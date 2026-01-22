@@ -31,3 +31,6 @@ It is **strongly recommended** to run this project using **Python 3.10.11**, whi
 Using a different Python version may lead to **module incompatibilities or unexpected behavior**, as some dependencies and system-level interactions are sensitive to interpreter changes.
 
 To ensure stability and full compatibility, please verify your Python environment before running or extending this project.
+
+Official Python 3.10.11 release:
+- https://www.python.org/downloads/release/python-31011/
