@@ -1,0 +1,34 @@
+Systema Auxilium Controlled Access License v1.0
+Copyright (c) 2026 Nicanor III W. Cariasa
+
+1. **Ownership**
+   - All rights, title, and interest in Systema Auxilium, including all source code,
+     documentation, and associated materials, are owned exclusively by
+     Nicanor III W. Cariasa (“the Creator”).
+
+2. **Permitted Use**
+   - Licensees may run the software privately for personal use only.
+   - Redistribution, modification, sublicensing, or creation of derivative works is
+     strictly prohibited.
+
+3. **NOTICE and Attribution**
+   - The NOTICE file, including all author attribution and disclaimers, must be
+     preserved in full for any private-use copy.
+   - Removal or modification of NOTICE is strictly forbidden.
+
+4. **Liability**
+   - Systema Auxilium provides AI-assisted system-level operations via Python.
+   - Improper prompts, misconfiguration, or misuse may result in system damage.
+   - The Creator assumes no responsibility or liability for any damage, loss, or
+     consequences.
+
+5. **License Change Clause**
+   - The Creator reserves the exclusive right to release a new license version
+     at any time.  
+   - Any new license published by the Creator automatically supersedes this
+     license for all existing and future use of Systema Auxilium.
+   - Future versions of Systema Auxilium must retain this property:  
+     **only the Creator may change the license**.
+
+6. **Acceptance**
+   - Use of Systema Auxilium constitutes acceptance of all terms in this license.

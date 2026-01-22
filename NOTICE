@@ -1,0 +1,21 @@
+Systema Auxilium
+
+This software was originally architected by:
+
+Nicanor III W. Cariasa
+
+This exact NOTICE file, including all text, the author attribution above,
+and the disclaimer below, MUST be preserved in all private-use copies of Systema Auxilium.
+
+Systema Auxilium provides AI-assisted control over system-level operations via Python.
+Improper use, unsafe prompts, or misconfiguration may result in data loss or system instability.
+
+The author assumes no responsibility or liability for any damage, loss, or consequences
+resulting from the use or misuse of this software.
+
+Redistribution, modification, publication, or derivative works without explicit written permission
+from the Creator is strictly prohibited.
+
+This license is temporary. The Creator may release a new license at any time
+to convert Systema Auxilium into an open community project. Only the Creator controls
+the timing and terms of such a license change.
