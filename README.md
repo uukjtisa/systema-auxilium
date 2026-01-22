@@ -22,3 +22,12 @@ Once sufficient attention and interest is generated, the Creator may release a *
 ## NOTICE
 
 For legal and safety information, see the `NOTICE` file included in this repository.
+
+
+## Recommended Python Environment
+
+It is **strongly recommended** to run this project using **Python 3.10.11**, which is the exact version used during the development of **Systema Auxilium**.
+
+Using a different Python version may lead to **module incompatibilities or unexpected behavior**, as some dependencies and system-level interactions are sensitive to interpreter changes.
+
+To ensure stability and full compatibility, please verify your Python environment before running or extending this project.
