@@ -1,0 +1,99 @@
+# ============================================================================
+# SYSTEMA AUXILIUM - REQUIREMENTS
+# ============================================================================
+
+# ============================================================================
+# REQUIRED DEPENDENCIES (Core Functionality)
+# ============================================================================
+
+# GUI Framework
+PyQt6>=6.4.0
+
+# HTTP Requests & Web
+requests>=2.28.0
+Flask>=2.3.0
+Flask-CORS>=4.0.0
+flask-socketio>=5.3.0
+
+# Browser Automation (for Puter.js)
+selenium>=4.15.0
+
+# System Information
+psutil>=5.9.0
+
+# Voice Input/Output
+numpy>=1.24.0
+sounddevice>=0.4.6
+webrtcvad>=2.0.10
+SpeechRecognition>=3.10.0
+edge-tts>=6.1.0
+pygame>=2.5.0
+
+# Text Processing
+markdown2>=2.4.0
+
+# System Tray Icons
+pystray>=0.19.0
+Pillow>=10.0.0
+
+
+# ============================================================================
+# OPTIONAL DEPENDENCIES (Enhanced Features)
+# ============================================================================
+
+# --- Local AI Models (LLaMA) ---
+# Uncomment to enable offline AI with LLaMA models (Only for capable hardware)
+# llama-cpp-python>=0.2.0
+
+# --- Advanced Voice Activity Detection (Silero VAD) ---
+# Uncomment to enable ML-based voice detection
+# torch>=2.0.0
+# torchaudio>=2.0.0
+
+# --- Offline Speech Recognition (Vosk) ---
+# Uncomment for offline STT alternative
+# vosk>=0.3.45
+
+# --- Offline Text-to-Speech (pyttsx3) ---
+# Uncomment for offline TTS
+# pyttsx3>=2.90
+
+
+# ============================================================================
+# INSTALLATION NOTES
+# ============================================================================
+
+# Basic Installation (Required Only):
+#   pip install -r requirements.txt
+#
+# Full Installation (All Features):
+#   Uncomment optional dependencies above, then:
+#   pip install -r requirements.txt
+#
+# LLaMA Setup (Windows users may need specific build):
+#   pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
+#
+# Silero VAD (requires PyTorch):
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+#
+# Chrome/ChromeDriver for Selenium:
+#   - Download from: https://chromedriver.chromium.org/
+#   - Or install via: pip install webdriver-manager
+#
+# ============================================================================
+# PLATFORM-SPECIFIC NOTES
+# ============================================================================
+
+# Windows:
+#   - All dependencies should work out of the box
+#   - For audio, ensure you have working audio drivers
+#
+# Linux:
+#   - May need: sudo apt-get install portaudio19-dev python3-pyaudio
+#   - For PyQt6: sudo apt-get install python3-pyqt6
+#
+# macOS:
+#   - May need: brew install portaudio
+#   - For PyQt6: brew install pyqt6
+#
+# ============================================================================
