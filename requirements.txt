@@ -24,7 +24,7 @@ psutil>=5.9.0
 # Voice Input/Output
 numpy>=1.24.0
 sounddevice>=0.4.6
-webrtcvad>=2.0.10
+webrtcvad-wheels #Changed from webrtcvad to webrtcvad-wheels to skip compiling in installing dependencies.
 SpeechRecognition>=3.10.0
 edge-tts>=6.1.0
 pygame>=2.5.0
