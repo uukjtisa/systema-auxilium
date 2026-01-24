@@ -23,6 +23,7 @@ REM open_env.bat
 REM run.bat
 (
   echo @echo off
+  echo cd /d "%%~dp0"
   echo call "%%~dp0%VENV_NAME%\Scripts\activate.bat"
   echo REM Replace main.py with your script name if needed
   echo python "%%~dp0main.py"
