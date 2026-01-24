@@ -73,7 +73,7 @@ def main():
     controller = AssistantController()
     controller.show()
     
-    print("This AI can execute system-level actions if ran with sufficient permissions.\nUse caution when issuing prompts.\nYou are responsible for the actions taken.")
+    print("======================CAUTION======================\n\nThis AI can execute system-level actions if ran with sufficient permissions.\nUse caution when issuing prompts.\nYou are responsible for the actions taken.\n\n======================CAUTION======================")
 
     # Hide CMD window after initialization (if launched from CMD)
     console_hidden = hide_console_window()
