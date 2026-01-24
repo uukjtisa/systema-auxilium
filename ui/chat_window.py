@@ -10,7 +10,7 @@ Features:
 
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                              QTextEdit, QLineEdit, QPushButton, QLabel,
-                             QFrame, QMenu, QScrollArea, QFileDialog)
+                             QFrame, QMenu, QScrollArea, QFileDialog, QApplication)
 from PyQt6.QtCore import Qt, QTimer, QPoint, pyqtSignal
 from PyQt6.QtGui import QTextCursor, QFont, QColor, QPalette, QAction, QPixmap, QIcon, QCursor
 from datetime import datetime
@@ -156,6 +156,7 @@ class ChatWindow(QWidget):
         self.thinking_label_shown = False
         self.sidebar_visible = False
 
+
         # Voice state
         self.voice_enabled = False
 
@@ -243,10 +244,40 @@ class ChatWindow(QWidget):
         """)
         self.sidebar.hide()  # Start hidden
 
-        sidebar_layout = QVBoxLayout(self.sidebar)
+        # Create main sidebar layout (contains scroll area)
+        sidebar_main_layout = QVBoxLayout(self.sidebar)
+        sidebar_main_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_main_layout.setSpacing(0)
+
+        # Create scroll area for sidebar content
+        sidebar_scroll = QScrollArea()
+        sidebar_scroll.setWidgetResizable(True)
+        sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        sidebar_scroll.setStyleSheet("""
+                QScrollArea {
+                    border: none;
+                    background-color: transparent;
+                }
+                QScrollBar:vertical {
+                    background: #171717;
+                    width: 8px;
+                    border-radius: 4px;
+                }
+                QScrollBar::handle:vertical {
+                    background: #3C3C3C;
+                    border-radius: 4px;
+                    min-height: 20px;
+                }
+                QScrollBar::handle:vertical:hover {
+                    background: #4A4A4A;
+                }
+            """)
+
+        # Create container widget for scrollable content
+        sidebar_content = QWidget()
+        sidebar_layout = QVBoxLayout(sidebar_content)
         sidebar_layout.setContentsMargins(12, 12, 12, 12)
         sidebar_layout.setSpacing(10)
-        sidebar_layout.setSizeConstraint(QVBoxLayout.SizeConstraint.SetMinAndMaxSize)
 
         # Sidebar header
         sidebar_header = QLabel("🎨 Appearance")
@@ -388,7 +419,7 @@ class ChatWindow(QWidget):
 
         sidebar_layout.addWidget(user_name_container)
 
-        # NEW: Personalization Instructions
+        # NEW: Personalization Instructions - Replace the entire personalization_container section with this:
         personalization_container = QFrame()
         personalization_container.setStyleSheet("""
             QFrame {
@@ -405,45 +436,23 @@ class ChatWindow(QWidget):
         personalization_label.setStyleSheet("color: #9AA0A6; font-size: 11px;")
         personalization_layout.addWidget(personalization_label)
 
-        self.personalization_input = QTextEdit()
-        self.personalization_input.setPlaceholderText(
-            "Add custom instructions...\n\n"
-            "Example:\n"
-            "- Always be enthusiastic\n"
-            "- Use emojis often\n"
-            "- Explain like I'm a beginner"
-        )
-        self.personalization_input.setMaximumHeight(120)
-        self.personalization_input.setMinimumHeight(80)
-        self.personalization_input.setStyleSheet("""
-            QTextEdit {
+        # Single button to open instructions window
+        configure_instructions_btn = QPushButton("⚙️ Configure Instructions")
+        configure_instructions_btn.setStyleSheet("""
+            QPushButton {
                 background-color: #2A2A2A;
                 border: 1px solid #3C3C3C;
                 border-radius: 6px;
-                padding: 6px;
+                padding: 8px;
                 font-size: 10px;
                 color: #E8EAED;
             }
-        """)
-        personalization_layout.addWidget(self.personalization_input)
-
-        # Save button
-        save_personalization_btn = QPushButton("💾 Save")
-        save_personalization_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #1A73E8;
-                border: none;
-                border-radius: 6px;
-                padding: 6px;
-                font-size: 10px;
-                color: white;
-            }
             QPushButton:hover {
-                background-color: #1557B0;
+                background-color: #333333;
             }
         """)
-        save_personalization_btn.clicked.connect(self.save_personalization)
-        personalization_layout.addWidget(save_personalization_btn)
+        configure_instructions_btn.clicked.connect(self.open_instructions_window)
+        personalization_layout.addWidget(configure_instructions_btn)
 
         sidebar_layout.addWidget(personalization_container)
 
@@ -473,26 +482,33 @@ class ChatWindow(QWidget):
         """)
         sidebar_layout.addWidget(mode_info)
 
+        # At the end of sidebar content, add stretch
         sidebar_layout.addStretch()
 
-        # Clear button
+        # Add clear button at the bottom
         clear_btn = QPushButton("🗑️ Clear Chat")
         clear_btn.setStyleSheet("""
-            QPushButton {
-                background-color: transparent;
-                border: 1px solid #3C3C3C;
-                border-radius: 6px;
-                padding: 8px;
-                font-size: 11px;
-                color: #9AA0A6;
-            }
-            QPushButton:hover {
-                background-color: #2A2A2A;
-                color: #E8EAED;
-            }
-        """)
+                QPushButton {
+                    background-color: transparent;
+                    border: 1px solid #3C3C3C;
+                    border-radius: 6px;
+                    padding: 8px;
+                    font-size: 11px;
+                    color: #9AA0A6;
+                }
+                QPushButton:hover {
+                    background-color: #2A2A2A;
+                    color: #E8EAED;
+                }
+            """)
         clear_btn.clicked.connect(self.clear_chat)
         sidebar_layout.addWidget(clear_btn)
+
+        # Set the content widget to the scroll area
+        sidebar_scroll.setWidget(sidebar_content)
+
+        # Add scroll area to main sidebar layout
+        sidebar_main_layout.addWidget(sidebar_scroll)
 
         main_layout.addWidget(self.sidebar)
 
@@ -621,11 +637,11 @@ class ChatWindow(QWidget):
         input_layout.setContentsMargins(0, 0, 0, 0)
         input_layout.setSpacing(8)
 
-        # Mode selector and input combined
+        # Mode selector and input combined - Update the combined_container styling
         combined_container = QFrame()
         combined_container.setStyleSheet("""
             QFrame {
-                background-color: #2A2A2A;
+                background-color: #1A1A1A;
                 border: 1px solid #3C3C3C;
                 border-radius: 12px;
             }
@@ -653,15 +669,20 @@ class ChatWindow(QWidget):
         self.mode_dropdown.clicked.connect(self.show_mode_menu)
         combined_layout.addWidget(self.mode_dropdown)
 
-        # Text input
+        # Text input - Replace the section where self.input_field is created and styled
         self.input_field = ResizableInput()
-        self.input_field.setStyleSheet("""
+        self.input_field.text_input.setStyleSheet("""
             QTextEdit {
-                background-color: transparent;
+                background-color: #1A1A1A;
                 border: none;
                 color: #E8EAED;
                 font-size: 13px;
+                font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
                 padding: 8px 4px;
+                line-height: 1.6;
+            }
+            QTextEdit:focus {
+                background-color: #151515;
             }
         """)
         self.input_field.enterPressed.connect(self.send_message)
@@ -815,22 +836,15 @@ class ChatWindow(QWidget):
     def save_personalization(self):
         """Save personalization settings"""
         user_name = self.user_name_input.text().strip()
-        custom_instructions = self.personalization_input.toPlainText().strip()
-
         self.controller.set_user_name(user_name)
-        self.controller.set_custom_instructions(custom_instructions)
-
-        self.add_system_message("✓ **Personalization Saved**\n\nYour preferences have been updated!")
+        self.add_system_message("✓ **Name Saved**")
 
     def load_personalization(self):
         """Load personalization settings"""
         user_name = self.controller.get_user_name()
-        custom_instructions = self.controller.get_custom_instructions()
-
+        # Remove custom_instructions loading since it's now in the dialog
         if user_name:
             self.user_name_input.setText(user_name)
-        if custom_instructions:
-            self.personalization_input.setPlainText(custom_instructions)
 
     def update_voice_status(self, status):
         """Update voice status indicator"""
@@ -869,6 +883,127 @@ class ChatWindow(QWidget):
             self.sidebar.hide()
             # Force layout update
             self.layout().update()
+
+    def open_instructions_window(self):
+        """Open custom instructions configuration window"""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QTextEdit, QLabel
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Custom Assistant Instructions")
+        dialog.setModal(True)
+        dialog.setMinimumSize(500, 400)
+        dialog.setStyleSheet("""
+            QDialog {
+                background-color: #212121;
+            }
+        """)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        # Title
+        title = QLabel("Custom Instructions")
+        title.setStyleSheet("""
+            QLabel {
+                color: #E8EAED;
+                font-size: 16px;
+                font-weight: 600;
+                margin-bottom: 8px;
+            }
+        """)
+        layout.addWidget(title)
+
+        # Description
+        desc = QLabel("Customize how the assistant responds to you:")
+        desc.setStyleSheet("color: #9AA0A6; font-size: 11px; margin-bottom: 8px;")
+        layout.addWidget(desc)
+
+        # Text area - Update the text_edit section with better styling
+        text_edit = QTextEdit()
+        text_edit.setPlaceholderText(
+            "Example:\n"
+            "- Always be enthusiastic and encouraging\n"
+            "- Use emojis when appropriate\n"
+            "- Explain technical concepts simply\n"
+            "- Be concise in your responses"
+        )
+        text_edit.setStyleSheet("""
+            QTextEdit {
+                background-color: #1A1A1A;
+                border: 1px solid #3C3C3C;
+                border-radius: 8px;
+                padding: 12px;
+                font-size: 13px;
+                font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+                color: #E8EAED;
+                line-height: 1.6;
+            }
+            QTextEdit:focus {
+                border: 1px solid #1A73E8;
+                background-color: #151515;
+            }
+        """)
+
+        # Load existing instructions
+        current_instructions = self.controller.get_custom_instructions()
+        if current_instructions:
+            text_edit.setPlainText(current_instructions)
+
+        layout.addWidget(text_edit, 1)  # Stretch to fill space
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(8)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: 1px solid #3C3C3C;
+                border-radius: 6px;
+                padding: 10px 24px;
+                font-size: 12px;
+                color: #9AA0A6;
+            }
+            QPushButton:hover {
+                background-color: #2A2A2A;
+                color: #E8EAED;
+            }
+        """)
+        cancel_btn.clicked.connect(dialog.reject)
+
+        save_btn = QPushButton("Save")
+        save_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1A73E8;
+                border: none;
+                border-radius: 6px;
+                padding: 10px 24px;
+                font-size: 12px;
+                color: white;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #1557B0;
+            }
+        """)
+
+        def save_and_close():
+            instructions = text_edit.toPlainText().strip()
+            self.controller.set_custom_instructions(instructions)
+            self.add_system_message("✓ **Custom Instructions Saved**")
+            dialog.accept()
+
+        save_btn.clicked.connect(save_and_close)
+
+        button_layout.addStretch()
+        button_layout.addWidget(cancel_btn)
+        button_layout.addWidget(save_btn)
+
+        layout.addLayout(button_layout)
+
+        dialog.exec()
 
     def show_mode_menu(self):
         """Show mode selection menu"""
@@ -1020,9 +1155,6 @@ class ChatWindow(QWidget):
 
     def add_user_message(self, message):
         """Add user message"""
-        # Store current input height before layout changes
-        current_height = self.input_field.text_input.height()
-
         message_widget = QFrame()
         message_widget.setStyleSheet("""
             QFrame {
@@ -1035,7 +1167,82 @@ class ChatWindow(QWidget):
         message_layout.setContentsMargins(0, 0, 0, 0)
         message_layout.setSpacing(12)
 
-        # Avatar
+        # Add stretch to push message to the right
+        message_layout.addStretch()
+
+        # Container for name and content (with max width for readability)
+        main_container_widget = QWidget()
+        main_container_widget.setMaximumWidth(600)  # Max width for readability
+        main_container = QVBoxLayout(main_container_widget)
+        main_container.setSpacing(4)
+        main_container.setContentsMargins(0, 0, 0, 0)
+
+        # Name header (OUTSIDE border)
+        name_label = QLabel("<b>You</b>")
+        name_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        name_label.setStyleSheet("color: #E8EAED; font-size: 12px;")
+        main_container.addWidget(name_label)
+
+        # Message content container (with border) - using QFrame for positioning
+        content_wrapper = QFrame()
+        content_wrapper.setStyleSheet("""
+            QFrame {
+                background-color: #252525;
+                border: 1px solid #3C3C3C;
+                border-radius: 12px;
+            }
+        """)
+
+        # Use absolute positioning for copy button
+        content_wrapper_layout = QHBoxLayout(content_wrapper)
+        content_wrapper_layout.setContentsMargins(10, 10, 10, 10)
+        content_wrapper_layout.setSpacing(8)
+
+        # Copy button on the LEFT side for user messages
+        copy_btn = QPushButton("📋")
+        copy_btn.setFixedSize(24, 24)
+        copy_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: none;
+                border-radius: 4px;
+                font-size: 12px;
+                color: #9AA0A6;
+            }
+            QPushButton:hover {
+                background-color: #3C3C3C;
+                color: #E8EAED;
+            }
+        """)
+        copy_btn.clicked.connect(lambda: self.copy_to_clipboard(message))
+        copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        content_wrapper_layout.addWidget(copy_btn, alignment=Qt.AlignmentFlag.AlignTop)
+
+        # Text label
+        text_label = QLabel()
+        text_label.setTextFormat(Qt.TextFormat.RichText)
+        text_label.setText(self.render_markdown(message))
+        text_label.setWordWrap(True)
+        text_label.setOpenExternalLinks(True)
+        text_label.setStyleSheet("""
+            QLabel {
+                color: #E8EAED;
+                font-size: 13px;
+                line-height: 1.5;
+                background: transparent;
+                border: none;
+            }
+        """)
+        text_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse |
+            Qt.TextInteractionFlag.LinksAccessibleByMouse
+        )
+        content_wrapper_layout.addWidget(text_label, 1)
+
+        main_container.addWidget(content_wrapper)
+        message_layout.addWidget(main_container_widget)
+
+        # Avatar (RIGHT side for user)
         avatar = QLabel(self.user_avatar)
         avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
         avatar.setStyleSheet("""
@@ -1051,47 +1258,18 @@ class ChatWindow(QWidget):
         """)
         message_layout.addWidget(avatar, alignment=Qt.AlignmentFlag.AlignTop)
 
-        # Message content
-        content_layout = QVBoxLayout()
-        content_layout.setSpacing(4)
-
-        name_label = QLabel("<b>You</b>")
-        name_label.setStyleSheet("color: #E8EAED; font-size: 12px;")
-        content_layout.addWidget(name_label)
-
-        text_label = QLabel(message)
-        text_label.setWordWrap(True)
-        text_label.setTextFormat(Qt.TextFormat.PlainText)
-        text_label.setStyleSheet("""
-            QLabel {
-                color: #BDC1C6;
-                font-size: 13px;
-                line-height: 1.5;
-            }
-        """)
-        content_layout.addWidget(text_label)
-
-        message_layout.addLayout(content_layout, 1)
-
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
         self.scroll_to_bottom()
 
-        # Restore input height after layout update
-        QTimer.singleShot(10, lambda: self.input_field.text_input.setFixedHeight(current_height))
-
     def add_ai_message(self, message):
         """Add AI message with markdown rendering"""
-        # Store current input height before layout changes
-        current_height = self.input_field.text_input.height()
-
         # NEW: Remove emotion brackets for DISPLAY only
-        # (TTS gets the original text with brackets)
         display_message = self._clean_emotion_brackets(message)
 
         message_widget = QFrame()
         message_widget.setStyleSheet("""
             QFrame {
-                background-color: #2A2A2A;
+                background-color: transparent;
                 padding: 12px 16px;
             }
         """)
@@ -1100,7 +1278,7 @@ class ChatWindow(QWidget):
         message_layout.setContentsMargins(0, 0, 0, 0)
         message_layout.setSpacing(12)
 
-        # Avatar
+        # Avatar (LEFT side for AI)
         avatar = QLabel(self.bot_avatar)
         avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
         avatar.setStyleSheet("""
@@ -1116,35 +1294,81 @@ class ChatWindow(QWidget):
         """)
         message_layout.addWidget(avatar, alignment=Qt.AlignmentFlag.AlignTop)
 
-        # Message content
-        content_layout = QVBoxLayout()
-        content_layout.setSpacing(4)
+        # Container for name and content (with max width for readability)
+        main_container_widget = QWidget()
+        main_container_widget.setMaximumWidth(600)  # Max width for readability
+        main_container = QVBoxLayout(main_container_widget)
+        main_container.setSpacing(4)
+        main_container.setContentsMargins(0, 0, 0, 0)
 
+        # Name header (OUTSIDE border)
         name_label = QLabel("<b>Systema Auxilium</b>")
         name_label.setStyleSheet("color: #E8EAED; font-size: 12px;")
-        content_layout.addWidget(name_label)
+        main_container.addWidget(name_label)
 
+        # Message content with border
+        content_wrapper = QFrame()
+        content_wrapper.setStyleSheet("""
+            QFrame {
+                background-color: #2A2A2A;
+                border: 1px solid #3C3C3C;
+                border-radius: 12px;
+            }
+        """)
+
+        content_wrapper_layout = QHBoxLayout(content_wrapper)
+        content_wrapper_layout.setContentsMargins(10, 10, 10, 10)
+        content_wrapper_layout.setSpacing(8)
+
+        # Text label
         text_label = QLabel()
-        text_label.setWordWrap(True)
         text_label.setTextFormat(Qt.TextFormat.RichText)
-        text_label.setOpenExternalLinks(True)
         text_label.setText(self.render_markdown(display_message))
+        text_label.setWordWrap(True)
+        text_label.setOpenExternalLinks(True)
         text_label.setStyleSheet("""
             QLabel {
                 color: #BDC1C6;
                 font-size: 13px;
                 line-height: 1.5;
+                background: transparent;
+                border: none;
             }
         """)
-        content_layout.addWidget(text_label)
+        text_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse |
+            Qt.TextInteractionFlag.LinksAccessibleByMouse
+        )
+        content_wrapper_layout.addWidget(text_label, 1)
 
-        message_layout.addLayout(content_layout, 1)
+        # Copy button on the RIGHT side for AI messages
+        copy_btn = QPushButton("📋")
+        copy_btn.setFixedSize(24, 24)
+        copy_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: none;
+                border-radius: 4px;
+                font-size: 12px;
+                color: #9AA0A6;
+            }
+            QPushButton:hover {
+                background-color: #3C3C3C;
+                color: #E8EAED;
+            }
+        """)
+        copy_btn.clicked.connect(lambda: self.copy_to_clipboard(display_message))
+        copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        content_wrapper_layout.addWidget(copy_btn, alignment=Qt.AlignmentFlag.AlignTop)
+
+        main_container.addWidget(content_wrapper)
+        message_layout.addWidget(main_container_widget)
+
+        # Add stretch to keep AI messages on the left
+        message_layout.addStretch()
 
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
         self.scroll_to_bottom()
-
-        # Restore input height after layout update
-        QTimer.singleShot(10, lambda: self.input_field.text_input.setFixedHeight(current_height))
 
     def _clean_emotion_brackets(self, text):
         """
@@ -1177,6 +1401,10 @@ class ChatWindow(QWidget):
         text_label.setTextFormat(Qt.TextFormat.RichText)
         text_label.setOpenExternalLinks(True)
         text_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        text_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse |
+            Qt.TextInteractionFlag.LinksAccessibleByMouse
+        )  # ADD THIS LINE
         text_label.setText(self.render_markdown(message))
         text_label.setStyleSheet("""
             QLabel {
@@ -1196,6 +1424,15 @@ class ChatWindow(QWidget):
 
         # Restore input height after layout update
         QTimer.singleShot(10, lambda: self.input_field.text_input.setFixedHeight(current_height))
+
+    def copy_to_clipboard(self, text):
+        """Copy text to clipboard"""
+        clipboard = QApplication.clipboard()
+        clipboard.setText(text)
+        # Optional: Show a brief feedback message
+        self.status_label.setText("✓ Copied to clipboard")
+        QTimer.singleShot(2000, lambda: self.status_label.setText(""))
+
 
     def scroll_to_bottom(self):
         """Scroll to bottom"""

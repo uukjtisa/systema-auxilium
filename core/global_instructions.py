@@ -466,7 +466,7 @@ Ask yourself:
 IF YOU NEED MORE INFO → USE ANOTHER TOOL!
 IF YOU HAVE EVERYTHING → EXIT!
 
-Options:
+Options to use:
 - More tools: {{"tool": "python_interpreter", "input": "..."}}
 - Exit: {{"tool": "exit_from_tools"}}
 
