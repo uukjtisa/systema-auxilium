@@ -211,6 +211,7 @@ class ChatWindow(QWidget):
         """)
         self.container.setObjectName("container")
         self.container.setCursor(Qt.CursorShape.ArrowCursor)
+        self.container.setAcceptDrops(True)
 
         self.init_ui()
 
@@ -307,6 +308,11 @@ class ChatWindow(QWidget):
 
         # Create container widget for scrollable content
         sidebar_content = QWidget()
+        sidebar_content.setStyleSheet("""
+            QWidget {
+                background-color: #171717;
+            }
+        """)
         sidebar_layout = QVBoxLayout(sidebar_content)
         sidebar_layout.setContentsMargins(12, 12, 12, 12)
         sidebar_layout.setSpacing(10)
@@ -697,6 +703,12 @@ class ChatWindow(QWidget):
 
         # Chat messages container
         self.chat_widget = QWidget()
+        self.chat_widget.setStyleSheet("""
+            QWidget {
+                background-color: #212121;
+            }
+        """)
+        self.chat_widget.setAcceptDrops(True)
         self.chat_layout = QVBoxLayout(self.chat_widget)
         self.chat_layout.setContentsMargins(0, 16, 0, 16)
         self.chat_layout.setSpacing(0)
@@ -722,7 +734,7 @@ class ChatWindow(QWidget):
         input_container = QFrame()
         input_container.setStyleSheet("""
             QFrame {
-                background-color: transparent;
+                background-color: #1F1F1F;
                 border-top: 1px solid #2A2A2A;
                 padding: 12px 16px;
             }
@@ -736,7 +748,7 @@ class ChatWindow(QWidget):
         combined_container = QFrame()
         combined_container.setStyleSheet("""
             QFrame {
-                background-color: #1A1A1A;
+                background-color: #1F1F1F;
                 border: 1px solid #3C3C3C;
                 border-radius: 12px;
             }
@@ -768,7 +780,7 @@ class ChatWindow(QWidget):
         self.input_field = ResizableInput()
         self.input_field.text_input.setStyleSheet("""
             QTextEdit {
-                background-color: #1A1A1A;
+                background-color: #1F1F1F;
                 border: none;
                 color: #E8EAED;
                 font-size: 13px;
@@ -777,7 +789,7 @@ class ChatWindow(QWidget):
                 line-height: 1.6;
             }
             QTextEdit:focus {
-                background-color: #151515;
+                background-color: #1F1F1F;
             }
         """)
         self.input_field.enterPressed.connect(self.send_message)
@@ -1890,24 +1902,29 @@ class ChatWindow(QWidget):
 
     def dragEnterEvent(self, event):
         """Handle drag enter"""
-        if self.controller.get_ai_provider() == 'puter':
-            if event.mimeData().hasUrls():
-                event.acceptProposedAction()
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
 
     def dropEvent(self, event):
         """Handle file drop"""
-        if self.controller.get_ai_provider() != 'puter':
-            self.add_system_message("❌ Image attachment only works with Puter.js provider")
+        files = [u.toLocalFile() for u in event.mimeData().urls()]
+        if not files:
             return
 
-        files = [u.toLocalFile() for u in event.mimeData().urls()]
-        if files:
-            image_file = files[0]
-            # Check if it's an image
+        file_path = files[0]
+
+        # For Puter provider with images, use attachment mode
+        if self.controller.get_ai_provider() == 'puter':
             valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']
-            if any(image_file.lower().endswith(ext) for ext in valid_extensions):
-                self.attached_image = image_file
+            if any(file_path.lower().endswith(ext) for ext in valid_extensions):
+                self.attached_image = file_path
                 self.add_system_message(
-                    f"📎 **Image Ready:** {image_file}\n\nType your message and press Enter to send with image.")
-            else:
-                self.add_system_message("❌ Please drop an image file (jpg, png, gif, etc.)")
+                    f"📎 **Image Ready:** {file_path}\n\nType your message and press Enter to send with image.")
+                return
+
+        # Otherwise, insert file path into text input
+        current_text = self.input_field.toPlainText()
+        if current_text:
+            self.input_field.text_input.setPlainText(current_text + "\n" + file_path)
+        else:
+            self.input_field.text_input.setPlainText(file_path)
