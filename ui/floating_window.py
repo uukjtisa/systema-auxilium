@@ -79,7 +79,6 @@ class FloatingWindow(QWidget):
             # If any child is visible, raise this window
             if child_active:
                 self.raise_()
-                self.activateWindow()
 
     def move_to_center(self):
         """Move window to center of screen"""
