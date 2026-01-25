@@ -4,9 +4,9 @@ FIXED: Voice settings now actually work - VAD and TTS voice selection are functi
 """
 
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-                             QLineEdit, QPushButton, QTextEdit, QComboBox, QGroupBox, QCheckBox, QScrollArea)
-from PyQt6.QtCore import Qt, QPoint
-from PyQt6.QtGui import QFont
+                             QLineEdit, QPushButton, QTextEdit, QComboBox, QGroupBox, QCheckBox, QScrollArea, QFrame)
+from PyQt6.QtCore import Qt, QPoint, QTimer, QRect
+from PyQt6.QtGui import QRegion
 
 
 class SettingsWindow(QWidget):
@@ -16,58 +16,149 @@ class SettingsWindow(QWidget):
         super().__init__()
         self.controller = controller
 
-        # Window settings
+        # Window dragging and resizing state
+        self.dragging = False
+        self.drag_position = QPoint()
+        self.resizing = False
+        self.resize_edge = None
+        self.resize_start_geometry = None
+        self.resize_timer = QTimer()
+        self.resize_timer.setSingleShot(True)
+        self.resize_timer.timeout.connect(self.save_window_geometry)
+
+        self.setMouseTracking(True)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover)
+
+        # Window settings - BORDERLESS (resizable like chat window)
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.Window |
             Qt.WindowType.WindowStaysOnTopHint
         )
-        self.setFixedSize(600, 750)
-        self.setStyleSheet("""
-            QWidget {
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setMinimumSize(600, 500)
+        self.resize(600, 750)  # Default size (but resizable!)
+
+        # Main container for rounded corners
+        self.container = QWidget()
+        self.container.setAutoFillBackground(True)  # ADD THIS LINE
+        self.container.setStyleSheet("""
+            QWidget#container {
                 background-color: #1e1e1e;
+                border-radius: 12px;
+            }
+            QWidget {
                 color: #ffffff;
+                font-family: 'Segoe UI', -apple-system, system-ui, sans-serif;
+            }
+            QScrollArea {
+                background-color: #1e1e1e;
+            }
+            QScrollArea > QWidget {
+                background-color: #1e1e1e;
             }
         """)
-
-        # Dragging
-        self._is_dragging = False
-        self._drag_offset = QPoint()
+        self.container.setObjectName("container")
 
         self.init_ui()
         self.load_settings()
 
+        # Wrap everything in container for rounded corners
+        wrapper_layout = QVBoxLayout(self)
+        wrapper_layout.setContentsMargins(0, 0, 0, 0)
+        wrapper_layout.addWidget(self.container)
+
+        # Apply rounded mask
+        self.apply_rounded_mask()
+        self.create_resize_handles()
+
     def init_ui(self):
         """Initialize UI"""
-        main_layout = QVBoxLayout()
-        main_layout.setContentsMargins(15, 15, 15, 15)
-        main_layout.setSpacing(15)
+        main_layout = QVBoxLayout(self.container)  # Changed: use container
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
-        # Header
-        header = QHBoxLayout()
+        # Header bar (draggable)
+        header_bar = QFrame()
+        header_bar.setFixedHeight(50)
+        header_bar.mousePressEvent = self.header_mouse_press
+        header_bar.mouseMoveEvent = self.header_mouse_move
+        header_bar.mouseReleaseEvent = self.header_mouse_release
+        header_bar.setStyleSheet("""
+            QFrame {
+                background-color: #1e1e1e;
+                border-bottom: 1px solid #2A2A2A;
+            }
+        """)
+
+        header_layout = QHBoxLayout(header_bar)
+        header_layout.setContentsMargins(16, 0, 16, 0)
+
+        # Title
         title = QLabel("⚙️ Settings")
-        title.setStyleSheet("font-size: 18px; font-weight: bold;")
-        header.addWidget(title)
+        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #ffffff;")
+        header_layout.addWidget(title)
 
-        header.addStretch()
+        header_layout.addStretch()
 
-        # Close button
-        close_btn = QPushButton("✖")
-        close_btn.setMaximumWidth(30)
-        close_btn.setStyleSheet("""
+        # Minimize button
+        minimize_btn = QPushButton("−")
+        minimize_btn.setFixedSize(32, 32)
+        minimize_btn.setStyleSheet("""
             QPushButton {
-                background: #ff5555;
+                background: transparent;
                 border: none;
-                border-radius: 3px;
-                padding: 5px;
+                border-radius: 6px;
+                font-size: 18px;
+                color: #9AA0A6;
             }
             QPushButton:hover {
-                background: #ff7777;
+                background: #2A2A2A;
+                color: #E8EAED;
+            }
+        """)
+        minimize_btn.clicked.connect(self.showMinimized)
+        header_layout.addWidget(minimize_btn)
+
+        # Maximize button
+        self.maximize_btn = QPushButton("□")
+        self.maximize_btn.setFixedSize(32, 32)
+        self.maximize_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: none;
+                border-radius: 6px;
+                font-size: 16px;
+                color: #9AA0A6;
+            }
+            QPushButton:hover {
+                background: #2A2A2A;
+                color: #E8EAED;
+            }
+        """)
+        self.maximize_btn.clicked.connect(self.toggle_maximize)
+        header_layout.addWidget(self.maximize_btn)
+
+        # Close button
+        close_btn = QPushButton("×")
+        close_btn.setFixedSize(32, 32)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: none;
+                border-radius: 6px;
+                font-size: 22px;
+                color: #9AA0A6;
+            }
+            QPushButton:hover {
+                background: #EA4335;
+                color: white;
             }
         """)
         close_btn.clicked.connect(self.hide)
-        header.addWidget(close_btn)
+        header_layout.addWidget(close_btn)
 
-        main_layout.addLayout(header)
+        main_layout.addWidget(header_bar)
 
         # Create scroll area for all settings
         scroll = QScrollArea()
@@ -90,7 +181,31 @@ class SettingsWindow(QWidget):
 
         # Container widget for scroll area
         scroll_widget = QWidget()
+        scroll_widget.setStyleSheet("""
+            QWidget {
+                background-color: #1e1e1e;
+                color: #ffffff;
+            }
+            QGroupBox {
+                color: #ffffff;
+                font-weight: bold;
+                border: 1px solid #3d3d3d;
+                border-radius: 8px;
+                margin-top: 12px;
+                padding-top: 12px;
+            }
+            QGroupBox::title {
+                color: #ffffff;
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+            }
+            QLabel {
+                color: #ffffff;
+            }
+        """)
         scroll_layout = QVBoxLayout(scroll_widget)
+        scroll_layout.setContentsMargins(15, 15, 15, 15)  # Add padding
         scroll_layout.setSpacing(15)
 
         # AI Provider Selection
@@ -128,6 +243,7 @@ class SettingsWindow(QWidget):
                 padding: 8px;
                 font-size: 12px;
                 font-family: monospace;
+                color: #ffffff;
             }
         """)
         api_layout.addWidget(api_label)
@@ -145,6 +261,7 @@ class SettingsWindow(QWidget):
                 border-radius: 5px;
                 padding: 5px;
                 font-size: 11px;
+                color: #ffffff;
             }
             QPushButton:hover {
                 background-color: #4d4d4d;
@@ -175,7 +292,8 @@ class SettingsWindow(QWidget):
             "Get your API key from Google AI Studio"
         )
         gemini_info.setWordWrap(True)
-        gemini_info.setStyleSheet("color: #ccc; font-size: 10pt; padding: 10px; background: #2d2d2d; border-radius: 5px;")
+        gemini_info.setStyleSheet(
+            "color: #ccc; font-size: 10pt; padding: 10px; background: #2d2d2d; border-radius: 5px;")
         gemini_layout.addWidget(gemini_info)
 
         gemini_key_label = QLabel("API Key:")
@@ -190,6 +308,7 @@ class SettingsWindow(QWidget):
                 padding: 8px;
                 font-size: 12px;
                 font-family: monospace;
+                color: #ffffff;
             }
         """)
         gemini_layout.addWidget(gemini_key_label)
@@ -207,6 +326,7 @@ class SettingsWindow(QWidget):
                 border-radius: 5px;
                 padding: 5px;
                 font-size: 11px;
+                color: #ffffff;
             }
             QPushButton:hover {
                 background-color: #4d4d4d;
@@ -239,7 +359,8 @@ class SettingsWindow(QWidget):
         self.gemini_model_combo.currentIndexChanged.connect(self.update_gemini_model_description)
         gemini_layout.addWidget(self.gemini_model_desc)
 
-        gemini_link = QLabel('<a href="https://aistudio.google.com/apikey" style="color: #5555ff;">Get API key: https://aistudio.google.com/apikey</a>')
+        gemini_link = QLabel(
+            '<a href="https://aistudio.google.com/apikey" style="color: #5555ff;">Get API key: https://aistudio.google.com/apikey</a>')
         gemini_link.setOpenExternalLinks(True)
         gemini_link.setStyleSheet("color: #888; font-size: 9pt;")
         gemini_layout.addWidget(gemini_link)
@@ -273,7 +394,7 @@ class SettingsWindow(QWidget):
 
         # LLaMA Generation Settings
         llama_gen_label = QLabel("⚙️ Generation Settings")
-        llama_gen_label.setStyleSheet("font-weight: bold; margin-top: 15px;")
+        llama_gen_label.setStyleSheet("font-weight: bold; margin-top: 15px; color: #ffffff;")
         llama_layout.addWidget(llama_gen_label)
 
         # Max Tokens
@@ -284,14 +405,15 @@ class SettingsWindow(QWidget):
         self.llama_tokens_input.setPlaceholderText("2000")
         self.llama_tokens_input.setMaximumWidth(100)
         self.llama_tokens_input.setStyleSheet("""
-                    QLineEdit {
-                        background-color: #2d2d2d;
-                        border: 1px solid #3d3d3d;
-                        border-radius: 5px;
-                        padding: 6px;
-                        font-size: 11px;
-                    }
-                """)
+            QLineEdit {
+                background-color: #2d2d2d;
+                border: 1px solid #3d3d3d;
+                border-radius: 5px;
+                padding: 6px;
+                font-size: 11px;
+                color: #ffffff;
+            }
+        """)
         tokens_layout.addWidget(self.llama_tokens_input)
 
         tokens_info = QLabel("(Higher = More output, slower)")
@@ -312,14 +434,15 @@ class SettingsWindow(QWidget):
         self.llama_temp_combo.addItem("1.0 (Very Creative)", 1.0)
         self.llama_temp_combo.setCurrentIndex(3)  # Default 0.7
         self.llama_temp_combo.setStyleSheet("""
-                    QComboBox {
-                        background-color: #2d2d2d;
-                        border: 1px solid #3d3d3d;
-                        border-radius: 5px;
-                        padding: 6px;
-                        font-size: 11px;
-                    }
-                """)
+            QComboBox {
+                background-color: #2d2d2d;
+                border: 1px solid #3d3d3d;
+                border-radius: 5px;
+                padding: 6px;
+                font-size: 11px;
+                color: #ffffff;
+            }
+        """)
         temp_layout.addWidget(self.llama_temp_combo)
         temp_layout.addStretch()
         llama_layout.addLayout(temp_layout)
@@ -335,14 +458,15 @@ class SettingsWindow(QWidget):
         self.llama_topp_combo.addItem("0.95 (Diverse)", 0.95)
         self.llama_topp_combo.setCurrentIndex(2)  # Default 0.9
         self.llama_topp_combo.setStyleSheet("""
-                    QComboBox {
-                        background-color: #2d2d2d;
-                        border: 1px solid #3d3d3d;
-                        border-radius: 5px;
-                        padding: 6px;
-                        font-size: 11px;
-                    }
-                """)
+            QComboBox {
+                background-color: #2d2d2d;
+                border: 1px solid #3d3d3d;
+                border-radius: 5px;
+                padding: 6px;
+                font-size: 11px;
+                color: #ffffff;
+            }
+        """)
         topp_layout.addWidget(self.llama_topp_combo)
         topp_layout.addStretch()
         llama_layout.addLayout(topp_layout)
@@ -364,22 +488,22 @@ class SettingsWindow(QWidget):
         )
         self.llama_warning_label.setWordWrap(True)
         self.llama_warning_label.setStyleSheet("""
-                    QLabel {
-                        color: #ff9900;
-                        font-size: 9pt;
-                        padding: 10px;
-                        background: #2d1a00;
-                        border: 1px solid #ff9900;
-                        border-radius: 5px;
-                        margin-left: 20px;
-                    }
-                """)
+            QLabel {
+                color: #ff9900;
+                font-size: 9pt;
+                padding: 10px;
+                background: #2d1a00;
+                border: 1px solid #ff9900;
+                border-radius: 5px;
+                margin-left: 20px;
+            }
+        """)
         self.llama_warning_label.hide()
         llama_layout.addWidget(self.llama_warning_label)
 
         # Model Management
         llama_mgmt_label = QLabel("🔄 Model Management")
-        llama_mgmt_label.setStyleSheet("font-weight: bold; margin-top: 15px;")
+        llama_mgmt_label.setStyleSheet("font-weight: bold; margin-top: 15px; color: #ffffff;")
         llama_layout.addWidget(llama_mgmt_label)
 
         # Model selector
@@ -388,14 +512,15 @@ class SettingsWindow(QWidget):
 
         self.llama_model_combo = QComboBox()
         self.llama_model_combo.setStyleSheet("""
-                    QComboBox {
-                        background-color: #2d2d2d;
-                        border: 1px solid #3d3d3d;
-                        border-radius: 5px;
-                        padding: 6px;
-                        font-size: 11px;
-                    }
-                """)
+            QComboBox {
+                background-color: #2d2d2d;
+                border: 1px solid #3d3d3d;
+                border-radius: 5px;
+                padding: 6px;
+                font-size: 11px;
+                color: #ffffff;
+            }
+        """)
         model_select_layout.addWidget(self.llama_model_combo, 1)
         llama_layout.addLayout(model_select_layout)
 
@@ -405,33 +530,35 @@ class SettingsWindow(QWidget):
         self.llama_reload_btn = QPushButton("🔄 Reload Model")
         self.llama_reload_btn.clicked.connect(self.reload_llama_model)
         self.llama_reload_btn.setStyleSheet("""
-                    QPushButton {
-                        background-color: #3d3d3d;
-                        border: none;
-                        border-radius: 5px;
-                        padding: 8px;
-                        font-size: 11px;
-                    }
-                    QPushButton:hover {
-                        background-color: #4d4d4d;
-                    }
-                """)
+            QPushButton {
+                background-color: #3d3d3d;
+                border: none;
+                border-radius: 5px;
+                padding: 8px;
+                font-size: 11px;
+                color: #ffffff;
+            }
+            QPushButton:hover {
+                background-color: #4d4d4d;
+            }
+        """)
         model_btn_layout.addWidget(self.llama_reload_btn)
 
         self.llama_switch_btn = QPushButton("🔀 Switch Model")
         self.llama_switch_btn.clicked.connect(self.switch_llama_model)
         self.llama_switch_btn.setStyleSheet("""
-                    QPushButton {
-                        background-color: #3d3d3d;
-                        border: none;
-                        border-radius: 5px;
-                        padding: 8px;
-                        font-size: 11px;
-                    }
-                    QPushButton:hover {
-                        background-color: #4d4d4d;
-                    }
-                """)
+            QPushButton {
+                background-color: #3d3d3d;
+                border: none;
+                border-radius: 5px;
+                padding: 8px;
+                font-size: 11px;
+                color: #ffffff;
+            }
+            QPushButton:hover {
+                background-color: #4d4d4d;
+            }
+        """)
         model_btn_layout.addWidget(self.llama_switch_btn)
 
         llama_layout.addLayout(model_btn_layout)
@@ -455,7 +582,8 @@ class SettingsWindow(QWidget):
             "• All AI requests are FREE and work all day long"
         )
         puter_info.setWordWrap(True)
-        puter_info.setStyleSheet("color: #ccc; font-size: 10pt; padding: 10px; background: #2d2d2d; border-radius: 5px;")
+        puter_info.setStyleSheet(
+            "color: #ccc; font-size: 10pt; padding: 10px; background: #2d2d2d; border-radius: 5px;")
         puter_layout.addWidget(puter_info)
 
         # Model selection
@@ -485,7 +613,7 @@ class SettingsWindow(QWidget):
         start_puter_btn.setStyleSheet("""
             QPushButton {
                 background-color: #55ff55;
-                color: #000;
+                color: #ffffff;
                 border: none;
                 border-radius: 5px;
                 padding: 8px;
@@ -507,6 +635,7 @@ class SettingsWindow(QWidget):
                 border-radius: 5px;
                 padding: 8px;
                 font-size: 11px;
+                color: #ffffff;
             }
             QPushButton:hover {
                 background-color: #6666ff;
@@ -542,6 +671,7 @@ class SettingsWindow(QWidget):
                 border-radius: 5px;
                 padding: 8px;
                 font-size: 12px;
+                color: #ffffff;
             }
         """)
         puter_account_layout.addWidget(email_label)
@@ -559,6 +689,7 @@ class SettingsWindow(QWidget):
                 border-radius: 5px;
                 padding: 8px;
                 font-size: 12px;
+                color: #ffffff;
             }
         """)
         puter_account_layout.addWidget(password_label)
@@ -576,6 +707,7 @@ class SettingsWindow(QWidget):
                 border-radius: 5px;
                 padding: 5px;
                 font-size: 11px;
+                color: #ffffff;
             }
             QPushButton:hover {
                 background-color: #4d4d4d;
@@ -601,6 +733,7 @@ class SettingsWindow(QWidget):
                 border-radius: 5px;
                 padding: 8px;
                 font-size: 11px;
+                color: #ffffff;
             }
             QPushButton:hover {
                 background-color: #4d4d4d;
@@ -613,7 +746,7 @@ class SettingsWindow(QWidget):
         reset_quota_btn.setStyleSheet("""
             QPushButton {
                 background-color: #ff9900;
-                color: #000;
+                color: #ffffff;
                 border: none;
                 border-radius: 5px;
                 padding: 8px;
@@ -669,7 +802,7 @@ class SettingsWindow(QWidget):
 
         # Input device
         input_label = QLabel("🎙️ Input Device (Microphone):")
-        input_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        input_label.setStyleSheet("font-weight: bold; margin-top: 10px; color: #ffffff;")
         voice_layout.addWidget(input_label)
 
         self.input_device_combo = QComboBox()
@@ -680,13 +813,14 @@ class SettingsWindow(QWidget):
                 border-radius: 5px;
                 padding: 6px;
                 font-size: 11px;
+                color: #ffffff;
             }
         """)
         voice_layout.addWidget(self.input_device_combo)
 
         # Output device
         output_label = QLabel("🔊 Output Device (Speaker):")
-        output_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        output_label.setStyleSheet("font-weight: bold; margin-top: 10px; color: #ffffff;")
         voice_layout.addWidget(output_label)
 
         self.output_device_combo = QComboBox()
@@ -697,6 +831,7 @@ class SettingsWindow(QWidget):
                 border-radius: 5px;
                 padding: 6px;
                 font-size: 11px;
+                color: #ffffff;
             }
         """)
         voice_layout.addWidget(self.output_device_combo)
@@ -711,6 +846,7 @@ class SettingsWindow(QWidget):
                 padding: 8px;
                 font-size: 11px;
                 margin-top: 8px;
+                color: #ffffff;
             }
             QPushButton:hover {
                 background-color: #4d4d4d;
@@ -721,7 +857,7 @@ class SettingsWindow(QWidget):
 
         # NEW: Voice Interrupt Mode
         interrupt_label = QLabel("🔇 Voice Interruption:")
-        interrupt_label.setStyleSheet("font-weight: bold; margin-top: 15px;")
+        interrupt_label.setStyleSheet("font-weight: bold; margin-top: 15px; color: #ffffff;")
         voice_layout.addWidget(interrupt_label)
 
         self.interrupt_mode_combo = QComboBox()
@@ -734,6 +870,7 @@ class SettingsWindow(QWidget):
                 border-radius: 5px;
                 padding: 6px;
                 font-size: 11px;
+                color: #ffffff;
             }
         """)
         voice_layout.addWidget(self.interrupt_mode_combo)
@@ -748,7 +885,7 @@ class SettingsWindow(QWidget):
 
         # TTS Provider selection
         tts_provider_label = QLabel("🔊 TTS Provider:")
-        tts_provider_label.setStyleSheet("font-weight: bold; margin-top: 15px;")
+        tts_provider_label.setStyleSheet("font-weight: bold; margin-top: 15px; color: #ffffff;")
         voice_layout.addWidget(tts_provider_label)
 
         self.tts_provider_combo = QComboBox()
@@ -762,6 +899,7 @@ class SettingsWindow(QWidget):
                 border-radius: 5px;
                 padding: 6px;
                 font-size: 11px;
+                color: #ffffff;
             }
         """)
         self.tts_provider_combo.currentIndexChanged.connect(self.on_tts_provider_changed)
@@ -773,7 +911,7 @@ class SettingsWindow(QWidget):
         edge_tts_layout.setContentsMargins(0, 0, 0, 0)
 
         tts_label = QLabel("🎵 Edge TTS Voice:")
-        tts_label.setStyleSheet("font-weight: bold; margin-top: 15px;")
+        tts_label.setStyleSheet("font-weight: bold; margin-top: 15px; color: #ffffff;")
         edge_tts_layout.addWidget(tts_label)
 
         self.tts_voice_combo = QComboBox()
@@ -784,6 +922,7 @@ class SettingsWindow(QWidget):
                 border-radius: 5px;
                 padding: 6px;
                 font-size: 11px;
+                color: #ffffff;
             }
         """)
 
@@ -813,7 +952,7 @@ class SettingsWindow(QWidget):
         puter_tts_layout.setContentsMargins(0, 0, 0, 0)
 
         puter_tts_model_label = QLabel("🔊 Puter TTS Model:")
-        puter_tts_model_label.setStyleSheet("font-weight: bold; margin-top: 15px;")
+        puter_tts_model_label.setStyleSheet("font-weight: bold; margin-top: 15px; color: #ffffff;")
         puter_tts_layout.addWidget(puter_tts_model_label)
 
         self.puter_tts_model_combo = QComboBox()
@@ -824,11 +963,13 @@ class SettingsWindow(QWidget):
                 border-radius: 5px;
                 padding: 6px;
                 font-size: 11px;
+                color: #ffffff;
             }
         """)
         puter_tts_layout.addWidget(self.puter_tts_model_combo)
 
         puter_tts_voice_label = QLabel("🎵 Puter Voice (optional):")
+        puter_tts_voice_label.setStyleSheet("color: #ffffff;")
         puter_tts_layout.addWidget(puter_tts_voice_label)
 
         self.puter_tts_voice_input = QLineEdit()
@@ -840,6 +981,7 @@ class SettingsWindow(QWidget):
                 border-radius: 5px;
                 padding: 6px;
                 font-size: 11px;
+                color: #ffffff;
             }
         """)
         puter_tts_layout.addWidget(self.puter_tts_voice_input)
@@ -867,6 +1009,7 @@ class SettingsWindow(QWidget):
         elevenlabs_layout.addWidget(elevenlabs_info)
 
         elevenlabs_voice_label = QLabel("Voice ID:")
+        elevenlabs_voice_label.setStyleSheet("color: #ffffff;")
         elevenlabs_layout.addWidget(elevenlabs_voice_label)
 
         self.elevenlabs_voice_input = QLineEdit()
@@ -878,6 +1021,7 @@ class SettingsWindow(QWidget):
                 border-radius: 5px;
                 padding: 6px;
                 font-size: 11px;
+                color: #ffffff;
             }
         """)
         elevenlabs_layout.addWidget(self.elevenlabs_voice_input)
@@ -889,12 +1033,13 @@ class SettingsWindow(QWidget):
 
         # Advanced options - ENHANCED VAD CONTROLS
         advanced_label = QLabel("⚙️ Voice Detection Options:")
-        advanced_label.setStyleSheet("font-weight: bold; margin-top: 15px;")
+        advanced_label.setStyleSheet("font-weight: bold; margin-top: 15px; color: #ffffff;")
         voice_layout.addWidget(advanced_label)
 
         # VAD Type Selection
         vad_type_layout = QHBoxLayout()
         vad_type_label = QLabel("VAD Engine:")
+        vad_type_label.setStyleSheet("color: #ffffff;")
         vad_type_layout.addWidget(vad_type_label)
 
         # WebRTC VAD toggle
@@ -920,7 +1065,9 @@ class SettingsWindow(QWidget):
         webrtc_settings_layout.setContentsMargins(20, 5, 0, 5)
 
         webrtc_agg_layout = QHBoxLayout()
-        webrtc_agg_layout.addWidget(QLabel("WebRTC Aggressiveness:"))
+        webrtc_agg_label = QLabel("WebRTC Aggressiveness:")
+        webrtc_agg_label.setStyleSheet("color: #ffffff;")
+        webrtc_agg_layout.addWidget(webrtc_agg_label)
         self.vad_combo = QComboBox()
         self.vad_combo.addItem("0 (Least)", 0)
         self.vad_combo.addItem("1 (Low)", 1)
@@ -934,6 +1081,7 @@ class SettingsWindow(QWidget):
                 border-radius: 5px;
                 padding: 4px;
                 font-size: 10px;
+                color: #ffffff;
             }
         """)
         webrtc_agg_layout.addWidget(self.vad_combo)
@@ -951,7 +1099,9 @@ class SettingsWindow(QWidget):
         silero_settings_layout.setContentsMargins(20, 5, 0, 5)
 
         silero_threshold_layout = QHBoxLayout()
-        silero_threshold_layout.addWidget(QLabel("Silero Threshold:"))
+        silero_threshold_label = QLabel("Silero Threshold:")
+        silero_threshold_label.setStyleSheet("color: #ffffff;")
+        silero_threshold_layout.addWidget(silero_threshold_label)
         self.silero_threshold_combo = QComboBox()
         self.silero_threshold_combo.addItem("0.3 (Very Sensitive)", 0.3)
         self.silero_threshold_combo.addItem("0.5 (Balanced)", 0.5)
@@ -965,6 +1115,7 @@ class SettingsWindow(QWidget):
                 border-radius: 5px;
                 padding: 4px;
                 font-size: 10px;
+                color: #ffffff;
             }
         """)
         silero_threshold_layout.addWidget(self.silero_threshold_combo)
@@ -1024,7 +1175,7 @@ class SettingsWindow(QWidget):
         save_btn.setStyleSheet("""
             QPushButton {
                 background-color: #55ff55;
-                color: #000;
+                color: #ffffff;
                 border: none;
                 border-radius: 5px;
                 padding: 10px 20px;
@@ -1061,21 +1212,6 @@ class SettingsWindow(QWidget):
             self.silero_settings_widget.show()
         else:
             self.silero_settings_widget.hide()
-
-    def mousePressEvent(self, event):
-        """Handle mouse press for dragging"""
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._is_dragging = True
-            self._drag_offset = event.pos()
-
-    def mouseMoveEvent(self, event):
-        """Handle mouse move for dragging"""
-        if self._is_dragging:
-            self.move(self.mapToGlobal(event.pos() - self._drag_offset))
-
-    def mouseReleaseEvent(self, event):
-        """Handle mouse release"""
-        self._is_dragging = False
 
     def on_provider_changed(self, provider):
         """Handle provider change - DYNAMIC VISIBILITY + AUTO-SWITCH"""
@@ -1636,3 +1772,149 @@ class SettingsWindow(QWidget):
     def show_status_message(self, message):
         """Show a temporary status message"""
         print(f"[Settings] {message}")
+
+    def apply_rounded_mask(self):
+        """Apply rounded corners mask"""
+        from PyQt6.QtGui import QPainterPath
+        from PyQt6.QtCore import QRectF
+
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(self.rect()), 12, 12)
+        region = QRegion(path.toFillPolygon().toPolygon())
+        self.setMask(region)
+
+    def resizeEvent(self, event):
+        """Handle window resize"""
+        super().resizeEvent(event)
+        self.apply_rounded_mask()
+        if hasattr(self, 'resize_handles'):
+            self.position_resize_handles()
+        if hasattr(self, 'resize_timer'):
+            self.resize_timer.stop()
+            self.resize_timer.start(1000)
+
+    def save_window_geometry(self):
+        """Save window geometry - placeholder for future implementation"""
+        pass
+
+    def toggle_maximize(self):
+        """Toggle maximize/restore"""
+        if self.isMaximized():
+            self.showNormal()
+            self.maximize_btn.setText("□")
+        else:
+            self.showMaximized()
+            self.maximize_btn.setText("❐")
+
+    def header_mouse_press(self, event):
+        """Handle mouse press on header for dragging"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.dragging = True
+            self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def header_mouse_move(self, event):
+        """Handle mouse move on header for dragging"""
+        if self.dragging:
+            self.move(event.globalPosition().toPoint() - self.drag_position)
+            event.accept()
+
+    def header_mouse_release(self, event):
+        """Handle mouse release"""
+        self.dragging = False
+        event.accept()
+
+    def create_resize_handles(self):
+        """Create invisible resize handles around window edges"""
+        handle_size = 8
+        corner_size = 16
+
+        self.resize_handles = {}
+
+        edges = {
+            'top': (0, 0, 0, handle_size, Qt.CursorShape.SizeVerCursor),
+            'bottom': (0, 0, 0, handle_size, Qt.CursorShape.SizeVerCursor),
+            'left': (0, 0, handle_size, 0, Qt.CursorShape.SizeHorCursor),
+            'right': (0, 0, handle_size, 0, Qt.CursorShape.SizeHorCursor),
+        }
+
+        for edge_name, (l, t, w, h, cursor) in edges.items():
+            handle = QFrame(self)
+            handle.setStyleSheet("background-color: transparent;")
+            handle.setCursor(cursor)
+            handle.edge_type = edge_name
+            handle.installEventFilter(self)
+            self.resize_handles[edge_name] = handle
+            handle.raise_()
+
+        corners = {
+            'top-left': (0, 0, corner_size, corner_size, Qt.CursorShape.SizeFDiagCursor),
+            'top-right': (0, 0, corner_size, corner_size, Qt.CursorShape.SizeBDiagCursor),
+            'bottom-left': (0, 0, corner_size, corner_size, Qt.CursorShape.SizeBDiagCursor),
+            'bottom-right': (0, 0, corner_size, corner_size, Qt.CursorShape.SizeFDiagCursor),
+        }
+
+        for corner_name, (l, t, w, h, cursor) in corners.items():
+            handle = QFrame(self)
+            handle.setStyleSheet("background-color: transparent;")
+            handle.setCursor(cursor)
+            handle.edge_type = corner_name
+            handle.installEventFilter(self)
+            self.resize_handles[corner_name] = handle
+            handle.raise_()
+
+        self.position_resize_handles()
+
+    def position_resize_handles(self):
+        """Position resize handles based on window size"""
+        w = self.width()
+        h = self.height()
+        handle_size = 8
+        corner_size = 16
+        header_height = 50
+
+        self.resize_handles['top'].setGeometry(corner_size, header_height, w - 2 * corner_size, handle_size)
+        self.resize_handles['bottom'].setGeometry(corner_size, h - handle_size, w - 2 * corner_size, handle_size)
+        self.resize_handles['left'].setGeometry(0, corner_size, handle_size, h - 2 * corner_size)
+        self.resize_handles['right'].setGeometry(w - handle_size, corner_size, handle_size, h - 2 * corner_size)
+
+        self.resize_handles['top-left'].setGeometry(0, header_height, corner_size, corner_size)
+        self.resize_handles['top-right'].setGeometry(w - corner_size, header_height, corner_size, corner_size)
+        self.resize_handles['bottom-left'].setGeometry(0, h - corner_size, corner_size, corner_size)
+        self.resize_handles['bottom-right'].setGeometry(w - corner_size, h - corner_size, corner_size, corner_size)
+
+    def eventFilter(self, obj, event):
+        """Handle resize handle events"""
+        if hasattr(obj, 'edge_type'):
+            if event.type() == event.Type.MouseButtonPress:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    self.resizing = True
+                    self.resize_edge = obj.edge_type
+                    self.resize_start_geometry = self.geometry()
+                    self.resize_start_pos = event.globalPosition().toPoint()
+                    return True
+
+            elif event.type() == event.Type.MouseButtonRelease:
+                if self.resizing:
+                    self.resizing = False
+                    self.resize_edge = None
+                    return True
+
+            elif event.type() == event.Type.MouseMove and self.resizing:
+                delta = event.globalPosition().toPoint() - self.resize_start_pos
+                new_geo = QRect(self.resize_start_geometry)
+
+                if 'left' in self.resize_edge:
+                    new_geo.setLeft(self.resize_start_geometry.left() + delta.x())
+                if 'right' in self.resize_edge:
+                    new_geo.setRight(self.resize_start_geometry.right() + delta.x())
+                if 'top' in self.resize_edge:
+                    new_geo.setTop(self.resize_start_geometry.top() + delta.y())
+                if 'bottom' in self.resize_edge:
+                    new_geo.setBottom(self.resize_start_geometry.bottom() + delta.y())
+
+                if new_geo.width() >= self.minimumWidth() and new_geo.height() >= self.minimumHeight():
+                    self.setGeometry(new_geo)
+                return True
+
+        return super().eventFilter(obj, event)

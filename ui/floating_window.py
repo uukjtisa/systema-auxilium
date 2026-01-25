@@ -58,7 +58,29 @@ class FloatingWindow(QWidget):
         
         # Center on screen
         QTimer.singleShot(100, self.move_to_center)
-    
+
+        # Timer to keep window on top of children
+        self.raise_timer = QTimer(self)
+        self.raise_timer.timeout.connect(self.ensure_on_top)
+        self.raise_timer.start(50)  # Check every 50ms
+
+    def ensure_on_top(self):
+        """Ensure floating window is always on top of child windows"""
+        if self.isVisible():
+            # Check if any child window is active
+            child_active = False
+            if self.chat_window and self.chat_window.isVisible():
+                child_active = True
+            if self.settings_window and self.settings_window.isVisible():
+                child_active = True
+            if self.debug_window and self.debug_window.isVisible():
+                child_active = True
+
+            # If any child is visible, raise this window
+            if child_active:
+                self.raise_()
+                self.activateWindow()
+
     def move_to_center(self):
         """Move window to center of screen"""
         from PyQt6.QtWidgets import QApplication
