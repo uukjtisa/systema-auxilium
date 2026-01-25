@@ -45,6 +45,78 @@ class MultiLineInput(QTextEdit):
         else:
             super().keyPressEvent(event)
 
+    def insertFromMimeData(self, source):
+        """Override paste to handle file paths"""
+        if source.hasUrls():
+            # Handle file drops/pastes
+            for url in source.urls():
+                file_path = url.toLocalFile()
+                if file_path:
+                    # Get the chat window to use its helper methods
+                    chat_window = self.get_chat_window()
+                    if chat_window:
+                        cleaned_path = chat_window.clean_file_path(file_path)
+
+                        # Check if Puter + image
+                        if chat_window.controller.get_ai_provider() == 'puter':
+                            valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif']
+                            if any(cleaned_path.lower().endswith(ext) for ext in valid_extensions):
+                                chat_window.attached_image = cleaned_path
+                                chat_window.add_system_message(
+                                    f"📎 **Image Ready:** {cleaned_path}\n\nType your message and press Enter."
+                                )
+                                return
+
+                        # Quote non-image paths
+                        if chat_window.should_quote_path(cleaned_path):
+                            cleaned_path = f'"{cleaned_path}"'
+
+                        self.insertPlainText(cleaned_path)
+                    else:
+                        # Fallback if can't find chat window
+                        self.insertPlainText(file_path)
+            return
+        elif source.hasText():
+            text = source.text().strip()
+
+            # Get the chat window to use its helper methods
+            chat_window = self.get_chat_window()
+            if chat_window:
+                cleaned_path = chat_window.clean_file_path(text)
+
+                # Check if it's a valid file path
+                if os.path.exists(cleaned_path):
+                    # Check if Puter + image
+                    if chat_window.controller.get_ai_provider() == 'puter':
+                        valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif']
+                        if any(cleaned_path.lower().endswith(ext) for ext in valid_extensions):
+                            chat_window.attached_image = cleaned_path
+                            chat_window.add_system_message(
+                                f"📎 **Image Ready:** {cleaned_path}\n\nType your message and press Enter."
+                            )
+                            return
+
+                    # Quote non-image paths
+                    if chat_window.should_quote_path(cleaned_path):
+                        cleaned_path = f'"{cleaned_path}"'
+
+                    self.insertPlainText(cleaned_path)
+                    return
+
+            # If not a file path, paste normally
+            super().insertFromMimeData(source)
+        else:
+            super().insertFromMimeData(source)
+
+    def get_chat_window(self):
+        """Get the ChatWindow parent"""
+        parent = self.parent()
+        while parent:
+            if parent.__class__.__name__ == 'ChatWindow':
+                return parent
+            parent = parent.parent()
+        return None
+
     def adjust_height(self):
         if self.manual_resize:
             return
@@ -153,7 +225,6 @@ class ChatWindow(QWidget):
         self.thinking_dots = 0
         self.thinking_label_shown = False
         self.sidebar_visible = False
-
 
         # Voice state
         self.voice_enabled = False
@@ -759,6 +830,25 @@ class ChatWindow(QWidget):
         combined_layout.setSpacing(8)
         combined_layout.setSizeConstraint(QHBoxLayout.SizeConstraint.SetMinimumSize)
 
+        # File browse button
+        browse_btn = QPushButton("📁")
+        browse_btn.setFixedSize(32, 32)
+        browse_btn.setStyleSheet("""
+                QPushButton {
+                    background: transparent;
+                    border: 2px solid #5F5F5F;
+                    border-radius: 16px;
+                    font-size: 14px;
+                }
+                QPushButton:hover {
+                    background: #2A2A2A;
+                    border-color: #7F7F7F;
+                }
+            """)
+        browse_btn.clicked.connect(self.browse_for_file)
+        browse_btn.setToolTip("Browse for files")
+        combined_layout.addWidget(browse_btn)
+
         # Mode dropdown (ChatGPT-style)
         self.mode_dropdown = QPushButton("💬")
         self.mode_dropdown.setFixedSize(32, 32)
@@ -898,13 +988,16 @@ class ChatWindow(QWidget):
         # Load personalization
         self.load_personalization()
 
+        # Notify if admin priveleges are available
+        self.check_admin_mode()
+
         # Welcome message
         self.add_system_message(
             "👋 **Welcome to Systema Auxilium!**\n\n"
             "I can execute Python code and control your system. "
             "Click the 💬 icon to force specific modes:\n"
-            "• **Tools** - Operations that return values\n"
-            "• **Commands** - Quick actions without feedback"
+            "• **Tools** - Operations that returns feedback to the Agent: Reading files, Investigating errors, etc..\n"
+            "• **Commands** - Quick actions without feedback: Opening apps, creating files, etc.."
         )
 
     def toggle_voice(self):
@@ -1578,6 +1671,42 @@ class ChatWindow(QWidget):
         else:
             self.controller.send_message(message)
 
+    def browse_for_file(self):
+        """Alternative to drag & drop - works in admin mode"""
+        from PyQt6.QtWidgets import QFileDialog
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select File",
+            "",
+            "All Files (*.*)"
+        )
+
+        if file_path:
+            # Clean the file path
+            file_path = self.clean_file_path(file_path)
+
+            # For Puter provider with images
+            if self.controller.get_ai_provider() == 'puter':
+                valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif']
+                if any(file_path.lower().endswith(ext) for ext in valid_extensions):
+                    self.attached_image = file_path
+                    self.add_system_message(
+                        f"📎 **Image Ready:** {file_path}\n\nType your message and press Enter."
+                    )
+                    return
+
+            # Quote non-image paths
+            if self.should_quote_path(file_path):
+                file_path = f'"{file_path}"'
+
+            # Otherwise insert path into input
+            current_text = self.input_field.toPlainText()
+            if current_text:
+                self.input_field.text_input.setPlainText(current_text + "\n" + file_path)
+            else:
+                self.input_field.text_input.setPlainText(file_path)
+
     def set_input_enabled(self, enabled):
         """Enable/disable input"""
         self.input_field.setEnabled(enabled)
@@ -1913,14 +2042,21 @@ class ChatWindow(QWidget):
 
         file_path = files[0]
 
+        # Clean the file path
+        file_path = self.clean_file_path(file_path)
+
         # For Puter provider with images, use attachment mode
         if self.controller.get_ai_provider() == 'puter':
-            valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']
+            valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif']
             if any(file_path.lower().endswith(ext) for ext in valid_extensions):
                 self.attached_image = file_path
                 self.add_system_message(
                     f"📎 **Image Ready:** {file_path}\n\nType your message and press Enter to send with image.")
                 return
+
+        # Quote non-image paths
+        if self.should_quote_path(file_path):
+            file_path = f'"{file_path}"'
 
         # Otherwise, insert file path into text input
         current_text = self.input_field.toPlainText()
@@ -1928,3 +2064,68 @@ class ChatWindow(QWidget):
             self.input_field.text_input.setPlainText(current_text + "\n" + file_path)
         else:
             self.input_field.text_input.setPlainText(file_path)
+
+    def clean_file_path(self, path):
+        """Clean file path by removing file:/// prefix and normalizing"""
+        if path.startswith('file:///'):
+            path = path[8:]  # Remove 'file:///'
+        elif path.startswith('file://'):
+            path = path[7:]  # Remove 'file://'
+
+        # Normalize path separators
+        path = path.replace('/', '\\')
+
+        return path
+
+    def should_quote_path(self, path):
+        """Check if path should be quoted (not an image)"""
+        image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif']
+        return not any(path.lower().endswith(ext) for ext in image_extensions)
+
+    def keyPressEvent(self, event):
+        """Handle paste of file paths"""
+        if event.key() == Qt.Key.Key_V and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            clipboard = QApplication.clipboard()
+            text = clipboard.text().strip()
+
+            # Clean the path first
+            cleaned_path = self.clean_file_path(text)
+
+            # Check if it's a file path
+            if os.path.exists(cleaned_path):
+                # For Puter provider with images
+                if self.controller.get_ai_provider() == 'puter':
+                    valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif']
+                    if any(cleaned_path.lower().endswith(ext) for ext in valid_extensions):
+                        self.attached_image = cleaned_path
+                        self.add_system_message(
+                            f"📎 **Image Ready:** {cleaned_path}\n\nType your message and press Enter."
+                        )
+                        event.accept()
+                        return
+
+                # Quote non-image paths
+                if self.should_quote_path(cleaned_path):
+                    cleaned_path = f'"{cleaned_path}"'
+
+                self.input_field.text_input.insertPlainText(cleaned_path)
+                event.accept()
+                return
+
+        super().keyPressEvent(event)
+
+    def check_admin_mode(self):
+        """Check if running as admin and notify user"""
+        import ctypes
+        try:
+            is_admin = ctypes.windll.shell32.IsUserAnAdmin()
+            if is_admin:
+                self.add_system_message(
+                    "⚠️ **Administrator Mode Enabled**\n\n"
+                    "This Agent is now running with elevated system privileges and can perform high-level system changes and tasks.\n\n"
+                    "Some Windows security features (UIPI) may restrict drag-and-drop behavior in some instances.\n"
+                    "If drag & drop does not work, please use the 📁 file browser button instead."
+                )
+
+        except:
+            pass
