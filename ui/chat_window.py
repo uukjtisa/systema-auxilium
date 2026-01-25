@@ -406,15 +406,16 @@ class ChatWindow(QWidget):
         self.user_name_input = QLineEdit()
         self.user_name_input.setPlaceholderText("Enter your name...")
         self.user_name_input.setStyleSheet("""
-            QLineEdit {
-                background-color: #2A2A2A;
-                border: 1px solid #3C3C3C;
-                border-radius: 6px;
-                padding: 6px;
-                font-size: 11px;
-                color: #E8EAED;
-            }
-        """)
+                QLineEdit {
+                    background-color: #2A2A2A;
+                    border: 1px solid #3C3C3C;
+                    border-radius: 6px;
+                    padding: 6px;
+                    font-size: 11px;
+                    color: #E8EAED;
+                }
+            """)
+        self.user_name_input.textChanged.connect(self.on_user_name_changed) # Connect to save immediately on text change
         user_name_layout.addWidget(self.user_name_input)
 
         sidebar_layout.addWidget(user_name_container)
@@ -833,12 +834,6 @@ class ChatWindow(QWidget):
         self.update_voice_status("")
         self.add_system_message("🔇 **Voice Mode Disabled**")
 
-    def save_personalization(self):
-        """Save personalization settings"""
-        user_name = self.user_name_input.text().strip()
-        self.controller.set_user_name(user_name)
-        self.add_system_message("✓ **Name Saved**")
-
     def load_personalization(self):
         """Load personalization settings"""
         user_name = self.controller.get_user_name()
@@ -1064,6 +1059,11 @@ class ChatWindow(QWidget):
         else:
             self.mode_dropdown.setText("💬")
             self.add_system_message("💬 **Normal Mode** - AI decides when to use tools or commands")
+
+    def on_user_name_changed(self, text):
+        """Called when user name input changes"""
+        user_name = text.strip()
+        self.controller.set_user_name(user_name)
 
     def change_bot_avatar(self):
         """Change bot avatar"""
@@ -1432,7 +1432,6 @@ class ChatWindow(QWidget):
         # Optional: Show a brief feedback message
         self.status_label.setText("✓ Copied to clipboard")
         QTimer.singleShot(2000, lambda: self.status_label.setText(""))
-
 
     def scroll_to_bottom(self):
         """Scroll to bottom"""
