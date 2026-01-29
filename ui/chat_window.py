@@ -1461,7 +1461,10 @@ class ChatWindow(QWidget):
     def add_ai_message(self, message):
         """Add AI message with markdown rendering"""
         # NEW: Remove emotion brackets for DISPLAY only
-        display_message = self._clean_emotion_brackets(message)
+        if self.voice_enabled:
+            display_message = self._clean_emotion_brackets(message)
+        else:
+            display_message = message
 
         message_widget = QFrame()
         message_widget.setStyleSheet("""
@@ -1717,9 +1720,6 @@ class ChatWindow(QWidget):
             self.input_field.setPlaceholderText("AI is working... please wait")
 
     def show_ai_message(self, message):
-        if not message or not message.strip():
-            return
-
         # In voice mode and NOT in tool mode, start voice and wait for callback
         if self.voice_enabled and not self.controller.ai.tool_manager.in_tool_mode:
             self.log("[Voice] Buffering message, starting TTS...")

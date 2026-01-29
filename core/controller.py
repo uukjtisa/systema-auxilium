@@ -738,7 +738,7 @@ class AssistantController(QObject):
             return
 
         # Show visible text immediately (only if not empty) - NORMAL MODE or TOOL MODE
-        if result.get('response') and result['response'].strip():
+        if result.get('response'):
             self.ui.show_ai_message(result['response'])
 
         # NEW: Check if AI just exited tool mode
@@ -791,7 +791,7 @@ class AssistantController(QObject):
                     f"═══ AI's REPORT TO USER ═══\n{raw_response}")
 
         # Show the AI's report to user
-        if result.get('response') and result['response'].strip():
+        if result.get('response'):
             self.ui.show_ai_message(result['response'])
 
     def handle_tool_mode_response(self, result):
