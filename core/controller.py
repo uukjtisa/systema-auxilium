@@ -28,11 +28,6 @@ class AssistantController(QObject):
 
         # Settings
         self.settings_file = "assistant_settings.json"
-        # LLaMA runtime settings (not saved, loaded on startup)
-        self.llama_max_tokens = 2000  # Default
-        self.llama_temperature = 0.7
-        self.llama_top_p = 0.9
-        self.llama_override_enabled = False
         self.settings = self.load_settings()
 
         # Detect system information
@@ -108,23 +103,13 @@ class AssistantController(QObject):
             print(f"Error loading settings: {e}")
 
         # FIRST-TIME LAUNCH DEFAULTS
-        # Check if LLaMA is actually available before defaulting to it
-        default_provider = 'anthropic'  # Safe fallback
-        default_tts = 'edge-tts'  # Safe fallback (no install needed)
-
-        try:
-            from core.llama_provider import LLaMAProvider
-            provider = LLaMAProvider()
-            if provider.is_available() and provider.find_default_model():
-                default_provider = 'llama'  # Use LLaMA if available
-                default_tts = 'pyttsx3'  # Use offline TTS if LLaMA works
-        except:
-            pass
+        default_provider = 'anthropic'
+        default_tts = 'edge-tts'
 
         return {
             'api_key': '',
             'gemini_api_key': '',
-            'ai_provider': default_provider,  # LLaMA if available, else Anthropic
+            'ai_provider': default_provider,
             'puter_model': 'gpt-4o-mini',
             'gemini_model': 'gemini-2.0-flash-exp',
             'voice_input_device': None,
@@ -1015,128 +1000,3 @@ class AssistantController(QObject):
                 'description': '✅ FREE: 30 RPM, 14,400/day - Smallest, ultra-fast'
             },
         ]
-
-    def get_llama_available(self):
-        """Check if LLaMA is available - ULTRA SAFE"""
-        try:
-            # Don't even try to import if known to be problematic
-            import sys
-            if sys.platform == 'win32':
-                # Additional safety for Windows
-                try:
-                    from core.llama_provider import LLaMAProvider
-                    provider = LLaMAProvider()
-                    return provider.is_available()
-                except Exception as e:
-                    print(f"[LLaMA] Not available: {e}")
-                    return False
-            else:
-                from core.llama_provider import LLaMAProvider
-                provider = LLaMAProvider()
-                return provider.is_available()
-        except:
-            return False
-
-    def get_llama_models(self):
-        """Get available LLaMA models - ULTRA SAFE"""
-        try:
-            from core.llama_provider import LLaMAProvider
-            provider = LLaMAProvider()
-            return provider.list_available_models()
-        except:
-            return []
-
-    def get_llama_download_instructions(self):
-        """Get LLaMA download instructions - ULTRA SAFE"""
-        try:
-            from core.llama_provider import LLaMAProvider
-            provider = LLaMAProvider()
-            return provider.download_default_model()
-        except:
-            return """LLaMA provider not available.
-
-    To install:
-    1. pip install llama-cpp-python
-    2. Download a model from https://huggingface.co/TheBloke
-    3. Place .gguf file in llama_models/ folder
-    """
-
-    def get_llama_settings(self):
-        """Get current LLaMA generation settings"""
-        return {
-            'max_tokens': self.llama_max_tokens,
-            'temperature': self.llama_temperature,
-            'top_p': self.llama_top_p,
-            'override_enabled': self.llama_override_enabled
-        }
-
-    def set_llama_settings(self, max_tokens, temperature, top_p, override_enabled):
-        """Set LLaMA generation settings"""
-        self.llama_max_tokens = max_tokens
-        self.llama_temperature = temperature
-        self.llama_top_p = top_p
-        self.llama_override_enabled = override_enabled
-
-        # Update AI engine settings
-        if self.ai.llama_provider:
-            self.ai.llama_provider.max_tokens = max_tokens
-            self.ai.llama_provider.temperature = temperature
-            self.ai.llama_provider.top_p = top_p
-
-        self.log(f"LLaMA settings updated: tokens={max_tokens}, temp={temperature}, top_p={top_p}", "SUCCESS")
-
-    def reload_llama_model(self):
-        """Reload LLaMA model (non-blocking) - returns status"""
-        if self.ai.ai_provider != 'llama':
-            return False, "LLaMA is not the current provider"
-
-        if not self.ai.llama_provider:
-            return False, "LLaMA provider not initialized"
-
-        self.log("Reloading LLaMA model...", "INFO")
-
-        # Unload current model
-        self.ai.llama_provider.model = None
-        self.ai.llama_provider.model_loaded = False
-
-        # Reload in background thread
-        import threading
-        def reload():
-            success = self.ai.llama_provider.load_model()
-            if success:
-                self.log("✓ Model reloaded successfully!", "SUCCESS")
-            else:
-                self.log("✗ Model reload failed", "ERROR")
-
-        thread = threading.Thread(target=reload, daemon=True)
-        thread.start()
-
-        return True, "Model reloading in background..."
-
-    def switch_llama_model(self, model_path):
-        """Switch to a different LLaMA model"""
-        if self.ai.ai_provider != 'llama':
-            return False, "LLaMA is not the current provider"
-
-        if not self.ai.llama_provider:
-            return False, "LLaMA provider not initialized"
-
-        self.log(f"Switching to model: {model_path}", "INFO")
-
-        # Unload current
-        self.ai.llama_provider.model = None
-        self.ai.llama_provider.model_loaded = False
-
-        # Load new model in background
-        import threading
-        def load_new():
-            success = self.ai.llama_provider.load_model(model_path)
-            if success:
-                self.log(f"✓ Switched to: {model_path}", "SUCCESS")
-            else:
-                self.log(f"✗ Failed to load: {model_path}", "ERROR")
-
-        thread = threading.Thread(target=load_new, daemon=True)
-        thread.start()
-
-        return True, "Switching model in background..."
