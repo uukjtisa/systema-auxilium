@@ -28,11 +28,11 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Systema Auxilium - AI System Agent")
     app.setOrganizationName("NicProjects")
+    print(
+        "======================CAUTION======================\n\nThis AI can execute system-level actions if ran with sufficient permissions.\nUse caution when issuing prompts.\nYou are responsible for the actions taken.\n\n======================CAUTION======================")
     # Initialize controller
     controller = AssistantController()
     controller.show()
-
-    print("======================CAUTION======================\n\nThis AI can execute system-level actions if ran with sufficient permissions.\nUse caution when issuing prompts.\nYou are responsible for the actions taken.\n\n======================CAUTION======================")
 
     # Hide CMD window after initialization (if launched from CMD)
     console_hidden = hide_console_window()
