@@ -22,10 +22,6 @@ class ToolManager:
         self.in_tool_mode = False
         self.last_tool_output = None
 
-        # Track executed calls to prevent double execution
-        self.executed_hashes = set()
-        self.execution_lock = threading.Lock()
-
     def _extract_all_json_blocks(self, text):
         """
         Extract ALL JSON blocks from text (code blocks and bare JSON)
@@ -44,7 +40,7 @@ class ToolManager:
                 continue
 
         # Pattern 2: Bare JSON objects (not inside code blocks)
-        # Only look for JSON outside of already-found code blocks
+        # Only look for JSON outside already-found code blocks
         covered_ranges = [(start, end) for _, start, end, _ in found_blocks]
 
         bare_json_pattern = r'\{[^{}]*"(?:tool|command)"[^{}]*\}'
@@ -120,15 +116,6 @@ class ToolManager:
             if self._is_valid_tool_call(data):
                 tool_name = data['tool'].strip()
                 tool_input = data.get('input', '').strip()
-
-                # Check if already executed
-                exec_hash = self._get_execution_hash('tool', tool_name, tool_input)
-                with self.execution_lock:
-                    if exec_hash in self.executed_hashes:
-                        continue  # Skip, already executed
-                    self.executed_hashes.add(exec_hash)
-
-                # Remove this JSON from text
                 remaining_text = text[:start_pos] + text[end_pos:]
                 remaining_text = remaining_text.strip()
 
@@ -152,15 +139,6 @@ class ToolManager:
             if self._is_valid_command_call(data):
                 command_name = data['command'].strip()
                 command_input = data.get('input', '').strip()
-
-                # Check if already executed
-                exec_hash = self._get_execution_hash('command', command_name, command_input)
-                with self.execution_lock:
-                    if exec_hash in self.executed_hashes:
-                        continue  # Skip, already executed
-                    self.executed_hashes.add(exec_hash)
-
-                # Remove this JSON from text
                 remaining_text = text[:start_pos] + text[end_pos:]
                 remaining_text = remaining_text.strip()
 
@@ -325,11 +303,6 @@ class ToolManager:
             'visible_message': f"Unknown command: {command_name}"
         }
 
-    def clear_execution_history(self):
-        """Clear execution history (call between messages)"""
-        with self.execution_lock:
-            self.executed_hashes.clear()
-
     def get_tool_mode_prompt(self):
         """Get the prompt for tool mode"""
         if self.last_tool_output:
@@ -339,4 +312,3 @@ class ToolManager:
     def reset_python_interpreter(self):
         """Reset the Python interpreter state"""
         self.tools['python_interpreter'].reset()
-        self.clear_execution_history()

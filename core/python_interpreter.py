@@ -90,39 +90,36 @@ class PythonInterpreter:
                 # Detect if code has multiple lines or multiple statements
                 code_stripped = code_str.strip()
                 has_newlines = '\n' in code_stripped
-
-                # Try to detect multiple statements on same line
-                # (This is a heuristic - not perfect but catches common cases)
                 has_semicolons = ';' in code_stripped
 
-                # Decide on compilation mode
                 if has_newlines or has_semicolons:
                     # Multi-line or multiple statements - use 'exec' mode
-                    mode = 'exec'
-
-                    # For exec mode, we need to manually handle expression evaluation
-                    # Split into lines and check if last line is an expression
-                    lines = code_stripped.split('\n')
-                    last_line = lines[-1].strip() if lines else ''
-
-                    # Try to compile everything
                     try:
                         compiled = compile(code_str, '<input>', 'exec')
                         exec(compiled, self.interpreter.locals)
                         success = True
 
-                        # Now try to evaluate the last line as an expression if it looks like one
+                        # Check if last line looks like an expression that should return a value
+                        lines = code_stripped.split('\n')
+                        last_line = lines[-1].strip() if lines else ''
+
+                        # Only try to get a return value if last line looks like a pure expression
+                        # (not a statement, not a function call with side effects already executed)
                         if last_line and not any(last_line.startswith(kw) for kw in
-                                                ['import', 'from', 'def', 'class', 'if', 'for',
-                                                 'while', 'with', 'try', 'except', 'finally',
-                                                 'return', 'break', 'continue', 'pass', 'raise',
-                                                 'del', 'yield', 'assert', 'global', 'nonlocal']):
+                                                 ['import', 'from', 'def', 'class', 'if', 'for',
+                                                  'while', 'with', 'try', 'except', 'finally',
+                                                  'return', 'break', 'continue', 'pass', 'raise',
+                                                  'del', 'yield', 'assert', 'global', 'nonlocal', 'print']):
                             try:
-                                # Try to evaluate last line as expression
-                                result = eval(last_line, self.interpreter.locals)
-                                self.interpreter.last_result = result
+                                # Try to compile as expression first to see if it's valid
+                                compile(last_line, '<input>', 'eval')
+                                # If it compiles as expression, get its value from namespace
+                                # DON'T re-evaluate it - just check if it's a simple name reference
+                                if last_line.isidentifier():
+                                    result = self.interpreter.locals.get(last_line)
+                                # For more complex expressions, we'd need to re-eval
+                                # but that risks double execution, so skip
                             except:
-                                # Last line wasn't an expression, that's fine
                                 pass
 
                     except SyntaxError as e:
@@ -134,13 +131,10 @@ class PythonInterpreter:
                     more = self.interpreter.runsource(code_str, '<input>', 'single')
 
                     if more:
-                        # Code is incomplete
                         error = "Incomplete code block"
                         success = False
                     else:
-                        # Code executed successfully
                         success = True
-                        # Get the result that was captured by our displayhook
                         result = self.interpreter.last_result
 
         except Exception as e:
