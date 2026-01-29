@@ -214,7 +214,7 @@ class SettingsWindow(QWidget):
 
         provider_label = QLabel("Select AI Provider:")
         self.provider_combo = QComboBox()
-        self.provider_combo.addItems(["llama", "anthropic", "gemini", "puter"])  # LLaMA first!
+        self.provider_combo.addItems(["anthropic", "gemini", "puter"])
         self.provider_combo.currentTextChanged.connect(self.on_provider_changed)
         provider_layout.addWidget(provider_label)
         provider_layout.addWidget(self.provider_combo)
@@ -368,203 +368,7 @@ class SettingsWindow(QWidget):
         self.gemini_group.setLayout(gemini_layout)
         scroll_layout.addWidget(self.gemini_group)
 
-        # LLaMA Configuration (Free, Offline) - SAFE INITIALIZATION
-        self.llama_group = QGroupBox("LLaMA (Free, Offline AI)")
-        llama_layout = QVBoxLayout()
-
-        llama_info = QLabel(
-            "🆓 **100% Free & Offline AI**\n\n"
-            "LLaMA runs entirely on your computer - no API key, no internet needed!\n"
-            "Perfect for privacy and unlimited usage."
-        )
-        llama_info.setWordWrap(True)
-        llama_info.setStyleSheet(
-            "color: #ccc; font-size: 10pt; padding: 10px; background: #2d2d2d; border-radius: 5px;")
-        llama_layout.addWidget(llama_info)
-
-        # SAFE: Don't check availability during init - defer to load_settings
-        self.llama_status_label = QLabel("Checking LLaMA availability...")
-        self.llama_status_label.setStyleSheet("color: #888; font-style: italic;")
-        llama_layout.addWidget(self.llama_status_label)
-
-        self.llama_models_container = QWidget()
-        self.llama_models_layout = QVBoxLayout(self.llama_models_container)
-        self.llama_models_layout.setContentsMargins(0, 0, 0, 0)
-        llama_layout.addWidget(self.llama_models_container)
-
-        # LLaMA Generation Settings
-        llama_gen_label = QLabel("⚙️ Generation Settings")
-        llama_gen_label.setStyleSheet("font-weight: bold; margin-top: 15px; color: #ffffff;")
-        llama_layout.addWidget(llama_gen_label)
-
-        # Max Tokens
-        tokens_layout = QHBoxLayout()
-        tokens_layout.addWidget(QLabel("Max Tokens:"))
-
-        self.llama_tokens_input = QLineEdit()
-        self.llama_tokens_input.setPlaceholderText("2000")
-        self.llama_tokens_input.setMaximumWidth(100)
-        self.llama_tokens_input.setStyleSheet("""
-            QLineEdit {
-                background-color: #2d2d2d;
-                border: 1px solid #3d3d3d;
-                border-radius: 5px;
-                padding: 6px;
-                font-size: 11px;
-                color: #ffffff;
-            }
-        """)
-        tokens_layout.addWidget(self.llama_tokens_input)
-
-        tokens_info = QLabel("(Higher = More output, slower)")
-        tokens_info.setStyleSheet("color: #888; font-size: 9pt;")
-        tokens_layout.addWidget(tokens_info)
-        tokens_layout.addStretch()
-        llama_layout.addLayout(tokens_layout)
-
-        # Temperature
-        temp_layout = QHBoxLayout()
-        temp_layout.addWidget(QLabel("Temperature:"))
-
-        self.llama_temp_combo = QComboBox()
-        self.llama_temp_combo.addItem("0.1 (Precise)", 0.1)
-        self.llama_temp_combo.addItem("0.3 (Focused)", 0.3)
-        self.llama_temp_combo.addItem("0.5 (Balanced)", 0.5)
-        self.llama_temp_combo.addItem("0.7 (Creative)", 0.7)
-        self.llama_temp_combo.addItem("1.0 (Very Creative)", 1.0)
-        self.llama_temp_combo.setCurrentIndex(3)  # Default 0.7
-        self.llama_temp_combo.setStyleSheet("""
-            QComboBox {
-                background-color: #2d2d2d;
-                border: 1px solid #3d3d3d;
-                border-radius: 5px;
-                padding: 6px;
-                font-size: 11px;
-                color: #ffffff;
-            }
-        """)
-        temp_layout.addWidget(self.llama_temp_combo)
-        temp_layout.addStretch()
-        llama_layout.addLayout(temp_layout)
-
-        # Top-P
-        topp_layout = QHBoxLayout()
-        topp_layout.addWidget(QLabel("Top-P (Nucleus):"))
-
-        self.llama_topp_combo = QComboBox()
-        self.llama_topp_combo.addItem("0.7 (Strict)", 0.7)
-        self.llama_topp_combo.addItem("0.8 (Balanced)", 0.8)
-        self.llama_topp_combo.addItem("0.9 (Default)", 0.9)
-        self.llama_topp_combo.addItem("0.95 (Diverse)", 0.95)
-        self.llama_topp_combo.setCurrentIndex(2)  # Default 0.9
-        self.llama_topp_combo.setStyleSheet("""
-            QComboBox {
-                background-color: #2d2d2d;
-                border: 1px solid #3d3d3d;
-                border-radius: 5px;
-                padding: 6px;
-                font-size: 11px;
-                color: #ffffff;
-            }
-        """)
-        topp_layout.addWidget(self.llama_topp_combo)
-        topp_layout.addStretch()
-        llama_layout.addLayout(topp_layout)
-
-        # Override Checkbox
-        self.llama_override_checkbox = QCheckBox("⚠️ Override Context Limits (Use with caution!)")
-        self.llama_override_checkbox.setStyleSheet("color: #ff9900; font-size: 11pt;")
-        self.llama_override_checkbox.stateChanged.connect(self.on_llama_override_toggled)
-        llama_layout.addWidget(self.llama_override_checkbox)
-
-        # Warning label (hidden by default)
-        self.llama_warning_label = QLabel(
-            "⚠️ <b>Warning:</b> High token counts can cause:\n"
-            "• Slow generation (1-2 min per response)\n"
-            "• High RAM usage (4-8GB+)\n"
-            "• System slowdown\n\n"
-            "<b>Estimate:</b> 1000 tokens ≈ 750 words ≈ 30 seconds\n"
-            "Recommended max: 4000 tokens"
-        )
-        self.llama_warning_label.setWordWrap(True)
-        self.llama_warning_label.setStyleSheet("""
-            QLabel {
-                color: #ff9900;
-                font-size: 9pt;
-                padding: 10px;
-                background: #2d1a00;
-                border: 1px solid #ff9900;
-                border-radius: 5px;
-                margin-left: 20px;
-            }
-        """)
-        self.llama_warning_label.hide()
-        llama_layout.addWidget(self.llama_warning_label)
-
-        # Model Management
-        llama_mgmt_label = QLabel("🔄 Model Management")
-        llama_mgmt_label.setStyleSheet("font-weight: bold; margin-top: 15px; color: #ffffff;")
-        llama_layout.addWidget(llama_mgmt_label)
-
-        # Model selector
-        model_select_layout = QHBoxLayout()
-        model_select_layout.addWidget(QLabel("Current Model:"))
-
-        self.llama_model_combo = QComboBox()
-        self.llama_model_combo.setStyleSheet("""
-            QComboBox {
-                background-color: #2d2d2d;
-                border: 1px solid #3d3d3d;
-                border-radius: 5px;
-                padding: 6px;
-                font-size: 11px;
-                color: #ffffff;
-            }
-        """)
-        model_select_layout.addWidget(self.llama_model_combo, 1)
-        llama_layout.addLayout(model_select_layout)
-
-        # Model action buttons
-        model_btn_layout = QHBoxLayout()
-
-        self.llama_reload_btn = QPushButton("🔄 Reload Model")
-        self.llama_reload_btn.clicked.connect(self.reload_llama_model)
-        self.llama_reload_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3d3d3d;
-                border: none;
-                border-radius: 5px;
-                padding: 8px;
-                font-size: 11px;
-                color: #ffffff;
-            }
-            QPushButton:hover {
-                background-color: #4d4d4d;
-            }
-        """)
-        model_btn_layout.addWidget(self.llama_reload_btn)
-
-        self.llama_switch_btn = QPushButton("🔀 Switch Model")
-        self.llama_switch_btn.clicked.connect(self.switch_llama_model)
-        self.llama_switch_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3d3d3d;
-                border: none;
-                border-radius: 5px;
-                padding: 8px;
-                font-size: 11px;
-                color: #ffffff;
-            }
-            QPushButton:hover {
-                background-color: #4d4d4d;
-            }
-        """)
-        model_btn_layout.addWidget(self.llama_switch_btn)
-
-        llama_layout.addLayout(model_btn_layout)
-
-        self.llama_group.setLayout(llama_layout)
-        scroll_layout.addWidget(self.llama_group)
+        # LLaMA support removed
 
         # Puter.js Configuration
         self.puter_group = QGroupBox("Puter.js Configuration")
@@ -1214,12 +1018,11 @@ class SettingsWindow(QWidget):
             self.silero_settings_widget.hide()
 
     def on_provider_changed(self, provider):
-        """Handle provider change - DYNAMIC VISIBILITY + AUTO-SWITCH"""
+        """Handle provider change - DYNAMIC VISIBILITY"""
         # Hide all provider-specific groups first
         self.anthropic_group.hide()
         self.gemini_group.hide()
         self.puter_group.hide()
-        self.llama_group.hide()  # NEW
 
         # CRITICAL: Always hide Puter-specific sections first
         self.puter_account_group.hide()
@@ -1234,9 +1037,6 @@ class SettingsWindow(QWidget):
             self.update_tts_provider_options(show_puter=True)
         elif provider == 'gemini':
             self.gemini_group.show()
-            self.update_tts_provider_options(show_puter=False)
-        elif provider == 'llama':  # NEW
-            self.llama_group.show()
             self.update_tts_provider_options(show_puter=False)
         else:  # anthropic
             self.anthropic_group.show()
@@ -1361,62 +1161,6 @@ class SettingsWindow(QWidget):
             # Show Edge TTS settings
             self.puter_tts_group.hide()
             self.edge_tts_group.show()
-
-    def check_llama_status(self):
-        """Check LLaMA status safely - called after window is shown"""
-        try:
-            # Clear previous content
-            while self.llama_models_layout.count():
-                item = self.llama_models_layout.takeAt(0)
-                if item.widget():
-                    item.widget().deleteLater()
-
-            # Check availability
-            if self.controller.get_llama_available():
-                self.llama_status_label.setText("✓ LLaMA is installed and ready!")
-                self.llama_status_label.setStyleSheet("color: #55ff55; font-weight: bold;")
-
-                # List models
-                models = self.controller.get_llama_models()
-                if models:
-                    model_list = QLabel(f"**Available Models:** {len(models)}")
-                    self.llama_models_layout.addWidget(model_list)
-
-                    for model in models:
-                        model_label = QLabel(f"  • {model['name']} ({model['size_mb']} MB)")
-                        model_label.setStyleSheet("color: #ccc; font-size: 9pt;")
-                        self.llama_models_layout.addWidget(model_label)
-                else:
-                    no_models = QLabel("⚠️ No models found. Download a model to get started:")
-                    self.llama_models_layout.addWidget(no_models)
-
-                    instructions = QTextEdit()
-                    instructions.setPlainText(self.controller.get_llama_download_instructions())
-                    instructions.setReadOnly(True)
-                    instructions.setMaximumHeight(150)
-                    instructions.setStyleSheet("""
-                        QTextEdit {
-                            background-color: #2d2d2d;
-                            border: 1px solid #3d3d3d;
-                            border-radius: 5px;
-                            padding: 8px;
-                            font-size: 10px;
-                            color: #E8EAED;
-                            font-family: monospace;
-                        }
-                    """)
-                    self.llama_models_layout.addWidget(instructions)
-            else:
-                self.llama_status_label.setText("⚠️ LLaMA not installed")
-                self.llama_status_label.setStyleSheet("color: #ff5555; font-family: monospace;")
-
-                llama_error = QLabel("Install with: pip install llama-cpp-python")
-                llama_error.setStyleSheet("color: #ff5555; font-family: monospace; font-size: 9pt;")
-                self.llama_models_layout.addWidget(llama_error)
-
-        except Exception as e:
-            self.llama_status_label.setText(f"⚠️ Error checking LLaMA: {str(e)[:50]}")
-            self.llama_status_label.setStyleSheet("color: #ff5555;")
 
     def setup_puter_account(self):
         """Setup new Puter account"""
@@ -1604,32 +1348,6 @@ class SettingsWindow(QWidget):
         # Update visibility
         self.on_vad_settings_changed()
 
-        # Load LLaMA settings
-        llama_settings = self.controller.get_llama_settings()
-        self.llama_tokens_input.setText(str(llama_settings['max_tokens']))
-
-        for i in range(self.llama_temp_combo.count()):
-            if self.llama_temp_combo.itemData(i) == llama_settings['temperature']:
-                self.llama_temp_combo.setCurrentIndex(i)
-                break
-
-        for i in range(self.llama_topp_combo.count()):
-            if self.llama_topp_combo.itemData(i) == llama_settings['top_p']:
-                self.llama_topp_combo.setCurrentIndex(i)
-                break
-
-        self.llama_override_checkbox.setChecked(llama_settings['override_enabled'])
-
-        # Load LLaMA models into combo
-        models = self.controller.get_llama_models()
-        self.llama_model_combo.clear()
-        for model in models:
-            self.llama_model_combo.addItem(model['name'], model['path'])
-
-        # NEW: Check LLaMA status AFTER window is fully loaded (delayed)
-        from PyQt6.QtCore import QTimer
-        QTimer.singleShot(100, self.check_llama_status)
-
     def save_settings(self):
         """Save settings to controller - FIXED: Actually applies voice settings!"""
         # Save provider
@@ -1746,28 +1464,6 @@ class SettingsWindow(QWidget):
             self.show_status_message("✓ Opening Puter interface...")
         except Exception as e:
             self.show_status_message(f"✗ Error: {e}")
-
-    def on_llama_override_toggled(self, state):
-        """Show/hide warning when override is toggled"""
-        if state == 2:  # Checked
-            self.llama_warning_label.show()
-        else:
-            self.llama_warning_label.hide()
-
-    def reload_llama_model(self):
-        """Reload current LLaMA model"""
-        success, message = self.controller.reload_llama_model()
-        self.show_status_message(message)
-
-    def switch_llama_model(self):
-        """Switch to selected LLaMA model"""
-        model_path = self.llama_model_combo.currentData()
-        if not model_path:
-            self.show_status_message("No model selected")
-            return
-
-        success, message = self.controller.switch_llama_model(model_path)
-        self.show_status_message(message)
 
     def show_status_message(self, message):
         """Show a temporary status message"""

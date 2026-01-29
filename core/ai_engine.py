@@ -21,25 +21,7 @@ class AIEngine:
         self.gemini_api_key = gemini_api_key
         self.puter_server = puter_server
 
-        # LLaMA provider - SAFE INITIALIZATION
-        self.llama_provider = None
-        try:
-            # Only try to load LLaMA if explicitly requested or no other provider available
-            if api_key == '' and not puter_server and gemini_api_key == '':
-                try:
-                    from core.llama_provider import LLaMAProvider
-                    self.llama_provider = LLaMAProvider(log_callback=log_callback)
-                    if self.llama_provider.load_model():
-                        self.ai_provider = 'llama'
-                        self.log("LLaMA provider loaded as default (free, offline)", "SUCCESS")
-                    else:
-                        self.log("LLaMA model not found - using Anthropic as fallback", "WARNING")
-                        self.llama_provider = None
-                except Exception as e:
-                    self.log(f"LLaMA initialization failed: {e}", "WARNING")
-                    self.llama_provider = None
-        except:
-            pass
+        # LLaMA provider removed
 
         # Store system information
         self.system_info = system_info
@@ -94,16 +76,6 @@ class AIEngine:
 
     def set_provider(self, provider):
         self.ai_provider = provider
-
-        # Initialize LLaMA if selected
-        if provider == 'llama' and self.llama_provider is None:
-            try:
-                from core.llama_provider import LLaMAProvider
-                self.llama_provider = LLaMAProvider(log_callback=self.log)
-                self.llama_provider.load_model()
-            except:
-                pass
-
         self.log(f"AI provider set to: {provider}")
 
     def set_puter_model(self, model):
@@ -137,9 +109,7 @@ class AIEngine:
             'content': user_message
         })
 
-        if self.ai_provider == 'llama':
-            return self._generate_llama_response()
-        elif self.ai_provider == 'puter':
+        if self.ai_provider == 'puter':
             return self._generate_puter_response()
         elif self.ai_provider == 'gemini':
             return self._generate_gemini_response()
@@ -275,34 +245,6 @@ class AIEngine:
             self.log(f"Puter error: {e}", "ERROR")
             return {
                 'response': f"Error: {e}",
-                'has_tool_call': False,
-                'in_tool_mode': False,
-                'thinking': False
-            }
-
-    def _generate_llama_response(self):
-        """Generate response using local LLaMA"""
-        try:
-            if not self.llama_provider or not self.llama_provider.model_loaded:
-                return {
-                    'response': "Error: LLaMA model not loaded",
-                    'has_tool_call': False,
-                    'in_tool_mode': False,
-                    'thinking': False
-                }
-
-            messages = self._build_messages()
-
-            self.log("Generating with LLaMA...")
-            ai_text = self.llama_provider.generate(messages, max_tokens=20000, temperature=0.7)
-
-            return self._process_ai_response(ai_text)
-
-        except Exception as e:
-            error_msg = f"LLaMA Error: {e}"
-            self.log(error_msg, "ERROR")
-            return {
-                'response': error_msg,
                 'has_tool_call': False,
                 'in_tool_mode': False,
                 'thinking': False
@@ -791,33 +733,6 @@ class AIEngine:
             })
 
         return messages
-
-    def get_llama_available(self):
-        """Check if LLaMA is available"""
-        try:
-            from core.llama_provider import LLaMAProvider
-            provider = LLaMAProvider()
-            return provider.is_available()
-        except:
-            return False
-
-    def get_llama_models(self):
-        """Get available LLaMA models"""
-        try:
-            from core.llama_provider import LLaMAProvider
-            provider = LLaMAProvider()
-            return provider.list_available_models()
-        except:
-            return []
-
-    def get_llama_download_instructions(self):
-        """Get LLaMA download instructions"""
-        try:
-            from core.llama_provider import LLaMAProvider
-            provider = LLaMAProvider()
-            return provider.download_default_model()
-        except:
-            return "LLaMA provider not available"
 
     def clear_history(self):
         self.conversation_history = []
