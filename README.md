@@ -7,6 +7,8 @@
 
 Run the create_env.bat and that should install the dependencies and create the run.bat
 
+Tested on Windows 11 and Windows 10
+
 ## What is Systema Auxilium?
 
 Systema Auxilium (Latin for "System Helper") is an AI-powered desktop assistant that can interact with your operating system through Python code execution. It provides a natural language interface to automate system tasks, manage files, control applications, and perform various operations that would typically require manual scripting or command-line interaction.
