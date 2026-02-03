@@ -1294,7 +1294,7 @@ class PuterServer:
 
                 try:
                     element1 = wait.until(
-                        EC.element_to_be_clickable((By.XPATH, '//*[@id="window-body-0"]/div/div[1]/div[1]/div[3]'))
+                        EC.element_to_be_clickable((By.XPATH, '/html/body/div[2]/div[3]/div/div[1]/div[1]/div[3]'))
                     )
                     element1.click()
                     time.sleep(1)
@@ -1306,7 +1306,7 @@ class PuterServer:
                 try:
                     element2 = wait.until(
                         EC.element_to_be_clickable(
-                            (By.XPATH, '//*[@id="window-body-0"]/div/div[2]/div[3]/div/div[3]/div[4]/div/button'))
+                            (By.XPATH, '/html/body/div[2]/div[3]/div/div[2]/div[3]/div/div[3]/div[5]/div/button'))
                     )
                     element2.click()
                     time.sleep(1)
@@ -1317,7 +1317,7 @@ class PuterServer:
 
                 try:
                     element3 = wait.until(
-                        EC.element_to_be_clickable((By.XPATH, '//*[@id="window-body-2"]/div/button[1]'))
+                        EC.element_to_be_clickable((By.XPATH, '/html/body/div[3]/div/div[3]/div/button[1]'))
                     )
                     element3.click()
                     time.sleep(1)
@@ -1330,8 +1330,7 @@ class PuterServer:
                     password_field = None
                     xpaths_to_try = [
                         '//*[@id="window-body-4"]/div/input',
-                        '/html/body/div[3]/div/div[3]/div/input',
-                        '//*[@id="window-body-4"]/div/p'
+                        '/html/body/div[3]/div/div[3]/div/input'
                     ]
 
                     for xpath in xpaths_to_try:
