@@ -1433,18 +1433,6 @@ class SettingsWindow(QWidget):
         # Apply to voice handler
         self.controller.set_vad_aggressiveness(vad_level)
 
-        # Save LLaMA settings
-        try:
-            max_tokens = int(self.llama_tokens_input.text() or "2000")
-        except:
-            max_tokens = 2000
-
-        temperature = self.llama_temp_combo.currentData()
-        top_p = self.llama_topp_combo.currentData()
-        override_enabled = self.llama_override_checkbox.isChecked()
-
-        self.controller.set_llama_settings(max_tokens, temperature, top_p, override_enabled)
-
         # Show confirmation
         self.show_status_message("✓ Settings saved successfully!")
 
