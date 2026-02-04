@@ -5,6 +5,8 @@ An AI assistant that can control the system via Python interpreter
 Original Architecture & Implementation:
     - Niccc2007
 """
+import faulthandler
+faulthandler.enable()  # Will show crash location
 
 import sys
 import ctypes
@@ -29,7 +31,9 @@ def main():
     app.setApplicationName("Systema Auxilium - AI System Agent")
     app.setOrganizationName("NicProjects")
     print(
-        "======================CAUTION======================\n\nThis AI can execute system-level actions if ran with sufficient permissions.\nUse caution when issuing prompts.\nYou are responsible for the actions taken.\n\n======================CAUTION======================")
+        "======================CAUTION======================\n\nThis AI can execute system-level actions if ran with "
+        "sufficient permissions.\nUse caution when issuing prompts.\nYou are responsible for the actions "
+        "taken.\n\n======================CAUTION======================")
     # Initialize controller
     controller = AssistantController()
     controller.show()
@@ -40,6 +44,7 @@ def main():
         print("[Startup] Console window hidden (toggle in Debug Window)")
 
     sys.exit(app.exec())
+
 
 if __name__ == "__main__":
     main()

@@ -181,6 +181,7 @@ class ToolManager:
                 output_parts.append(f"ERROR:\n{result['error']}")
 
             if not output_parts:
+                print(output_parts)
                 output_parts.append("Code executed successfully (no output)")
 
             return "\n\n".join(output_parts)
