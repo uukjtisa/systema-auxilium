@@ -70,6 +70,7 @@ class AssistantController(QObject):
         self.ai.set_tts_provider(self.settings.get('tts_provider', 'edge-tts'))
         self.ai.set_puter_tts_model(self.settings.get('puter_tts_model', 'tts-1'))
         self.ai.set_puter_tts_voice(self.settings.get('puter_tts_voice'))
+        self.ai.set_puter_timeout(self.settings.get('puter_timeout', 30))
 
         # Auto-start Puter if selected
         if self.settings.get('ai_provider') == 'puter':
@@ -121,6 +122,7 @@ class AssistantController(QObject):
             'puter_tts_voice': None,
             'puter_email': '',
             'puter_password': '',
+            'puter_timeout': 30,  # Default timeout in seconds for Puter.js server
             'voice_vad_aggressiveness': 3,
             'voice_interrupt_mode': 'manual',
             'elevenlabs_enabled': False,
@@ -429,6 +431,13 @@ class AssistantController(QObject):
         self.settings['puter_password'] = password
         self.save_settings()
         self.log("Puter credentials saved", "SUCCESS")
+
+    def set_puter_timeout(self, timeout):
+        """Set Puter.js server timeout in seconds"""
+        self.settings['puter_timeout'] = timeout
+        self.ai.set_puter_timeout(timeout)
+        self.save_settings()
+        self.log(f"Puter timeout set to {timeout} seconds", "SUCCESS")
 
     def reset_puter_quota(self):
         """Reset Puter quota using saved credentials"""

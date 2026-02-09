@@ -812,6 +812,9 @@ class PuterServer:
 
     def _start_browser(self):
         """Start Selenium browser with persistent profile"""
+        from selenium.webdriver.chrome.service import Service
+        from webdriver_manager.chrome import ChromeDriverManager
+
         try:
             self.log("Starting Selenium browser...")
 
@@ -825,8 +828,9 @@ class PuterServer:
             chrome_options.add_argument("--disable-blink-features=AutomationControlled")
             chrome_options.add_experimental_option('useAutomationExtension', False)
             chrome_options.add_experimental_option("detach", True)
-
-            self.driver = webdriver.Chrome(options=chrome_options)
+            
+            service = Service(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(options=chrome_options, service=service)
             self.log(f"✓ Browser started with profile: {self.profile_path}")
 
             self.driver.get(f"http://127.0.0.1:{self.port}")
