@@ -525,6 +525,42 @@ class SettingsWindow(QWidget):
         show_puter_password_layout.addStretch()
         puter_account_layout.addLayout(show_puter_password_layout)
 
+        # Response Timeout
+        timeout_label = QLabel("⏱️ Response Timeout (seconds):")
+        timeout_label.setStyleSheet("font-weight: bold; margin-top: 15px; color: #ffffff;")
+        puter_account_layout.addWidget(timeout_label)
+
+        timeout_container = QHBoxLayout()
+        self.puter_timeout_input = QLineEdit()
+        self.puter_timeout_input.setPlaceholderText("30")
+        self.puter_timeout_input.setMaximumWidth(100)
+        self.puter_timeout_input.setStyleSheet("""
+            QLineEdit {
+                background-color: #2d2d2d;
+                border: 1px solid #3d3d3d;
+                border-radius: 5px;
+                padding: 8px;
+                font-size: 12px;
+                color: #ffffff;
+            }
+        """)
+        timeout_container.addWidget(self.puter_timeout_input)
+
+        timeout_info = QLabel("How long to wait for AI response")
+        timeout_info.setStyleSheet("color: #888; font-size: 9pt; margin-left: 10px;")
+        timeout_container.addWidget(timeout_info)
+        timeout_container.addStretch()
+
+        puter_account_layout.addLayout(timeout_container)
+
+        timeout_desc = QLabel(
+            "💡 Increase this if using ultra-smart models that take longer to respond\n"
+            "   Default: 30 seconds. Try 60-90 for complex queries."
+        )
+        timeout_desc.setWordWrap(True)
+        timeout_desc.setStyleSheet("color: #888; font-size: 9pt; margin-left: 20px;")
+        puter_account_layout.addWidget(timeout_desc)
+
         # Account action buttons
         puter_action_layout = QHBoxLayout()
 
@@ -1278,6 +1314,10 @@ class SettingsWindow(QWidget):
         self.puter_email_input.setText(creds['email'])
         self.puter_password_input.setText(creds['password'])
 
+        # Load Puter timeout
+        puter_timeout = self.controller.settings.get('puter_timeout', 30)
+        self.puter_timeout_input.setText(str(puter_timeout))
+
         # Load TTS provider
         tts_provider = self.controller.get_tts_provider()
         index = self.tts_provider_combo.findData(tts_provider)
@@ -1385,6 +1425,20 @@ class SettingsWindow(QWidget):
         email = self.puter_email_input.text().strip()
         password = self.puter_password_input.text().strip()
         self.controller.set_puter_credentials(email, password)
+
+        # Save Puter timeout
+        timeout_text = self.puter_timeout_input.text().strip()
+        if timeout_text:
+            try:
+                timeout = int(timeout_text)
+                if timeout > 0:
+                    self.controller.set_puter_timeout(timeout)
+                else:
+                    self.controller.set_puter_timeout(30)  # Default if invalid
+            except ValueError:
+                self.controller.set_puter_timeout(30)  # Default if invalid
+        else:
+            self.controller.set_puter_timeout(30)  # Default if empty
 
         # Save TTS provider
         tts_provider = self.tts_provider_combo.currentData()

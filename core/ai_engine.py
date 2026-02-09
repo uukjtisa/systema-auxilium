@@ -44,6 +44,7 @@ class AIEngine:
         self.tts_provider = 'edge-tts'  # Can be 'edge-tts' or 'puter'
         self.puter_tts_model = 'tts-1'
         self.puter_tts_voice = None
+        self.puter_timeout = 30  # Default timeout in seconds
 
         # API endpoints
         self.anthropic_api_url = "https://api.anthropic.com/v1/messages"
@@ -97,6 +98,11 @@ class AIEngine:
     def set_puter_tts_voice(self, voice):
         self.puter_tts_voice = voice
         self.log(f"Puter TTS voice set to: {voice}")
+
+    def set_puter_timeout(self, timeout):
+        """Set Puter.js server timeout in seconds"""
+        self.puter_timeout = int(timeout)
+        self.log(f"Puter timeout set to: {timeout} seconds")
 
     def log(self, message, level="INFO"):
         print(f"[AI Engine] {message}")
@@ -171,7 +177,7 @@ class AIEngine:
                 messages=messages,
                 model=self.puter_model,
                 image=image_path,
-                timeout=30
+                timeout=self.puter_timeout
             )
 
             if not ai_reply:
@@ -228,7 +234,7 @@ class AIEngine:
             ai_reply = self.puter_server.send_chat_request(
                 messages=messages,
                 model=self.puter_model,
-                timeout=30
+                timeout=self.puter_timeout
             )
 
             if not ai_reply:
@@ -276,7 +282,7 @@ class AIEngine:
                 api_url,
                 headers=headers,
                 json=request_body,
-                timeout=30
+                timeout=self.puter_timeout
             )
 
             if response.status_code == 200:
@@ -334,7 +340,7 @@ class AIEngine:
                     "max_tokens": 2000,
                     "messages": messages
                 },
-                timeout=30
+                timeout=self.puter_timeout
             )
 
             if response.status_code == 200:
@@ -519,7 +525,7 @@ class AIEngine:
             ai_reply = self.puter_server.send_chat_request(
                 messages=messages,
                 model=self.puter_model,
-                timeout=30
+                timeout=self.puter_timeout
             )
 
             if not ai_reply:
@@ -558,7 +564,7 @@ class AIEngine:
                 api_url,
                 headers=headers,
                 json=request_body,
-                timeout=30
+                timeout=self.puter_timeout
             )
 
             if response.status_code == 200:
@@ -612,7 +618,7 @@ class AIEngine:
                     "max_tokens": 2000,
                     "messages": messages
                 },
-                timeout=30
+                timeout=self.puter_timeout
             )
 
             if response.status_code == 200:
