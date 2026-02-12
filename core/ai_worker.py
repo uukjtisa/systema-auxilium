@@ -1,6 +1,6 @@
 """
 AI Worker - Runs AI operations in background thread
-UPDATED: Added 'post_exit' operation for guiding AI after tool mode
+UPDATED: Updated to match new work_environment and execute_code naming
 """
 
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -29,11 +29,11 @@ class AIWorker(QThread):
                 user_message, image_path = self.args
                 result = self.ai_engine.generate_response_with_image(user_message, image_path)
             elif self.operation == 'continue_tool':
-                result = self.ai_engine.continue_tool_mode()
+                result = self.ai_engine.continue_work_mode()
             elif self.operation == 'post_exit':
                 result = self.ai_engine.send_post_exit_prompt()
             else:
-                result = {'response': 'Unknown operation', 'has_tool_call': False, 'in_tool_mode': False,
+                result = {'response': 'Unknown operation', 'has_work_call': False, 'in_work_mode': False,
                           'thinking': False}
 
             self.response_ready.emit(result)

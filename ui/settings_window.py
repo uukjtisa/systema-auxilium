@@ -1502,7 +1502,7 @@ class SettingsWindow(QWidget):
         """Open Puter interface in browser"""
         try:
             import webbrowser
-            webbrowser.open('http://127.0.0.1:5555')
+            webbrowser.open(f'http://127.0.0.1:8888')
             self.show_status_message("✓ Opening Puter interface...")
         except Exception as e:
             self.show_status_message(f"✗ Error: {e}")

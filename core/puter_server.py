@@ -32,7 +32,7 @@ log.setLevel(logging.ERROR)
 class PuterServer:
     """Selenium-based Flask-SocketIO server for Puter.js AI with full feature support including ElevenLabs"""
 
-    def __init__(self, port=5555, log_callback=None):
+    def __init__(self, port=8888, log_callback=None):
         self.port = port
         self.log_callback = log_callback
         self.server_thread = None
@@ -63,7 +63,7 @@ class PuterServer:
 
     def _get_html_template(self):
         """Return dark mode HTML template with full Puter.ai features including ElevenLabs"""
-        return '''<!DOCTYPE html>
+        html = '''<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -251,7 +251,7 @@ class PuterServer:
         <div style="margin: 20px 0;">
             <span class="badge warning" id="puter-status">Loading Puter.js...</span>
             <span class="badge warning" id="websocket-status">WebSocket: Connecting...</span>
-            <span class="badge">Port: 5555</span>
+            <span class="badge">Port: [{used_port}]</span>
             <span class="badge">Profile: PuterAPIServerPROFILE</span>
         </div>
 
@@ -395,7 +395,7 @@ class PuterServer:
         function initializeWebSocket() {
             addLog('Connecting to WebSocket server...', 'info');
             
-            socket = io('http://127.0.0.1:5555', {
+            socket = io('http://127.0.0.1:[{used_port}]', {
                 transports: ['websocket', 'polling'],
                 reconnection: true,
                 reconnectionDelay: 1000,
@@ -731,6 +731,8 @@ class PuterServer:
     </script>
 </body>
 </html>'''
+        html = html.replace("[{used_port}]", str(self.port))
+        return html
 
     def create_app(self):
         """Create and configure Flask app with SocketIO"""

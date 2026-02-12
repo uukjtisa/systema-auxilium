@@ -1,202 +1,224 @@
 """
-Tool Manager - Unified tool and command system
-IMPROVED: Better parsing, double-execution prevention, GUI threading support
+Tool Manager - Simplified work environment and code execution system
+REVAMPED: Clean architecture, easy to extend with new tools
 """
-import textwrap
 
-from core.python_interpreter import PythonInterpreter
-from core.global_instructions import TOOL_MODE_PROMPT
 import json
 import re
 import threading
-import hashlib
+from core.python_interpreter import PythonInterpreter
 
 
 class ToolManager:
-    """Manages all available tools and commands with unified execution"""
+    """Manages work environment and code execution with unified tool system"""
 
     def __init__(self):
+        # Available tools - easy to add more!
         self.tools = {
-            'python_interpreter': PythonInterpreter(),
+            'python': PythonInterpreter(),
         }
-        self.in_tool_mode = False
-        self.last_tool_output = None
 
-    def _extract_all_json_blocks(self, text):
-        """
-        Extract ALL JSON blocks from text (code blocks and bare JSON)
-        Returns list of (json_data, start_pos, end_pos, json_string)
-        """
-        found_blocks = []
+        # Work mode state
+        self.in_work_mode = False
+        self.last_work_output = None
 
-        # Pattern 1: Code blocks with ```json or ```
+    def parse_work_environment(self, text):
+        """
+        Parse work_environment call from AI output
+
+        Returns:
+            tuple: (code, remaining_text) or None if not found
+        """
+        json_data = self._extract_json(text)
+
+        if json_data and 'work_environment' in json_data:
+            code = json_data.get('input', '').strip()
+            # Remove JSON block from text
+            remaining_text = self._remove_json_from_text(text, json_data)
+            return code, remaining_text
+
+        return None
+
+    def parse_execute_code(self, text):
+        """
+        Parse execute_code call from AI output
+
+        Returns:
+            tuple: (code, remaining_text) or None if not found
+        """
+        json_data = self._extract_json(text)
+
+        if json_data and 'execute_code' in json_data:
+            code = json_data.get('input', '').strip()
+            # Remove JSON block from text
+            remaining_text = self._remove_json_from_text(text, json_data)
+            return code, remaining_text
+
+        return None
+
+    def run_work_environment(self, code):
+        """
+        Execute code in work environment mode
+        AI will see the output and can chain more executions
+
+        Returns:
+            str: Formatted output for AI
+        """
+        # Check for exit command
+        if code.lower() == 'exit':
+            self.in_work_mode = False
+            return "EXITED_WORK_MODE"
+
+        # Execute Python code
+        result = self.tools['python'].execute(code)
+
+        # Format output for AI to analyze
+        output_parts = []
+
+        if result['stdout']:
+            output_parts.append(f"STDOUT:\n{result['stdout']}")
+
+        if result['stderr']:
+            output_parts.append(f"STDERR:\n{result['stderr']}")
+
+        if result['result'] is not None:
+            output_parts.append(f"RESULT:\n{result['result']}")
+
+        if result['error']:
+            output_parts.append(f"ERROR:\n{result['error']}")
+
+        if not output_parts:
+            output_parts.append(
+                "Code executed but produced no output. "
+                "RECOMMENDATION: Use print() or return values to see results!"
+            )
+
+        return "\n\n".join(output_parts)
+
+    def run_execute_code(self, code, log_callback=None):
+        """
+        Execute code directly without returning output to AI
+        Used for quick actions like opening apps, showing UI
+
+        Returns:
+            dict: {
+                'success': bool,
+                'message': str  # Message to show user
+            }
+        """
+        try:
+            if log_callback:
+                log_callback(f"Executing: {code[:100]}...", "INFO")
+
+            # Check if it's a GUI app that needs threading
+            result = self._execute_with_gui_support(code)
+
+            # GUI app launched in background
+            if result.get('gui_launched'):
+                if log_callback:
+                    log_callback("✓ GUI application launched", "SUCCESS")
+                return {
+                    'success': True,
+                    'message': "GUI launched. Did it appear on your screen?"
+                }
+
+            # Normal execution completed
+            if result['success']:
+                if log_callback:
+                    log_callback("✓ Code executed successfully", "SUCCESS")
+                return {
+                    'success': True,
+                    'message': "Code executed. Did it work as expected?"
+                }
+
+            # Execution failed
+            error_msg = result.get('error', 'Unknown error')
+            if log_callback:
+                log_callback(f"✗ Execution failed: {error_msg}", "ERROR")
+            return {
+                'success': False,
+                'message': f"Execution failed: {error_msg}"
+            }
+
+        except Exception as e:
+            if log_callback:
+                log_callback(f"Error: {e}", "ERROR")
+            return {
+                'success': False,
+                'message': f"Error: {str(e)}"
+            }
+
+    def get_work_mode_prompt(self):
+        """Get the prompt for work mode continuation"""
+        from core.global_instructions import WORK_MODE_PROMPT
+
+        output = self.last_work_output or "No previous output"
+        return WORK_MODE_PROMPT.format(work_output=output)
+
+    def reset_python(self):
+        """Reset Python interpreter state"""
+        self.tools['python'].reset()
+
+    # --- Internal helper methods ---
+
+    def _extract_json(self, text):
+        """
+        Extract first valid JSON block from text
+        Supports both ```json code blocks and bare JSON
+
+        Returns:
+            dict or None
+        """
+        # Try code blocks first: ```json {...} ```
         code_block_pattern = r'```(?:json)?\s*(\{[^`]+\})\s*```'
-        for match in re.finditer(code_block_pattern, text, re.MULTILINE | re.DOTALL):
-            json_str = match.group(1).strip()
+        match = re.search(code_block_pattern, text, re.DOTALL)
+
+        if match:
             try:
-                data = json.loads(json_str)
-                found_blocks.append((data, match.start(), match.end(), json_str))
+                return json.loads(match.group(1).strip())
             except json.JSONDecodeError:
-                continue
+                pass
 
-        # Pattern 2: Bare JSON objects (not inside code blocks)
-        # Only look for JSON outside already-found code blocks
-        covered_ranges = [(start, end) for _, start, end, _ in found_blocks]
+        # Try bare JSON: {...}
+        bare_json_pattern = r'\{[^{}]*"(?:work_environment|execute_code)"[^{}]*\}'
+        match = re.search(bare_json_pattern, text, re.DOTALL)
 
-        bare_json_pattern = r'\{[^{}]*"(?:tool|command)"[^{}]*\}'
-        for match in re.finditer(bare_json_pattern, text, re.MULTILINE | re.DOTALL):
-            # Check if this position is already covered by a code block
-            pos = match.start()
-            is_covered = any(start <= pos <= end for start, end in covered_ranges)
-
-            if not is_covered:
-                json_str = match.group(0).strip()
-                try:
-                    data = json.loads(json_str)
-                    found_blocks.append((data, match.start(), match.end(), json_str))
-                except json.JSONDecodeError:
-                    continue
-
-        # Sort by position to maintain order
-        found_blocks.sort(key=lambda x: x[1])
-        return found_blocks
-
-    def _is_valid_tool_call(self, json_data):
-        """
-        Check if JSON is a valid tool call
-        Simple check: has "tool" key with non-empty string value
-        """
-        if not isinstance(json_data, dict):
-            return False
-
-        if 'tool' not in json_data:
-            return False
-
-        tool_name = json_data.get('tool')
-        if not isinstance(tool_name, str) or not tool_name.strip():
-            return False
-
-        return True
-
-    def _is_valid_command_call(self, json_data):
-        """
-        Check if JSON is a valid command call
-        Simple check: has "command" key with non-empty string value
-        """
-        if not isinstance(json_data, dict):
-            return False
-
-        if 'command' not in json_data:
-            return False
-
-        command_name = json_data.get('command')
-        if not isinstance(command_name, str) or not command_name.strip():
-            return False
-
-        return True
-
-    def _get_execution_hash(self, call_type, name, input_code):
-        """Generate hash for execution tracking"""
-        hash_str = f"{call_type}:{name}:{input_code}"
-        return hashlib.md5(hash_str.encode()).hexdigest()
-
-    def parse_tool_call(self, text):
-        """
-        Parse tool calls from AI output using JSON format
-
-        Returns:
-            tuple: (tool_name, tool_input, remaining_text)
-            or None if no tool call found
-        """
-        # Extract all JSON blocks
-        json_blocks = self._extract_all_json_blocks(text)
-
-        # Find first valid tool call
-        for data, start_pos, end_pos, json_str in json_blocks:
-            if self._is_valid_tool_call(data):
-                tool_name = data['tool'].strip()
-                tool_input = data.get('input', '').strip()
-                remaining_text = text[:start_pos] + text[end_pos:]
-                remaining_text = remaining_text.strip()
-
-                return tool_name, tool_input, remaining_text
+        if match:
+            try:
+                return json.loads(match.group(0).strip())
+            except json.JSONDecodeError:
+                pass
 
         return None
 
-    def parse_command_call(self, text):
+    def _remove_json_from_text(self, text, json_data):
+        """Remove the JSON block from text to get remaining message"""
+        json_str = json.dumps(json_data, indent=2)
+
+        # Try to find and remove the JSON (with or without code block markers)
+        patterns = [
+            rf'```json\s*{re.escape(json_str)}\s*```',
+            rf'```\s*{re.escape(json_str)}\s*```',
+            re.escape(json_str)
+        ]
+
+        for pattern in patterns:
+            text = re.sub(pattern, '', text, flags=re.DOTALL)
+
+        return text.strip()
+
+    def _execute_with_gui_support(self, code):
         """
-        Parse command calls from AI output using JSON format
+        Execute code with GUI app detection and threading support
 
         Returns:
-            tuple: (command_name, command_input, remaining_text)
-            or None if no command call found
-        """
-        # Extract all JSON blocks
-        json_blocks = self._extract_all_json_blocks(text)
-
-        # Find first valid command call
-        for data, start_pos, end_pos, json_str in json_blocks:
-            if self._is_valid_command_call(data):
-                command_name = data['command'].strip()
-                command_input = data.get('input', '').strip()
-                remaining_text = text[:start_pos] + text[end_pos:]
-                remaining_text = remaining_text.strip()
-
-                return command_name, command_input, remaining_text
-
-        return None
-
-    def execute_tool(self, tool_name, tool_input):
-        """
-        Execute a tool and return formatted output
-        Tools enter tool mode and return values for AI to analyze
-
-        Returns:
-            str: Formatted tool output for AI
-        """
-        # Exit detection
-        if tool_name.lower() == 'exit_from_tools':
-            self.in_tool_mode = False
-            return "EXITED_TOOL_MODE"
-
-        if tool_name not in self.tools:
-            return f"ERROR: Unknown tool '{tool_name}'"
-
-        if tool_name == 'python_interpreter':
-            result = self.tools['python_interpreter'].execute(tool_input)
-
-            # Format output for AI
-            output_parts = []
-
-            if result['stdout']:
-                output_parts.append(f"STDOUT:\n{result['stdout']}")
-
-            if result['stderr']:
-                output_parts.append(f"STDERR:\n{result['stderr']}")
-
-            if result['result'] is not None:
-                output_parts.append(f"RESULT:\n{result['result']}")
-
-            if result['error']:
-                output_parts.append(f"ERROR:\n{result['error']}")
-
-            if not output_parts:
-                output_parts.append(f"Code ran but [no output]. IF THIS IS UNEXPECTED: It is HIGHLY recommended to re-execute this code but with STDOUT catchers like print() or display()! DO NOT ASSUME ANYTHING!")
-
-            return "\n\n".join(output_parts)
-
-        return f"ERROR: Tool '{tool_name}' not implemented"
-
-    def _execute_in_thread(self, code_str):
-        """
-        Execute code in a separate thread for GUI apps
-        Detects tkinter/GUI code and runs appropriately
+            dict: Execution result with optional 'gui_launched' flag
         """
         result_container = {}
 
-        def run_code():
+        def run():
             try:
-                result_container['result'] = self.tools['python_interpreter'].execute(code_str)
+                result_container['result'] = self.tools['python'].execute(code)
             except Exception as e:
                 result_container['result'] = {
                     'success': False,
@@ -207,108 +229,28 @@ class ToolManager:
                     'execution_count': 0
                 }
 
-        # Check if code contains GUI keywords
-        gui_keywords = ['tkinter', 'tk.Tk()', 'mainloop()', 'pygame', 'wx.App', 'PyQt', 'PySide']
-        needs_thread = any(keyword.lower() in code_str.lower() for keyword in gui_keywords)
+        # Detect GUI keywords
+        gui_keywords = ['tkinter', 'tk.Tk()', 'mainloop()', 'pygame',
+                       'wx.App', 'PyQt', 'PySide']
+        needs_thread = any(kw.lower() in code.lower() for kw in gui_keywords)
 
         if needs_thread:
             # Run in separate thread for GUI apps
-            thread = threading.Thread(target=run_code, daemon=True)
+            thread = threading.Thread(target=run, daemon=True)
             thread.start()
-            thread.join(timeout=0.5)  # Quick timeout - GUI apps start fast
+            thread.join(timeout=0.5)
 
-            # If thread is still running, it's likely a GUI with mainloop
+            # If still running, it's probably a GUI with mainloop
             if thread.is_alive():
                 return {
                     'success': True,
-                    'stdout': '',
-                    'stderr': '',
-                    'result': None,
-                    'error': None,
-                    'execution_count': 0,
                     'gui_launched': True
                 }
         else:
             # Run normally for non-GUI code
-            run_code()
+            run()
 
         return result_container.get('result', {
             'success': False,
-            'stdout': '',
-            'stderr': '',
-            'result': None,
-            'error': 'Execution failed',
-            'execution_count': 0
+            'error': 'Execution failed'
         })
-
-    def execute_command(self, command_name, command_input, log_callback=None):
-        """
-        Execute a command - works exactly like tools but doesn't return to AI
-        Commands don't enter tool mode and don't give output back to AI
-
-        Returns:
-            dict: {
-                'success': bool,
-                'visible_message': str  # Message to show user
-            }
-        """
-        if command_name == 'python_interpreter':
-            try:
-                if log_callback:
-                    log_callback(f"Executing command: {command_input[:100]}...", "INFO")
-
-                # Execute using threading support for GUI apps
-                result = self._execute_in_thread(command_input)
-
-                # Check if it's a GUI app that launched
-                if result.get('gui_launched'):
-                    if log_callback:
-                        log_callback("✓ GUI application launched", "SUCCESS")
-                    return {
-                        'success': True,
-                        'visible_message': "GUI launched. Please confirm if it appeared on your screen."
-                    }
-
-                # Check if execution was successful
-                if result['success']:
-                    if log_callback:
-                        log_callback("✓ Command executed successfully", "SUCCESS")
-
-                    return {
-                        'success': True,
-                        'visible_message': "Command executed. Please confirm if it worked as expected."
-                    }
-                else:
-                    # Execution failed
-                    error_msg = result.get('error', 'Unknown error')
-                    if log_callback:
-                        log_callback(f"✗ Command failed: {error_msg}", "ERROR")
-
-                    return {
-                        'success': False,
-                        'visible_message': f"Command failed: {error_msg}"
-                    }
-
-            except Exception as e:
-                if log_callback:
-                    log_callback(f"Command error: {e}", "ERROR")
-
-                return {
-                    'success': False,
-                    'visible_message': f"Command error: {str(e)}"
-                }
-
-        return {
-            'success': False,
-            'visible_message': f"Unknown command: {command_name}"
-        }
-
-    def get_tool_mode_prompt(self):
-        """Get the prompt for tool mode"""
-        if self.last_tool_output:
-            return TOOL_MODE_PROMPT.format(tool_output=self.last_tool_output)
-        return TOOL_MODE_PROMPT.format(tool_output="No previous output")
-
-    def reset_python_interpreter(self):
-        """Reset the Python interpreter state"""
-        self.tools['python_interpreter'].reset()
