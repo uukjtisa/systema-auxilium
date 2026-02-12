@@ -5,8 +5,12 @@ FIXED: Removed voice mode prompt logic, using single prompt for all modes
 
 import requests
 from core.tool_manager import ToolManager
-from core.global_instructions import get_system_prompt, POST_EXIT_PROMPT, POST_EXIT_PROMPT_VOICE, \
+from core.global_instructions import (
+    get_system_prompt,
+    POST_EXIT_PROMPT,
+    POST_EXIT_PROMPT_VOICE,
     get_gemini_system_prompt
+)
 
 
 class AIEngine:
@@ -127,8 +131,8 @@ class AIEngine:
         if self.ai_provider != 'puter':
             return {
                 'response': "Error: Image attachment only supported with Puter",
-                'has_tool_call': False,
-                'in_tool_mode': False,
+                'has_work_call': False,
+                'in_work_mode': False,
                 'thinking': False
             }
 
@@ -145,16 +149,16 @@ class AIEngine:
             if not self.puter_server:
                 return {
                     'response': "Error: Puter server not initialized",
-                    'has_tool_call': False,
-                    'in_tool_mode': False,
+                    'has_work_call': False,
+                    'in_work_mode': False,
                     'thinking': False
                 }
 
             if not self.puter_server.is_running:
                 return {
                     'response': "Error: Puter server not running",
-                    'has_tool_call': False,
-                    'in_tool_mode': False,
+                    'has_work_call': False,
+                    'in_work_mode': False,
                     'thinking': False
                 }
 
@@ -162,7 +166,7 @@ class AIEngine:
             messages = [
                 {"role": "system", "content": self.system_prompt},
                 {"role": "assistant",
-                 "content": "I understand. I will use tools when I need outputs, and commands for quick actions."}
+                 "content": "I understand. I will use My Work Environment when I need to complete complex tasks or need information, and Execute Single commands for quick actions."}
             ]
 
             # Add conversation history
@@ -183,8 +187,8 @@ class AIEngine:
             if not ai_reply:
                 return {
                     'response': "Error: No response from Puter server",
-                    'has_tool_call': False,
-                    'in_tool_mode': False,
+                    'has_work_call': False,
+                    'in_work_mode': False,
                     'thinking': False
                 }
 
@@ -194,8 +198,8 @@ class AIEngine:
             self.log(f"Puter error: {e}", "ERROR")
             return {
                 'response': f"Error: {e}",
-                'has_tool_call': False,
-                'in_tool_mode': False,
+                'has_work_call': False,
+                'in_work_mode': False,
                 'thinking': False
             }
 
@@ -204,16 +208,16 @@ class AIEngine:
             if not self.puter_server:
                 return {
                     'response': "Error: Puter server not initialized",
-                    'has_tool_call': False,
-                    'in_tool_mode': False,
+                    'has_work_call': False,
+                    'in_work_mode': False,
                     'thinking': False
                 }
 
             if not self.puter_server.is_running:
                 return {
                     'response': "Error: Puter server not running",
-                    'has_tool_call': False,
-                    'in_tool_mode': False,
+                    'has_work_call': False,
+                    'in_work_mode': False,
                     'thinking': False
                 }
 
@@ -221,7 +225,7 @@ class AIEngine:
             messages = [
                 {"role": "system", "content": self.system_prompt},
                 {"role": "assistant",
-                 "content": "I understand. I will use tools when I need outputs, and commands for quick actions."}
+                 "content": "I understand. I will use My Work Environment when I need to complete complex tasks or need information, and Execute Single commands for quick actions."}
             ]
 
             # Add conversation history
@@ -240,8 +244,8 @@ class AIEngine:
             if not ai_reply:
                 return {
                     'response': "Error: No response from Puter server",
-                    'has_tool_call': False,
-                    'in_tool_mode': False,
+                    'has_work_call': False,
+                    'in_work_mode': False,
                     'thinking': False
                 }
 
@@ -251,8 +255,8 @@ class AIEngine:
             self.log(f"Puter error: {e}", "ERROR")
             return {
                 'response': f"Error: {e}",
-                'has_tool_call': False,
-                'in_tool_mode': False,
+                'has_work_call': False,
+                'in_work_mode': False,
                 'thinking': False
             }
 
@@ -261,8 +265,8 @@ class AIEngine:
             if not self.gemini_api_key:
                 return {
                     'response': "Error: Gemini API key not set",
-                    'has_tool_call': False,
-                    'in_tool_mode': False,
+                    'has_work_call': False,
+                    'in_work_mode': False,
                     'thinking': False
                 }
 
@@ -296,8 +300,8 @@ class AIEngine:
 
                 return {
                     'response': "Error: Unexpected Gemini response format",
-                    'has_tool_call': False,
-                    'in_tool_mode': False,
+                    'has_work_call': False,
+                    'in_work_mode': False,
                     'thinking': False
                 }
             else:
@@ -305,8 +309,8 @@ class AIEngine:
                 self.log(error_msg, "ERROR")
                 return {
                     'response': f"Error: {error_msg}",
-                    'has_tool_call': False,
-                    'in_tool_mode': False,
+                    'has_work_call': False,
+                    'in_work_mode': False,
                     'thinking': False
                 }
 
@@ -315,8 +319,8 @@ class AIEngine:
             self.log(error_msg, "ERROR")
             return {
                 'response': error_msg,
-                'has_tool_call': False,
-                'in_tool_mode': False,
+                'has_work_call': False,
+                'in_work_mode': False,
                 'thinking': False
             }
 
@@ -352,8 +356,8 @@ class AIEngine:
                 self.log(error_msg, "ERROR")
                 return {
                     'response': f"Error: {error_msg}",
-                    'has_tool_call': False,
-                    'in_tool_mode': False,
+                    'has_work_call': False,
+                    'in_work_mode': False,
                     'thinking': False
                 }
 
@@ -362,62 +366,34 @@ class AIEngine:
             self.log(error_msg, "ERROR")
             return {
                 'response': error_msg,
-                'has_tool_call': False,
-                'in_tool_mode': False,
+                'has_work_call': False,
+                'in_work_mode': False,
                 'thinking': False
             }
 
     def _process_ai_response(self, ai_text):
-        """Process AI response - check for commands first, then tools"""
+        """
+        Process AI response and handle work_environment or execute_code calls
+
+        Returns:
+            dict: Response data with execution status
+        """
         self.last_raw_response = ai_text
 
-        # Check for COMMAND
-        command_info = self.tool_manager.parse_command_call(ai_text)
+        # Check for work_environment call
+        work_call = self.tool_manager.parse_work_environment(ai_text)
+        if work_call:
+            code, visible_text = work_call
+            self.log(f"Work environment call detected")
 
-        if command_info:
-            command_name, command_input, visible_text = command_info
-            self.log(f"Command detected: {command_name}")
+            # Execute code in work mode
+            work_output = self.tool_manager.run_work_environment(code)
 
-            result = self.tool_manager.execute_command(
-                command_name,
-                command_input,
-                log_callback=self.log
-            )
+            # Check if AI exited work mode
+            if work_output == "EXITED_WORK_MODE":
+                self.tool_manager.in_work_mode = False
 
-            if result['success']:
-                if visible_text:
-                    final_text = visible_text
-                else:
-                    final_text = result['visible_message']
-            else:
-                final_text = f"{visible_text}\n\n{result['visible_message']}" if visible_text else result['visible_message']
-
-            self.conversation_history.append({
-                'role': 'assistant',
-                'content': ai_text
-            })
-
-            return {
-                'response': final_text,
-                'has_tool_call': False,
-                'in_tool_mode': False,
-                'thinking': False,
-                'command_name': command_name,
-                'command_input': command_input
-            }
-
-        # Check for TOOL
-        tool_call_info = self.tool_manager.parse_tool_call(ai_text)
-
-        if tool_call_info:
-            tool_name, tool_input, visible_text = tool_call_info
-            self.log(f"Tool call detected: {tool_name}")
-
-            tool_output = self.tool_manager.execute_tool(tool_name, tool_input)
-
-            if tool_output == "EXITED_TOOL_MODE":
-                self.tool_manager.in_tool_mode = False
-
+                # Add visible text to history if any
                 if visible_text and visible_text.strip():
                     self.conversation_history.append({
                         'role': 'assistant',
@@ -425,31 +401,56 @@ class AIEngine:
                     })
 
                 return {
-                    'response': visible_text if (visible_text and visible_text.strip()) else "",
-                    'has_tool_call': False,
-                    'in_tool_mode': False,
+                    'response': visible_text if visible_text.strip() else "",
+                    'has_work_call': False,
+                    'in_work_mode': False,
                     'thinking': False,
-                    'exited_tool_mode': True
+                    'exited_work_mode': True
                 }
 
-            self.tool_manager.in_tool_mode = True
-            self.tool_manager.last_tool_output = tool_output
+            # Store output for next iteration
+            self.tool_manager.last_work_output = work_output
+            self.tool_manager.in_work_mode = True
 
+            # Add to history
             self.conversation_history.append({
                 'role': 'assistant',
                 'content': ai_text
             })
 
             return {
-                'response': visible_text if visible_text else "**Working...**",
-                'has_tool_call': True,
-                'in_tool_mode': True,
+                'response': visible_text if visible_text else "Working...",
+                'has_work_call': True,
+                'in_work_mode': True,
                 'thinking': True,
-                'tool_name': tool_name,
-                'tool_input': tool_input
+                'code': code
             }
 
-        # Normal response
+        # Check for execute_code call
+        execute_call = self.tool_manager.parse_execute_code(ai_text)
+        if execute_call:
+            code, visible_text = execute_call
+            self.log(f"Execute code call detected")
+
+            # Execute code (AI doesn't see output)
+            result = self.tool_manager.run_execute_code(code, self.log_callback)
+
+            # Add to history
+            self.conversation_history.append({
+                'role': 'assistant',
+                'content': ai_text
+            })
+
+            return {
+                'response': ai_text,
+                'has_work_call': False,
+                'in_work_mode': False,
+                'thinking': False,
+                'executed': True,
+                'execution_success': result['success']
+            }
+
+        # No execution calls - normal response
         self.conversation_history.append({
             'role': 'assistant',
             'content': ai_text
@@ -457,33 +458,35 @@ class AIEngine:
 
         return {
             'response': ai_text,
-            'has_tool_call': False,
-            'in_tool_mode': False,
+            'has_work_call': False,
+            'in_work_mode': False,
             'thinking': False
         }
 
-    def continue_tool_mode(self):
-        if not self.tool_manager.in_tool_mode:
+    def continue_work_mode(self):
+        """Continue work mode execution with AI analyzing previous output"""
+        if not self.tool_manager.in_work_mode:
             return {
-                'response': "Not in tool mode",
-                'has_tool_call': False,
-                'in_tool_mode': False,
+                'response': "Not in work mode",
+                'has_work_call': False,
+                'in_work_mode': False,
                 'thinking': False
             }
 
-        tool_prompt = self.tool_manager.get_tool_mode_prompt()
-
+            # Add work mode prompt to conversation
+        work_prompt = self.tool_manager.get_work_mode_prompt()
         self.conversation_history.append({
-            'role': 'system',
-            'content': tool_prompt
+            'role': 'user',
+            'content': work_prompt
         })
 
+        # Generate next response based on provider
         if self.ai_provider == 'puter':
-            return self._continue_tool_mode_puter()
+            return self._continue_work_mode_puter()
         elif self.ai_provider == 'gemini':
-            return self._continue_tool_mode_gemini()
+            return self._continue_work_mode_gemini()
         else:
-            return self._continue_tool_mode_anthropic()
+            return self._continue_work_mode_anthropic()
 
     def send_post_exit_prompt(self):
         """Send post-exit prompt (same for all modes now)"""
@@ -500,19 +503,19 @@ class AIEngine:
             })
 
         if self.ai_provider == 'puter':
-            return self._continue_tool_mode_puter()
+            return self._continue_work_mode_puter()
         elif self.ai_provider == 'gemini':
-            return self._continue_tool_mode_gemini()
+            return self._continue_work_mode_gemini()
         else:
-            return self._continue_tool_mode_anthropic()
+            return self._continue_work_mode_anthropic()
 
-    def _continue_tool_mode_puter(self):
+    def _continue_work_mode_puter(self):
         try:
             # NEW FORMAT: Build full message history
             messages = [
                 {"role": "system", "content": self.system_prompt},
                 {"role": "assistant",
-                 "content": "I understand. I will use tools when I need outputs, and commands for quick actions."}
+                 "content": "I understand. I will use My Work Environment when I need to complete complex tasks or need information, and Execute Single commands for quick actions."}
             ]
 
             # Add conversation history (includes the tool prompt)
@@ -531,22 +534,22 @@ class AIEngine:
             if not ai_reply:
                 return {
                     'response': "Error: No response",
-                    'has_tool_call': False,
-                    'in_tool_mode': False,
+                    'has_work_call': False,
+                    'in_work_mode': False,
                     'thinking': False
                 }
 
-            return self._process_tool_mode_response(ai_reply)
+            return self._process_work_mode_response(ai_reply)
 
         except Exception as e:
             return {
                 'response': f"Error: {e}",
-                'has_tool_call': False,
-                'in_tool_mode': False,
+                'has_work_call': False,
+                'in_work_mode': False,
                 'thinking': False
             }
 
-    def _continue_tool_mode_gemini(self):
+    def _continue_work_mode_gemini(self):
         try:
             messages = self._build_gemini_messages()
             api_url = self.gemini_api_url_template.format(model=self.gemini_model)
@@ -574,31 +577,31 @@ class AIEngine:
                     if 'content' in candidate and 'parts' in candidate['content']:
                         parts = candidate['content']['parts']
                         ai_text = ''.join([part.get('text', '') for part in parts])
-                        return self._process_tool_mode_response(ai_text)
+                        return self._process_work_mode_response(ai_text)
 
                 return {
                     'response': "Error: Unexpected response format",
-                    'has_tool_call': False,
-                    'in_tool_mode': False,
+                    'has_work_call': False,
+                    'in_work_mode': False,
                     'thinking': False
                 }
             else:
                 return {
                     'response': f"Gemini API Error: {response.status_code}",
-                    'has_tool_call': False,
-                    'in_tool_mode': False,
+                    'has_work_call': False,
+                    'in_work_mode': False,
                     'thinking': False
                 }
 
         except Exception as e:
             return {
                 'response': f"Error: {e}",
-                'has_tool_call': False,
-                'in_tool_mode': False,
+                'has_work_call': False,
+                'in_work_mode': False,
                 'thinking': False
             }
 
-    def _continue_tool_mode_anthropic(self):
+    def _continue_work_mode_anthropic(self):
         messages = self._build_messages()
 
         try:
@@ -624,36 +627,37 @@ class AIEngine:
             if response.status_code == 200:
                 data = response.json()
                 ai_text = data['content'][0]['text']
-                return self._process_tool_mode_response(ai_text)
+                return self._process_work_mode_response(ai_text)
             else:
                 return {
                     'response': f"API Error: {response.status_code}",
-                    'has_tool_call': False,
-                    'in_tool_mode': False,
+                    'has_work_call': False,
+                    'in_work_mode': False,
                     'thinking': False
                 }
 
         except Exception as e:
             return {
                 'response': f"Error: {e}",
-                'has_tool_call': False,
-                'in_tool_mode': False,
+                'has_work_call': False,
+                'in_work_mode': False,
                 'thinking': False
             }
 
-    def _process_tool_mode_response(self, ai_text):
+    def _process_work_mode_response(self, ai_text):
+        """Process AI response while in work mode"""
         self.last_raw_response = ai_text
 
-        tool_call_info = self.tool_manager.parse_tool_call(ai_text)
+        work_call = self.tool_manager.parse_work_environment(ai_text)
 
-        if tool_call_info:
-            tool_name, tool_input, visible_text = tool_call_info
-            self.log(f"Consecutive tool call detected: {tool_name}")
+        if work_call:
+            code, visible_text = work_call
+            self.log(f"Consecutive work environment call detected")
 
-            tool_output = self.tool_manager.execute_tool(tool_name, tool_input)
+            work_output = self.tool_manager.run_work_environment(code)
 
-            if tool_output == "EXITED_TOOL_MODE":
-                self.tool_manager.in_tool_mode = False
+            if work_output == "EXITED_WORK_MODE":
+                self.tool_manager.in_work_mode = False
 
                 if visible_text and visible_text.strip():
                     self.conversation_history.append({
@@ -663,13 +667,13 @@ class AIEngine:
 
                 return {
                     'response': visible_text if (visible_text and visible_text.strip()) else "",
-                    'has_tool_call': False,
-                    'in_tool_mode': False,
+                    'has_work_call': False,
+                    'in_work_mode': False,
                     'thinking': False,
-                    'exited_tool_mode': True
+                    'exited_work_mode': True
                 }
 
-            self.tool_manager.last_tool_output = tool_output
+            self.tool_manager.last_work_output = work_output
 
             self.conversation_history.append({
                 'role': 'assistant',
@@ -678,15 +682,14 @@ class AIEngine:
 
             return {
                 'response': visible_text if visible_text else "Working...",
-                'has_tool_call': True,
-                'in_tool_mode': True,
+                'has_work_call': True,
+                'in_work_mode': True,
                 'thinking': True,
-                'tool_name': tool_name,
-                'tool_input': tool_input
+                'code': code
             }
 
         else:
-            self.tool_manager.in_tool_mode = False
+            self.tool_manager.in_work_mode = False
 
             self.conversation_history.append({
                 'role': 'assistant',
@@ -695,8 +698,8 @@ class AIEngine:
 
             return {
                 'response': ai_text,
-                'has_tool_call': False,
-                'in_tool_mode': False,
+                'has_work_call': False,
+                'in_work_mode': False,
                 'thinking': False
             }
 
@@ -708,7 +711,7 @@ class AIEngine:
             },
             {
                 'role': 'assistant',
-                'content': 'I understand. I will use tools when I need outputs, and commands for quick actions.'
+                'content': 'I understand. I will use My Work Environment when I need to complete complex tasks or need information, and Execute Single commands for quick actions.'
             }
         ]
 
@@ -727,7 +730,7 @@ class AIEngine:
         })
 
         messages.append({
-            "parts": [{"text": 'Understood. I will use tools and commands appropriately.'}],
+            "parts": [{"text": 'I understand. I will use My Work Environment when I need to complete complex tasks or need information, and Execute Single commands for quick actions.'}],
             "role": "model"
         })
 
@@ -741,7 +744,13 @@ class AIEngine:
         return messages
 
     def clear_history(self):
+        """Clear conversation history and reset work mode"""
         self.conversation_history = []
-        self.tool_manager.in_tool_mode = False
-        self.tool_manager.last_tool_output = None
+        self.tool_manager.in_work_mode = False
+        self.tool_manager.last_work_output = None
         self.last_raw_response = None
+
+    def reset_python_interpreter(self):
+        """Reset the Python interpreter state"""
+        self.tool_manager.reset_python()
+        self.log("Python interpreter reset")

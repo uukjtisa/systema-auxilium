@@ -1480,7 +1480,7 @@ class ChatWindow(QWidget):
                 background-color: #A62C23;
             }
         """)
-        self.interrupt_btn.clicked.connect(self.interrupt_tool_mode)
+        self.interrupt_btn.clicked.connect(self.interrupt_work_mode)
         self.interrupt_btn.hide()  # Hidden by default
         combined_layout.addWidget(self.interrupt_btn)
 
@@ -1526,9 +1526,7 @@ class ChatWindow(QWidget):
         self.add_system_message(
             "👋 **Welcome to Systema Auxilium!**\n\n"
             "I can execute Python code and control your system. "
-            "Click the 💬 icon to force specific modes:\n"
-            "• **Tools** - Operations that returns feedback to the Agent: Reading files, Investigating errors, etc..\n"
-            "• **Commands** - Quick actions without feedback: Opening apps, creating files, etc.."
+            "Click the 💬 icon to enforce tool usage."
         )
 
     def toggle_voice(self):
@@ -1761,13 +1759,13 @@ class ChatWindow(QWidget):
         menu.addSeparator()
 
         # Tool mode
-        tool_action = QAction("🔧 Use Tools", self)
-        tool_action.triggered.connect(lambda: self.set_force_mode('tool'))
+        tool_action = QAction("🔧 Use Work Environment", self)
+        tool_action.triggered.connect(lambda: self.set_force_mode('work_environment'))
         menu.addAction(tool_action)
 
         # Command mode
-        command_action = QAction("⚡ Use Commands", self)
-        command_action.triggered.connect(lambda: self.set_force_mode('command'))
+        command_action = QAction("⚡ Execute a Code", self)
+        command_action.triggered.connect(lambda: self.set_force_mode('execute_code'))
         menu.addAction(command_action)
 
         # Show menu below button
@@ -1778,15 +1776,15 @@ class ChatWindow(QWidget):
         """Set force mode"""
         self.force_mode = mode
 
-        if mode == 'tool':
+        if mode == 'work_environment':
             self.mode_dropdown.setText("🔧")
-            self.add_system_message("🔧 **Tool Mode** - AI will use tools for operations")
-        elif mode == 'command':
+            self.add_system_message("🔧 **Work Environment** - AI will enter its work environment to do some complex task.")
+        elif mode == 'execute_code':
             self.mode_dropdown.setText("⚡")
-            self.add_system_message("⚡ **Command Mode** - AI will use commands for quick actions")
+            self.add_system_message("⚡ **Single Execution** - AI will execute a single request.")
         else:
             self.mode_dropdown.setText("💬")
-            self.add_system_message("💬 **Normal Mode** - AI decides when to use tools or commands")
+            self.add_system_message("💬 **Normal Mode** - AI decides when to use Work environment or Single Execution")
 
     def on_user_name_changed(self, text):
         """Called when user name input changes"""
@@ -2270,10 +2268,10 @@ class ChatWindow(QWidget):
             self.add_system_message(f"📎 Image attached: {image_path}")
 
         # Add mode instruction if forced
-        if self.force_mode == 'tool':
-            message = "[VERY CRITICAL: USE TOOLS ONLY] " + message
-        elif self.force_mode == 'command':
-            message = "[VERY CRITICAL: USE COMMANDS ONLY] " + message
+        if self.force_mode == 'work_environment':
+            message = "[VERY CRITICAL THE USER HAS ENFORCED: work_environment ONLY and FULFILL THIS TASK EFFICIENTLY (ignore if the message of the user doesn't request of anything)] " + message
+        elif self.force_mode == 'execute_code':
+            message = "[VERY CRITICAL THE USER HAS ENFORCED: execute_code ONLY and RUN a SINGLE PYTHON CODE TO DO THIS REQUEST(ignore if the message of the user doesn't request of anything)] " + message
 
         display_message = self.input_field.toPlainText().strip()
         self.add_user_message(display_message)
@@ -2339,7 +2337,7 @@ class ChatWindow(QWidget):
 
     def show_ai_message(self, message):
         # In voice mode and NOT in tool mode, start voice and wait for callback
-        if self.voice_enabled and not self.controller.ai.tool_manager.in_tool_mode:
+        if self.voice_enabled and not self.controller.ai.tool_manager.in_work_mode:
             self.log("[Voice] Buffering message, starting TTS...")
 
             # Buffer message
@@ -2421,9 +2419,9 @@ class ChatWindow(QWidget):
         dots = "●" * self.thinking_dots + "○" * (3 - self.thinking_dots)
         self.status_label.setText(f"AI is thinking {dots}")
 
-    def interrupt_tool_mode(self):
+    def interrupt_work_mode(self):
         """Interrupt current tool operation"""
-        if self.controller.interrupt_tool_mode():
+        if self.controller.interrupt_work_mode():
             self.interrupt_btn.hide()
             self.send_btn.show()
 

@@ -597,7 +597,7 @@ class FloatingWindow(QWidget):
         from PyQt6.QtWidgets import QApplication
         QApplication.quit()
 
-    def handle_tool_mode_update(self, result):
+    def handle_work_mode_update(self, result):
         """Handle tool mode updates"""
         if self.chat_window:
             self.chat_window.handle_ai_response(result)
