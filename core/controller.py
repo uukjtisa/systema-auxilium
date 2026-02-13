@@ -39,8 +39,8 @@ class AssistantController(QObject):
 
         # Puter server
         from pathlib import Path
-        if not Path('../puter_port.txt').exists():
-            Path('../puter_port.txt').write_text(
+        if not Path('puter_port.txt').exists():
+            Path('puter_port.txt').write_text(
                 '5555,8888,7777 #DO NOT DELETE THIS #ADD ANY PORT AS YOU WANT, IT WILL PRIORITIZE THE FIRST ON THE LEFT, SEPARATE WITH COMMAS. #ADD PORTS ON TOP ONLY. #CONTEXT IT IS BETTER IF THE PORT USED IS ONE THAT HAS BEEN USED BEFORE, SO IT WONT ASK FOR PUTER CONFIRMATION FOR THE FIRST MESSAGE.')
         ports = self._parse_ports()
 
@@ -128,7 +128,7 @@ class AssistantController(QObject):
         """
         import os
 
-        filepath = './puter_port.txt'
+        filepath = 'puter_port.txt'
         ports = []
 
         try:
