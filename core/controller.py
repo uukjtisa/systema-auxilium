@@ -48,14 +48,12 @@ class AssistantController(QObject):
         for p in ports:
             if self._is_open_port(p):
                 if not p:
-                    self.log(f"----Port {p} is not available----", "WARNING")
                     continue
                 else:
-                    self.log(f"----Port {p} is available and will now be used----", "SUCCESS")
                     port = p
                     break
-            if not port:
-                self.log("No available ports within puter_port.txt was available, resorting to random ports instead")
+        if not port:
+            self.log("No available ports within puter_port.txt was available, resorting to random ports instead")
 
         self.free_port = port if port else self.get_a_port()
         self.puter_server = PuterServer(port=self.free_port, log_callback=self.log)
@@ -128,20 +126,19 @@ class AssistantController(QObject):
         Returns:
             list: List of port numbers as integers (in order of priority)
         """
-        filepath = '../puter_port.txt'
+        import os
+
+        filepath = './puter_port.txt'
         ports = []
 
         try:
             with open(filepath, 'r') as f:
+                f.seek(0)
                 for line in f:
-                    # Remove comments (everything after #)
                     line = line.split('#')[0].strip()
-
-                    # Skip empty lines
                     if not line:
                         continue
 
-                    # Split by comma and parse ports
                     port_strings = line.split(',')
                     for port_str in port_strings:
                         port_str = port_str.strip()
@@ -150,26 +147,52 @@ class AssistantController(QObject):
                                 port = int(port_str)
                                 ports.append(port)
                             except ValueError:
-                                # Skip invalid port numbers
                                 print(f"Warning: Skipping invalid port '{port_str}'")
                                 continue
 
         except FileNotFoundError:
-            print(f"Warning: {filepath} not found, returning empty list")
+            abs_path = os.path.abspath(filepath)
+            print(f"Warning: {abs_path} not found, returning empty list")
             return []
         except Exception as e:
             print(f"Error parsing ports: {e}")
             return []
-
+        self.log(f"CHECKING PORTS:  {ports}")
         return ports
 
     def _is_open_port(self, port):
+        # Check if port is actually available (not bound AND not in zombie state)
         test = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        test.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
         try:
-            test.bind(("", port))
-            return True
+            # Try to bind - this checks if something is actively using the port
+            test.bind(("127.0.0.1", port))
+            test.close()
+
+            # Double check - try to connect to see if something is actually listening
+            # (catches zombie processes that released bind but are still hanging)
+            test2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            test2.settimeout(0.1)  # Quick timeout
+            result = test2.connect_ex(("127.0.0.1", port))
+            test2.close()
+
+            # If connection refused (111) or timeout, port is truly free
+            # If it connects (0), something is listening = NOT free
+            if result == 0:
+                self.log(f"-----Port {port} is not available-----", "WARNING")
+                return False  # Something is still listening (zombie or active)
+            self.log(f"-----Port {port} is available and will now be used-----", "SUCCESS")
+            return True  # Port is actually free
+
         except OSError:
-            return False
+            self.log(f"-----Port {port} is not available-----", "WARNING")
+            return False  # Port is in use
+        finally:
+            try:
+                test.close()
+            except:
+                pass
 
     def get_a_port(self):
         while True:
