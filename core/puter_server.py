@@ -68,7 +68,7 @@ class PuterServer:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Puter.js AI Server - Full Feature Set + ElevenLabs</title>
+    <title>Puter.js AI Server </title>
     <script src="https://js.puter.com/v2/"></script>
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
     <style>
@@ -240,8 +240,8 @@ class PuterServer:
 </head>
 <body>
     <div class="container">
-        <h1>🤖 Puter.js AI Server + ElevenLabs</h1>
-        <p class="subtitle">Selenium-powered persistent browser with full AI feature set including ElevenLabs TTS</p>
+        <h1>🤖 Puter.js AI Server</h1>
+        <p class="subtitle">API provider</p>
         
         <div id="connectionStatus" class="status disconnected">
             <strong>⏳ Connecting...</strong><br>
@@ -263,40 +263,6 @@ class PuterServer:
         </div>
 
         <div class="info-box">
-            <strong>✨ Available Features</strong>
-            <div class="features-grid">
-                <div class="feature-card">
-                    <div class="icon">💬</div>
-                    <div class="title">Chat (GPT-5.2, GPT-5, etc.)</div>
-                </div>
-                <div class="feature-card">
-                    <div class="icon">🖼️</div>
-                    <div class="title">Image Analysis (GPT-5-nano)</div>
-                </div>
-                <div class="feature-card">
-                    <div class="icon">🎨</div>
-                    <div class="title">Text-to-Image (DALL-E 3)</div>
-                </div>
-                <div class="feature-card">
-                    <div class="icon">🔊</div>
-                    <div class="title">Text-to-Speech (TTS-1)</div>
-                </div>
-                <div class="feature-card elevenlabs">
-                    <div class="icon">🎙️</div>
-                    <div class="title">ElevenLabs TTS (Premium)</div>
-                </div>
-                <div class="feature-card">
-                    <div class="icon">🎤</div>
-                    <div class="title">Speech-to-Text (Whisper)</div>
-                </div>
-                <div class="feature-card">
-                    <div class="icon">♻️</div>
-                    <div class="title">Quota Reset</div>
-                </div>
-            </div>
-        </div>
-
-        <div class="info-box">
             <strong>📊 Activity Log</strong>
             <div id="activityLog">
                 <div class="log-entry log-info">Initializing...</div>
@@ -305,15 +271,8 @@ class PuterServer:
 
         <div class="info-box">
             <strong>ℹ️ Important Notes</strong>
-            • Keep this tab open for API requests to work<br>
             • First request may require authentication popup<br>
-            • <strong>NEW: ElevenLabs TTS with 70+ languages and premium voices</strong><br>
             • Image uploads limited to 512MB via 0x0.st<br>
-            • History managed server-side for efficiency<br>
-            • Browser profile persists across sessions<br>
-            • TTI/TTS return base64 data (auto-saved with save_to parameter)<br>
-            • Long operations: timeout increased to 180s<br>
-            • WebSocket buffer: 50MB (supports large images)<br>
             • <strong>Verbose mode shows all raw received data and detailed errors</strong>
         </div>
     </div>
