@@ -1,6 +1,8 @@
 """
 AI Engine - Handles AI interactions
 FIXED: Removed voice mode prompt logic, using single prompt for all modes
+UPDATED: Added supervised execution support with code approval dialogs
+UPDATED: Appends error traceback to execute_code failures
 """
 
 import requests
@@ -17,13 +19,20 @@ class AIEngine:
     """AI conversation engine"""
 
     def __init__(self, log_callback=None, api_key='', puter_server=None, gemini_api_key='', system_info='',
-                 voice_mode=False, elevenlabs_enabled=False):
+                 voice_mode=False, elevenlabs_enabled=False, settings_callback=None):
         self.log_callback = log_callback
         self.conversation_history = []
-        self.tool_manager = ToolManager()
+
+        # Store these first so tool_manager can access them
         self.api_key = api_key
         self.gemini_api_key = gemini_api_key
         self.puter_server = puter_server
+
+        # Initialize tool_manager with settings callback and AI engine reference
+        self.tool_manager = ToolManager(
+            settings_callback=settings_callback,
+            ai_engine=self  # Pass self so dialog can call AI for explanations
+        )
 
         # LLaMA provider removed
 
@@ -70,6 +79,72 @@ class AIEngine:
         self.elevenlabs_enabled = elevenlabs_enabled
         self.system_prompt = get_system_prompt(self.system_info, voice_mode, elevenlabs_enabled)
         self.log(f"Voice settings updated: voice_mode={voice_mode}, elevenlabs={elevenlabs_enabled}")
+
+    def _get_ai_response_internal(self, prompt):
+        """Get AI response without adding to conversation history"""
+        # This is similar to get_response but doesn't modify conversation_history
+        if self.ai_provider == 'anthropic':
+            return self._get_anthropic_response_internal(prompt)
+        elif self.ai_provider == 'gemini':
+            return self._get_gemini_response_internal(prompt)
+        elif self.ai_provider == 'puter':
+            return self._get_puter_response_internal(prompt)
+        else:
+            return "Error: Unknown provider"
+
+    def _get_anthropic_response_internal(self, prompt):
+        """Get Anthropic response for internal use (explanation)"""
+        try:
+            url = "https://api.anthropic.com/v1/messages"
+            headers = {
+                "x-api-key": self.api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"
+            }
+
+            data = {
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": 2000,
+                "messages": [{"role": "user", "content": prompt}]
+            }
+
+            response = requests.post(url, headers=headers, json=data, timeout=30)
+            response.raise_for_status()
+            result = response.json()
+
+            return result['content'][0]['text']
+
+        except Exception as e:
+            return f"Error getting explanation: {str(e)}"
+
+    def _get_gemini_response_internal(self, prompt):
+        """Get Gemini response for internal use (explanation)"""
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.gemini_model}:generateContent?key={self.gemini_api_key}"
+
+            data = {
+                "contents": [{
+                    "parts": [{"text": prompt}]
+                }]
+            }
+
+            response = requests.post(url, json=data, timeout=30)
+            response.raise_for_status()
+            result = response.json()
+
+            return result['candidates'][0]['content']['parts'][0]['text']
+
+        except Exception as e:
+            return f"Error getting explanation: {str(e)}"
+
+    def _get_puter_response_internal(self, prompt):
+        """Get Puter response for internal use (explanation)"""
+        try:
+            response = self.generate_response(prompt)
+            return response
+
+        except Exception as e:
+            return f"Error getting explanation: {str(e)}"
 
     def set_api_key(self, api_key):
         self.api_key = api_key
@@ -393,11 +468,11 @@ class AIEngine:
             if work_output == "EXITED_WORK_MODE":
                 self.tool_manager.in_work_mode = False
 
-                # Add visible text to history if any
-                if visible_text and visible_text.strip():
+                # Add FULL AI TEXT to history for consistency
+                if ai_text and ai_text.strip():
                     self.conversation_history.append({
                         'role': 'assistant',
-                        'content': visible_text
+                        'content': ai_text
                     })
 
                 return {
@@ -412,10 +487,10 @@ class AIEngine:
             self.tool_manager.last_work_output = work_output
             self.tool_manager.in_work_mode = True
 
-            # Add to history
+            # Add FULL AI TEXT to history (with JSON) so AI remembers tool usage
             self.conversation_history.append({
                 'role': 'assistant',
-                'content': ai_text
+                'content': ai_text  # Keep original with JSON for AI's memory!
             })
 
             return {
@@ -435,14 +510,21 @@ class AIEngine:
             # Execute code (AI doesn't see output)
             result = self.tool_manager.run_execute_code(code, self.log_callback)
 
-            # Add to history
+            # Add FULL AI TEXT to history (with JSON) so AI remembers tool usage
             self.conversation_history.append({
                 'role': 'assistant',
-                'content': ai_text
+                'content': ai_text  # Keep original with JSON for AI's memory!
             })
 
+            # If execution failed, append error traceback to visible text
+            response_text = visible_text
+            if not result['success'] and result.get('error'):
+                # Append error block at the very bottom
+                error_block = f"\n\n```Error\n{result['error']}\n```"
+                response_text = response_text + error_block
+
             return {
-                'response': ai_text,
+                'response': response_text,  # Return clean text (with error if failed) to display in chat
                 'has_work_call': False,
                 'in_work_mode': False,
                 'thinking': False,
@@ -659,10 +741,11 @@ class AIEngine:
             if work_output == "EXITED_WORK_MODE":
                 self.tool_manager.in_work_mode = False
 
-                if visible_text and visible_text.strip():
+                # Add FULL AI TEXT to history for consistency
+                if ai_text and ai_text.strip():
                     self.conversation_history.append({
                         'role': 'assistant',
-                        'content': visible_text
+                        'content': ai_text
                     })
 
                 return {
@@ -675,9 +758,10 @@ class AIEngine:
 
             self.tool_manager.last_work_output = work_output
 
+            # Add FULL AI TEXT to history (with JSON) so AI remembers tool usage
             self.conversation_history.append({
                 'role': 'assistant',
-                'content': ai_text
+                'content': ai_text  # Keep original with JSON for AI's memory!
             })
 
             return {

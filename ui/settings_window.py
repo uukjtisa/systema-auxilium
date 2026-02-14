@@ -120,25 +120,6 @@ class SettingsWindow(QWidget):
         minimize_btn.clicked.connect(self.showMinimized)
         header_layout.addWidget(minimize_btn)
 
-        # Maximize button
-        self.maximize_btn = QPushButton("□")
-        self.maximize_btn.setFixedSize(32, 32)
-        self.maximize_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                border: none;
-                border-radius: 6px;
-                font-size: 16px;
-                color: #9AA0A6;
-            }
-            QPushButton:hover {
-                background: #2A2A2A;
-                color: #E8EAED;
-            }
-        """)
-        self.maximize_btn.clicked.connect(self.toggle_maximize)
-        header_layout.addWidget(self.maximize_btn)
-
         # Close button
         close_btn = QPushButton("×")
         close_btn.setFixedSize(32, 32)
@@ -287,7 +268,7 @@ class SettingsWindow(QWidget):
         gemini_layout = QVBoxLayout()
 
         gemini_info = QLabel(
-            "🌟 Google Gemini API (formerly Google AI Studio)\n\n"
+            "🔸 Google Gemini API (formerly Google AI Studio)\n\n"
             "Free tier available with generous quotas!\n"
             "Get your API key from Google AI Studio"
         )
@@ -630,7 +611,7 @@ class SettingsWindow(QWidget):
         voice_layout = QVBoxLayout()
 
         voice_info = QLabel(
-            "🆓 **FREE Voice Features:**\n"
+            "🎙️ **FREE Voice Features:**\n"
             "• Google Speech Recognition (no API key needed!)\n"
             "• Microsoft Edge TTS (completely free!)\n\n"
             "Select your audio devices below:"
@@ -972,7 +953,7 @@ class SettingsWindow(QWidget):
         scroll_layout.addWidget(voice_group)
 
         # Debug Mode Section
-        debug_group = QGroupBox("🔧 Debug Options")
+        debug_group = QGroupBox("🐛 Debug Options")
         debug_layout = QVBoxLayout()
 
         self.debug_checkbox = QCheckBox("Enable Debug Mode")
@@ -1001,6 +982,40 @@ class SettingsWindow(QWidget):
 
         debug_group.setLayout(debug_layout)
         scroll_layout.addWidget(debug_group)
+
+        # Supervised Execution Section
+        supervised_group = QGroupBox("[SECURITY] Code Execution Safety")
+        supervised_layout = QVBoxLayout()
+
+        self.supervised_checkbox = QCheckBox("Enable Supervised Execution (Recommended)")
+        self.supervised_checkbox.setStyleSheet("""
+            QCheckBox {
+                color: #ffffff;
+                font-size: 11pt;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+            }
+        """)
+        self.supervised_checkbox.setChecked(True)  # Default ON
+        supervised_layout.addWidget(self.supervised_checkbox)
+
+        supervised_info = QLabel(
+            "When enabled:\n"
+            "• Review all code before execution\n"
+            "• Edit code if needed\n"
+            "• Request AI explanations of code\n"
+            "• Reject potentially harmful code\n\n"
+            "⚠️ Disabling this allows automatic code execution without review.\n"
+            "Only disable if you fully trust the AI."
+        )
+        supervised_info.setWordWrap(True)
+        supervised_info.setStyleSheet("color: #888; font-size: 9pt; margin-top: 5px;")
+        supervised_layout.addWidget(supervised_info)
+
+        supervised_group.setLayout(supervised_layout)
+        scroll_layout.addWidget(supervised_group)
 
         scroll_layout.addStretch()
 
@@ -1288,6 +1303,10 @@ class SettingsWindow(QWidget):
         debug_mode = self.controller.get_debug_mode()
         self.debug_checkbox.setChecked(debug_mode)
 
+        # Load supervised execution mode
+        supervised_mode = self.controller.settings.get('supervised_execution', True)  # Default ON
+        self.supervised_checkbox.setChecked(supervised_mode)
+
         # Load interrupt mode
         interrupt_mode = self.controller.settings.get('voice_interrupt_mode', 'manual')
         index = self.interrupt_mode_combo.findData(interrupt_mode)
@@ -1414,6 +1433,10 @@ class SettingsWindow(QWidget):
         debug_mode = self.debug_checkbox.isChecked()
         self.controller.set_debug_mode(debug_mode)
 
+        # Save supervised execution mode
+        supervised_mode = self.supervised_checkbox.isChecked()
+        self.controller.settings['supervised_execution'] = supervised_mode
+
         # Save voice devices
         input_device = self.input_device_combo.currentData()
         self.controller.set_voice_input_device(input_device)
@@ -1534,15 +1557,6 @@ class SettingsWindow(QWidget):
     def save_window_geometry(self):
         """Save window geometry - placeholder for future implementation"""
         pass
-
-    def toggle_maximize(self):
-        """Toggle maximize/restore"""
-        if self.isMaximized():
-            self.showNormal()
-            self.maximize_btn.setText("□")
-        else:
-            self.showMaximized()
-            self.maximize_btn.setText("❐")
 
     def header_mouse_press(self, event):
         """Handle mouse press on header for dragging"""

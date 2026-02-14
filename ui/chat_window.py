@@ -224,32 +224,6 @@ class ResizableInput(QWidget):
         self.text_input.setPlaceholderText(text)
 
 
-class ResizeHandle(QLabel):
-    """Custom resize handle that properly handles mouse events"""
-
-    def __init__(self, text, cursor, parent=None):
-        super().__init__(text, parent)
-        self.setCursor(cursor)
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._parent_widget = parent
-        self.setMouseTracking(True)
-
-    def mousePressEvent(self, event):
-        if self._parent_widget and event.button() == Qt.MouseButton.LeftButton:
-            self._parent_widget.handle_resize_press(event, self)
-        event.accept()
-
-    def mouseMoveEvent(self, event):
-        if self._parent_widget:
-            self._parent_widget.handle_resize_move(event, self)
-        event.accept()
-
-    def mouseReleaseEvent(self, event):
-        if self._parent_widget and event.button() == Qt.MouseButton.LeftButton:
-            self._parent_widget.handle_resize_release(event, self)
-        event.accept()
-
-
 class CodeSyntaxHighlighter(QSyntaxHighlighter):
     """Syntax highlighter for code blocks - supports multiple languages"""
 
@@ -479,25 +453,40 @@ class CodeSyntaxHighlighter(QSyntaxHighlighter):
 
 
 class CodeBlockWidget(QWidget):
-    """Widget for displaying code blocks with syntax highlighting and resize handle"""
+    """Widget for displaying code blocks with syntax highlighting and resize handles"""
+
     def __init__(self, language, code, parent=None):
         super().__init__(parent)
         self.code = code
         self.language = language
 
-        # Resize state (vertical only — horizontal scrolling handled inside scroll area)
+        # Collapse state - START COLLAPSED
+        self.is_expanded = False
+
+        # Resize state (both vertical and horizontal)
         self.is_resizing_vertical = False
+        self.is_resizing_horizontal = False
         self.resize_start_y = 0
+        self.resize_start_x = 0
         self.resize_start_height = 0
+        self.resize_start_width = 0
         self.min_height = 60
         self.max_height = 800
+        self.min_width = 300
+        self.max_width = 1200
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 6, 0, 0)
+        # Use horizontal layout to accommodate right resize handle
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(0, 6, 0, 0)
+        main_layout.setSpacing(0)
+
+        # Vertical content container
+        content_widget = QWidget()
+        layout = QVBoxLayout(content_widget)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
         # ── Main container ─────────────────────────────────────────────────────
-        # Use object name so this QFrame rule doesn't bleed into children
         self.main_container = QFrame()
         self.main_container.setObjectName("codeBlock")
         self.main_container.setStyleSheet("""
@@ -514,7 +503,7 @@ class CodeBlockWidget(QWidget):
         # ── Header ─────────────────────────────────────────────────────────────
         header = QFrame()
         header.setObjectName("codeHeader")
-        header.setFixedHeight(75)  # Changed from 32 to 75 to fix clipping issues
+        header.setFixedHeight(75)
         header.setStyleSheet("""
             QFrame#codeHeader {
                 background-color: #252525;
@@ -546,6 +535,33 @@ class CodeBlockWidget(QWidget):
         """)
         header_layout.addWidget(lang_label)
         header_layout.addStretch()
+
+        # Toggle button (expand/collapse)
+        self.toggle_btn = QPushButton("▶")  # Start with right arrow (collapsed)
+        self.toggle_btn.setObjectName("codeToggleBtn")
+        self.toggle_btn.setStyleSheet("""
+            QPushButton#codeToggleBtn {
+                background-color: rgba(168, 199, 250, 0.08);
+                border: 1px solid rgba(168, 199, 250, 0.2);
+                border-radius: 4px;
+                padding: 6px 10px;
+                font-size: 11px;
+                font-weight: 500;
+                color: #9CDCFE;
+            }
+            QPushButton#codeToggleBtn:hover {
+                background-color: rgba(168, 199, 250, 0.15);
+                border-color: rgba(168, 199, 250, 0.35);
+            }
+            QPushButton#codeToggleBtn:pressed {
+                background-color: rgba(168, 199, 250, 0.25);
+            }
+        """)
+        self.toggle_btn.clicked.connect(self.toggle_expand)
+        self.toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        header_layout.addWidget(self.toggle_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        # Copy button
         self.copy_btn = QPushButton("📋")
         self.copy_btn.setObjectName("codeCopyBtn")
         self.copy_btn.setStyleSheet("""
@@ -553,7 +569,7 @@ class CodeBlockWidget(QWidget):
                 background-color: rgba(168, 199, 250, 0.08);
                 border: 1px solid rgba(168, 199, 250, 0.2);
                 border-radius: 4px;
-                padding: 6px 10px;  /* Changed from 4px to 6px */
+                padding: 6px 10px;
                 font-size: 11px;
                 font-weight: 500;
                 color: #9CDCFE;
@@ -637,7 +653,7 @@ class CodeBlockWidget(QWidget):
             }
         """)
 
-        # Match visual size of surrounding text (~13px UI text ≈ 10pt monospace)
+        # Match visual size of surrounding text
         font = QFont('Consolas', 10)
         if not font.exactMatch():
             font = QFont('Monaco', 10)
@@ -649,10 +665,18 @@ class CodeBlockWidget(QWidget):
         code_container_layout.addWidget(self.code_editor)
         self.scroll_area.setWidget(code_container)
 
-        # Auto-height based on line count (no fixed width — fills parent naturally)
+        # Auto-height based on line count
         line_count = len(code.split('\n'))
         calculated_height = min(max(line_count * 17 + 24, self.min_height), self.max_height)
         self.scroll_area.setFixedHeight(calculated_height)
+
+        # Set initial width
+        self.scroll_area.setMinimumWidth(self.min_width)
+        self.scroll_area.setMaximumWidth(self.max_width)
+
+        # START HIDDEN (collapsed)
+        self.scroll_area.hide()
+        self.vertical_handle_visible = False
 
         container_layout.addWidget(self.scroll_area)
         layout.addWidget(self.main_container)
@@ -674,7 +698,47 @@ class CodeBlockWidget(QWidget):
         self.vertical_handle.mousePressEvent = self.handle_vertical_press
         self.vertical_handle.mouseMoveEvent = self.handle_vertical_move
         self.vertical_handle.mouseReleaseEvent = self.handle_vertical_release
+        self.vertical_handle.hide()  # START HIDDEN
         layout.addWidget(self.vertical_handle)
+
+        main_layout.addWidget(content_widget)
+
+        # ── Right horizontal resize handle ─────────────────────────────────────
+        self.horizontal_handle = QFrame()
+        self.horizontal_handle.setObjectName("codeResizeHandleHorizontal")
+        self.horizontal_handle.setFixedWidth(5)
+        self.horizontal_handle.setStyleSheet("""
+            QFrame#codeResizeHandleHorizontal {
+                background: rgba(168, 199, 250, 0.15);
+                border-radius: 4px;
+            }
+            QFrame#codeResizeHandleHorizontal:hover {
+                background: rgba(168, 199, 250, 0.35);
+            }
+        """)
+        self.horizontal_handle.setCursor(Qt.CursorShape.SizeHorCursor)
+        self.horizontal_handle.mousePressEvent = self.handle_horizontal_press
+        self.horizontal_handle.mouseMoveEvent = self.handle_horizontal_move
+        self.horizontal_handle.mouseReleaseEvent = self.handle_horizontal_release
+        self.horizontal_handle.hide()  # START HIDDEN
+        main_layout.addWidget(self.horizontal_handle)
+
+    def toggle_expand(self):
+        """Toggle between expanded and collapsed states"""
+        self.is_expanded = not self.is_expanded
+
+        if self.is_expanded:
+            # Expand - show code area and resize handles
+            self.scroll_area.show()
+            self.vertical_handle.show()
+            self.horizontal_handle.show()
+            self.toggle_btn.setText("▼")
+        else:
+            # Collapse - hide code area and resize handles
+            self.scroll_area.hide()
+            self.vertical_handle.hide()
+            self.horizontal_handle.hide()
+            self.toggle_btn.setText("▶")
 
     def handle_vertical_press(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -696,6 +760,26 @@ class CodeBlockWidget(QWidget):
             self.is_resizing_vertical = False
             event.accept()
 
+    def handle_horizontal_press(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.is_resizing_horizontal = True
+            self.resize_start_x = event.globalPosition().x()
+            self.resize_start_width = self.scroll_area.width()
+            event.accept()
+
+    def handle_horizontal_move(self, event):
+        if self.is_resizing_horizontal:
+            delta = event.globalPosition().x() - self.resize_start_x
+            new_width = self.resize_start_width + delta
+            new_width = max(self.min_width, min(new_width, self.max_width))
+            self.scroll_area.setFixedWidth(int(new_width))
+            event.accept()
+
+    def handle_horizontal_release(self, event):
+        if self.is_resizing_horizontal:
+            self.is_resizing_horizontal = False
+            event.accept()
+
     def copy_code(self):
         clipboard = QApplication.clipboard()
         clipboard.setText(self.code)
@@ -705,7 +789,7 @@ class CodeBlockWidget(QWidget):
                 background-color: rgba(52, 168, 83, 0.15);
                 border: 1px solid rgba(52, 168, 83, 0.35);
                 border-radius: 4px;
-                padding: 6px 10px;  /* Changed from 1px to 6px */
+                padding: 6px 10px;
                 font-size: 11px;
                 color: #34A853;
             }
@@ -719,7 +803,7 @@ class CodeBlockWidget(QWidget):
                 background-color: rgba(168, 199, 250, 0.08);
                 border: 1px solid rgba(168, 199, 250, 0.2);
                 border-radius: 4px;
-                padding: 6px 10px;  /* Changed from 1px to 6px */
+                padding: 6px 10px;
                 font-size: 11px;
                 font-weight: 500;
                 color: #9CDCFE;
