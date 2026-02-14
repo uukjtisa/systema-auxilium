@@ -272,8 +272,8 @@ class PuterServer:
         <div class="info-box">
             <strong>ℹ️ Important Notes</strong>
             • First request may require authentication popup<br>
-            • Image uploads limited to 512MB via 0x0.st<br>
-            • <strong>Verbose mode shows all raw received data and detailed errors</strong>
+            • Image uploads limited to 512MB via 0x0.st
+            <strong>Verbose mode shows all raw received data and detailed errors</strong>
         </div>
     </div>
 
