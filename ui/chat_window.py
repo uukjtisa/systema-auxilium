@@ -520,7 +520,7 @@ class CodeBlockWidget(QWidget):
         header_layout.setSpacing(8)
         header_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
-        display_lang = language.upper() if language and language.lower() != 'text' else 'CODE'
+        display_lang = language.upper() if language and language.lower() != 'text' else 'TEXT' #SHOW "TEXT" INSTEAD OF "CODE"
         lang_label = QLabel(display_lang)
         lang_label.setObjectName("codeLangLabel")
         lang_label.setStyleSheet("""
