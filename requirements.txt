@@ -17,6 +17,7 @@ flask-socketio>=5.3.0
 
 # Browser Automation (for Puter.js)
 selenium>=4.15.0
+webdriver_manager>=4.0.2
 
 # System Information
 psutil>=5.9.0
