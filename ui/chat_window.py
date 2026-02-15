@@ -847,6 +847,10 @@ class ChatWindow(QWidget):
         # Image attachment
         self.attached_image = None
 
+        # Interrupt tracking
+        self.last_sent_message = None  # Track last message for interrupt
+        self.last_user_message_widget = None  # Track last user message widget for removal
+
         # Window dragging state
         self.dragging = False
         self.drag_position = QPoint()
@@ -1282,7 +1286,18 @@ class ChatWindow(QWidget):
 
         header_layout.addStretch()
 
-        # Window control buttons
+        # Voice status label
+        self.voice_status_label = QLabel("")
+        self.voice_status_label.setStyleSheet("""
+                    QLabel {
+                        font-size: 10px;
+                        color: #9AA0A6;
+                        margin: 0 8px;
+                    }
+                """)
+        header_layout.addWidget(self.voice_status_label)
+
+        # ==========Window control buttons==========
 
         # Minimize button
         minimize_btn = QPushButton("−")
@@ -1340,17 +1355,6 @@ class ChatWindow(QWidget):
         """)
         close_btn.clicked.connect(self.close)
         header_layout.addWidget(close_btn)
-
-        # Voice status label
-        self.voice_status_label = QLabel("")
-        self.voice_status_label.setStyleSheet("""
-            QLabel {
-                font-size: 10px;
-                color: #9AA0A6;
-                margin: 0 8px;
-            }
-        """)
-        header_layout.addWidget(self.voice_status_label)
 
         chat_layout.addWidget(header_bar)
 
@@ -1545,7 +1549,7 @@ class ChatWindow(QWidget):
         self.voice_interrupt_btn.hide()  # Hidden by default
         combined_layout.addWidget(self.voice_interrupt_btn)
 
-        # Interrupt button (only shown during tool mode)
+        # Interrupt response button
         self.interrupt_btn = QPushButton("⏹")
         self.interrupt_btn.setFixedSize(32, 32)
         self.interrupt_btn.setStyleSheet("""
@@ -1564,7 +1568,7 @@ class ChatWindow(QWidget):
                 background-color: #A62C23;
             }
         """)
-        self.interrupt_btn.clicked.connect(self.interrupt_work_mode)
+        self.interrupt_btn.clicked.connect(self.interrupt_response)
         self.interrupt_btn.hide()  # Hidden by default
         combined_layout.addWidget(self.interrupt_btn)
 
@@ -2111,6 +2115,9 @@ class ChatWindow(QWidget):
         """)
         message_layout.addWidget(avatar, alignment=Qt.AlignmentFlag.AlignTop)
 
+        # Track this widget for potential removal
+        self.last_user_message_widget = message_widget
+
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
         self.scroll_to_bottom()
 
@@ -2358,6 +2365,10 @@ class ChatWindow(QWidget):
             message = "[VERY CRITICAL THE USER HAS ENFORCED: execute_code ONLY and RUN a SINGLE PYTHON CODE TO DO THIS REQUEST(ignore if the message of the user doesn't request of anything)] " + message
 
         display_message = self.input_field.toPlainText().strip()
+
+        # Track this message for potential interrupt
+        self.last_sent_message = display_message
+
         self.add_user_message(display_message)
 
         self.input_field.clear()
@@ -2503,11 +2514,45 @@ class ChatWindow(QWidget):
         dots = "●" * self.thinking_dots + "○" * (3 - self.thinking_dots)
         self.status_label.setText(f"AI is thinking {dots}")
 
-    def interrupt_work_mode(self):
-        """Interrupt current tool operation"""
-        if self.controller.interrupt_work_mode():
+    def interrupt_response(self):
+        """Interrupt current AI response and restore message to input"""
+        # Only interrupt if currently processing
+        if not self.controller.is_processing and not self.controller.ai.tool_manager.in_work_mode:
+            return
+
+        # Cancel the pending request in controller
+        success = self.controller.interrupt_request()
+
+        if success:
+            # Remove the last user message widget from UI
+            if self.last_user_message_widget:
+                self.chat_layout.removeWidget(self.last_user_message_widget)
+                self.last_user_message_widget.deleteLater()
+                self.last_user_message_widget = None
+
+            # Return the message to input box
+            if self.last_sent_message:
+                current_text = self.input_field.toPlainText()
+                if current_text:
+                    # Append with two newlines to avoid replacing existing text
+                    self.input_field.text_input.setPlainText(self.last_sent_message + "\n\n" + current_text)
+                else:
+                    self.input_field.text_input.setPlainText(self.last_sent_message)
+                self.last_sent_message = None
+
+            # Hide interrupt button, show send button
             self.interrupt_btn.hide()
             self.send_btn.show()
+
+            # Hide thinking and enable input
+            self.hide_thinking()
+
+            # Show confirmation message
+            self.add_system_message("⚡️ **Response interrupted - message returned to input**")
+
+    def interrupt_work_mode(self):
+        """Legacy method - now redirects to interrupt_response"""
+        self.interrupt_response()
 
     def interrupt_voice(self):
         """Interrupt TTS playback"""

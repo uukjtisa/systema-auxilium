@@ -834,6 +834,16 @@ class AIEngine:
         self.tool_manager.last_work_output = None
         self.last_raw_response = None
 
+    def remove_last_user_message(self):
+        """Remove the last user message from conversation history"""
+        # Find and remove the last user message
+        for i in range(len(self.conversation_history) - 1, -1, -1):
+            if self.conversation_history[i]['role'] == 'user':
+                removed_msg = self.conversation_history.pop(i)
+                self.log(f"Removed user message from history: {removed_msg['content'][:50]}...")
+                return True
+        return False
+
     def reset_python_interpreter(self):
         """Reset the Python interpreter state"""
         self.tool_manager.reset_python()

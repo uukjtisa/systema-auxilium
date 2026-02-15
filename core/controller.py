@@ -1023,6 +1023,38 @@ class AssistantController(QObject):
             return True
         return False
 
+    def interrupt_request(self):
+        """Interrupt current AI request and clean up state"""
+        interrupted = False
+
+        # Stop the current worker thread if it exists
+        if hasattr(self, 'current_worker') and self.current_worker and self.current_worker.isRunning():
+            self.log("Interrupting AI worker thread...")
+            self.current_worker.terminate()  # Force terminate the thread
+            self.current_worker.wait(1000)  # Wait up to 1 second
+            interrupted = True
+
+        # Cancel work mode if active
+        if self.ai.tool_manager.in_work_mode:
+            self.log("Tool mode interrupted by user")
+            self.work_mode_timer.stop()
+            self.ai.tool_manager.in_work_mode = False
+            self.ai.tool_manager.last_work_output = None
+            interrupted = True
+
+        # Clear processing flag
+        if self.is_processing:
+            self.is_processing = False
+            interrupted = True
+
+        # Remove the last user message from conversation history
+        if interrupted:
+            removed = self.ai.remove_last_user_message()
+            if removed:
+                self.log("Removed last user message from conversation history")
+
+        return interrupted
+
     def show(self):
         """Show the UI"""
         self.ui.show()
