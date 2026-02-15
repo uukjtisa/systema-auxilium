@@ -276,7 +276,6 @@ class CodeApprovalDialog(QDialog):
         self.ai_engine = ai_engine
         self.result = None  # 'accept', 'reject', or None
         self.modified_code = code
-        self.dont_show_again = False
         self.chat_visible = False
         self.worker = None  # AI response worker thread
 
@@ -311,7 +310,7 @@ class CodeApprovalDialog(QDialog):
         layout.setSpacing(12)
 
         # Title
-        title = QLabel("⚠️ Code Execution Approval")
+        title = QLabel("⚠️ Code Execution Approval (You can disable this pop up in the settings)")
         title.setStyleSheet("""
             QLabel {
                 color: #E8EAED;
@@ -395,32 +394,6 @@ class CodeApprovalDialog(QDialog):
         """)
         layout.addWidget(warning)
 
-        # Don't show again checkbox
-        self.dont_show_checkbox = QCheckBox("Don't show this again (can be re-enabled in settings)")
-        self.dont_show_checkbox.setStyleSheet("""
-            QCheckBox {
-                color: #9AA0A6;
-                font-size: 11px;
-                margin-top: 8px;
-            }
-            QCheckBox::indicator {
-                width: 16px;
-                height: 16px;
-                border: 2px solid #3C3C3C;
-                border-radius: 3px;
-                background-color: #1A1A1A;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #1A73E8;
-                border-color: #1A73E8;
-            }
-            QCheckBox::indicator:hover {
-                border-color: #1A73E8;
-            }
-        """)
-        self.dont_show_checkbox.stateChanged.connect(self.on_dont_show_changed)
-        layout.addWidget(self.dont_show_checkbox)
-
         # Buttons
         button_layout = QHBoxLayout()
         button_layout.setSpacing(8)
@@ -502,70 +475,6 @@ class CodeApprovalDialog(QDialog):
             self.worker.wait()
         super().closeEvent(event)
 
-    def on_dont_show_changed(self, state):
-        """Handle don't show again checkbox change"""
-        if state == Qt.CheckState.Checked.value:
-            # Show warning dialog
-            warning_box = QMessageBox(self)
-            warning_box.setWindowTitle("⚠️ Warning: Unsupervised Code Execution")
-            warning_box.setIcon(QMessageBox.Icon.Warning)
-
-            warning_text = (
-                "<h3 style='color: #F28B82;'>Are you sure you want to disable code approval?</h3>"
-                "<p style='color: #E8EAED;'>Disabling supervised execution means code will run automatically "
-                "without your review. This could be dangerous if:</p>"
-                "<ul style='color: #9AA0A6;'>"
-                "<li>The AI generates malicious or harmful code</li>"
-                "<li>The code accesses or modifies your files without permission</li>"
-                "<li>The code makes network requests to unknown servers</li>"
-                "<li>The code executes system commands that could damage your system</li>"
-                "</ul>"
-                "<p style='color: #E8EAED; font-weight: 600;'>Only disable this if you fully trust the AI "
-                "and understand the risks.</p>"
-                "<p style='color: #9AA0A6; font-size: 11px;'>You can re-enable supervised execution "
-                "anytime in Settings.</p>"
-            )
-
-            warning_box.setText(warning_text)
-            warning_box.setStandardButtons(
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
-            warning_box.setDefaultButton(QMessageBox.StandardButton.No)
-
-            # Style the warning box
-            warning_box.setStyleSheet("""
-                QMessageBox {
-                    background-color: #212121;
-                }
-                QMessageBox QLabel {
-                    color: #E8EAED;
-                    font-size: 13px;
-                }
-                QPushButton {
-                    background-color: #2A2A2A;
-                    border: 1px solid #3C3C3C;
-                    border-radius: 6px;
-                    padding: 8px 16px;
-                    font-size: 12px;
-                    color: #E8EAED;
-                    min-width: 80px;
-                }
-                QPushButton:hover {
-                    background-color: #3A3A3A;
-                    border-color: #4A4A4A;
-                }
-            """)
-
-            result = warning_box.exec()
-
-            if result != QMessageBox.StandardButton.Yes:
-                # User said no, uncheck the box
-                self.dont_show_checkbox.setChecked(False)
-            else:
-                self.dont_show_again = True
-        else:
-            self.dont_show_again = False
-
     def on_explain(self):
         """Show chat and request explanation of the code"""
         # Toggle chat visibility
@@ -580,9 +489,9 @@ class CodeApprovalDialog(QDialog):
 
             # Send initial explanation request
             explain_prompt = (
-                f"<SYSTEM_AUTOMATED_MESSAGE>PLEASE EXPLAIN THIS CODE THAT IS TO BE EXECUTED, "
+                f"<SYSTEM_AUTOMATED_MESSAGE> PLEASE EXPLAIN THIS CODE THAT IS TO BE EXECUTED, "
                 f"WARN OF ANY RISK AND MALICIOUS INTENT IF ANY. "
-                f"SAY WHETHER IT IS [SAFE, RISKY, BAD]</SYSTEM_AUTOMATED_MESSAGE>\n\n"
+                f"SAY WHETHER IT IS [SAFE, RISKY, BAD] ALSO KEEP YOUR RESPONSE FOR THIS SPECIFIC MESSAGE CONCISE AND CLEAN OF ANY MARKDOWN OR SEPCIAL CHARACTERS </SYSTEM_AUTOMATED_MESSAGE>\n\n"
                 f"```python\n{current_code}\n```"
             )
 
@@ -711,7 +620,7 @@ class CodeApprovalDialog(QDialog):
         Show dialog and get approval
 
         Returns:
-            tuple: (approved: bool, modified_code: str, dont_show_again: bool)
+            tuple: (approved: bool, modified_code: str)
         """
         dialog = CodeApprovalDialog(code, execution_type, ai_engine, parent)
 
@@ -721,9 +630,8 @@ class CodeApprovalDialog(QDialog):
         dialog.activateWindow()
 
         result = dialog.exec()
-        
+
         approved = dialog.result == 'accept'
         modified_code = dialog.modified_code if approved else code
-        dont_show_again = dialog.dont_show_again
-        
-        return approved, modified_code, dont_show_again
+
+        return approved, modified_code

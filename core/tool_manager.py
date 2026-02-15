@@ -125,13 +125,12 @@ class ToolManager:
         try:
             # Create event to block worker thread until approval is received
             approval_event = threading.Event()
-            approval_result = {'approved': True, 'modified_code': code, 'dont_show_again': False}
+            approval_result = {'approved': True, 'modified_code': code}
 
-            def callback(approved, modified_code, dont_show_again):
+            def callback(approved, modified_code):
                 """Callback function executed on main thread after dialog closes"""
                 approval_result['approved'] = approved
                 approval_result['modified_code'] = modified_code
-                approval_result['dont_show_again'] = dont_show_again
                 approval_event.set()
 
             # Emit signal to main thread (will show dialog there)
@@ -139,12 +138,6 @@ class ToolManager:
 
             # Wait for approval (blocks worker thread, but not main thread)
             approval_event.wait()
-
-            # Update settings if user chose "don't show again"
-            if approval_result['dont_show_again'] and self.settings_callback:
-                settings = self.settings_callback()
-                settings['supervised_execution'] = False
-                # Note: Settings will be saved by controller
 
             return approval_result['approved'], approval_result['modified_code']
 
@@ -162,29 +155,29 @@ class ToolManager:
         Args:
             code: Code to execute
             execution_type: 'execute_code' or 'work_environment'
-            callback: Function to call with (approved, modified_code, dont_show_again)
+            callback: Function to call with (approved, modified_code)
         """
         try:
             from ui.code_approval_dialog import CodeApprovalDialog
 
             if not self.ai_engine:
                 print("Warning: No AI engine available for code explanation")
-                callback(True, code, False)
+                callback(True, code)
                 return
 
             # Show dialog on main thread
-            approved, modified_code, dont_show_again = CodeApprovalDialog.get_approval(
+            approved, modified_code = CodeApprovalDialog.get_approval(
                 code, execution_type, self.ai_engine
             )
 
             # Call callback with results
-            callback(approved, modified_code, dont_show_again)
+            callback(approved, modified_code)
 
         except Exception as e:
             print(f"Error in approval dialog: {e}")
             import traceback
             traceback.print_exc()
-            callback(True, code, False)
+            callback(True, code)
 
     def run_work_environment(self, code):
         """
