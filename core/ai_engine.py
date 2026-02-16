@@ -558,7 +558,7 @@ class AIEngine:
             # Add work mode prompt to conversation
         work_prompt = self.tool_manager.get_work_mode_prompt()
         self.conversation_history.append({
-            'role': 'user',
+            'role': 'system',
             'content': work_prompt
         })
 
