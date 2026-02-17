@@ -25,7 +25,6 @@ import threading
 # ═══════════════════════════════════════════════════════════════════════════════
 # ANIMATION TIMING CONSTANTS
 # Tweak these values to adjust the feel of every animation in the chat window.
-# I didn't add these in the settings to avoid bloating it.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # --- Window ---
@@ -1783,11 +1782,16 @@ class ChatWindow(QWidget):
 
         self._sidebar_anim.start()
 
-    def _animate_message_in(self, widget):
+    def _animate_message_in(self, widget, on_settled=None):
         """
         Slide-open + fade-in a new message widget.
         Uses OutBack easing for a satisfying spring overshoot.
         Timings controlled by ANIM_MSG_IN_* constants at top of file.
+
+        on_settled: optional callable fired AFTER the animation completes and
+                    the widget is unconstrained.  Use this to trigger scroll
+                    centering — at that point sb.maximum() and widget.height()
+                    are accurate.
         """
         natural_h = widget.sizeHint().height()
         if natural_h < 10:
@@ -1821,6 +1825,11 @@ class ChatWindow(QWidget):
         def _on_done():
             widget.setMaximumHeight(16777215)   # Qt QWIDGETSIZE_MAX — unconstrain
             widget.setGraphicsEffect(None)
+            # Fire the scroll callback now that layout is fully settled.
+            # A tiny extra delay lets Qt flush the layout update so
+            # sb.maximum() and widget.height() are guaranteed correct.
+            if on_settled is not None:
+                QTimer.singleShot(30, on_settled)
 
         group.finished.connect(_on_done)
 
@@ -2588,8 +2597,11 @@ class ChatWindow(QWidget):
         menu_btn.clicked.connect(lambda: self._show_message_menu(message_data))
 
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
-        self._animate_message_in(message_widget)
-        QTimer.singleShot(120, lambda: self.scroll_to_widget(message_widget))
+        # Scroll AFTER animation completes so sb.maximum() and widget.height()
+        # are accurate — firing at 120ms (mid-animation) caused the clamp
+        # min(target, sb.maximum()) to cut the target short on long chats.
+        self._animate_message_in(message_widget,
+                                 on_settled=lambda: self.scroll_to_widget(message_widget))
 
     def add_ai_message(self, message):
         """Add AI message with markdown rendering, code blocks, and three-dot menu"""
@@ -2769,8 +2781,8 @@ class ChatWindow(QWidget):
         menu_btn.clicked.connect(lambda: self._show_message_menu(message_data))
 
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
-        self._animate_message_in(message_widget)
-        QTimer.singleShot(120, lambda: self.scroll_to_widget(message_widget))
+        self._animate_message_in(message_widget,
+                                 on_settled=lambda: self.scroll_to_widget(message_widget))
 
     def _clean_emotion_brackets(self, text):
         """Remove ElevenLabs emotion brackets from text for display"""
@@ -2816,8 +2828,8 @@ class ChatWindow(QWidget):
         message_layout.addWidget(text_label)
 
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
-        self._animate_message_in(message_widget)
-        QTimer.singleShot(120, lambda: self.scroll_to_widget(message_widget))
+        self._animate_message_in(message_widget,
+                                 on_settled=lambda: self.scroll_to_widget(message_widget))
 
     def copy_to_clipboard(self, text):
         """Copy text to clipboard"""
@@ -2844,12 +2856,27 @@ class ChatWindow(QWidget):
     # ── Smart scroll-to-message ────────────────────────────────────────────
 
     def scroll_to_widget(self, widget):
-        """Scroll so the new message is optimally visible."""
+        """
+        Scroll so the new message is optimally visible.
+
+        IMPORTANT: must only be called AFTER the message's pop-in animation
+        has finished, so that:
+          - widget.height() returns the real rendered height
+          - sb.maximum() reflects the full content including the new message
+        Calling this mid-animation causes sb.maximum() to be stale (too small),
+        making the clamp cut the target short on long chats.
+        """
         if not hasattr(self, 'chat_scroll_area'):
             return
         if self._user_scrolling:
             self._user_scrolling = False
             return
+
+        try:
+            if not widget.isVisible():
+                return
+        except RuntimeError:
+            return  # Widget already deleted
 
         sb = self.chat_scroll_area.verticalScrollBar()
         viewport_h = self.chat_scroll_area.viewport().height()
@@ -2860,15 +2887,23 @@ class ChatWindow(QWidget):
             return
 
         widget_top = pos_in_content.y()
-        widget_h   = widget.sizeHint().height()
+
+        # Use actual rendered height — only valid after animation completes.
+        # sizeHint() can be stale; widget.height() reflects the live layout.
+        widget_h = widget.height()
         if widget_h < 20:
-            widget_h = widget.height()
+            widget_h = widget.sizeHint().height()
+        if widget_h < 20:
+            widget_h = 200  # safe fallback
 
         if widget_h <= viewport_h - 40:
+            # Small message: centre it vertically in the viewport
             target = widget_top - (viewport_h - widget_h) // 2
         else:
+            # Tall message: show from top with a small padding
             target = widget_top - 16
 
+        # sb.maximum() is now accurate because the animation is complete.
         target = max(0, min(target, sb.maximum()))
         self._animated_scroll_to(target)
 
@@ -3202,6 +3237,10 @@ class ChatWindow(QWidget):
         if not message:
             return
 
+        # Sending is an explicit user action — always scroll to the new bubble
+        # regardless of whether the user was scrolling up to read older messages.
+        self._user_scrolling = False
+
         was_manually_resized = self.input_field.text_input.manual_resize
         stored_height = self.input_field.text_input.height() if was_manually_resized else None
 
@@ -3271,6 +3310,8 @@ class ChatWindow(QWidget):
         self.send_btn.setEnabled(enabled)
         if enabled:
             self.input_field.setPlaceholderText("Send a message... (Shift+Enter for new line)")
+            # Restore focus so the user can type immediately without clicking
+            self.input_field.text_input.setFocus()
         else:
             self.input_field.setPlaceholderText("AI is working... please wait")
 
