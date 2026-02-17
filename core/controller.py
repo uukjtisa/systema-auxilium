@@ -1163,10 +1163,21 @@ class AssistantController(QObject):
         # Load chat history into AI
         for msg in session_data['chat_history']:
             self.ai.conversation_history.append(msg)
-        
-        # Render messages in UI
+
+        # Render messages in UI — strip tool call JSON from assistant messages
+        # so stored {"execute_code":...} / {"set_session_name":...} blocks are
+        # not shown as raw text.  The original chat_history is kept intact for AI context.
         if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
-            self.ui.chat_window.render_loaded_messages(session_data['chat_history'])
+            display_history = []
+            for msg in session_data['chat_history']:
+                if msg.get('role') == 'assistant':
+                    cleaned_content = self.ai.tool_manager.strip_tool_calls(
+                        msg.get('content', '')
+                    )
+                    display_history.append({**msg, 'content': cleaned_content})
+                else:
+                    display_history.append(msg)
+            self.ui.chat_window.render_loaded_messages(display_history)
         
         # Update current session
         self.current_session_id = session_id

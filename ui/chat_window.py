@@ -28,10 +28,10 @@ import threading
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # --- Window ---
-ANIM_WINDOW_FADE_IN_MS       = 220    # Chat window fade-in when shown (ms)
+ANIM_WINDOW_FADE_IN_MS       = 340    # Chat window fade-in when shown (ms)
 
 # --- Sidebar ---
-ANIM_SIDEBAR_SLIDE_MS        = 260    # Sidebar slide in / out (ms)
+ANIM_SIDEBAR_SLIDE_MS        = 360    # Sidebar slide in / out (ms)
 
 # --- Messages ---
 ANIM_MSG_IN_HEIGHT_MS        = 480    # Message pop-in: height expand (ms)
@@ -2332,8 +2332,10 @@ class ChatWindow(QWidget):
             if role == 'user':
                 self.add_user_message(content)
             elif role == 'assistant':
+                #EXTRA CLEANER IF ANYTHIN LEAKS THE FIRST TIME
                 cleaned_content = self._remove_tool_usage_format(content)
-                self.add_ai_message(cleaned_content)
+                if not cleaned_content.strip() == "":
+                    self.add_ai_message(cleaned_content)
 
     def _remove_tool_usage_format(self, content):
         """Remove tool usage JSON blocks from AI message"""
