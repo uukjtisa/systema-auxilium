@@ -10,6 +10,7 @@ from core.system_info import get_system_info, format_system_info_for_prompt
 from core.voice_handler import VoiceHandler
 from ui.floating_window import FloatingWindow
 from core.ai_worker import AIWorker
+from core.session_manager import SessionManager
 import os
 import json
 import random
@@ -110,6 +111,14 @@ class AssistantController(QObject):
 
         # NEW: Connect voice message signal to handler (main thread safe)
         self.voice_message_signal.connect(self._handle_voice_message_on_main_thread)
+
+        # SESSION MANAGEMENT - Initialize session manager
+        self.session_manager = SessionManager()
+        self.current_session_id = None
+        self.session_has_messages = False
+        
+        # Create initial session
+        self._create_new_session()
 
         self.log("System AI Assistant initialized", "SUCCESS")
 
@@ -860,6 +869,15 @@ class AssistantController(QObject):
         # Show visible text immediately (only if not empty) - NORMAL MODE or TOOL MODE
         if result.get('response'):
             self.ui.show_ai_message(result['response'])
+            
+            # SESSION SAVE: Mark session as having messages and auto-save
+            if not self.session_has_messages:
+                self.session_has_messages = True
+            self._auto_save_session()
+        
+        # Check if AI set a session name
+        if result.get('session_name'):
+            self.set_session_name(result['session_name'])
 
         # NEW: Check if AI just exited tool mode
         if result.get('exited_work_mode'):
@@ -913,6 +931,11 @@ class AssistantController(QObject):
         # Show the AI's report to user
         if result.get('response'):
             self.ui.show_ai_message(result['response'])
+            
+            # SESSION SAVE: Mark session as having messages and auto-save
+            if not self.session_has_messages:
+                self.session_has_messages = True
+            self._auto_save_session()
 
     def handle_work_mode_response(self, result):
         """Handle tool mode response from worker thread"""
@@ -1054,6 +1077,153 @@ class AssistantController(QObject):
                 self.log("Removed last user message from conversation history")
 
         return interrupted
+
+    # ═══════════════════════════════════════════════════════════
+    # SESSION MANAGEMENT METHODS
+    # ═══════════════════════════════════════════════════════════
+    
+    def _create_new_session(self):
+        """Create a new session"""
+        # Save current session if it has messages
+        if self.current_session_id and self.session_has_messages:
+            self._auto_save_session()
+        
+        # Delete current session if it's empty
+        if self.current_session_id and not self.session_has_messages:
+            self.session_manager.delete_session(self.current_session_id)
+        
+        # Create new session
+        self.current_session_id = self.session_manager.create_session()
+        self.session_has_messages = False
+        self.log(f"Created new session: {self.current_session_id}")
+    
+    def _auto_save_session(self):
+        """Automatically save current session after AI response"""
+        if not self.current_session_id:
+            return
+        
+        if not self.session_has_messages:
+            return  # Don't save empty sessions
+        
+        # Get conversation history (already excludes system prompt - that's in construction)
+        chat_history = self.ai.conversation_history.copy()
+        
+        # Save session
+        success = self.session_manager.save_session(
+            self.current_session_id, 
+            chat_history
+        )
+        
+        if success:
+            self.ui.chat_window.refresh_session_list()
+            self.log(f"Session auto-saved: {self.current_session_id}")
+        else:
+            self.log(f"Failed to save session: {self.current_session_id}", "ERROR")
+    
+    def create_new_session(self):
+        """Create new session (called from UI)"""
+        # Save + create new session FIRST (while AI history is still intact)
+        self._create_new_session()
+
+        # NOW clear AI history and UI (after the old session has been saved)
+        self.ai.clear_history()
+
+        if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
+            self.ui.chat_window.clear_chat_silent()
+        
+        # Refresh UI
+        if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
+            self.ui.chat_window.refresh_session_list()
+            self.ui.chat_window.add_system_message("🆕 **New Session Created**")
+    
+    def load_session(self, session_id):
+        """Load a session"""
+        # Save current session first
+        if self.current_session_id and self.session_has_messages:
+            self._auto_save_session()
+        
+        # Delete current empty session
+        if self.current_session_id and not self.session_has_messages:
+            self.session_manager.delete_session(self.current_session_id)
+        
+        # Load session data
+        session_data = self.session_manager.load_session(session_id)
+        
+        if not session_data:
+            self.log(f"Failed to load session: {session_id}", "ERROR")
+            return False
+        
+        # Clear chat UI
+        if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
+            self.ui.chat_window.clear_chat_silent()
+        
+        # Clear AI history
+        self.ai.clear_history()
+        
+        # Load chat history into AI
+        for msg in session_data['chat_history']:
+            self.ai.conversation_history.append(msg)
+        
+        # Render messages in UI
+        if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
+            self.ui.chat_window.render_loaded_messages(session_data['chat_history'])
+        
+        # Update current session
+        self.current_session_id = session_id
+        self.session_has_messages = len(session_data['chat_history']) > 0
+        
+        self.log(f"Session loaded: {session_id}")
+        return True
+    
+    def delete_session(self, session_id):
+        """Delete a session"""
+        # If deleting active session, create new one
+        if session_id == self.current_session_id:
+            # Clear chat
+            if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
+                self.ui.chat_window.clear_chat_silent()
+            
+            # Clear AI history
+            self.ai.clear_history()
+            
+            # Delete the session
+            self.session_manager.delete_session(session_id)
+            
+            # Create new session
+            self._create_new_session()
+            
+            # Refresh UI
+            if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
+                self.ui.chat_window.refresh_session_list()
+                self.ui.chat_window.add_system_message("🗑️ **Session Deleted** - New session created")
+        else:
+            # Just delete the session
+            self.session_manager.delete_session(session_id)
+            
+            # Refresh UI
+            if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
+                self.ui.chat_window.refresh_session_list()
+    
+    def set_session_name(self, name):
+        """Set name for current session (called by AI tool)"""
+        if not self.current_session_id:
+            return
+        
+        # Rename session
+        success = self.session_manager.rename_session(self.current_session_id, name)
+        
+        if success:
+            self.log(f"Session renamed to: {name}")
+            
+            # Refresh UI session list
+            if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
+                self.ui.chat_window.refresh_session_list()
+        else:
+            self.log(f"Failed to rename session", "ERROR")
+    
+    def get_session_list(self):
+        """Get list of all sessions"""
+        return self.session_manager.list_sessions()
 
     def show(self):
         """Show the UI"""
