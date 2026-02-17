@@ -97,6 +97,23 @@ class ToolManager:
 
         return None
 
+    def parse_set_session_name(self, text):
+        """
+        Parse set_session_name call from AI output
+        
+        Returns:
+            tuple: (session_name, remaining_text) or None if not found
+        """
+        json_data = self._extract_json(text)
+        
+        if json_data and 'set_session_name' in json_data:
+            session_name = json_data.get('set_session_name', '').strip()
+            # Remove JSON block from text
+            remaining_text = self._remove_json_from_text(text, json_data)
+            return session_name, remaining_text
+        
+        return None
+
     def _check_supervised_execution(self, code, execution_type):
         """
         Check if supervised execution is enabled and get approval if needed
@@ -345,7 +362,7 @@ class ToolManager:
                 pass
 
         # Try bare JSON: {...}
-        bare_json_pattern = r'\{[^{}]*"(?:work_environment|execute_code)"[^{}]*\}'
+        bare_json_pattern = r'\{[^{}]*"(?:work_environment|execute_code|set_session_name)"[^{}]*\}'
         match = re.search(bare_json_pattern, text, re.DOTALL)
 
         if match:
@@ -368,7 +385,7 @@ class ToolManager:
             # Verify this is the right JSON by checking if it has the tool key
             try:
                 found_json = json.loads(match.group(1))
-                if 'work_environment' in found_json or 'execute_code' in found_json:
+                if 'work_environment' in found_json or 'execute_code' in found_json or 'set_session_name' in found_json:
                     text = text[:match.start()] + text[match.end():]
                     return text.strip()
             except:
@@ -377,7 +394,7 @@ class ToolManager:
         # Pattern 2: Remove bare JSON objects
         # Use a more sophisticated approach - find the JSON and remove it
         # Look for the opening brace of a JSON with our tool keys
-        start_pattern = r'\{\s*"(?:work_environment|execute_code)"'
+        start_pattern = r'\{\s*"(?:work_environment|execute_code|set_session_name)"'
         start_match = re.search(start_pattern, text)
 
         if start_match:

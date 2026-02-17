@@ -851,6 +851,9 @@ class ChatWindow(QWidget):
         self.last_sent_message = None  # Track last message for interrupt
         self.last_user_message_widget = None  # Track last user message widget for removal
 
+        # MESSAGE CONTROL: Track all messages for edit/delete/rewind
+        self.message_widgets = []  # List of {widget, role, content, history_index}
+
         # Window dragging state
         self.dragging = False
         self.drag_position = QPoint()
@@ -1201,27 +1204,48 @@ class ChatWindow(QWidget):
         """)
         sidebar_layout.addWidget(mode_info)
 
+        # ═══════════════════════════════════════════════════════════
+        # SESSION HISTORY SECTION
+        # ═══════════════════════════════════════════════════════════
+
+        # Header
+        session_header = QLabel("📁 Session History")
+        session_header.setStyleSheet("font-size: 12px; font-weight: 600; color: #9AA0A6; padding: 8px 4px; margin-top: 12px;")
+        sidebar_layout.addWidget(session_header)
+
+        # New Session Button
+        new_session_btn = QPushButton("➕ New Session")
+        new_session_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1A73E8;
+                border: none;
+                border-radius: 6px;
+                padding: 8px;
+                font-size: 11px;
+                color: white;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: #1557B0;
+            }
+        """)
+        new_session_btn.clicked.connect(lambda: self.controller.create_new_session())
+        new_session_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        sidebar_layout.addWidget(new_session_btn)
+
+        # Session list container (scrollable)
+        session_list_container = QWidget()
+        session_list_container.setStyleSheet("background-color: transparent;")
+        self.session_list_layout = QVBoxLayout(session_list_container)
+        self.session_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.session_list_layout.setSpacing(2)
+        sidebar_layout.addWidget(session_list_container)
+
+        # Load initial sessions
+        QTimer.singleShot(100, self.refresh_session_list)
+
         # At the end of sidebar content, add stretch
         sidebar_layout.addStretch()
-
-        # Add clear button at the bottom
-        clear_btn = QPushButton("🗑️ Clear Chat")
-        clear_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: transparent;
-                    border: 1px solid #3C3C3C;
-                    border-radius: 6px;
-                    padding: 8px;
-                    font-size: 11px;
-                    color: #9AA0A6;
-                }
-                QPushButton:hover {
-                    background-color: #2A2A2A;
-                    color: #E8EAED;
-                }
-            """)
-        clear_btn.clicked.connect(self.clear_chat)
-        sidebar_layout.addWidget(clear_btn)
 
         # Set the content widget to the scroll area
         sidebar_scroll.setWidget(sidebar_content)
@@ -1949,6 +1973,92 @@ class ChatWindow(QWidget):
         self.user_avatar_display.setText(emoji)
         self.save_config()
 
+    def _latex_to_base64_img(self, latex_expr, display=True):
+        """Render a LaTeX expression to a tight base64-encoded PNG using matplotlib.
+        Returns HTML with the rendered image + a dim copyable source line."""
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            import io, base64
+
+            # Start with a near-zero figure — bbox_inches='tight' will expand
+            # it to exactly fit the text, producing no excess whitespace.
+            fig = plt.figure(figsize=(0.01, 0.01))
+            fig.patch.set_alpha(0)
+            ax = fig.add_axes([0, 0, 1, 1])
+            ax.set_axis_off()
+            ax.patch.set_alpha(0)
+
+            fontsize = 13 if display else 11
+            ax.text(0.5, 0.5, f'${latex_expr}$',
+                    fontsize=fontsize, color='#BDC1C6',
+                    ha='center', va='center',
+                    transform=ax.transAxes)
+
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', dpi=150, bbox_inches='tight',
+                        transparent=True, pad_inches=0.05, facecolor='none')
+            plt.close(fig)
+            buf.seek(0)
+            b64 = base64.b64encode(buf.read()).decode('utf-8')
+
+            # Dim copyable source so the user can select & copy the raw LaTeX
+            source_html = (
+                f'<span style="font-family:monospace;font-size:9px;'
+                f'color:#4A4A4A;user-select:text;">{latex_expr}</span>'
+            )
+
+            if display:
+                return (
+                    f'<br>'
+                    f'<div style="text-align:center;margin:4px 0 2px 0;">'
+                    f'<img src="data:image/png;base64,{b64}" style="max-height:40px;">'
+                    f'</div>'
+                    f'<div style="text-align:center;margin:0 0 4px 0;">{source_html}</div>'
+                    f'<br>'
+                )
+            else:
+                return (
+                    f'<img src="data:image/png;base64,{b64}" '
+                    f'style="vertical-align:middle;margin:0 2px;max-height:22px;">'
+                    f'&nbsp;{source_html}'
+                )
+        except Exception:
+            return f'<code>{latex_expr}</code>'
+
+    def _preprocess_latex(self, text):
+        """Detect and replace LaTeX math expressions with rendered PNG images.
+
+        Handles three notations:
+          1. Standard display math:   \\[ ... \\]
+          2. Standard inline math:    $ ... $
+          3. Bare-bracket display:    [ ... ]  (on its own line, containing LaTeX syntax)
+        """
+        import re
+
+        # --- 1. Standard display math:  \[ ... \] ---
+        def replace_display(m):
+            return self._latex_to_base64_img(m.group(1).strip(), display=True)
+        text = re.sub(r'\\\[(.*?)\\\]', replace_display, text, flags=re.DOTALL)
+
+        # --- 2. Standard inline math:  $...$  (skip $$...$$) ---
+        def replace_inline(m):
+            return self._latex_to_base64_img(m.group(1).strip(), display=False)
+        text = re.sub(r'(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)', replace_inline, text)
+
+        # --- 3. Bare-bracket display:  [ formula ]  on its own line
+        #    Only triggers when the content contains LaTeX-like tokens
+        def replace_bracket(m):
+            inner = m.group(1).strip()
+            has_latex = bool(re.search(r'\\[a-zA-Z]+|[_^{}]|\bfrac\b|\bsum\b|\bint\b', inner))
+            if has_latex:
+                return self._latex_to_base64_img(inner, display=True)
+            return m.group(0)  # Leave non-math brackets untouched
+        text = re.sub(r'^\[\s*(.+?)\s*\]\s*$', replace_bracket, text, flags=re.MULTILINE)
+
+        return text
+
     def render_markdown(self, text):
         """Render markdown to HTML"""
         try:
@@ -1995,17 +2105,173 @@ class ChatWindow(QWidget):
         return parts
 
     def clear_chat(self):
-        """Clear chat history"""
+        """Clear chat history WITH notification"""
+        self._clear_chat_internal()
+        self.add_system_message("🔄 **Chat Cleared** - Ready for a new conversation!")
+
+    def clear_chat_silent(self):
+        """Clear chat history WITHOUT notification (for session loading)"""
+        self._clear_chat_internal()
+
+    def _clear_chat_internal(self):
+        """Internal method to clear chat widgets"""
         while self.chat_layout.count() > 1:
             item = self.chat_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
 
-        self.controller.ai.clear_history()
-        self.add_system_message("🔄 **Chat Cleared** - Ready for a new conversation!")
+        # Clear message tracking
+        self.message_widgets = []
+
+        # Clear AI history is handled by controller, not here
+
+    def render_loaded_messages(self, messages):
+        """Render messages from loaded session"""
+        for msg in messages:
+            role = msg['role']
+            content = msg['content']
+
+            if role == 'user':
+                self.add_user_message(content)
+            elif role == 'assistant':
+                # Clean tool usage from content
+                cleaned_content = self._remove_tool_usage_format(content)
+                self.add_ai_message(cleaned_content)
+
+    def _remove_tool_usage_format(self, content):
+        """Remove tool usage JSON blocks from AI message"""
+        import re
+        # Remove JSON tool blocks (work_environment, execute_code, set_session_name)
+        # Pattern: ```json\n{...}\n```
+        cleaned = re.sub(
+            r'```json\s*\{[^}]*(?:"work_environment"|"execute_code"|"set_session_name")[^}]*\}.*?```',
+            '',
+            content,
+            flags=re.DOTALL
+        )
+        # Clean up extra whitespace
+        cleaned = re.sub(r'\n\s*\n\s*\n+', '\n\n', cleaned)
+        return cleaned.strip()
+
+    def refresh_session_list(self):
+        """Refresh the session list in sidebar"""
+        # Get sessions from controller
+        if not hasattr(self, 'session_list_layout'):
+            return
+
+        # Clear existing session items
+        while self.session_list_layout.count() > 0:
+            item = self.session_list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        # Get sessions
+        sessions = self.controller.get_session_list()
+
+        # Add session items
+        for session in sessions:
+            session_item = self._create_session_item(
+                session['id'],
+                session['name'],
+                session['date'],
+                is_active=(session['id'] == self.controller.current_session_id)
+            )
+            self.session_list_layout.addWidget(session_item)
+
+        # Add stretch at the end
+        self.session_list_layout.addStretch()
+
+    def _create_session_item(self, session_id, session_name, creation_date, is_active=False):
+        """Create a session list item widget"""
+        item_widget = QFrame()
+        item_widget.setStyleSheet(f"""
+            QFrame {{
+                background-color: {"#2A2A2A" if is_active else "transparent"};
+                border-radius: 6px;
+                padding: 8px;
+                margin: 2px 0px;
+            }}
+            QFrame:hover {{
+                background-color: {"#2A2A2A" if is_active else "#252525"};
+            }}
+        """)
+
+        layout = QHBoxLayout(item_widget)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(8)
+
+        # Content layout
+        content_layout = QVBoxLayout()
+        content_layout.setSpacing(2)
+
+        # Session name
+        name_label = QLabel(session_name)
+        name_label.setStyleSheet(f"""
+            color: {"#E8EAED" if is_active else "#9AA0A6"};
+            font-size: 12px;
+            font-weight: {"bold" if is_active else "normal"};
+        """)
+        name_label.setWordWrap(True)
+        content_layout.addWidget(name_label)
+
+        # Creation date
+        date_label = QLabel(creation_date)
+        date_label.setStyleSheet("color: #5F5F5F; font-size: 10px;")
+        content_layout.addWidget(date_label)
+
+        layout.addLayout(content_layout, 1)
+
+        # Delete button
+        delete_btn = QPushButton("🗑️")
+        delete_btn.setFixedSize(24, 24)
+        delete_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: none;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background: rgba(234, 67, 53, 0.2);
+                border-radius: 12px;
+            }
+        """)
+        delete_btn.clicked.connect(lambda: self._delete_session_clicked(session_id))
+        delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        layout.addWidget(delete_btn)
+
+        # Make item clickable
+        item_widget.mousePressEvent = lambda e: self._load_session_clicked(session_id)
+        item_widget.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        return item_widget
+
+    def _load_session_clicked(self, session_id):
+        """Load session when clicked"""
+        if session_id == self.controller.current_session_id:
+            return  # Already active
+
+        self.controller.load_session(session_id)
+
+    def _delete_session_clicked(self, session_id):
+        """Delete session when delete button clicked"""
+        # If active session, show confirmation
+        if session_id == self.controller.current_session_id:
+            from PyQt6.QtWidgets import QMessageBox
+            reply = QMessageBox.question(
+                self,
+                'Delete Active Session',
+                'Are you sure you want to delete the current session?\nA new session will be created.',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+
+            if reply == QMessageBox.StandardButton.Yes:
+                self.controller.delete_session(session_id)
+        else:
+            self.controller.delete_session(session_id)
 
     def add_user_message(self, message):
-        """Add user message"""
+        """Add user message with three-dot menu"""
         message_widget = QFrame()
         message_widget.setStyleSheet("""
             QFrame {
@@ -2034,7 +2300,7 @@ class ChatWindow(QWidget):
         name_label.setStyleSheet("color: #E8EAED; font-size: 12px;")
         main_container.addWidget(name_label)
 
-        # Message content container (with border) - using QFrame for positioning
+        # Message content container (with border)
         content_wrapper = QFrame()
         content_wrapper.setStyleSheet("""
             QFrame {
@@ -2044,7 +2310,6 @@ class ChatWindow(QWidget):
             }
         """)
 
-        # Use absolute positioning for copy button
         content_wrapper_layout = QVBoxLayout(content_wrapper)
         content_wrapper_layout.setContentsMargins(12, 12, 12, 8)
         content_wrapper_layout.setSpacing(8)
@@ -2097,6 +2362,31 @@ class ChatWindow(QWidget):
         content_wrapper_layout.addLayout(copy_btn_container)
 
         main_container.addWidget(content_wrapper)
+
+        # THREE-DOT MENU — below the bubble, right-aligned
+        menu_row = QHBoxLayout()
+        menu_row.setContentsMargins(0, 2, 0, 0)
+        menu_btn = QPushButton("⋯")
+        menu_btn.setFixedSize(24, 24)
+        menu_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: none;
+                font-size: 18px;
+                color: #5F5F5F;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: rgba(255, 255, 255, 0.1);
+                border-radius: 12px;
+                color: #9AA0A6;
+            }
+        """)
+        menu_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        menu_row.addStretch()
+        menu_row.addWidget(menu_btn)
+        main_container.addLayout(menu_row)
+
         message_layout.addWidget(main_container_widget)
 
         # Avatar (RIGHT side for user)
@@ -2118,16 +2408,33 @@ class ChatWindow(QWidget):
         # Track this widget for potential removal
         self.last_user_message_widget = message_widget
 
+        # MESSAGE TRACKING
+        message_index = len(self.message_widgets)
+        message_data = {
+            'widget': message_widget,
+            'role': 'user',
+            'content': message,
+            'index': message_index,
+            'text_label': text_label
+        }
+        self.message_widgets.append(message_data)
+
+        # Connect menu button
+        menu_btn.clicked.connect(lambda: self._show_message_menu(message_data))
+
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
         self.scroll_to_bottom()
 
     def add_ai_message(self, message):
-        """Add AI message with markdown rendering and code blocks"""
+        """Add AI message with markdown rendering, code blocks, and three-dot menu"""
         # Remove emotion brackets for display if voice enabled
         if self.voice_enabled:
             display_message = self._clean_emotion_brackets(message)
         else:
             display_message = message
+
+        # Render any LaTeX expressions to images (AI messages only)
+        display_message = self._preprocess_latex(display_message)
 
         message_widget = QFrame()
         message_widget.setStyleSheet("""
@@ -2157,7 +2464,7 @@ class ChatWindow(QWidget):
         """)
         message_layout.addWidget(avatar, alignment=Qt.AlignmentFlag.AlignTop)
 
-        # Container for name and content - REMOVED max-width
+        # Container for name and content
         main_container_widget = QWidget()
         main_container = QVBoxLayout(main_container_widget)
         main_container.setSpacing(4)
@@ -2184,12 +2491,11 @@ class ChatWindow(QWidget):
 
         # Parse message for code blocks
         parts = self.render_markdown_with_code_blocks(display_message)
+        first_text_label = None
 
         if isinstance(parts, list):
-            # Has code blocks - render each part
             for part in parts:
                 if part[0] == 'text':
-                    # Regular text
                     text_label = QLabel()
                     text_label.setTextFormat(Qt.TextFormat.RichText)
                     text_label.setText(self.render_markdown(part[1]))
@@ -2209,15 +2515,12 @@ class ChatWindow(QWidget):
                         Qt.TextInteractionFlag.LinksAccessibleByMouse
                     )
                     content_wrapper_layout.addWidget(text_label)
-
+                    if not first_text_label:
+                        first_text_label = text_label
                 elif part[0] == 'code':
-                    # Code block
-                    language = part[1]
-                    code = part[2]
-                    code_widget = CodeBlockWidget(language, code)
+                    code_widget = CodeBlockWidget(part[1], part[2])
                     content_wrapper_layout.addWidget(code_widget)
         else:
-            # No code blocks - render normally
             text_label = QLabel()
             text_label.setTextFormat(Qt.TextFormat.RichText)
             text_label.setText(parts)
@@ -2237,10 +2540,10 @@ class ChatWindow(QWidget):
                 Qt.TextInteractionFlag.LinksAccessibleByMouse
             )
             content_wrapper_layout.addWidget(text_label)
+            first_text_label = text_label
 
-        # Copy button for entire message at BOTTOM LEFT for AI messages
+        # Copy button at BOTTOM LEFT for AI messages
         copy_btn_container = QHBoxLayout()
-
         copy_btn = QPushButton("📋")
         copy_btn.setFixedSize(28, 28)
         copy_btn.setStyleSheet("""
@@ -2260,16 +2563,55 @@ class ChatWindow(QWidget):
         copy_btn.clicked.connect(lambda: self.copy_to_clipboard(display_message))
         copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         copy_btn_container.addWidget(copy_btn)
-
         copy_btn_container.addStretch()
-
         content_wrapper_layout.addLayout(copy_btn_container)
 
         main_container.addWidget(content_wrapper)
+
+        # THREE-DOT MENU — below the bubble, left-aligned
+        ai_menu_row = QHBoxLayout()
+        ai_menu_row.setContentsMargins(0, 2, 0, 0)
+        menu_btn = QPushButton("⋯")
+        menu_btn.setFixedSize(24, 24)
+        menu_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: none;
+                font-size: 18px;
+                color: #5F5F5F;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: rgba(255, 255, 255, 0.1);
+                border-radius: 12px;
+                color: #9AA0A6;
+            }
+        """)
+        menu_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        ai_menu_row.addWidget(menu_btn)
+        ai_menu_row.addStretch()
+        main_container.addLayout(ai_menu_row)
+
         message_layout.addWidget(main_container_widget)
 
         # Add stretch to keep AI messages on the left
         message_layout.addStretch()
+
+        # MESSAGE TRACKING
+        message_index = len(self.message_widgets)
+        message_data = {
+            'widget': message_widget,
+            'role': 'assistant',
+            'content': message,
+            'display_content': display_message,
+            'index': message_index,
+            'text_label': first_text_label,
+            'content_wrapper_layout': content_wrapper_layout
+        }
+        self.message_widgets.append(message_data)
+
+        # Connect menu button
+        menu_btn.clicked.connect(lambda: self._show_message_menu(message_data))
 
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
         self.scroll_to_bottom()
@@ -2341,6 +2683,250 @@ class ChatWindow(QWidget):
         if isinstance(scroll_area, QScrollArea):
             scrollbar = scroll_area.verticalScrollBar()
             scrollbar.setValue(scrollbar.maximum())
+
+    # ═══════════════════════════════════════════════════════════
+    # MESSAGE CONTROL METHODS (Edit, Delete, Rewind, Regenerate)
+    # ═══════════════════════════════════════════════════════════
+
+    def _show_message_menu(self, message_data):
+        """Show context menu for message"""
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #2A2A2A;
+                border: 1px solid #3C3C3C;
+                border-radius: 8px;
+                padding: 4px;
+                color: #E8EAED;
+            }
+            QMenu::item {
+                padding: 8px 16px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #3C3C3C;
+            }
+        """)
+
+        # Edit action
+        edit_action = QAction("✏️ Edit Message", self)
+        edit_action.triggered.connect(lambda: self._edit_message(message_data))
+        menu.addAction(edit_action)
+
+        # Regenerate action (AI messages only)
+        if message_data['role'] == 'assistant':
+            regen_action = QAction("🔄 Regenerate Response", self)
+            regen_action.triggered.connect(lambda: self._regenerate_response(message_data))
+            menu.addAction(regen_action)
+
+        menu.addSeparator()
+
+        # Delete action
+        delete_action = QAction("🗑️ Delete Message", self)
+        delete_action.triggered.connect(lambda: self._delete_message(message_data))
+        menu.addAction(delete_action)
+
+        # Rewind action
+        rewind_action = QAction("⏪ Rewind to Here", self)
+        rewind_action.triggered.connect(lambda: self._rewind_to_message(message_data))
+        menu.addAction(rewind_action)
+
+        menu.exec(QCursor.pos())
+
+    def _edit_message(self, message_data):
+        """Edit a message"""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QTextEdit, QPushButton, QLabel
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Edit Message")
+        dialog.setMinimumWidth(500)
+        dialog.setStyleSheet("""
+            QDialog {
+                background-color: #212121;
+            }
+            QLabel {
+                color: #E8EAED;
+                font-size: 13px;
+            }
+        """)
+
+        layout = QVBoxLayout(dialog)
+
+        # Header
+        header = QLabel(f"<b>Edit {'Your' if message_data['role'] == 'user' else 'AI'} Message</b>")
+        layout.addWidget(header)
+
+        # Text edit
+        text_edit = QTextEdit()
+        text_edit.setPlainText(message_data['content'])
+        text_edit.setStyleSheet("""
+            QTextEdit {
+                background-color: #2A2A2A;
+                border: 1px solid #3C3C3C;
+                border-radius: 6px;
+                padding: 8px;
+                color: #E8EAED;
+                font-size: 13px;
+                font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            }
+        """)
+        text_edit.setMinimumHeight(150)
+        layout.addWidget(text_edit)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2A2A2A;
+                border: 1px solid #3C3C3C;
+                border-radius: 6px;
+                padding: 8px 16px;
+                color: #E8EAED;
+            }
+            QPushButton:hover {
+                background-color: #3C3C3C;
+            }
+        """)
+        cancel_btn.clicked.connect(dialog.reject)
+        button_layout.addWidget(cancel_btn)
+
+        save_text = "Save & Regenerate" if message_data['role'] == 'user' else "Save"
+        save_btn = QPushButton(save_text)
+        save_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1A73E8;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 16px;
+                color: white;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: #1557B0;
+            }
+        """)
+        save_btn.clicked.connect(lambda: self._save_edited_message(message_data, text_edit.toPlainText(), dialog))
+        button_layout.addWidget(save_btn)
+
+        layout.addLayout(button_layout)
+
+        dialog.exec()
+
+    def _save_edited_message(self, message_data, new_content, dialog):
+        """Save edited message and handle consequences"""
+        if not new_content.strip():
+            return
+
+        # Update message content
+        message_data['content'] = new_content
+
+        # Update in AI history
+        history_index = self._get_history_index(message_data)
+        if history_index >= 0:
+            self.controller.ai.conversation_history[history_index]['content'] = new_content
+
+        # Update display
+        if message_data.get('text_label'):
+            message_data['text_label'].setText(self.render_markdown(new_content))
+
+        # If user message, trigger regeneration
+        if message_data['role'] == 'user':
+            # Rewind to after this message (delete everything after)
+            self._rewind_to_message(message_data, keep_message=True)
+            # Send message again (this will trigger AI response)
+            self.controller.send_message(new_content)
+
+        # Save session
+        self.controller._auto_save_session()
+
+        dialog.accept()
+
+    def _delete_message(self, message_data):
+        """Delete a message"""
+        # Get history index FIRST, before removing from tracking list
+        history_index = self._get_history_index(message_data)
+
+        # Remove from UI
+        widget = message_data['widget']
+        self.chat_layout.removeWidget(widget)
+        widget.deleteLater()
+
+        # Remove from tracking
+        self.message_widgets.remove(message_data)
+
+        # Reindex remaining messages
+        for i, msg in enumerate(self.message_widgets):
+            msg['index'] = i
+
+        # Remove from AI history
+        if history_index >= 0:
+            self.controller.ai.conversation_history.pop(history_index)
+
+        # Save session
+        self.controller._auto_save_session()
+
+    def _rewind_to_message(self, message_data, keep_message=False):
+        """Rewind conversation to a specific message"""
+        target_index = message_data['index']
+
+        # Determine cutoff point
+        cutoff = target_index + 1 if keep_message else target_index
+
+        # Remove all messages after this point from UI
+        for i in range(len(self.message_widgets) - 1, cutoff - 1, -1):
+            msg_data = self.message_widgets[i]
+            self.chat_layout.removeWidget(msg_data['widget'])
+            msg_data['widget'].deleteLater()
+
+        # Truncate message tracking
+        self.message_widgets = self.message_widgets[:cutoff]
+
+        # Truncate AI history
+        history_index = self._get_history_index(message_data)
+        if history_index >= 0:
+            if keep_message:
+                history_index += 1
+            self.controller.ai.conversation_history = self.controller.ai.conversation_history[:history_index]
+
+        # Save session
+        self.controller._auto_save_session()
+
+    def _regenerate_response(self, message_data):
+        """Regenerate AI response"""
+        # Find the user message before this AI message
+        target_index = message_data['index']
+
+        # Find previous user message
+        user_msg = None
+        for i in range(target_index - 1, -1, -1):
+            if self.message_widgets[i]['role'] == 'user':
+                user_msg = self.message_widgets[i]
+                break
+
+        if not user_msg:
+            return  # No user message found
+
+        # Rewind to after that user message (delete this AI response and everything after)
+        self._rewind_to_message(user_msg, keep_message=True)
+
+        # Trigger new AI response
+        user_message = user_msg['content']
+        self.controller.send_message(user_message)
+
+    def _get_history_index(self, message_data):
+        """Get the index of a message in conversation_history.
+
+        message_widgets and conversation_history are always built in the same
+        order (one entry per user/AI turn, no system messages in either list),
+        so the widget's 'index' is the direct conversation_history index.
+        """
+        idx = message_data.get('index', -1)
+        if idx < 0 or idx >= len(self.controller.ai.conversation_history):
+            return -1
+        return idx
 
     def send_message(self):
         """Send message"""

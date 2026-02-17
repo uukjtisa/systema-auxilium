@@ -448,12 +448,21 @@ class AIEngine:
 
     def _process_ai_response(self, ai_text):
         """
-        Process AI response and handle work_environment or execute_code calls
+        Process AI response and handle work_environment, execute_code, or set_session_name calls
 
         Returns:
             dict: Response data with execution status
         """
         self.last_raw_response = ai_text
+
+        # Check for set_session_name call (handle first as it's simple)
+        session_name = None
+        session_name_call = self.tool_manager.parse_set_session_name(ai_text)
+        if session_name_call:
+            session_name, remaining_text = session_name_call
+            self.log(f"Set session name call detected: {session_name}")
+            # Use the cleaned text for further processing
+            ai_text = remaining_text
 
         # Check for work_environment call
         work_call = self.tool_manager.parse_work_environment(ai_text)
@@ -480,7 +489,8 @@ class AIEngine:
                     'has_work_call': False,
                     'in_work_mode': False,
                     'thinking': False,
-                    'exited_work_mode': True
+                    'exited_work_mode': True,
+                    'session_name': session_name
                 }
 
             # Store output for next iteration
@@ -498,7 +508,8 @@ class AIEngine:
                 'has_work_call': True,
                 'in_work_mode': True,
                 'thinking': True,
-                'code': code
+                'code': code,
+                'session_name': session_name
             }
 
         # Check for execute_code call
@@ -529,7 +540,8 @@ class AIEngine:
                 'in_work_mode': False,
                 'thinking': False,
                 'executed': True,
-                'execution_success': result['success']
+                'execution_success': result['success'],
+                'session_name': session_name
             }
 
         # No execution calls - normal response
@@ -542,7 +554,8 @@ class AIEngine:
             'response': ai_text,
             'has_work_call': False,
             'in_work_mode': False,
-            'thinking': False
+            'thinking': False,
+            'session_name': session_name
         }
 
     def continue_work_mode(self):
