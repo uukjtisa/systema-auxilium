@@ -54,6 +54,10 @@ class ToolManager:
         self.generated_dir = os.path.join(os.getcwd(), '.generated')
         self._ensure_generated_dir()
 
+        # Canonical tool keys and their normalised (no-underscore, lowercase) forms
+        self._tool_keys = ['work_environment', 'execute_code', 'set_session_name']
+        self._tool_keys_norm = {k.replace('_', '').lower(): k for k in self._tool_keys}
+
     def _ensure_generated_dir(self):
         """Create .generated directory if it doesn't exist"""
         try:
@@ -70,12 +74,11 @@ class ToolManager:
         Returns:
             tuple: (code, remaining_text) or None if not found
         """
-        json_data = self._extract_json(text)
+        json_data = self._extract_json(text, tool_key='work_environment')
 
-        if json_data and 'work_environment' in json_data:
-            code = json_data.get('input', '').strip()
-            # Remove JSON block from text
-            remaining_text = self._remove_json_from_text(text, json_data)
+        if json_data and self._has_tool_key(json_data, 'work_environment'):
+            code = (self._get_tool_value(json_data, 'input') or '').strip()
+            remaining_text = self._remove_json_from_text(text, json_data, tool_key='work_environment')
             return code, remaining_text
 
         return None
@@ -87,12 +90,11 @@ class ToolManager:
         Returns:
             tuple: (code, remaining_text) or None if not found
         """
-        json_data = self._extract_json(text)
+        json_data = self._extract_json(text, tool_key='execute_code')
 
-        if json_data and 'execute_code' in json_data:
-            code = json_data.get('input', '').strip()
-            # Remove JSON block from text
-            remaining_text = self._remove_json_from_text(text, json_data)
+        if json_data and self._has_tool_key(json_data, 'execute_code'):
+            code = (self._get_tool_value(json_data, 'input') or '').strip()
+            remaining_text = self._remove_json_from_text(text, json_data, tool_key='execute_code')
             return code, remaining_text
 
         return None
@@ -100,18 +102,17 @@ class ToolManager:
     def parse_set_session_name(self, text):
         """
         Parse set_session_name call from AI output
-        
+
         Returns:
             tuple: (session_name, remaining_text) or None if not found
         """
-        json_data = self._extract_json(text)
-        
-        if json_data and 'set_session_name' in json_data:
-            session_name = json_data.get('set_session_name', '').strip()
-            # Remove JSON block from text
-            remaining_text = self._remove_json_from_text(text, json_data)
+        json_data = self._extract_json(text, tool_key='set_session_name')
+
+        if json_data and self._has_tool_key(json_data, 'set_session_name'):
+            session_name = (self._get_tool_value(json_data, 'set_session_name') or '').strip()
+            remaining_text = self._remove_json_from_text(text, json_data, tool_key='set_session_name')
             return session_name, remaining_text
-        
+
         return None
 
     def _check_supervised_execution(self, code, execution_type):
@@ -341,64 +342,227 @@ class ToolManager:
         """Reset Python interpreter state"""
         self.tools['python'].reset()
 
+    def strip_tool_calls(self, text):
+        """
+        Remove all tool call JSON blocks from text for display purposes.
+        Does NOT execute any code — purely for cleaning stored messages before rendering.
+        """
+        if not text:
+            return text
+        for key in self._tool_keys:
+            text = self._remove_json_from_text(text, None, tool_key=key)
+        return text
+
     # --- Internal helper methods ---
 
-    def _extract_json(self, text):
+    def _norm_key(self, key):
+        """Normalise a key for fuzzy comparison (strip underscores, lowercase)."""
+        return key.replace('_', '').lower()
+
+    def _find_canonical_tool_key(self, data):
         """
-        Extract first valid JSON block from text
-        Supports both ```json code blocks and bare JSON
+        Return the canonical tool key present in a parsed JSON dict, or None.
+        Handles AI inconsistencies like 'setsessionname' vs 'set_session_name'.
+        """
+        for k in data:
+            canonical = self._tool_keys_norm.get(self._norm_key(k))
+            if canonical:
+                return canonical
+        return None
+
+    def _has_tool_key(self, data, tool_key):
+        """Check if data contains tool_key or any fuzzy variant of it."""
+        target = self._norm_key(tool_key)
+        return any(self._norm_key(k) == target for k in data)
+
+    def _get_tool_value(self, data, tool_key):
+        """
+        Get value for a tool key using fuzzy matching so that e.g.
+        'setsessionname' is found when looking up 'set_session_name'.
+        """
+        target = self._norm_key(tool_key)
+        for k, v in data.items():
+            if self._norm_key(k) == target:
+                return v
+        return None
+
+    def _count_unmatched_closing_braces(self, text):
+        """
+        Count top-level unmatched closing braces in text (outside strings and
+        code fences).  Returns how many orphaned } characters exist.
+        """
+        # Strip code fences so their braces are not counted
+        stripped = re.sub(r'```[^`]*```', '', text, flags=re.DOTALL)
+        depth = 0
+        in_string = False
+        escape_next = False
+        for char in stripped:
+            if escape_next:
+                escape_next = False
+                continue
+            if char == '\\':
+                escape_next = True
+                continue
+            if char == '"' and not escape_next:
+                in_string = not in_string
+                continue
+            if not in_string:
+                if char == '{':
+                    depth += 1
+                elif char == '}':
+                    depth -= 1
+        return max(0, -depth)
+
+    def _cleanup_orphaned_braces(self, text):
+        """
+        Strip lone } lines from the END of text, but only as many as are
+        actually unmatched.  Removes AI formatting artifacts (e.g. a stray }
+        after a code block) without touching valid JSON that must remain for
+        sibling parse calls.
+        """
+        unmatched = self._count_unmatched_closing_braces(text)
+        if unmatched == 0:
+            return text.strip()
+        lines = text.splitlines()
+        removed = 0
+        while removed < unmatched and lines:
+            if lines[-1].strip() == '}':
+                lines.pop()
+                removed += 1
+            else:
+                break  # last line is not a lone } — stop
+        return '\n'.join(lines).strip()
+
+    def _extract_json(self, text, tool_key=None):
+        """
+        Extract all valid JSON blocks from text and return the one matching
+        tool_key.  Supports both ```json code blocks and bare JSON, and handles
+        AI inconsistencies like missing underscores in key names.
+
+        Scans ALL occurrences of both patterns so mixed responses (e.g. one
+        bare JSON + one code-block JSON) are handled correctly.
+
+        Args:
+            text: The text to search
+            tool_key: Optional canonical key (e.g. 'execute_code').  When
+                      provided, returns the first JSON containing this key
+                      (fuzzy-matched).  When None, returns the first tool JSON
+                      found (preserves original behaviour).
 
         Returns:
             dict or None
         """
-        # Try code blocks first: ```json {...} ```
+        candidates = []
+
+        # Collect code-block JSONs: ```json {...} ```
         code_block_pattern = r'```(?:json)?\s*(\{[^`]+\})\s*```'
-        match = re.search(code_block_pattern, text, re.DOTALL)
-
-        if match:
+        for match in re.finditer(code_block_pattern, text, re.DOTALL):
             try:
-                return json.loads(match.group(1).strip())
+                data = json.loads(match.group(1).strip())
+                if self._find_canonical_tool_key(data):
+                    candidates.append(data)
             except json.JSONDecodeError:
                 pass
 
-        # Try bare JSON: {...}
-        bare_json_pattern = r'\{[^{}]*"(?:work_environment|execute_code|set_session_name)"[^{}]*\}'
-        match = re.search(bare_json_pattern, text, re.DOTALL)
+        # Collect bare JSONs — use brace-counting to handle nested braces/f-strings
+        start = 0
+        while True:
+            start_pos = text.find('{', start)
+            if start_pos == -1:
+                break
 
-        if match:
-            try:
-                return json.loads(match.group(0).strip())
-            except json.JSONDecodeError:
-                pass
+            brace_count = 0
+            in_string = False
+            escape_next = False
+            end_pos = None
 
-        return None
+            for i in range(start_pos, len(text)):
+                char = text[i]
+                if escape_next:
+                    escape_next = False
+                    continue
+                if char == '\\':
+                    escape_next = True
+                    continue
+                if char == '"':
+                    in_string = not in_string
+                    continue
+                if not in_string:
+                    if char == '{':
+                        brace_count += 1
+                    elif char == '}':
+                        brace_count -= 1
+                        if brace_count == 0:
+                            end_pos = i + 1
+                            break
 
-    def _remove_json_from_text(self, text, json_data):
-        """Remove the JSON block from text to get remaining message"""
-        # Strategy: Find and remove the original JSON block directly from text
-        # This avoids formatting mismatches from json.dumps()
+            if end_pos:
+                try:
+                    data = json.loads(text[start_pos:end_pos])
+                    if self._find_canonical_tool_key(data):
+                        candidates.append(data)
+                except json.JSONDecodeError:
+                    pass
+                start = end_pos
+            else:
+                break
 
-        # Pattern 1: Remove ```json ... ``` blocks
-        code_block_pattern = r'```(?:json)?\s*(\{.*?\})\s*```'
-        match = re.search(code_block_pattern, text, re.DOTALL)
-        if match:
-            # Verify this is the right JSON by checking if it has the tool key
+        if not candidates:
+            return None
+
+        if tool_key:
+            # Return first candidate that contains the requested key (fuzzy)
+            for data in candidates:
+                if self._has_tool_key(data, tool_key):
+                    return data
+            return None
+
+        # No specific key requested — return first found (original behaviour)
+        return candidates[0]
+
+    def _remove_json_from_text(self, text, json_data, tool_key=None):
+        """
+        Remove the JSON block for the given tool_key from text, leaving all
+        other tool blocks intact.  Handles both code-fence blocks and bare
+        JSON, with fuzzy key matching to cover AI inconsistencies.
+
+        Args:
+            text: The original text
+            json_data: The parsed JSON dict (used to verify the right block)
+            tool_key: The specific tool key whose block should be removed
+
+        Returns:
+            str: Text with the matching JSON block removed
+        """
+        # --- Pattern 1: code-fence blocks ---
+        code_block_pattern = r'```(?:json)?\s*(\{[^`]+\})\s*```'
+        for match in re.finditer(code_block_pattern, text, re.DOTALL):
             try:
                 found_json = json.loads(match.group(1))
-                if 'work_environment' in found_json or 'execute_code' in found_json or 'set_session_name' in found_json:
+                should_remove = (
+                    (tool_key and self._has_tool_key(found_json, tool_key)) or
+                    (not tool_key and self._find_canonical_tool_key(found_json))
+                )
+                if should_remove:
                     text = text[:match.start()] + text[match.end():]
-                    return text.strip()
-            except:
+                    return self._cleanup_orphaned_braces(text.strip())
+            except Exception:
                 pass
 
-        # Pattern 2: Remove bare JSON objects
-        # Use a more sophisticated approach - find the JSON and remove it
-        # Look for the opening brace of a JSON with our tool keys
-        start_pattern = r'\{\s*"(?:work_environment|execute_code|set_session_name)"'
-        start_match = re.search(start_pattern, text)
+        # --- Pattern 2: bare JSON objects ---
+        # Build key variants to search for (handles missing underscores)
+        if tool_key:
+            key_variants = [tool_key, tool_key.replace('_', '')]
+        else:
+            key_variants = self._tool_keys + [k.replace('_', '') for k in self._tool_keys]
 
-        if start_match:
-            # Find the matching closing brace by counting braces
+        for kv in key_variants:
+            pat = r'\{\s*"' + re.escape(kv) + r'"'
+            start_match = re.search(pat, text)
+            if not start_match:
+                continue
+
+            # Walk forward counting braces to find the matching closing brace
             start_pos = start_match.start()
             brace_count = 0
             in_string = False
@@ -425,12 +589,13 @@ class ToolManager:
                     elif char == '}':
                         brace_count -= 1
                         if brace_count == 0:
-                            # Found the end!
                             end_pos = i + 1
                             text = text[:start_pos] + text[end_pos:]
-                            return text.strip()
+                            return self._cleanup_orphaned_braces(text.strip())
 
-        return text.strip()
+            break  # found a matching start pattern but no end — stop trying
+
+        return self._cleanup_orphaned_braces(text.strip())
 
     def _detect_gui_code(self, code):
         """Detect if code is likely a GUI application"""
