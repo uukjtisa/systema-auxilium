@@ -10,8 +10,9 @@ Features:
 
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                              QTextEdit, QLineEdit, QPushButton, QLabel,
-                             QFrame, QMenu, QScrollArea, QApplication)
-from PyQt6.QtCore import Qt, QTimer, QPoint, pyqtSignal, QRect
+                             QFrame, QMenu, QScrollArea, QApplication,
+                             QGraphicsOpacityEffect)
+from PyQt6.QtCore import Qt, QTimer, QPoint, pyqtSignal, QRect, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup
 from PyQt6.QtGui import QAction, QCursor, QRegion
 from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QFont
 import re
@@ -19,6 +20,43 @@ import markdown2
 import os
 import json
 import threading
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ANIMATION TIMING CONSTANTS
+# Tweak these values to adjust the feel of every animation in the chat window.
+# I didn't add these in the settings to avoid bloating it.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# --- Window ---
+ANIM_WINDOW_FADE_IN_MS       = 220    # Chat window fade-in when shown (ms)
+
+# --- Sidebar ---
+ANIM_SIDEBAR_SLIDE_MS        = 260    # Sidebar slide in / out (ms)
+
+# --- Messages ---
+ANIM_MSG_IN_HEIGHT_MS        = 480    # Message pop-in: height expand (ms)
+ANIM_MSG_IN_FADE_MS          = 380    # Message pop-in: fade-in (ms)
+ANIM_MSG_IN_OVERSHOOT_PX     = 120    # Extra pixels past natural height (OutBack spring feel)
+ANIM_MSG_OUT_FADE_MS         = 220    # Message pop-out: fade-out (ms)
+ANIM_MSG_OUT_HEIGHT_MS       = 280    # Message pop-out: height collapse (ms)
+
+# --- Scroll (animated jumps, e.g. scroll-to-new-message) ---
+ANIM_SCROLL_MIN_MS           = 180    # Shortest animated scroll duration (ms)
+ANIM_SCROLL_MAX_MS           = 600    # Longest animated scroll duration (ms)
+
+# --- Inertia scroll (mouse-wheel / trackpad momentum) ---
+ANIM_INERTIA_INTERVAL_MS     = 14     # Tick interval (~70 fps)
+ANIM_INERTIA_FRICTION        = 0.86   # Velocity multiplier per tick (lower = snappier stop)
+ANIM_INERTIA_MIN_VELOCITY    = 0.5    # Stop threshold (px / tick)
+ANIM_INERTIA_SCALE           = 0.38   # Wheel angleDelta → velocity scale
+ANIM_INERTIA_MAX_VELOCITY    = 1400   # Max speed cap (px / tick)
+
+# --- UI feedback timers ---
+ANIM_COPY_FEEDBACK_MS        = 1500   # "✓ Copied!" button state duration (ms)
+ANIM_STATUS_CLEAR_MS         = 2000   # Status-bar message clear delay (ms)
+
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
 class MultiLineInput(QTextEdit):
@@ -794,7 +832,7 @@ class CodeBlockWidget(QWidget):
                 color: #34A853;
             }
         """)
-        QTimer.singleShot(1500, self.reset_copy_button)
+        QTimer.singleShot(ANIM_COPY_FEEDBACK_MS, self.reset_copy_button)
 
     def reset_copy_button(self):
         self.copy_btn.setText("📋")
@@ -830,6 +868,31 @@ class ChatWindow(QWidget):
         self.thinking_dots = 0
         self.thinking_label_shown = False
         self.sidebar_visible = False
+
+        # ── Smooth scroll state (main chat) ───────────────────────────────
+        self._scroll_anim = None
+        self._inertia_velocity = 0.0
+        self._inertia_timer = QTimer()
+        self._inertia_timer.setInterval(ANIM_INERTIA_INTERVAL_MS)
+        self._inertia_timer.timeout.connect(self._inertia_tick)
+        self._user_scrolling = False
+
+        # ── Smooth scroll state (sidebar) ─────────────────────────────────
+        self._sidebar_scroll_anim = None
+        self._sidebar_inertia_velocity = 0.0
+        self._sidebar_inertia_timer = QTimer()
+        self._sidebar_inertia_timer.setInterval(ANIM_INERTIA_INTERVAL_MS)
+        self._sidebar_inertia_timer.timeout.connect(self._sidebar_inertia_tick)
+
+        # ── Smooth scroll state (input field) ─────────────────────────────
+        self._input_inertia_velocity = 0.0
+        self._input_inertia_timer = QTimer()
+        self._input_inertia_timer.setInterval(ANIM_INERTIA_INTERVAL_MS)
+        self._input_inertia_timer.timeout.connect(self._input_inertia_tick)
+
+        # ── Animation state ────────────────────────────────────────────────────
+        self._sidebar_anim = None
+        self._open_anim = None
 
         # Voice state
         self.voice_enabled = False
@@ -908,13 +971,6 @@ class ChatWindow(QWidget):
 
         self.create_resize_handles()
 
-    def resizeEvent(self, event):
-        """Handle window resize to maintain layout"""
-        super().resizeEvent(event)
-        # Force layout update when window is resized
-        if hasattr(self, 'chat_widget'):
-            self.chat_widget.updateGeometry()
-
     def load_config(self):
         try:
             if os.path.exists(self.config_file):
@@ -949,45 +1005,64 @@ class ChatWindow(QWidget):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # === SIDEBAR ===
-        self.sidebar = QFrame()
+        # ═══════════════════════════════════════════════════════════════════════
+        # SIDEBAR — overlay (not in main_layout), parented to self.container.
+        # Slides in/out via QPropertyAnimation on geometry.
+        # ═══════════════════════════════════════════════════════════════════════
+        self.sidebar = QFrame(self.container)
         self.sidebar.setFixedWidth(240)
         self.sidebar.setStyleSheet("""
             QFrame {
                 background-color: #171717;
                 border-right: 1px solid #2A2A2A;
+                border-top-left-radius: 12px;
+                border-bottom-left-radius: 12px;
             }
         """)
-        self.sidebar.hide()  # Start hidden
+        # Start the sidebar parked off-screen to the left (hidden)
+        self.sidebar.setGeometry(-240, 0, 240, 650)
+        self.sidebar.hide()
 
         # Create main sidebar layout (contains scroll area)
         sidebar_main_layout = QVBoxLayout(self.sidebar)
         sidebar_main_layout.setContentsMargins(0, 0, 0, 0)
         sidebar_main_layout.setSpacing(0)
 
-        # Create scroll area for sidebar content
-        sidebar_scroll = QScrollArea()
-        sidebar_scroll.setWidgetResizable(True)
-        sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        sidebar_scroll.setStyleSheet("""
-                QScrollArea {
-                    border: none;
-                    background-color: transparent;
-                }
-                QScrollBar:vertical {
-                    background: #171717;
-                    width: 8px;
-                    border-radius: 4px;
-                }
-                QScrollBar::handle:vertical {
-                    background: #3C3C3C;
-                    border-radius: 4px;
-                    min-height: 20px;
-                }
-                QScrollBar::handle:vertical:hover {
-                    background: #4A4A4A;
-                }
-            """)
+        # ── Sidebar scroll area (saved as instance var for smooth scroll) ──
+        self.sidebar_scroll = QScrollArea()
+        self.sidebar_scroll.setWidgetResizable(True)
+        self.sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.sidebar_scroll.setStyleSheet("""
+            QScrollArea {
+                border: none;
+                background-color: transparent;
+            }
+            QScrollBar:vertical {
+                background: transparent;
+                width: 12px;
+                margin: 0;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(168, 199, 250, 0.3);
+                border-radius: 6px;
+                min-height: 30px;
+                margin: 2px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(168, 199, 250, 0.5);
+            }
+            QScrollBar::handle:vertical:pressed {
+                background: rgba(168, 199, 250, 0.7);
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
+        """)
+        # Install viewport event filter for inertia scroll
+        self.sidebar_scroll.viewport().installEventFilter(self)
 
         # Create container widget for scrollable content
         sidebar_content = QWidget()
@@ -1141,7 +1216,7 @@ class ChatWindow(QWidget):
 
         sidebar_layout.addWidget(user_name_container)
 
-        # NEW: Personalization Instructions - Replace the entire personalization_container section with this:
+        # NEW: Personalization Instructions
         personalization_container = QFrame()
         personalization_container.setStyleSheet("""
             QFrame {
@@ -1248,12 +1323,12 @@ class ChatWindow(QWidget):
         sidebar_layout.addStretch()
 
         # Set the content widget to the scroll area
-        sidebar_scroll.setWidget(sidebar_content)
+        self.sidebar_scroll.setWidget(sidebar_content)
 
         # Add scroll area to main sidebar layout
-        sidebar_main_layout.addWidget(sidebar_scroll)
+        sidebar_main_layout.addWidget(self.sidebar_scroll)
 
-        main_layout.addWidget(self.sidebar)
+        # NOTE: sidebar is NOT added to main_layout — it is an overlay.
 
         # === MAIN CHAT AREA ===
         chat_container = QWidget()
@@ -1277,9 +1352,10 @@ class ChatWindow(QWidget):
         header_layout = QHBoxLayout(header_bar)
         header_layout.setContentsMargins(16, 0, 16, 0)
 
-        # Toggle sidebar button
-        self.toggle_sidebar_btn = QPushButton("☰")
+        # ── Toggle sidebar button ─────────────────────────────────────────────
+        self.toggle_sidebar_btn = QPushButton("☰", self.container)
         self.toggle_sidebar_btn.setFixedSize(32, 32)
+        self.toggle_sidebar_btn.setGeometry(16, 9, 32, 32)
         self.toggle_sidebar_btn.setStyleSheet("""
             QPushButton {
                 background: transparent;
@@ -1294,7 +1370,12 @@ class ChatWindow(QWidget):
             }
         """)
         self.toggle_sidebar_btn.clicked.connect(self.toggle_sidebar)
-        header_layout.addWidget(self.toggle_sidebar_btn)
+        self.toggle_sidebar_btn.raise_()
+        self.toggle_sidebar_btn.show()
+
+        # Spacer in the header so the title stays correctly indented
+        from PyQt6.QtWidgets import QSpacerItem, QSizePolicy
+        header_layout.addItem(QSpacerItem(48, 32, QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed))
 
         # Title
         title = QLabel("Systema Auxilium")
@@ -1428,8 +1509,12 @@ class ChatWindow(QWidget):
         self.chat_layout.setSpacing(0)
         self.chat_layout.addStretch()
 
+        self.chat_scroll_area = scroll_area
         scroll_area.setWidget(self.chat_widget)
         chat_layout.addWidget(scroll_area)
+
+        # Install event filter on the viewport for smooth inertia scrolling (main chat)
+        scroll_area.viewport().installEventFilter(self)
 
         # Status label
         self.status_label = QLabel("")
@@ -1458,7 +1543,7 @@ class ChatWindow(QWidget):
         input_layout.setContentsMargins(0, 0, 0, 0)
         input_layout.setSpacing(8)
 
-        # Mode selector and input combined - Update the combined_container styling
+        # Mode selector and input combined
         combined_container = QFrame()
         combined_container.setStyleSheet("""
             QFrame {
@@ -1509,7 +1594,7 @@ class ChatWindow(QWidget):
         self.mode_dropdown.clicked.connect(self.show_mode_menu)
         combined_layout.addWidget(self.mode_dropdown)
 
-        # Text input - Replace the section where self.input_field is created and styled
+        # Text input
         self.input_field = ResizableInput()
         self.input_field.text_input.setStyleSheet("""
             QTextEdit {
@@ -1527,6 +1612,9 @@ class ChatWindow(QWidget):
         """)
         self.input_field.enterPressed.connect(self.send_message)
         combined_layout.addWidget(self.input_field, 1)
+
+        # Install inertia scroll on the input field's viewport
+        self.input_field.text_input.viewport().installEventFilter(self)
 
         # NEW: Voice button inside message box
         self.voice_btn_inline = QPushButton("🎤")
@@ -1628,6 +1716,9 @@ class ChatWindow(QWidget):
 
         main_layout.addWidget(chat_container)
 
+        # Re-raise the toggle button so it sits above chat_container in Z-order.
+        self.toggle_sidebar_btn.raise_()
+
         # Load personalization
         self.load_personalization()
 
@@ -1641,81 +1732,140 @@ class ChatWindow(QWidget):
             "Click the 💬 icon to enforce tool usage."
         )
 
-    def toggle_voice(self):
-        """Toggle voice mode on/off"""
-        if not self.voice_btn_inline.isChecked():
-            # Disable voice
-            self.disable_voice()
-        else:
-            # Enable voice
-            self.enable_voice()
+    # ═══════════════════════════════════════════════════════════
+    # ANIMATION METHODS
+    # ═══════════════════════════════════════════════════════════
 
-    def enable_voice(self):
-        """Enable voice mode"""
-        success, message = self.controller.enable_voice_mode()
-
-        if success:
-            self.voice_enabled = True
-            self.voice_btn_inline.setChecked(True)  # Changed
-            self.add_system_message(f"🎤 **Voice Mode Enabled**\n\n{message}")
-            self.update_voice_status("Ready")
-        else:
-            self.voice_enabled = False
-            self.voice_btn_inline.setChecked(False)  # Changed
-            self.add_system_message(f"❌ **Voice Mode Failed**\n\n{message}")
-
-    def disable_voice(self):
-        """Disable voice mode"""
-        self.controller.disable_voice_mode()
-        self.voice_enabled = False
-        self.voice_btn_inline.setChecked(False)
-        self.update_voice_status("")
-        self.add_system_message("🔇 **Voice Mode Disabled**")
-
-    def load_personalization(self):
-        """Load personalization settings"""
-        user_name = self.controller.get_user_name()
-        # Remove custom_instructions loading since it's now in the dialog
-        if user_name:
-            self.user_name_input.setText(user_name)
-
-    def update_voice_status(self, status):
-        """Update voice status indicator"""
-        status_styles = {
-            'listening': ('🔴 Listening...', 'color: #EA4335; font-weight: bold;'),
-            'processing': ('🟡 Processing...', 'color: #FBBC04; font-weight: bold;'),
-            'speaking': ('🟢 Speaking...', 'color: #34A853; font-weight: bold;'),
-            'inactive': ('', ''),
-            'Ready': ('🎤 Ready', 'color: #9AA0A6;')
-        }
-
-        text, style = status_styles.get(status, ('', ''))
-        self.voice_status_label.setText(text)
-        self.voice_status_label.setStyleSheet(f"QLabel {{ font-size: 10px; margin: 0 8px; {style} }}")
-
-        # NEW: Show interrupt button during speaking (manual mode only)
-        if status == 'speaking' and self.controller.get_voice_interrupt_mode() == 'manual':
-            self.voice_interrupt_btn.show()
-        else:
-            self.voice_interrupt_btn.hide()
-
-    def closeEvent(self, event):
-        """Handle window close - just hide, don't close app"""
-        self.hide()
-        event.ignore()  # Prevent the window from actually closing
+    def showEvent(self, event):
+        """Fade the window in every time it becomes visible."""
+        super().showEvent(event)
+        self.setWindowOpacity(0.0)
+        self._open_anim = QPropertyAnimation(self, b"windowOpacity")
+        self._open_anim.setDuration(ANIM_WINDOW_FADE_IN_MS)
+        self._open_anim.setStartValue(0.0)
+        self._open_anim.setEndValue(1.0)
+        self._open_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._open_anim.start()
 
     def toggle_sidebar(self):
-        """Toggle sidebar visibility"""
+        """Toggle sidebar visibility with a smooth slide animation."""
         self.sidebar_visible = not self.sidebar_visible
-        if self.sidebar_visible:
+        self._animate_sidebar(self.sidebar_visible)
+
+    def _animate_sidebar(self, show: bool):
+        """Slide the sidebar in (show=True) or out (show=False)."""
+        if self._sidebar_anim is not None:
+            if self._sidebar_anim.state() == QPropertyAnimation.State.Running:
+                self._sidebar_anim.stop()
+
+        container_h = self.container.height()
+        sidebar_w = 240
+
+        if show:
+            self.sidebar.setGeometry(-sidebar_w, 0, sidebar_w, container_h)
             self.sidebar.show()
-            # Force layout update
-            self.sidebar.updateGeometry()
-            self.layout().update()
+            self.sidebar.raise_()
+            self.toggle_sidebar_btn.raise_()
+            start_geo = QRect(-sidebar_w, 0, sidebar_w, container_h)
+            end_geo   = QRect(0,          0, sidebar_w, container_h)
         else:
-            self.sidebar.hide()
-            # Force layout update
-            self.layout().update()
+            start_geo = QRect(0,          0, sidebar_w, container_h)
+            end_geo   = QRect(-sidebar_w, 0, sidebar_w, container_h)
+
+        self._sidebar_anim = QPropertyAnimation(self.sidebar, b"geometry")
+        self._sidebar_anim.setDuration(ANIM_SIDEBAR_SLIDE_MS)
+        self._sidebar_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._sidebar_anim.setStartValue(start_geo)
+        self._sidebar_anim.setEndValue(end_geo)
+
+        if not show:
+            self._sidebar_anim.finished.connect(lambda: self.sidebar.hide())
+
+        self._sidebar_anim.start()
+
+    def _animate_message_in(self, widget):
+        """
+        Slide-open + fade-in a new message widget.
+        Uses OutBack easing for a satisfying spring overshoot.
+        Timings controlled by ANIM_MSG_IN_* constants at top of file.
+        """
+        natural_h = widget.sizeHint().height()
+        if natural_h < 10:
+            natural_h = 300
+
+        # Start collapsed + invisible
+        widget.setMaximumHeight(0)
+
+        effect = QGraphicsOpacityEffect(widget)
+        effect.setOpacity(0.0)
+        widget.setGraphicsEffect(effect)
+
+        # Height: 0 → natural + overshoot (OutBack gives the spring feel)
+        height_anim = QPropertyAnimation(widget, b"maximumHeight")
+        height_anim.setDuration(ANIM_MSG_IN_HEIGHT_MS)
+        height_anim.setStartValue(0)
+        height_anim.setEndValue(natural_h + ANIM_MSG_IN_OVERSHOOT_PX)
+        height_anim.setEasingCurve(QEasingCurve.Type.OutBack)
+
+        # Opacity: 0 → 1
+        fade_anim = QPropertyAnimation(effect, b"opacity")
+        fade_anim.setDuration(ANIM_MSG_IN_FADE_MS)
+        fade_anim.setStartValue(0.0)
+        fade_anim.setEndValue(1.0)
+        fade_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        group = QParallelAnimationGroup(widget)
+        group.addAnimation(height_anim)
+        group.addAnimation(fade_anim)
+
+        def _on_done():
+            widget.setMaximumHeight(16777215)   # Qt QWIDGETSIZE_MAX — unconstrain
+            widget.setGraphicsEffect(None)
+
+        group.finished.connect(_on_done)
+
+        widget._anim_in_group = group
+        widget._anim_in_effect = effect
+        group.start()
+
+    def _animate_message_out(self, widget, callback):
+        """
+        Fade-out + collapse height of a message widget, then fire callback.
+        Timings controlled by ANIM_MSG_OUT_* constants at top of file.
+        """
+        if hasattr(widget, '_anim_in_group'):
+            try:
+                widget._anim_in_group.stop()
+            except RuntimeError:
+                pass
+            widget.setMaximumHeight(16777215)
+            widget.setGraphicsEffect(None)
+
+        effect = QGraphicsOpacityEffect(widget)
+        effect.setOpacity(1.0)
+        widget.setGraphicsEffect(effect)
+
+        fade_anim = QPropertyAnimation(effect, b"opacity")
+        fade_anim.setDuration(ANIM_MSG_OUT_FADE_MS)
+        fade_anim.setStartValue(1.0)
+        fade_anim.setEndValue(0.0)
+        fade_anim.setEasingCurve(QEasingCurve.Type.InCubic)
+
+        current_h = max(widget.height(), 10)
+        height_anim = QPropertyAnimation(widget, b"maximumHeight")
+        height_anim.setDuration(ANIM_MSG_OUT_HEIGHT_MS)
+        height_anim.setStartValue(current_h)
+        height_anim.setEndValue(0)
+        height_anim.setEasingCurve(QEasingCurve.Type.InCubic)
+
+        group = QParallelAnimationGroup(widget)
+        group.addAnimation(fade_anim)
+        group.addAnimation(height_anim)
+        group.finished.connect(callback)
+
+        widget._anim_out_group = group
+        widget._anim_out_effect = effect
+        group.start()
 
     def open_instructions_window(self):
         """Open custom instructions configuration window"""
@@ -1752,7 +1902,7 @@ class ChatWindow(QWidget):
         desc.setStyleSheet("color: #9AA0A6; font-size: 11px; margin-bottom: 8px;")
         layout.addWidget(desc)
 
-        # Text area - Update the text_edit section with better styling
+        # Text area
         text_edit = QTextEdit()
         text_edit.setPlaceholderText(
             "Example:\n"
@@ -1898,6 +2048,68 @@ class ChatWindow(QWidget):
             self.mode_dropdown.setText("💬")
             self.add_system_message("💬 **Normal Mode** - AI decides when to use Work environment or Single Execution")
 
+    def toggle_voice(self):
+        """Toggle voice mode on/off"""
+        if not self.voice_btn_inline.isChecked():
+            # Disable voice
+            self.disable_voice()
+        else:
+            # Enable voice
+            self.enable_voice()
+
+    def enable_voice(self):
+        """Enable voice mode"""
+        success, message = self.controller.enable_voice_mode()
+
+        if success:
+            self.voice_enabled = True
+            self.voice_btn_inline.setChecked(True)
+            self.add_system_message(f"🎤 **Voice Mode Enabled**\n\n{message}")
+            self.update_voice_status("Ready")
+        else:
+            self.voice_enabled = False
+            self.voice_btn_inline.setChecked(False)
+            self.add_system_message(f"❌ **Voice Mode Failed**\n\n{message}")
+
+    def disable_voice(self):
+        """Disable voice mode"""
+        self.controller.disable_voice_mode()
+        self.voice_enabled = False
+        self.voice_btn_inline.setChecked(False)
+        self.update_voice_status("")
+        self.add_system_message("🔇 **Voice Mode Disabled**")
+
+    def load_personalization(self):
+        """Load personalization settings"""
+        user_name = self.controller.get_user_name()
+        if user_name:
+            self.user_name_input.setText(user_name)
+
+    def update_voice_status(self, status):
+        """Update voice status indicator"""
+        status_styles = {
+            'listening': ('🔴 Listening...', 'color: #EA4335; font-weight: bold;'),
+            'processing': ('🟡 Processing...', 'color: #FBBC04; font-weight: bold;'),
+            'speaking': ('🟢 Speaking...', 'color: #34A853; font-weight: bold;'),
+            'inactive': ('', ''),
+            'Ready': ('🎤 Ready', 'color: #9AA0A6;')
+        }
+
+        text, style = status_styles.get(status, ('', ''))
+        self.voice_status_label.setText(text)
+        self.voice_status_label.setStyleSheet(f"QLabel {{ font-size: 10px; margin: 0 8px; {style} }}")
+
+        # Show interrupt button during speaking (manual mode only)
+        if status == 'speaking' and self.controller.get_voice_interrupt_mode() == 'manual':
+            self.voice_interrupt_btn.show()
+        else:
+            self.voice_interrupt_btn.hide()
+
+    def closeEvent(self, event):
+        """Handle window close - just hide, don't close app"""
+        self.hide()
+        event.ignore()  # Prevent the window from actually closing
+
     def on_user_name_changed(self, text):
         """Called when user name input changes"""
         user_name = text.strip()
@@ -1974,16 +2186,13 @@ class ChatWindow(QWidget):
         self.save_config()
 
     def _latex_to_base64_img(self, latex_expr, display=True):
-        """Render a LaTeX expression to a tight base64-encoded PNG using matplotlib.
-        Returns HTML with the rendered image + a dim copyable source line."""
+        """Render a LaTeX expression to a tight base64-encoded PNG using matplotlib."""
         try:
             import matplotlib
             matplotlib.use('Agg')
             import matplotlib.pyplot as plt
             import io, base64
 
-            # Start with a near-zero figure — bbox_inches='tight' will expand
-            # it to exactly fit the text, producing no excess whitespace.
             fig = plt.figure(figsize=(0.01, 0.01))
             fig.patch.set_alpha(0)
             ax = fig.add_axes([0, 0, 1, 1])
@@ -2003,7 +2212,6 @@ class ChatWindow(QWidget):
             buf.seek(0)
             b64 = base64.b64encode(buf.read()).decode('utf-8')
 
-            # Dim copyable source so the user can select & copy the raw LaTeX
             source_html = (
                 f'<span style="font-family:monospace;font-size:9px;'
                 f'color:#4A4A4A;user-select:text;">{latex_expr}</span>'
@@ -2028,33 +2236,23 @@ class ChatWindow(QWidget):
             return f'<code>{latex_expr}</code>'
 
     def _preprocess_latex(self, text):
-        """Detect and replace LaTeX math expressions with rendered PNG images.
-
-        Handles three notations:
-          1. Standard display math:   \\[ ... \\]
-          2. Standard inline math:    $ ... $
-          3. Bare-bracket display:    [ ... ]  (on its own line, containing LaTeX syntax)
-        """
+        """Detect and replace LaTeX math expressions with rendered PNG images."""
         import re
 
-        # --- 1. Standard display math:  \[ ... \] ---
         def replace_display(m):
             return self._latex_to_base64_img(m.group(1).strip(), display=True)
         text = re.sub(r'\\\[(.*?)\\\]', replace_display, text, flags=re.DOTALL)
 
-        # --- 2. Standard inline math:  $...$  (skip $$...$$) ---
         def replace_inline(m):
             return self._latex_to_base64_img(m.group(1).strip(), display=False)
         text = re.sub(r'(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)', replace_inline, text)
 
-        # --- 3. Bare-bracket display:  [ formula ]  on its own line
-        #    Only triggers when the content contains LaTeX-like tokens
         def replace_bracket(m):
             inner = m.group(1).strip()
             has_latex = bool(re.search(r'\\[a-zA-Z]+|[_^{}]|\bfrac\b|\bsum\b|\bint\b', inner))
             if has_latex:
                 return self._latex_to_base64_img(inner, display=True)
-            return m.group(0)  # Leave non-math brackets untouched
+            return m.group(0)
         text = re.sub(r'^\[\s*(.+?)\s*\]\s*$', replace_bracket, text, flags=re.MULTILINE)
 
         return text
@@ -2071,34 +2269,28 @@ class ChatWindow(QWidget):
         """Render markdown with special handling for code blocks"""
         import re
 
-        # Split text into parts: code blocks and regular text
         parts = []
         last_end = 0
 
-        # Pattern to match code blocks
         code_pattern = r'```(\w+)?\n(.*?)```'
 
         for match in re.finditer(code_pattern, text, re.DOTALL):
-            # Add text before code block
             if match.start() > last_end:
                 before_text = text[last_end:match.start()]
                 if before_text.strip():
                     parts.append(('text', before_text))
 
-            # Add code block
             language = match.group(1) or 'text'
             code_content = match.group(2)
             parts.append(('code', language, code_content))
 
             last_end = match.end()
 
-        # Add remaining text
         if last_end < len(text):
             remaining = text[last_end:]
             if remaining.strip():
                 parts.append(('text', remaining))
 
-        # If no code blocks found, render normally
         if not any(p[0] == 'code' for p in parts):
             return self.render_markdown(text)
 
@@ -2120,10 +2312,7 @@ class ChatWindow(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
-        # Clear message tracking
         self.message_widgets = []
-
-        # Clear AI history is handled by controller, not here
 
     def render_loaded_messages(self, messages):
         """Render messages from loaded session"""
@@ -2134,41 +2323,33 @@ class ChatWindow(QWidget):
             if role == 'user':
                 self.add_user_message(content)
             elif role == 'assistant':
-                # Clean tool usage from content
                 cleaned_content = self._remove_tool_usage_format(content)
                 self.add_ai_message(cleaned_content)
 
     def _remove_tool_usage_format(self, content):
         """Remove tool usage JSON blocks from AI message"""
         import re
-        # Remove JSON tool blocks (work_environment, execute_code, set_session_name)
-        # Pattern: ```json\n{...}\n```
         cleaned = re.sub(
             r'```json\s*\{[^}]*(?:"work_environment"|"execute_code"|"set_session_name")[^}]*\}.*?```',
             '',
             content,
             flags=re.DOTALL
         )
-        # Clean up extra whitespace
         cleaned = re.sub(r'\n\s*\n\s*\n+', '\n\n', cleaned)
         return cleaned.strip()
 
     def refresh_session_list(self):
         """Refresh the session list in sidebar"""
-        # Get sessions from controller
         if not hasattr(self, 'session_list_layout'):
             return
 
-        # Clear existing session items
         while self.session_list_layout.count() > 0:
             item = self.session_list_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
 
-        # Get sessions
         sessions = self.controller.get_session_list()
 
-        # Add session items
         for session in sessions:
             session_item = self._create_session_item(
                 session['id'],
@@ -2178,7 +2359,6 @@ class ChatWindow(QWidget):
             )
             self.session_list_layout.addWidget(session_item)
 
-        # Add stretch at the end
         self.session_list_layout.addStretch()
 
     def _create_session_item(self, session_id, session_name, creation_date, is_active=False):
@@ -2200,11 +2380,9 @@ class ChatWindow(QWidget):
         layout.setContentsMargins(8, 4, 8, 4)
         layout.setSpacing(8)
 
-        # Content layout
         content_layout = QVBoxLayout()
         content_layout.setSpacing(2)
 
-        # Session name
         name_label = QLabel(session_name)
         name_label.setStyleSheet(f"""
             color: {"#E8EAED" if is_active else "#9AA0A6"};
@@ -2214,14 +2392,12 @@ class ChatWindow(QWidget):
         name_label.setWordWrap(True)
         content_layout.addWidget(name_label)
 
-        # Creation date
         date_label = QLabel(creation_date)
         date_label.setStyleSheet("color: #5F5F5F; font-size: 10px;")
         content_layout.addWidget(date_label)
 
         layout.addLayout(content_layout, 1)
 
-        # Delete button
         delete_btn = QPushButton("🗑️")
         delete_btn.setFixedSize(24, 24)
         delete_btn.setStyleSheet("""
@@ -2239,7 +2415,6 @@ class ChatWindow(QWidget):
         delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         layout.addWidget(delete_btn)
 
-        # Make item clickable
         item_widget.mousePressEvent = lambda e: self._load_session_clicked(session_id)
         item_widget.setCursor(Qt.CursorShape.PointingHandCursor)
 
@@ -2248,13 +2423,12 @@ class ChatWindow(QWidget):
     def _load_session_clicked(self, session_id):
         """Load session when clicked"""
         if session_id == self.controller.current_session_id:
-            return  # Already active
+            return
 
         self.controller.load_session(session_id)
 
     def _delete_session_clicked(self, session_id):
         """Delete session when delete button clicked"""
-        # If active session, show confirmation
         if session_id == self.controller.current_session_id:
             from PyQt6.QtWidgets import QMessageBox
             reply = QMessageBox.question(
@@ -2284,23 +2458,19 @@ class ChatWindow(QWidget):
         message_layout.setContentsMargins(0, 0, 0, 0)
         message_layout.setSpacing(12)
 
-        # Add stretch to push message to the right
         message_layout.addStretch()
 
-        # Container for name and content (with max width for readability)
         main_container_widget = QWidget()
-        main_container_widget.setMaximumWidth(600)  # Max width for readability
+        main_container_widget.setMaximumWidth(600)
         main_container = QVBoxLayout(main_container_widget)
         main_container.setSpacing(4)
         main_container.setContentsMargins(0, 0, 0, 0)
 
-        # Name header (OUTSIDE border)
         name_label = QLabel("<b>You</b>")
         name_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         name_label.setStyleSheet("color: #E8EAED; font-size: 12px;")
         main_container.addWidget(name_label)
 
-        # Message content container (with border)
         content_wrapper = QFrame()
         content_wrapper.setStyleSheet("""
             QFrame {
@@ -2314,7 +2484,6 @@ class ChatWindow(QWidget):
         content_wrapper_layout.setContentsMargins(12, 12, 12, 8)
         content_wrapper_layout.setSpacing(8)
 
-        # Text label
         text_label = QLabel()
         text_label.setTextFormat(Qt.TextFormat.RichText)
         text_label.setText(self.render_markdown(message))
@@ -2335,7 +2504,6 @@ class ChatWindow(QWidget):
         )
         content_wrapper_layout.addWidget(text_label)
 
-        # Copy button at BOTTOM RIGHT for user messages
         copy_btn_container = QHBoxLayout()
         copy_btn_container.addStretch()
 
@@ -2405,10 +2573,8 @@ class ChatWindow(QWidget):
         """)
         message_layout.addWidget(avatar, alignment=Qt.AlignmentFlag.AlignTop)
 
-        # Track this widget for potential removal
         self.last_user_message_widget = message_widget
 
-        # MESSAGE TRACKING
         message_index = len(self.message_widgets)
         message_data = {
             'widget': message_widget,
@@ -2419,21 +2585,19 @@ class ChatWindow(QWidget):
         }
         self.message_widgets.append(message_data)
 
-        # Connect menu button
         menu_btn.clicked.connect(lambda: self._show_message_menu(message_data))
 
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
-        self.scroll_to_bottom()
+        self._animate_message_in(message_widget)
+        QTimer.singleShot(120, lambda: self.scroll_to_widget(message_widget))
 
     def add_ai_message(self, message):
         """Add AI message with markdown rendering, code blocks, and three-dot menu"""
-        # Remove emotion brackets for display if voice enabled
         if self.voice_enabled:
             display_message = self._clean_emotion_brackets(message)
         else:
             display_message = message
 
-        # Render any LaTeX expressions to images (AI messages only)
         display_message = self._preprocess_latex(display_message)
 
         message_widget = QFrame()
@@ -2464,18 +2628,15 @@ class ChatWindow(QWidget):
         """)
         message_layout.addWidget(avatar, alignment=Qt.AlignmentFlag.AlignTop)
 
-        # Container for name and content
         main_container_widget = QWidget()
         main_container = QVBoxLayout(main_container_widget)
         main_container.setSpacing(4)
         main_container.setContentsMargins(0, 0, 0, 0)
 
-        # Name header
         name_label = QLabel("<b>Systema Auxilium</b>")
         name_label.setStyleSheet("color: #E8EAED; font-size: 12px;")
         main_container.addWidget(name_label)
 
-        # Message content with border
         content_wrapper = QFrame()
         content_wrapper.setStyleSheet("""
             QFrame {
@@ -2489,7 +2650,6 @@ class ChatWindow(QWidget):
         content_wrapper_layout.setContentsMargins(10, 10, 10, 10)
         content_wrapper_layout.setSpacing(8)
 
-        # Parse message for code blocks
         parts = self.render_markdown_with_code_blocks(display_message)
         first_text_label = None
 
@@ -2542,7 +2702,6 @@ class ChatWindow(QWidget):
             content_wrapper_layout.addWidget(text_label)
             first_text_label = text_label
 
-        # Copy button at BOTTOM LEFT for AI messages
         copy_btn_container = QHBoxLayout()
         copy_btn = QPushButton("📋")
         copy_btn.setFixedSize(28, 28)
@@ -2593,11 +2752,8 @@ class ChatWindow(QWidget):
         main_container.addLayout(ai_menu_row)
 
         message_layout.addWidget(main_container_widget)
-
-        # Add stretch to keep AI messages on the left
         message_layout.addStretch()
 
-        # MESSAGE TRACKING
         message_index = len(self.message_widgets)
         message_data = {
             'widget': message_widget,
@@ -2610,20 +2766,17 @@ class ChatWindow(QWidget):
         }
         self.message_widgets.append(message_data)
 
-        # Connect menu button
         menu_btn.clicked.connect(lambda: self._show_message_menu(message_data))
 
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
-        self.scroll_to_bottom()
+        self._animate_message_in(message_widget)
+        QTimer.singleShot(120, lambda: self.scroll_to_widget(message_widget))
 
     def _clean_emotion_brackets(self, text):
-        """
-        Remove ElevenLabs emotion brackets from text for display
-        Examples: [happy] → removed, [giggles] → removed
-        """
+        """Remove ElevenLabs emotion brackets from text for display"""
         import re
         cleaned = re.sub(r'\[([^\]]+)\]', '', text)
-        cleaned = re.sub(r'\s+', ' ', cleaned)  # Clean double spaces
+        cleaned = re.sub(r'\s+', ' ', cleaned)
         return cleaned.strip()
 
     def add_system_message(self, message):
@@ -2663,26 +2816,168 @@ class ChatWindow(QWidget):
         message_layout.addWidget(text_label)
 
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
-        self.scroll_to_bottom()
+        self._animate_message_in(message_widget)
+        QTimer.singleShot(120, lambda: self.scroll_to_widget(message_widget))
 
     def copy_to_clipboard(self, text):
         """Copy text to clipboard"""
         clipboard = QApplication.clipboard()
         clipboard.setText(text)
-        # Optional: Show a brief feedback message
         self.status_label.setText("✓ Copied to clipboard")
-        QTimer.singleShot(2000, lambda: self.status_label.setText(""))
+        QTimer.singleShot(ANIM_STATUS_CLEAR_MS, lambda: self.status_label.setText(""))
 
     def scroll_to_bottom(self):
-        """Scroll to bottom"""
+        """Legacy helper — scrolls to absolute bottom (used by voice/thinking flows)."""
         QTimer.singleShot(50, self._do_scroll)
 
     def _do_scroll(self):
-        """Perform scroll"""
-        scroll_area = self.chat_widget.parent().parent()
-        if isinstance(scroll_area, QScrollArea):
-            scrollbar = scroll_area.verticalScrollBar()
-            scrollbar.setValue(scrollbar.maximum())
+        """Instant scroll to bottom (legacy, non-animated)."""
+        if hasattr(self, 'chat_scroll_area'):
+            sb = self.chat_scroll_area.verticalScrollBar()
+            self._animated_scroll_to(sb.maximum())
+        else:
+            scroll_area = self.chat_widget.parent().parent()
+            if isinstance(scroll_area, QScrollArea):
+                sb = scroll_area.verticalScrollBar()
+                sb.setValue(sb.maximum())
+
+    # ── Smart scroll-to-message ────────────────────────────────────────────
+
+    def scroll_to_widget(self, widget):
+        """Scroll so the new message is optimally visible."""
+        if not hasattr(self, 'chat_scroll_area'):
+            return
+        if self._user_scrolling:
+            self._user_scrolling = False
+            return
+
+        sb = self.chat_scroll_area.verticalScrollBar()
+        viewport_h = self.chat_scroll_area.viewport().height()
+
+        try:
+            pos_in_content = widget.mapTo(self.chat_widget, widget.rect().topLeft())
+        except RuntimeError:
+            return
+
+        widget_top = pos_in_content.y()
+        widget_h   = widget.sizeHint().height()
+        if widget_h < 20:
+            widget_h = widget.height()
+
+        if widget_h <= viewport_h - 40:
+            target = widget_top - (viewport_h - widget_h) // 2
+        else:
+            target = widget_top - 16
+
+        target = max(0, min(target, sb.maximum()))
+        self._animated_scroll_to(target)
+
+    def _animated_scroll_to(self, target_value: int):
+        """Animate the chat scrollbar to target_value using QPropertyAnimation."""
+        if not hasattr(self, 'chat_scroll_area'):
+            return
+
+        sb = self.chat_scroll_area.verticalScrollBar()
+        current = sb.value()
+        if abs(current - target_value) < 4:
+            return
+
+        if self._scroll_anim is not None:
+            if self._scroll_anim.state() == QPropertyAnimation.State.Running:
+                self._scroll_anim.stop()
+
+        anim = QPropertyAnimation(sb, b"value")
+        distance = abs(target_value - current)
+        duration = max(ANIM_SCROLL_MIN_MS, min(ANIM_SCROLL_MAX_MS, distance // 2))
+        anim.setDuration(duration)
+        anim.setStartValue(current)
+        anim.setEndValue(target_value)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self._scroll_anim = anim
+        anim.start()
+
+    def _animated_sidebar_scroll_to(self, target_value: int):
+        """Animate the sidebar scrollbar to target_value."""
+        if not hasattr(self, 'sidebar_scroll'):
+            return
+
+        sb = self.sidebar_scroll.verticalScrollBar()
+        current = sb.value()
+        if abs(current - target_value) < 4:
+            return
+
+        if self._sidebar_scroll_anim is not None:
+            if self._sidebar_scroll_anim.state() == QPropertyAnimation.State.Running:
+                self._sidebar_scroll_anim.stop()
+
+        anim = QPropertyAnimation(sb, b"value")
+        distance = abs(target_value - current)
+        duration = max(ANIM_SCROLL_MIN_MS, min(ANIM_SCROLL_MAX_MS, distance // 2))
+        anim.setDuration(duration)
+        anim.setStartValue(current)
+        anim.setEndValue(target_value)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self._sidebar_scroll_anim = anim
+        anim.start()
+
+    # ── Inertia scroll — main chat ─────────────────────────────────────────
+
+    def _inertia_tick(self):
+        """Called ~70fps while inertia is active for main chat."""
+        if not hasattr(self, 'chat_scroll_area'):
+            self._inertia_timer.stop()
+            return
+
+        sb = self.chat_scroll_area.verticalScrollBar()
+        self._inertia_velocity *= ANIM_INERTIA_FRICTION
+        if abs(self._inertia_velocity) < ANIM_INERTIA_MIN_VELOCITY:
+            self._inertia_timer.stop()
+            self._inertia_velocity = 0.0
+            return
+
+        new_val = sb.value() + int(self._inertia_velocity)
+        new_val = max(0, min(new_val, sb.maximum()))
+        sb.setValue(new_val)
+
+    # ── Inertia scroll — sidebar ───────────────────────────────────────────
+
+    def _sidebar_inertia_tick(self):
+        """Called ~70fps while inertia is active for sidebar."""
+        if not hasattr(self, 'sidebar_scroll'):
+            self._sidebar_inertia_timer.stop()
+            return
+
+        sb = self.sidebar_scroll.verticalScrollBar()
+        self._sidebar_inertia_velocity *= ANIM_INERTIA_FRICTION
+        if abs(self._sidebar_inertia_velocity) < ANIM_INERTIA_MIN_VELOCITY:
+            self._sidebar_inertia_timer.stop()
+            self._sidebar_inertia_velocity = 0.0
+            return
+
+        new_val = sb.value() + int(self._sidebar_inertia_velocity)
+        new_val = max(0, min(new_val, sb.maximum()))
+        sb.setValue(new_val)
+
+    # ── Inertia scroll — input field ───────────────────────────────────────
+
+    def _input_inertia_tick(self):
+        """Called ~70fps while inertia is active for input field."""
+        if not hasattr(self, 'input_field'):
+            self._input_inertia_timer.stop()
+            return
+
+        sb = self.input_field.text_input.verticalScrollBar()
+        self._input_inertia_velocity *= ANIM_INERTIA_FRICTION
+        if abs(self._input_inertia_velocity) < ANIM_INERTIA_MIN_VELOCITY:
+            self._input_inertia_timer.stop()
+            self._input_inertia_velocity = 0.0
+            return
+
+        new_val = sb.value() + int(self._input_inertia_velocity)
+        new_val = max(0, min(new_val, sb.maximum()))
+        sb.setValue(new_val)
 
     # ═══════════════════════════════════════════════════════════
     # MESSAGE CONTROL METHODS (Edit, Delete, Rewind, Regenerate)
@@ -2708,12 +3003,10 @@ class ChatWindow(QWidget):
             }
         """)
 
-        # Edit action
         edit_action = QAction("✏️ Edit Message", self)
         edit_action.triggered.connect(lambda: self._edit_message(message_data))
         menu.addAction(edit_action)
 
-        # Regenerate action (AI messages only)
         if message_data['role'] == 'assistant':
             regen_action = QAction("🔄 Regenerate Response", self)
             regen_action.triggered.connect(lambda: self._regenerate_response(message_data))
@@ -2721,12 +3014,10 @@ class ChatWindow(QWidget):
 
         menu.addSeparator()
 
-        # Delete action
         delete_action = QAction("🗑️ Delete Message", self)
         delete_action.triggered.connect(lambda: self._delete_message(message_data))
         menu.addAction(delete_action)
 
-        # Rewind action
         rewind_action = QAction("⏪ Rewind to Here", self)
         rewind_action.triggered.connect(lambda: self._rewind_to_message(message_data))
         menu.addAction(rewind_action)
@@ -2752,11 +3043,9 @@ class ChatWindow(QWidget):
 
         layout = QVBoxLayout(dialog)
 
-        # Header
         header = QLabel(f"<b>Edit {'Your' if message_data['role'] == 'user' else 'AI'} Message</b>")
         layout.addWidget(header)
 
-        # Text edit
         text_edit = QTextEdit()
         text_edit.setPlainText(message_data['content'])
         text_edit.setStyleSheet("""
@@ -2773,7 +3062,6 @@ class ChatWindow(QWidget):
         text_edit.setMinimumHeight(150)
         layout.addWidget(text_edit)
 
-        # Buttons
         button_layout = QHBoxLayout()
         button_layout.addStretch()
 
@@ -2820,86 +3108,73 @@ class ChatWindow(QWidget):
         if not new_content.strip():
             return
 
-        # Update message content
         message_data['content'] = new_content
 
-        # Update in AI history
         history_index = self._get_history_index(message_data)
         if history_index >= 0:
             self.controller.ai.conversation_history[history_index]['content'] = new_content
 
-        # Update display
         if message_data.get('text_label'):
             message_data['text_label'].setText(self.render_markdown(new_content))
 
-        # If user message, trigger regeneration
         if message_data['role'] == 'user':
-            # Rewind to after this message (delete everything after)
             self._rewind_to_message(message_data, keep_message=True)
-            # Send message again (this will trigger AI response)
             self.controller.send_message(new_content)
 
-        # Save session
         self.controller._auto_save_session()
 
         dialog.accept()
 
     def _delete_message(self, message_data):
-        """Delete a message"""
-        # Get history index FIRST, before removing from tracking list
+        """Delete a message — data removed sync, widget animated out async."""
         history_index = self._get_history_index(message_data)
 
-        # Remove from UI
-        widget = message_data['widget']
-        self.chat_layout.removeWidget(widget)
-        widget.deleteLater()
-
-        # Remove from tracking
-        self.message_widgets.remove(message_data)
-
-        # Reindex remaining messages
+        if message_data in self.message_widgets:
+            self.message_widgets.remove(message_data)
         for i, msg in enumerate(self.message_widgets):
             msg['index'] = i
-
-        # Remove from AI history
         if history_index >= 0:
-            self.controller.ai.conversation_history.pop(history_index)
-
-        # Save session
+            try:
+                self.controller.ai.conversation_history.pop(history_index)
+            except IndexError:
+                pass
         self.controller._auto_save_session()
 
-    def _rewind_to_message(self, message_data, keep_message=False):
-        """Rewind conversation to a specific message"""
-        target_index = message_data['index']
+        widget = message_data['widget']
+        def _destroy():
+            self.chat_layout.removeWidget(widget)
+            widget.deleteLater()
+        self._animate_message_out(widget, _destroy)
 
-        # Determine cutoff point
+    def _rewind_to_message(self, message_data, keep_message=False):
+        """Rewind conversation — data truncated sync, widgets animated out async."""
+        target_index = message_data['index']
         cutoff = target_index + 1 if keep_message else target_index
 
-        # Remove all messages after this point from UI
-        for i in range(len(self.message_widgets) - 1, cutoff - 1, -1):
-            msg_data = self.message_widgets[i]
-            self.chat_layout.removeWidget(msg_data['widget'])
-            msg_data['widget'].deleteLater()
+        widgets_to_remove = [md['widget'] for md in self.message_widgets[cutoff:]]
 
-        # Truncate message tracking
         self.message_widgets = self.message_widgets[:cutoff]
 
-        # Truncate AI history
         history_index = self._get_history_index(message_data)
         if history_index >= 0:
             if keep_message:
                 history_index += 1
-            self.controller.ai.conversation_history = self.controller.ai.conversation_history[:history_index]
+            self.controller.ai.conversation_history = \
+                self.controller.ai.conversation_history[:history_index]
 
-        # Save session
         self.controller._auto_save_session()
+
+        for widget in widgets_to_remove:
+            def _destroy(w=widget):
+                self.chat_layout.removeWidget(w)
+                w.deleteLater()
+            self._animate_message_out(widget, _destroy)
+
 
     def _regenerate_response(self, message_data):
         """Regenerate AI response"""
-        # Find the user message before this AI message
         target_index = message_data['index']
 
-        # Find previous user message
         user_msg = None
         for i in range(target_index - 1, -1, -1):
             if self.message_widgets[i]['role'] == 'user':
@@ -2907,22 +3182,15 @@ class ChatWindow(QWidget):
                 break
 
         if not user_msg:
-            return  # No user message found
+            return
 
-        # Rewind to after that user message (delete this AI response and everything after)
         self._rewind_to_message(user_msg, keep_message=True)
 
-        # Trigger new AI response
         user_message = user_msg['content']
         self.controller.send_message(user_message)
 
     def _get_history_index(self, message_data):
-        """Get the index of a message in conversation_history.
-
-        message_widgets and conversation_history are always built in the same
-        order (one entry per user/AI turn, no system messages in either list),
-        so the widget's 'index' is the direct conversation_history index.
-        """
+        """Get the index of a message in conversation_history."""
         idx = message_data.get('index', -1)
         if idx < 0 or idx >= len(self.controller.ai.conversation_history):
             return -1
@@ -2934,17 +3202,14 @@ class ChatWindow(QWidget):
         if not message:
             return
 
-        # Store manual resize state and height before clearing
         was_manually_resized = self.input_field.text_input.manual_resize
         stored_height = self.input_field.text_input.height() if was_manually_resized else None
 
-        # Check if Puter provider and has attached image
         image_path = None
         if self.controller.get_ai_provider() == 'puter' and self.attached_image:
             image_path = self.attached_image
             self.add_system_message(f"📎 Image attached: {image_path}")
 
-        # Add mode instruction if forced
         if self.force_mode == 'work_environment':
             message = "[VERY CRITICAL THE USER HAS ENFORCED: work_environment ONLY and FULFILL THIS TASK EFFICIENTLY (ignore if the message of the user doesn't request of anything)] " + message
         elif self.force_mode == 'execute_code':
@@ -2952,7 +3217,6 @@ class ChatWindow(QWidget):
 
         display_message = self.input_field.toPlainText().strip()
 
-        # Track this message for potential interrupt
         self.last_sent_message = display_message
 
         self.add_user_message(display_message)
@@ -2960,12 +3224,10 @@ class ChatWindow(QWidget):
         self.input_field.clear()
         self.attached_image = None
 
-        # Restore manual resize state and height after clearing
         if was_manually_resized and stored_height:
             self.input_field.text_input.manual_resize = True
             self.input_field.text_input.setFixedHeight(stored_height)
 
-        # Send with image if available
         if image_path:
             self.controller.send_message_with_image(message, image_path)
         else:
@@ -2983,10 +3245,8 @@ class ChatWindow(QWidget):
         )
 
         if file_path:
-            # Clean the file path
             file_path = self.clean_file_path(file_path)
 
-            # For Puter provider with images
             if self.controller.get_ai_provider() == 'puter':
                 valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif']
                 if any(file_path.lower().endswith(ext) for ext in valid_extensions):
@@ -2996,11 +3256,9 @@ class ChatWindow(QWidget):
                     )
                     return
 
-            # Quote non-image paths
             if self.should_quote_path(file_path):
                 file_path = f'"{file_path}"'
 
-            # Otherwise insert path into input
             current_text = self.input_field.toPlainText()
             if current_text:
                 self.input_field.text_input.setPlainText(current_text + "\n" + file_path)
@@ -3017,21 +3275,16 @@ class ChatWindow(QWidget):
             self.input_field.setPlaceholderText("AI is working... please wait")
 
     def show_ai_message(self, message):
-        # In voice mode and NOT in tool mode, start voice and wait for callback
         if self.voice_enabled and not self.controller.ai.tool_manager.in_work_mode:
             self.log("[Voice] Buffering message, starting TTS...")
 
-            # Buffer message
             self.pending_voice_message = message
             self.waiting_for_playback = True
 
-            # Use the standard thinking animation instead
             self.start_thinking_animation()
 
-            # Start TTS (will trigger callback when playback begins)
             self.speak_ai_response(message)
         else:
-            # Not in voice mode OR in tool mode - display immediately
             self.add_ai_message(message)
 
     def log(self, msg):
@@ -3041,7 +3294,6 @@ class ChatWindow(QWidget):
     def on_voice_playback_started(self):
         """Called when TTS playback actually starts (from background thread)"""
         self.log("[Voice] Playback started callback received")
-        # Emit signal to handle on main thread
         self.voice_playback_signal.emit()
 
     def _handle_voice_playback_on_main_thread(self):
@@ -3052,13 +3304,10 @@ class ChatWindow(QWidget):
             self.log("[Voice] Displaying buffered message NOW")
             self.waiting_for_playback = False
 
-            # Stop thinking animation
             self.stop_thinking_animation()
 
-            # NOW display the message
             self.add_ai_message(self.pending_voice_message)
 
-            # Clear pending message
             self.pending_voice_message = None
 
             self.log("[Voice] Message displayed successfully")
@@ -3102,38 +3351,30 @@ class ChatWindow(QWidget):
 
     def interrupt_response(self):
         """Interrupt current AI response and restore message to input"""
-        # Only interrupt if currently processing
         if not self.controller.is_processing and not self.controller.ai.tool_manager.in_work_mode:
             return
 
-        # Cancel the pending request in controller
         success = self.controller.interrupt_request()
 
         if success:
-            # Remove the last user message widget from UI
             if self.last_user_message_widget:
                 self.chat_layout.removeWidget(self.last_user_message_widget)
                 self.last_user_message_widget.deleteLater()
                 self.last_user_message_widget = None
 
-            # Return the message to input box
             if self.last_sent_message:
                 current_text = self.input_field.toPlainText()
                 if current_text:
-                    # Append with two newlines to avoid replacing existing text
                     self.input_field.text_input.setPlainText(self.last_sent_message + "\n\n" + current_text)
                 else:
                     self.input_field.text_input.setPlainText(self.last_sent_message)
                 self.last_sent_message = None
 
-            # Hide interrupt button, show send button
             self.interrupt_btn.hide()
             self.send_btn.show()
 
-            # Hide thinking and enable input
             self.hide_thinking()
 
-            # Show confirmation message
             self.add_system_message("⚡️ **Response interrupted - message returned to input**")
 
     def interrupt_work_mode(self):
@@ -3150,7 +3391,6 @@ class ChatWindow(QWidget):
         self.start_thinking_animation()
         self.thinking_label_shown = True
         self.set_input_enabled(False)
-        # Show interrupt button, hide send button
         self.send_btn.hide()
         self.interrupt_btn.show()
 
@@ -3159,7 +3399,6 @@ class ChatWindow(QWidget):
         self.stop_thinking_animation()
         self.thinking_label_shown = False
         self.set_input_enabled(True)
-        # Hide interrupt button, show send button
         self.interrupt_btn.hide()
         self.send_btn.show()
 
@@ -3169,22 +3408,30 @@ class ChatWindow(QWidget):
         from PyQt6.QtCore import QRectF
 
         path = QPainterPath()
-        path.addRoundedRect(QRectF(self.rect()), 12, 12)  # 12px radius to match CSS
+        path.addRoundedRect(QRectF(self.rect()), 12, 12)
         region = QRegion(path.toFillPolygon().toPolygon())
         self.setMask(region)
 
     def resizeEvent(self, event):
-        """Handle window resize to maintain layout and rounded corners"""
+        """Handle window resize."""
         super().resizeEvent(event)
         self.apply_rounded_mask()
         if hasattr(self, 'chat_widget'):
             self.chat_widget.updateGeometry()
 
-        # Reposition resize handles
+        if hasattr(self, 'sidebar') and hasattr(self, 'container'):
+            container_h = self.container.height()
+            if self.sidebar_visible:
+                self.sidebar.setGeometry(0, 0, 240, container_h)
+            else:
+                self.sidebar.setGeometry(-240, 0, 240, container_h)
+
+        if hasattr(self, 'toggle_sidebar_btn'):
+            self.toggle_sidebar_btn.raise_()
+
         if hasattr(self, 'resize_handles'):
             self.position_resize_handles()
 
-        # Debounced save
         if hasattr(self, 'resize_timer'):
             self.resize_timer.stop()
             self.resize_timer.start(1000)
@@ -3223,7 +3470,6 @@ class ChatWindow(QWidget):
                             geometry['width'],
                             geometry['height']
                         )
-                        # Update maximize button state after loading geometry
                         if self.isMaximized():
                             self.maximize_btn.setText("❐")
                         else:
@@ -3235,10 +3481,10 @@ class ChatWindow(QWidget):
         """Toggle maximize/restore"""
         if self.isMaximized():
             self.showNormal()
-            self.maximize_btn.setText("□")  # Square for maximize
+            self.maximize_btn.setText("□")
         else:
             self.showMaximized()
-            self.maximize_btn.setText("❐")  # Double square for restore
+            self.maximize_btn.setText("❐")
 
     def header_mouse_press(self, event):
         """Handle mouse press on header for dragging"""
@@ -3265,7 +3511,6 @@ class ChatWindow(QWidget):
 
         self.resize_handles = {}
 
-        # Edge handles
         edges = {
             'top': (0, 0, 0, handle_size, Qt.CursorShape.SizeVerCursor),
             'bottom': (0, 0, 0, handle_size, Qt.CursorShape.SizeVerCursor),
@@ -3280,9 +3525,8 @@ class ChatWindow(QWidget):
             handle.edge_type = edge_name
             handle.installEventFilter(self)
             self.resize_handles[edge_name] = handle
-            handle.raise_()  # ADD THIS - bring to front
+            handle.raise_()
 
-        # Corner handles
         corners = {
             'top-left': (0, 0, corner_size, corner_size, Qt.CursorShape.SizeFDiagCursor),
             'top-right': (0, 0, corner_size, corner_size, Qt.CursorShape.SizeBDiagCursor),
@@ -3297,7 +3541,7 @@ class ChatWindow(QWidget):
             handle.edge_type = corner_name
             handle.installEventFilter(self)
             self.resize_handles[corner_name] = handle
-            handle.raise_()  # ADD THIS - bring to front
+            handle.raise_()
 
         self.position_resize_handles()
 
@@ -3307,23 +3551,93 @@ class ChatWindow(QWidget):
         h = self.height()
         handle_size = 8
         corner_size = 16
-        header_height = 50  # Exclude header from top resize
+        header_height = 50
 
-        # Edges
         self.resize_handles['top'].setGeometry(corner_size, header_height, w - 2 * corner_size, handle_size)
         self.resize_handles['bottom'].setGeometry(corner_size, h - handle_size, w - 2 * corner_size, handle_size)
         self.resize_handles['left'].setGeometry(0, corner_size, handle_size, h - 2 * corner_size)
         self.resize_handles['right'].setGeometry(w - handle_size, corner_size, handle_size, h - 2 * corner_size)
 
-        # Corners
         self.resize_handles['top-left'].setGeometry(0, header_height, corner_size, corner_size)
         self.resize_handles['top-right'].setGeometry(w - corner_size, header_height, corner_size, corner_size)
         self.resize_handles['bottom-left'].setGeometry(0, h - corner_size, corner_size, corner_size)
         self.resize_handles['bottom-right'].setGeometry(w - corner_size, h - corner_size, corner_size, corner_size)
 
     def eventFilter(self, obj, event):
-        """Handle resize handle events"""
-        # Check if this is a resize handle
+        """Handle resize handle events and smooth scroll viewport events."""
+        from PyQt6.QtCore import QEvent
+
+        # ── Smooth inertia scroll — SIDEBAR viewport ───────────────────────
+        if hasattr(self, 'sidebar_scroll') and obj is self.sidebar_scroll.viewport():
+            if event.type() == QEvent.Type.Wheel:
+                if self._sidebar_scroll_anim is not None:
+                    try:
+                        if self._sidebar_scroll_anim.state() == QPropertyAnimation.State.Running:
+                            self._sidebar_scroll_anim.stop()
+                    except RuntimeError:
+                        pass
+
+                delta = event.angleDelta().y()
+                self._sidebar_inertia_velocity -= delta * ANIM_INERTIA_SCALE
+                self._sidebar_inertia_velocity = max(
+                    -ANIM_INERTIA_MAX_VELOCITY,
+                    min(ANIM_INERTIA_MAX_VELOCITY, self._sidebar_inertia_velocity)
+                )
+                if not self._sidebar_inertia_timer.isActive():
+                    self._sidebar_inertia_timer.start()
+                return True
+
+            elif event.type() == QEvent.Type.MouseButtonPress:
+                if self._sidebar_scroll_anim is not None:
+                    try:
+                        if self._sidebar_scroll_anim.state() == QPropertyAnimation.State.Running:
+                            self._sidebar_scroll_anim.stop()
+                    except RuntimeError:
+                        pass
+
+        # ── Smooth inertia scroll — INPUT FIELD viewport ───────────────────
+        if hasattr(self, 'input_field') and obj is self.input_field.text_input.viewport():
+            if event.type() == QEvent.Type.Wheel:
+                delta = event.angleDelta().y()
+                self._input_inertia_velocity -= delta * ANIM_INERTIA_SCALE
+                self._input_inertia_velocity = max(
+                    -ANIM_INERTIA_MAX_VELOCITY,
+                    min(ANIM_INERTIA_MAX_VELOCITY, self._input_inertia_velocity)
+                )
+                if not self._input_inertia_timer.isActive():
+                    self._input_inertia_timer.start()
+                return True
+
+        # ── Smooth inertia scroll — MAIN CHAT viewport ────────────────────
+        if hasattr(self, 'chat_scroll_area') and obj is self.chat_scroll_area.viewport():
+            if event.type() == QEvent.Type.Wheel:
+                if self._scroll_anim is not None:
+                    try:
+                        if self._scroll_anim.state() == QPropertyAnimation.State.Running:
+                            self._scroll_anim.stop()
+                    except RuntimeError:
+                        pass
+                self._user_scrolling = True
+
+                delta = event.angleDelta().y()
+                self._inertia_velocity -= delta * ANIM_INERTIA_SCALE
+                self._inertia_velocity = max(-ANIM_INERTIA_MAX_VELOCITY, min(ANIM_INERTIA_MAX_VELOCITY, self._inertia_velocity))
+
+                if not self._inertia_timer.isActive():
+                    self._inertia_timer.start()
+
+                return True
+
+            elif event.type() == QEvent.Type.MouseButtonPress:
+                self._user_scrolling = True
+                if self._scroll_anim is not None:
+                    try:
+                        if self._scroll_anim.state() == QPropertyAnimation.State.Running:
+                            self._scroll_anim.stop()
+                    except RuntimeError:
+                        pass
+
+        # ── Window resize handle events ────────────────────────────────────
         if hasattr(obj, 'edge_type'):
             if event.type() == event.Type.MouseButtonPress:
                 if event.button() == Qt.MouseButton.LeftButton:
@@ -3343,7 +3657,6 @@ class ChatWindow(QWidget):
                 delta = event.globalPosition().toPoint() - self.resize_start_pos
                 new_geo = QRect(self.resize_start_geometry)
 
-                # Handle resizing based on edge type
                 if 'left' in self.resize_edge:
                     new_geo.setLeft(self.resize_start_geometry.left() + delta.x())
                 if 'right' in self.resize_edge:
@@ -3353,7 +3666,6 @@ class ChatWindow(QWidget):
                 if 'bottom' in self.resize_edge:
                     new_geo.setBottom(self.resize_start_geometry.bottom() + delta.y())
 
-                # Enforce minimum size
                 if new_geo.width() >= self.minimumWidth() and new_geo.height() >= self.minimumHeight():
                     self.setGeometry(new_geo)
                 return True
@@ -3373,10 +3685,8 @@ class ChatWindow(QWidget):
 
         file_path = files[0]
 
-        # Clean the file path
         file_path = self.clean_file_path(file_path)
 
-        # For Puter provider with images, use attachment mode
         if self.controller.get_ai_provider() == 'puter':
             valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif']
             if any(file_path.lower().endswith(ext) for ext in valid_extensions):
@@ -3385,11 +3695,9 @@ class ChatWindow(QWidget):
                     f"📎 **Image Ready:** {file_path}\n\nType your message and press Enter to send with image.")
                 return
 
-        # Quote non-image paths
         if self.should_quote_path(file_path):
             file_path = f'"{file_path}"'
 
-        # Otherwise, insert file path into text input
         current_text = self.input_field.toPlainText()
         if current_text:
             self.input_field.text_input.setPlainText(current_text + "\n" + file_path)
@@ -3399,11 +3707,10 @@ class ChatWindow(QWidget):
     def clean_file_path(self, path):
         """Clean file path by removing file:/// prefix and normalizing"""
         if path.startswith('file:///'):
-            path = path[8:]  # Remove 'file:///'
+            path = path[8:]
         elif path.startswith('file://'):
-            path = path[7:]  # Remove 'file://'
+            path = path[7:]
 
-        # Normalize path separators
         path = path.replace('/', '\\')
 
         return path
@@ -3419,12 +3726,9 @@ class ChatWindow(QWidget):
             clipboard = QApplication.clipboard()
             text = clipboard.text().strip()
 
-            # Clean the path first
             cleaned_path = self.clean_file_path(text)
 
-            # Check if it's a file path
             if os.path.exists(cleaned_path):
-                # For Puter provider with images
                 if self.controller.get_ai_provider() == 'puter':
                     valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif']
                     if any(cleaned_path.lower().endswith(ext) for ext in valid_extensions):
@@ -3435,7 +3739,6 @@ class ChatWindow(QWidget):
                         event.accept()
                         return
 
-                # Quote non-image paths
                 if self.should_quote_path(cleaned_path):
                     cleaned_path = f'"{cleaned_path}"'
 
