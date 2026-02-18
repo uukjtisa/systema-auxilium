@@ -10,11 +10,15 @@ import re
 import threading
 import subprocess
 import os
-import tempfile
 from datetime import datetime
-from PyQt6.QtCore import QObject, pyqtSignal, QTimer
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import QObject, pyqtSignal
 from core.python_interpreter import PythonInterpreter
+from core.logger import _make_logger, _NoOpLogger
+
+# ─────────────────────────── Colored Logger Setup ────────────────────────────
+_verbose = True
+log = _make_logger("ToolManager") if _verbose else _NoOpLogger()
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 class ApprovalSignal(QObject):
@@ -33,38 +37,57 @@ class ToolManager:
             settings_callback: Function to get settings dict
             ai_engine: Reference to AI engine for code explanations
         """
+        log.info("[ToolManager.__init__] ── Initializing ToolManager ──────────────────────")
+        log.debug(f"[ToolManager.__init__] has_settings_callback={settings_callback is not None} | "
+                  f"has_ai_engine={ai_engine is not None}")
+
         # Available tools - easy to add more!
         self.tools = {
             'python': PythonInterpreter(),
         }
+        log.debug(f"[ToolManager.__init__] Tools initialized: {list(self.tools.keys())}")
 
         # Work mode state
         self.in_work_mode = False
         self.last_work_output = None
+        log.debug("[ToolManager.__init__] Work mode state: in_work_mode=False | last_work_output=None")
 
         # Settings and AI engine
         self.settings_callback = settings_callback
         self.ai_engine = ai_engine
 
         # Approval signal for main thread communication
+        log.debug("[ToolManager.__init__] Creating ApprovalSignal and connecting to main thread handler")
         self.approval_signal = ApprovalSignal()
         self.approval_signal.request_approval.connect(self._show_approval_dialog_on_main_thread)
+        log.debug("[ToolManager.__init__] ApprovalSignal connected")
 
         # Setup .generated folder (relative to working directory)
         self.generated_dir = os.path.join(os.getcwd(), '.generated')
+        log.debug(f"[ToolManager.__init__] .generated dir path: '{self.generated_dir}'")
         self._ensure_generated_dir()
 
         # Canonical tool keys and their normalised (no-underscore, lowercase) forms
         self._tool_keys = ['work_environment', 'execute_code', 'set_session_name']
         self._tool_keys_norm = {k.replace('_', '').lower(): k for k in self._tool_keys}
+        log.debug(f"[ToolManager.__init__] Registered tool keys: {self._tool_keys}")
+
+        log.info("[ToolManager.__init__] ✓ ToolManager initialization complete")
 
     def _ensure_generated_dir(self):
         """Create .generated directory if it doesn't exist"""
+        log.debug(f"[ToolManager._ensure_generated_dir] Checking: '{self.generated_dir}'")
         try:
             if not os.path.exists(self.generated_dir):
                 os.makedirs(self.generated_dir)
+                log.info(f"[ToolManager._ensure_generated_dir] ✓ Created .generated directory: "
+                         f"'{self.generated_dir}'")
                 print(f"Created .generated directory at: {self.generated_dir}")
+            else:
+                log.debug(f"[ToolManager._ensure_generated_dir] Directory already exists — no action")
         except Exception as e:
+            log.error(f"[ToolManager._ensure_generated_dir] ✗ Could not create directory: "
+                      f"{type(e).__name__}: {e}")
             print(f"Warning: Could not create .generated directory: {e}")
 
     def parse_work_environment(self, text):
@@ -74,13 +97,17 @@ class ToolManager:
         Returns:
             tuple: (code, remaining_text) or None if not found
         """
+        log.debug(f"[ToolManager.parse_work_environment] Parsing {len(text)} char text for work_environment call")
         json_data = self._extract_json(text, tool_key='work_environment')
 
         if json_data and self._has_tool_key(json_data, 'work_environment'):
             code = (self._get_tool_value(json_data, 'input') or '').strip()
             remaining_text = self._remove_json_from_text(text, json_data, tool_key='work_environment')
+            log.info(f"[ToolManager.parse_work_environment] ✓ Found work_environment call | "
+                     f"code_len={len(code)} | remaining_text_len={len(remaining_text)}")
             return code, remaining_text
 
+        log.debug("[ToolManager.parse_work_environment] No work_environment call found")
         return None
 
     def parse_execute_code(self, text):
@@ -90,13 +117,17 @@ class ToolManager:
         Returns:
             tuple: (code, remaining_text) or None if not found
         """
+        log.debug(f"[ToolManager.parse_execute_code] Parsing {len(text)} char text for execute_code call")
         json_data = self._extract_json(text, tool_key='execute_code')
 
         if json_data and self._has_tool_key(json_data, 'execute_code'):
             code = (self._get_tool_value(json_data, 'input') or '').strip()
             remaining_text = self._remove_json_from_text(text, json_data, tool_key='execute_code')
+            log.info(f"[ToolManager.parse_execute_code] ✓ Found execute_code call | "
+                     f"code_len={len(code)} | remaining_text_len={len(remaining_text)}")
             return code, remaining_text
 
+        log.debug("[ToolManager.parse_execute_code] No execute_code call found")
         return None
 
     def parse_set_session_name(self, text):
@@ -106,13 +137,17 @@ class ToolManager:
         Returns:
             tuple: (session_name, remaining_text) or None if not found
         """
+        log.debug(f"[ToolManager.parse_set_session_name] Parsing {len(text)} char text for set_session_name call")
         json_data = self._extract_json(text, tool_key='set_session_name')
 
         if json_data and self._has_tool_key(json_data, 'set_session_name'):
             session_name = (self._get_tool_value(json_data, 'set_session_name') or '').strip()
             remaining_text = self._remove_json_from_text(text, json_data, tool_key='set_session_name')
+            log.info(f"[ToolManager.parse_set_session_name] ✓ Found set_session_name call | "
+                     f"name='{session_name}' | remaining_text_len={len(remaining_text)}")
             return session_name, remaining_text
 
+        log.debug("[ToolManager.parse_set_session_name] No set_session_name call found")
         return None
 
     def _check_supervised_execution(self, code, execution_type):
@@ -127,19 +162,27 @@ class ToolManager:
         Returns:
             tuple: (approved: bool, modified_code: str)
         """
+        log.info(f"[ToolManager._check_supervised_execution] execution_type='{execution_type}' | "
+                 f"code_len={len(code)} | has_settings_callback={self.settings_callback is not None}")
+
         # Check if supervised execution is enabled
         if self.settings_callback:
             settings = self.settings_callback()
             supervised_enabled = settings.get('supervised_execution', True)  # Default ON
+            log.debug(f"[ToolManager._check_supervised_execution] supervised_execution={supervised_enabled}")
 
             if not supervised_enabled:
                 # Auto-approve if supervision is disabled
+                log.debug("[ToolManager._check_supervised_execution] Supervision disabled — auto-approving")
                 return True, code
         else:
             # No settings callback, assume supervised mode
             supervised_enabled = True
+            log.warning("[ToolManager._check_supervised_execution] No settings_callback — "
+                        "assuming supervised=True")
 
         # Show approval dialog on main thread
+        log.debug("[ToolManager._check_supervised_execution] Emitting request_approval signal to main thread")
         try:
             # Create event to block worker thread until approval is received
             approval_event = threading.Event()
@@ -147,6 +190,8 @@ class ToolManager:
 
             def callback(approved, modified_code):
                 """Callback function executed on main thread after dialog closes"""
+                log.debug(f"[ToolManager._check_supervised_execution] Approval callback received | "
+                          f"approved={approved} | code_modified={modified_code != code}")
                 approval_result['approved'] = approved
                 approval_result['modified_code'] = modified_code
                 approval_event.set()
@@ -155,11 +200,16 @@ class ToolManager:
             self.approval_signal.request_approval.emit(code, execution_type, callback)
 
             # Wait for approval (blocks worker thread, but not main thread)
+            log.debug("[ToolManager._check_supervised_execution] Waiting for user approval (blocking worker thread)...")
             approval_event.wait()
 
+            log.info(f"[ToolManager._check_supervised_execution] User decision received | "
+                     f"approved={approval_result['approved']}")
             return approval_result['approved'], approval_result['modified_code']
 
         except Exception as e:
+            log.error(f"[ToolManager._check_supervised_execution] ✗ Error showing approval dialog: "
+                      f"{type(e).__name__}: {e}")
             print(f"Error showing approval dialog: {e}")
             import traceback
             traceback.print_exc()
@@ -175,23 +225,32 @@ class ToolManager:
             execution_type: 'execute_code' or 'work_environment'
             callback: Function to call with (approved, modified_code)
         """
+        log.info(f"[ToolManager._show_approval_dialog_on_main_thread] execution_type='{execution_type}' | "
+                 f"code_len={len(code)} | has_ai_engine={self.ai_engine is not None}")
         try:
             from ui.code_approval_dialog import CodeApprovalDialog
 
             if not self.ai_engine:
+                log.warning("[ToolManager._show_approval_dialog_on_main_thread] No AI engine — "
+                            "auto-approving (no explanation available)")
                 print("Warning: No AI engine available for code explanation")
                 callback(True, code)
                 return
 
+            log.debug("[ToolManager._show_approval_dialog_on_main_thread] Showing CodeApprovalDialog...")
             # Show dialog on main thread
             approved, modified_code = CodeApprovalDialog.get_approval(
                 code, execution_type, self.ai_engine
             )
+            log.info(f"[ToolManager._show_approval_dialog_on_main_thread] Dialog closed | "
+                     f"approved={approved} | code_was_modified={modified_code != code}")
 
             # Call callback with results
             callback(approved, modified_code)
 
         except Exception as e:
+            log.error(f"[ToolManager._show_approval_dialog_on_main_thread] ✗ Exception: "
+                      f"{type(e).__name__}: {e}")
             print(f"Error in approval dialog: {e}")
             import traceback
             traceback.print_exc()
@@ -205,22 +264,35 @@ class ToolManager:
         Returns:
             str: Formatted output for AI
         """
+        code_preview = code.strip()[:80].replace('\n', '↵')
+        log.info(f"[ToolManager.run_work_environment] ── Executing code | "
+                 f"code_len={len(code)} | preview='{code_preview}' ──")
+
         # Check for exit command
         if code.lower() == 'exit':
+            log.info("[ToolManager.run_work_environment] Exit command detected — returning EXITED_WORK_MODE")
             self.in_work_mode = False
             return "EXITED_WORK_MODE"
 
         # Check supervised execution (now properly on main thread)
+        log.debug("[ToolManager.run_work_environment] Checking supervised execution...")
         approved, modified_code = self._check_supervised_execution(code, 'work_environment')
 
         if not approved:
+            log.warning("[ToolManager.run_work_environment] ✗ Execution rejected by user")
             return "ERROR:\nCode execution rejected by user"
 
         # Use modified code if user edited it
+        if modified_code != code:
+            log.info("[ToolManager.run_work_environment] Code was modified by user in approval dialog")
         code = modified_code
 
         # Execute Python code
+        log.debug("[ToolManager.run_work_environment] → Executing via PythonInterpreter")
         result = self.tools['python'].execute(code)
+        log.debug(f"[ToolManager.run_work_environment] Python result: success={result['success']} | "
+                  f"stdout_len={len(result['stdout'])} | stderr_len={len(result['stderr'])} | "
+                  f"has_error={bool(result['error'])}")
 
         # Format output for AI to analyze
         output_parts = []
@@ -242,8 +314,12 @@ class ToolManager:
                 "Code executed but produced no output. "
                 "RECOMMENDATION: Use print() or return values to see results!"
             )
+            log.debug("[ToolManager.run_work_environment] No output produced — sending recommendation")
 
-        return "\n\n".join(output_parts)
+        combined = "\n\n".join(output_parts)
+        log.info(f"[ToolManager.run_work_environment] ✓ Work environment output ready | "
+                 f"parts={len(output_parts)} | total_len={len(combined)}")
+        return combined
 
     def run_execute_code(self, code, log_callback=None):
         """
@@ -259,11 +335,16 @@ class ToolManager:
                 'stderr': str   # stderr output
             }
         """
+        code_preview = code.strip()[:80].replace('\n', '↵')
+        log.info(f"[ToolManager.run_execute_code] ── Executing code (no AI output) | "
+                 f"code_len={len(code)} | preview='{code_preview}' ──")
         try:
             # Check supervised execution (now properly on main thread)
+            log.debug("[ToolManager.run_execute_code] Checking supervised execution...")
             approved, modified_code = self._check_supervised_execution(code, 'execute_code')
 
             if not approved:
+                log.warning("[ToolManager.run_execute_code] ✗ Code execution rejected by user")
                 if log_callback:
                     log_callback("❌ Code execution rejected by user", "WARNING")
                 return {
@@ -275,16 +356,25 @@ class ToolManager:
                 }
 
             # Use modified code if user edited it
+            if modified_code != code:
+                log.info("[ToolManager.run_execute_code] Code was modified by user in approval dialog")
             code = modified_code
 
             if log_callback:
                 log_callback(f"Executing: {code[:100]}...", "INFO")
 
             # Check if it's a GUI app that needs subprocess
+            log.debug("[ToolManager.run_execute_code] → _execute_with_gui_support()")
             result = self._execute_with_gui_support(code)
+            log.debug(f"[ToolManager.run_execute_code] Execution result: "
+                      f"success={result.get('success')} | "
+                      f"gui_launched={result.get('gui_launched', False)} | "
+                      f"has_error={bool(result.get('error'))}")
 
             # GUI app launched in subprocess
             if result.get('gui_launched'):
+                log.info(f"[ToolManager.run_execute_code] ✓ GUI app launched | "
+                         f"pid={result.get('pid')} | script='{result.get('script_path')}'")
                 if log_callback:
                     log_callback("✓ GUI application launched", "SUCCESS")
                 return {
@@ -297,6 +387,7 @@ class ToolManager:
 
             # Normal execution completed
             if result['success']:
+                log.info("[ToolManager.run_execute_code] ✓ Code executed successfully")
                 if log_callback:
                     log_callback("✓ Code executed successfully", "SUCCESS")
                 return {
@@ -309,6 +400,7 @@ class ToolManager:
 
             # Execution failed - include full error
             error_msg = result.get('error', 'Unknown error')
+            log.error(f"[ToolManager.run_execute_code] ✗ Execution failed: {error_msg[:200]}")
             if log_callback:
                 log_callback(f"✗ Execution failed: {error_msg}", "ERROR")
             return {
@@ -321,6 +413,7 @@ class ToolManager:
 
         except Exception as e:
             error_trace = f"Exception: {str(e)}"
+            log.error(f"[ToolManager.run_execute_code] ✗ Outer exception: {type(e).__name__}: {e}")
             if log_callback:
                 log_callback(f"Error: {e}", "ERROR")
             return {
@@ -333,14 +426,20 @@ class ToolManager:
 
     def get_work_mode_prompt(self):
         """Get the prompt for work mode continuation"""
+        log.debug(f"[ToolManager.get_work_mode_prompt] Building work mode prompt | "
+                  f"has_last_output={self.last_work_output is not None}")
         from core.global_instructions import WORK_MODE_PROMPT
 
         output = self.last_work_output or "No previous output"
-        return WORK_MODE_PROMPT.format(work_output=output)
+        prompt = WORK_MODE_PROMPT.format(work_output=output)
+        log.debug(f"[ToolManager.get_work_mode_prompt] Prompt built | length={len(prompt)}")
+        return prompt
 
     def reset_python(self):
         """Reset Python interpreter state"""
+        log.info("[ToolManager.reset_python] Resetting Python interpreter state")
         self.tools['python'].reset()
+        log.info("[ToolManager.reset_python] ✓ Python interpreter reset complete")
 
     def strip_tool_calls(self, text):
         """
@@ -348,9 +447,13 @@ class ToolManager:
         Does NOT execute any code — purely for cleaning stored messages before rendering.
         """
         if not text:
+            log.debug("[ToolManager.strip_tool_calls] Empty text — returning as-is")
             return text
+        log.debug(f"[ToolManager.strip_tool_calls] Stripping tool calls from {len(text)} char text | "
+                  f"keys={self._tool_keys}")
         for key in self._tool_keys:
             text = self._remove_json_from_text(text, None, tool_key=key)
+        log.debug(f"[ToolManager.strip_tool_calls] ✓ Stripped | resulting_len={len(text)}")
         return text
 
     # --- Internal helper methods ---
@@ -750,6 +853,7 @@ class ToolManager:
         Returns:
             str: Path to the saved file
         """
+        log.debug(f"[ToolManager._save_code_to_file] Saving {len(code)} chars to .generated/")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         filename = f"gui_exec_{timestamp}.py"
         filepath = os.path.join(self.generated_dir, filename)
@@ -757,6 +861,7 @@ class ToolManager:
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(code)
 
+        log.info(f"[ToolManager._save_code_to_file] ✓ Saved to '{filepath}'")
         return filepath
 
     def _execute_with_gui_support(self, code):
@@ -766,18 +871,23 @@ class ToolManager:
         Returns:
             dict: Execution result with optional 'gui_launched' flag
         """
+        log.debug(f"[ToolManager._execute_with_gui_support] code_len={len(code)} — detecting GUI usage")
         # Detect if it's GUI code
         is_gui = self._detect_gui_code(code)
+        log.info(f"[ToolManager._execute_with_gui_support] GUI detection result: is_gui={is_gui}")
 
         if is_gui:
             # Use subprocess for GUI applications
             try:
                 # Save code to file
                 script_path = self._save_code_to_file(code)
+                log.debug(f"[ToolManager._execute_with_gui_support] GUI script saved: '{script_path}'")
                 print(f"Saved GUI script to: {script_path}")
 
                 # Launch in subprocess (non-blocking)
                 import sys
+                log.debug(f"[ToolManager._execute_with_gui_support] Launching subprocess: "
+                          f"'{sys.executable}' '{script_path}'")
                 process = subprocess.Popen(
                     [sys.executable, script_path],
                     stdout=subprocess.PIPE,
@@ -786,6 +896,8 @@ class ToolManager:
                 )
 
                 # Don't wait - let it run in background
+                log.info(f"[ToolManager._execute_with_gui_support] ✓ GUI process launched | "
+                         f"pid={process.pid} | script='{script_path}'")
                 print(f"GUI process started with PID: {process.pid}")
 
                 return {
@@ -800,6 +912,8 @@ class ToolManager:
             except Exception as e:
                 import traceback
                 error_trace = traceback.format_exc()
+                log.error(f"[ToolManager._execute_with_gui_support] ✗ GUI launch failed: "
+                          f"{type(e).__name__}: {e}")
                 return {
                     'success': False,
                     'error': error_trace,
@@ -808,5 +922,8 @@ class ToolManager:
                 }
         else:
             # Execute normally for non-GUI code
+            log.debug("[ToolManager._execute_with_gui_support] Non-GUI code — using PythonInterpreter")
             result = self.tools['python'].execute(code)
+            log.debug(f"[ToolManager._execute_with_gui_support] PythonInterpreter result: "
+                      f"success={result['success']}")
             return result

@@ -1,13 +1,6 @@
 """
 Puter.js Server - Selenium-based WebSocket server with persistent browser profile
 Complete feature set: Chat, Images, TTS (Standard + ElevenLabs), STT, Text-to-Image, Quota Reset, Account Setup
-
-KEY UPDATES IN THIS VERSION:
-1. Added ElevenLabs TTS support via provider parameter
-2. Comprehensive documentation of all ElevenLabs voices and models
-3. Support for all ElevenLabs output formats
-4. Automatic provider detection (standard vs elevenlabs)
-5. All previous features maintained and working
 """
 
 from flask import Flask, render_template_string
@@ -22,17 +15,25 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-
+from core.logger import _make_logger, _NoOpLogger
 
 # Disable Flask's default logging
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
 
 
+# ─────────────────────────── Colored Logger Setup ────────────────────────────
+_verbose = True
+plog = _make_logger("PuterServer") if _verbose else _NoOpLogger()
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 class PuterServer:
     """Selenium-based Flask-SocketIO server for Puter.js AI with full feature support including ElevenLabs"""
 
     def __init__(self, port=8888, log_callback=None):
+        plog.info(f"[PuterServer.__init__] ── Initializing PuterServer | port={port} | "
+                  f"has_log_callback={log_callback is not None} ──")
         self.port = port
         self.log_callback = log_callback
         self.server_thread = None
@@ -55,12 +56,8 @@ class PuterServer:
 
         # Profile path in working directory
         self.profile_path = os.path.join(os.getcwd(), "PuterAPIServerPROFILE")
-
-    def log(self, message):
-        """Log message"""
-        print(f"[Puter Server] {message}")
-        if self.log_callback:
-            self.log_callback(f"[Puter Server] {message}", "INFO")
+        plog.info(f"[PuterServer.__init__] ✓ PuterServer initialized | port={port} | "
+                  f"profile='{self.profile_path}'")
 
     def _get_html_template(self):
         """Return dark mode HTML template with full Puter.ai features including ElevenLabs"""
@@ -730,17 +727,17 @@ class PuterServer:
         @socketio.on('connect')
         def handle_connect():
             self.client_connected = True
-            self.log("✓ WebSocket client connected")
+            plog.info("[PuterServer] ✓ WebSocket client connected")
 
         @socketio.on('disconnect')
         def handle_disconnect():
             self.client_connected = False
-            self.log("⚠ WebSocket client disconnected")
+            plog.info("[PuterServer] ⚠ WebSocket client disconnected")
 
         @socketio.on('puter_ready')
         def handle_puter_ready(data):
             self.puter_ready = True
-            self.log("✓ Puter.js is ready with ElevenLabs support")
+            plog.info("[PuterServer] ✓ Puter.js is ready with ElevenLabs support")
 
         @socketio.on('chat_response')
         def handle_chat_response(data):
@@ -778,7 +775,7 @@ class PuterServer:
         from webdriver_manager.chrome import ChromeDriverManager
 
         try:
-            self.log("Starting Selenium browser...")
+            plog.info("[PuterServer] Starting Selenium browser...")
 
             os.makedirs(self.profile_path, exist_ok=True)
 
@@ -790,32 +787,34 @@ class PuterServer:
             chrome_options.add_argument("--disable-blink-features=AutomationControlled")
             chrome_options.add_experimental_option('useAutomationExtension', False)
             chrome_options.add_experimental_option("detach", True)
-            
+
             service = Service(ChromeDriverManager().install())
             self.driver = webdriver.Chrome(options=chrome_options, service=service)
-            self.log(f"✓ Browser started with profile: {self.profile_path}")
+            plog.info(f"[PuterServer] ✓ Browser started with profile: {self.profile_path}")
 
             self.driver.get(f"http://127.0.0.1:{self.port}")
-            self.log(f"✓ Navigated to http://127.0.0.1:{self.port}")
+            plog.info(f"[PuterServer] ✓ Navigated to http://127.0.0.1:{self.port}")
 
             self.browser_ready = True
             return True
 
         except Exception as e:
-            self.log(f"✗ Failed to start browser: {e}")
+            plog.error(f"[PuterServer.start] Failed to start browser: {e}")
             return False
 
     def start(self):
         """Start the server and browser"""
+        plog.info(f"[PuterServer.start] ── Starting PuterServer | port={self.port} ──")
         if self.is_running:
-            self.log("Server already running")
+            plog.warning(f"[PuterServer.start] Server already running, skipping start")
             return True
 
         try:
             def run_server():
                 try:
                     self.app, self.socketio = self.create_app()
-                    self.log(f"Starting WebSocket server on port {self.port}")
+                    plog.info(f"[PuterServer] Starting WebSocket server on port {self.port}")
+                    plog.info(f"[PuterServer.start] WebSocket server binding to 127.0.0.1:{self.port}")
                     self.socketio.run(
                         self.app,
                         host='127.0.0.1',
@@ -825,19 +824,23 @@ class PuterServer:
                         allow_unsafe_werkzeug=True
                     )
                 except Exception as e:
-                    self.log(f"Server error: {e}")
+                    plog.error(f"[PuterServer] Server error: {e}")
                     self.is_running = False
 
             self.server_thread = threading.Thread(target=run_server, daemon=True)
             self.server_thread.start()
             self.is_running = True
+            plog.debug(f"[PuterServer.start] Server thread started (daemon=True)")
 
             time.sleep(2)
-            self.log(f"✓ Server started at http://127.0.0.1:{self.port}")
+            plog.info(f"[PuterServer] ✓ Server started at http://127.0.0.1:{self.port}")
+            plog.info(f"[PuterServer.start] ✓ Server running at http://127.0.0.1:{self.port}")
 
             if not self._start_browser():
-                self.log("⚠ Browser failed to start, but server is running")
+                plog.warning("[PuterServer] ⚠ Browser failed to start, but server is running")
+                plog.warning(f"[PuterServer.start] ⚠ Browser launch failed | server still running")
                 return False
+            plog.info(f"[PuterServer.start] ✓ Browser launched successfully")
 
             print("\n" + "="*60)
             print("⚠️  IMPORTANT NOTICE")
@@ -851,7 +854,8 @@ class PuterServer:
             return True
 
         except Exception as e:
-            self.log(f"✗ Failed to start: {e}")
+            plog.error(f"[PuterServer] ✗ Failed to start: {e}")
+            plog.error(f"[PuterServer.start] ✗ Failed to start server | error={e}")
             self.is_running = False
             return False
 
@@ -863,7 +867,7 @@ class PuterServer:
 
             match = re.match(r'data:([^;]+);base64,(.+)', base64_data)
             if not match:
-                self.log("✗ Invalid base64 data URL format")
+                plog.error("[PuterServer] ✗ Invalid base64 data URL format")
                 return False
 
             mime_type = match.group(1)
@@ -875,11 +879,11 @@ class PuterServer:
                 f.write(binary_data)
 
             file_size_kb = len(binary_data) / 1024
-            self.log(f"✓ Saved to {output_path} ({file_size_kb:.1f}KB)")
+            plog.info(f"[PuterServer] ✓ Saved to {output_path} ({file_size_kb:.1f}KB)")
             return True
 
         except Exception as e:
-            self.log(f"✗ Failed to save base64 data: {e}")
+            plog.error(f"[PuterServer] ✗ Failed to save base64 data: {e}")
             return False
 
     def upload_image_to_host(self, image_path, max_size_mb=512):
@@ -888,14 +892,18 @@ class PuterServer:
         Caches the last working provider in self._recent_image_host and tries it
         first on subsequent calls for speed, falling back to the full chain on failure.
         """
+        plog.info(f"[PuterServer.upload_image_to_host] ── Uploading image | path={image_path} | max_size_mb={max_size_mb} ──")
         try:
             if not os.path.exists(image_path):
-                self.log(f"✗ Image file not found: {image_path}")
+                plog.error(f"[PuterServer] ✗ Image file not found: {image_path}")
+                plog.error(f"[PuterServer.upload_image_to_host] ✗ File not found | path={image_path}")
                 return None
 
             file_size_mb = os.path.getsize(image_path) / (1024 * 1024)
+            plog.debug(f"[PuterServer.upload_image_to_host] File size | size_mb={file_size_mb:.2f}")
             if file_size_mb > max_size_mb:
-                self.log(f"✗ Image too large: {file_size_mb:.2f}MB (max: {max_size_mb}MB)")
+                plog.error(f"[PuterServer] ✗ Image too large: {file_size_mb:.2f}MB (max: {max_size_mb}MB)")
+                plog.error(f"[PuterServer.upload_image_to_host] ✗ File too large | size_mb={file_size_mb:.2f} | max_mb={max_size_mb}")
                 return None
 
             providers = [
@@ -956,14 +964,16 @@ class PuterServer:
             def try_provider(p):
                 """Attempt an upload against a single provider. Returns URL or None."""
                 if file_size_mb > p["max_mb"]:
-                    self.log(f"⚠ [{p['name']}] Skipping — file too large ({file_size_mb:.2f}MB, max {p['max_mb']}MB)")
+                    plog.debug(f"[PuterServer] ⚠ [{p['name']}] Skipping — file too large ({file_size_mb:.2f}MB, max {p['max_mb']}MB)")
+                    plog.debug(f"[PuterServer.upload_image_to_host] Skipping {p['name']} | too large {file_size_mb:.2f}MB > {p['max_mb']}MB")
                     return None
 
                 # GoFile has a dedicated handler
                 if "custom_fn" in p:
                     return getattr(self, p["custom_fn"])(image_path, file_size_mb)
 
-                self.log(f"Uploading ({file_size_mb:.2f}MB) to {p['name']}...")
+                plog.info(f"[PuterServer] Uploading ({file_size_mb:.2f}MB) to {p['name']}...")
+                plog.debug(f"[PuterServer.upload_image_to_host] Trying provider={p['name']} | size_mb={file_size_mb:.2f}")
                 for attempt in range(3):
                     try:
                         with open(image_path, "rb") as f:
@@ -976,41 +986,50 @@ class PuterServer:
                             )
                         if response.status_code == 200:
                             url = p["parse"](response)
-                            self.log(f"✓ [{p['name']}] Uploaded: {url}")
+                            plog.info(f"[PuterServer] ✓ [{p['name']}] Uploaded: {url}")
+                            plog.info(f"[PuterServer.upload_image_to_host] ✓ Upload success | provider={p['name']} | url={url}")
                             time.sleep(1)
                             return url
-                        self.log(f"⚠ [{p['name']}] Attempt {attempt + 1} failed: HTTP {response.status_code}")
+                        plog.warning(f"[PuterServer] ⚠ [{p['name']}] Attempt {attempt + 1} failed: HTTP {response.status_code}")
+                        plog.warning(f"[PuterServer.upload_image_to_host] Provider {p['name']} attempt {attempt+1} | status={response.status_code}")
                     except Exception as e:
-                        self.log(f"⚠ [{p['name']}] Attempt {attempt + 1} error: {e}")
+                        plog.warning(f"[PuterServer] ⚠ [{p['name']}] Attempt {attempt + 1} error: {e}")
+                        plog.warning(f"[PuterServer.upload_image_to_host] Provider {p['name']} attempt {attempt+1} error | error={e}")
                     if attempt < 2:
                         time.sleep(2)
 
-                self.log(f"✗ [{p['name']}] Failed, trying next provider...")
+                plog.warning(f"[PuterServer] ✗ [{p['name']}] Failed, trying next provider...")
+                plog.debug(f"[PuterServer.upload_image_to_host] Provider {p['name']} exhausted all retries")
                 return None
 
             # --- Fast path: try the last known-good provider first ---
             if self._recent_image_host:
                 recent = next((p for p in providers if p["name"] == self._recent_image_host), None)
                 if recent:
-                    self.log(f"[Fast path] Trying last successful provider: {self._recent_image_host}")
+                    plog.info(f"[PuterServer] [Fast path] Trying last successful provider: {self._recent_image_host}")
+                    plog.debug(f"[PuterServer.upload_image_to_host] Fast path | trying cached provider={self._recent_image_host}")
                     url = try_provider(recent)
                     if url:
                         return url
-                    self.log(f"[Fast path] {self._recent_image_host} failed, falling back to full chain...")
+                    plog.warning(f"[PuterServer] [Fast path] {self._recent_image_host} failed, falling back to full chain...")
+                    plog.warning(f"[PuterServer.upload_image_to_host] Fast path failed | falling back to full chain")
                     self._recent_image_host = None
 
             # --- Full chain ---
+            plog.debug(f"[PuterServer.upload_image_to_host] Running full provider chain | count={len(providers)}")
             for p in providers:
                 url = try_provider(p)
                 if url:
                     self._recent_image_host = p["name"]
                     return url
 
-            self.log("✗ All upload providers failed")
+            plog.error("[PuterServer] ✗ All upload providers failed")
+            plog.error(f"[PuterServer.upload_image_to_host] ✗ All providers failed")
             return None
 
         except Exception as e:
-            self.log(f"✗ Upload error: {e}")
+            plog.error(f"[PuterServer] ✗ Upload error: {e}")
+            plog.error(f"[PuterServer.upload_image_to_host] ✗ Exception | error={e}")
             return None
 
     def _upload_gofile(self, image_path, file_size_mb):
@@ -1019,19 +1038,19 @@ class PuterServer:
         Fetches all available servers from the API and tries each one in order
         before giving up, so a single downed server won't block the upload.
         """
-        self.log(f"Uploading ({file_size_mb:.2f}MB) to GoFile...")
+        plog.info(f"[PuterServer] Uploading ({file_size_mb:.2f}MB) to GoFile...")
         try:
             resp = requests.get("https://api.gofile.io/servers", timeout=15)
             servers = resp.json()["data"]["servers"]  # [{"name": "store1", ...}, ...]
             server_names = [s["name"] for s in servers]
-            self.log(f"[GoFile] Available servers: {server_names}")
+            plog.info(f"[PuterServer] [GoFile] Available servers: {server_names}")
         except Exception as e:
-            self.log(f"✗ [GoFile] Could not fetch server list: {e}")
+            plog.error(f"[PuterServer] ✗ [GoFile] Could not fetch server list: {e}")
             return None
 
         for server in server_names:
             upload_url = f"https://{server}.gofile.io/contents/uploadfile"
-            self.log(f"[GoFile] Trying server: {server}")
+            plog.info(f"[PuterServer] [GoFile] Trying server: {server}")
             for attempt in range(3):
                 try:
                     with open(image_path, "rb") as f:
@@ -1040,51 +1059,58 @@ class PuterServer:
                         data = response.json()
                         if data.get("status") == "ok":
                             url = data["data"]["downloadPage"]
-                            self.log(f"✓ [GoFile/{server}] Uploaded: {url}")
+                            plog.info(f"[PuterServer] ✓ [GoFile/{server}] Uploaded: {url}")
                             time.sleep(1)
                             return url
-                        self.log(f"⚠ [GoFile/{server}] Bad response: {data.get('status')}")
+                        plog.warning(f"[PuterServer] ⚠ [GoFile/{server}] Bad response: {data.get('status')}")
                     else:
-                        self.log(f"⚠ [GoFile/{server}] Attempt {attempt + 1} failed: HTTP {response.status_code}")
+                        plog.warning(f"[PuterServer] ⚠ [GoFile/{server}] Attempt {attempt + 1} failed: HTTP {response.status_code}")
                 except Exception as e:
-                    self.log(f"⚠ [GoFile/{server}] Attempt {attempt + 1} error: {e}")
+                    plog.warning(f"[PuterServer] ⚠ [GoFile/{server}] Attempt {attempt + 1} error: {e}")
                 if attempt < 2:
                     time.sleep(2)
 
-            self.log(f"✗ [GoFile/{server}] All attempts failed, trying next server...")
+            plog.warning(f"[PuterServer] ✗ [GoFile/{server}] All attempts failed, trying next server...")
 
-        self.log("✗ [GoFile] All servers exhausted")
+        plog.error("[PuterServer] ✗ [GoFile] All servers exhausted")
         return None
 
     def send_chat_request(self, messages, model='gpt-5-chat-latest',
                          temperature=0.7, max_tokens=2000, image=None, timeout=60, is_test=False):
         """Send a chat request with full message history"""
+        plog.info(f"[PuterServer.send_chat_request] ── Chat request | model={model} | messages={len(messages)} | max_tokens={max_tokens} | timeout={timeout}s ──")
         try:
             if not self.client_connected or not self.puter_ready:
-                self.log("✗ Client not ready")
+                plog.warning(f"[PuterServer] ✗ Client not ready")
+                plog.warning(f"[PuterServer.send_chat_request] ✗ Client not ready | connected={self.client_connected} | puter_ready={self.puter_ready}")
                 return None
 
             image_url = None
             if image:
                 if image.startswith('http://') or image.startswith('https://'):
                     image_url = image
-                    self.log(f"Using image URL: {image_url}")
+                    plog.info(f"[PuterServer] Using image URL: {image_url}")
+                    plog.debug(f"[PuterServer.send_chat_request] Image is URL, using directly | url={image_url}")
                 else:
-                    self.log(f"Uploading local image: {image}")
+                    plog.info(f"[PuterServer] Uploading local image: {image}")
+                    plog.debug(f"[PuterServer.send_chat_request] Uploading local image | path={image}")
                     image_url = self.upload_image_to_host(image)
                     if not image_url:
-                        self.log("✗ Image upload failed")
+                        plog.error("[PuterServer] ✗ Image upload failed")
+                        plog.error(f"[PuterServer.send_chat_request] ✗ Image upload failed | path={image}")
                         return None
+                    plog.info(f"[PuterServer.send_chat_request] ✓ Image uploaded | url={image_url}")
 
-            self.log(f"Sending chat request (model: {model})")
+            plog.info(f"[PuterServer] Sending chat request (model: {model})")
             if image_url:
-                self.log(f"  → With image: {image_url}")
-            self.log(f"  → Messages: {len(messages)} in history")
+                plog.info(f"[PuterServer]   → With image: {image_url}")
+            plog.info(f"[PuterServer]   → Messages: {len(messages)} in history")
 
             self.latest_response = None
             self.response_ready.clear()
 
             if self.socketio:
+                plog.debug(f"[PuterServer.send_chat_request] Emitting 'chat_request' via SocketIO")
                 self.socketio.emit('chat_request', {
                     'messages': messages,
                     'model': model,
@@ -1094,45 +1120,55 @@ class PuterServer:
                 })
 
                 if is_test:
-                    self.log("Test Message is Sent...")
+                    plog.info("[PuterServer] Test Message is Sent...")
+                    plog.debug(f"[PuterServer.send_chat_request] Test mode, returning after emit")
                     return None
 
-                self.log(f"Waiting for response (timeout: {timeout}s)...")
+                plog.info(f"[PuterServer] Waiting for response (timeout: {timeout}s)...")
+                plog.debug(f"[PuterServer.send_chat_request] Waiting for response_ready event | timeout={timeout}s")
                 if self.response_ready.wait(timeout=timeout):
                     response = self.latest_response
                     if response and response.get('success'):
                         result = response.get('response')
-                        self.log(f"✓ Received response ({len(result)} chars)")
+                        plog.info(f"[PuterServer] ✓ Received response ({len(result)} chars)")
+                        plog.info(f"[PuterServer.send_chat_request] ✓ Response received | chars={len(result)}")
                         return result
                     else:
                         error_msg = response.get('response', 'Unknown error')
-                        self.log(f"✗ Request failed: {error_msg}")
+                        plog.error(f"[PuterServer] ✗ Request failed: {error_msg}")
+                        plog.error(f"[PuterServer.send_chat_request] ✗ Request failed | error={error_msg}")
                         return None
                 else:
-                    self.log("✗ Timeout waiting for response")
+                    plog.error("[PuterServer] ✗ Timeout waiting for response")
+                    plog.error(f"[PuterServer.send_chat_request] ✗ Timeout after {timeout}s waiting for response")
                     return None
             else:
-                self.log("✗ SocketIO not initialized")
+                plog.error("[PuterServer] ✗ SocketIO not initialized")
+                plog.error(f"[PuterServer.send_chat_request] ✗ SocketIO not initialized")
                 return None
 
         except Exception as e:
-            self.log(f"✗ Error: {e}")
+            plog.error(f"[PuterServer] ✗ Error: {e}")
+            plog.error(f"[PuterServer.send_chat_request] ✗ Exception | error={e}")
             return None
 
     def text_to_image(self, prompt, model='gpt-image-1', width=None, height=None,
                      save_to=None, timeout=180):
         """Generate image from text"""
+        plog.info(f"[PuterServer.text_to_image] ── TTI request | model={model} | size={width}x{height} | prompt='{prompt[:50]}...' ──")
         try:
             if not self.client_connected or not self.puter_ready:
-                self.log("✗ Client not ready")
+                plog.warning("[PuterServer] ✗ Client not ready")
+                plog.warning(f"[PuterServer.text_to_image] ✗ Client not ready | connected={self.client_connected} | puter_ready={self.puter_ready}")
                 return None
 
-            self.log(f"Text-to-Image request: {prompt[:50]}...")
+            plog.info(f"[PuterServer] Text-to-Image request: {prompt[:50]}...")
 
             self.latest_response = None
             self.response_ready.clear()
 
             if self.socketio:
+                plog.debug(f"[PuterServer.text_to_image] Emitting 'text_to_image_request'")
                 self.socketio.emit('text_to_image_request', {
                     'prompt': prompt,
                     'model': model,
@@ -1140,7 +1176,8 @@ class PuterServer:
                     'height': height
                 })
 
-                self.log(f"Waiting for image generation (timeout: {timeout}s)...")
+                plog.info(f"[PuterServer] Waiting for image generation (timeout: {timeout}s)...")
+                plog.debug(f"[PuterServer.text_to_image] Waiting for response | timeout={timeout}s")
                 if self.response_ready.wait(timeout=timeout):
                     response = self.latest_response
                     if response and response.get('success'):
@@ -1149,23 +1186,29 @@ class PuterServer:
 
                         if is_base64:
                             size_kb = len(image_data) / 1024
-                            self.log(f"✓ Received base64 image ({size_kb:.1f}KB)")
+                            plog.info(f"[PuterServer] ✓ Received base64 image ({size_kb:.1f}KB)")
+                            plog.info(f"[PuterServer.text_to_image] ✓ Base64 image received | size_kb={size_kb:.1f}")
                             if save_to:
+                                plog.debug(f"[PuterServer.text_to_image] Saving to file | path={save_to}")
                                 self._save_base64_to_file(image_data, save_to)
                             return image_data
                         else:
-                            self.log(f"✓ Image URL: {image_data}")
+                            plog.info(f"[PuterServer] ✓ Image URL: {image_data}")
+                            plog.info(f"[PuterServer.text_to_image] ✓ Image URL received | url={image_data}")
                             return image_data
                     else:
                         error = response.get('error', 'Unknown error')
-                        self.log(f"✗ Generation failed: {error}")
+                        plog.error(f"[PuterServer] ✗ Generation failed: {error}")
+                        plog.error(f"[PuterServer.text_to_image] ✗ Generation failed | error={error}")
                         return None
                 else:
-                    self.log("✗ Timeout waiting for image generation")
+                    plog.error("[PuterServer] ✗ Timeout waiting for image generation")
+                    plog.error(f"[PuterServer.text_to_image] ✗ Timeout after {timeout}s")
                     return None
 
         except Exception as e:
-            self.log(f"✗ Error: {e}")
+            plog.error(f"[PuterServer] ✗ Error: {e}")
+            plog.error(f"[PuterServer.text_to_image] ✗ Exception | error={e}")
             return None
 
     def text_to_speech(self, text, model='tts-1', voice=None, save_to=None,
@@ -1260,10 +1303,12 @@ class PuterServer:
         """
         try:
             if not self.client_connected or not self.puter_ready:
-                self.log("✗ Client not ready")
+                plog.warning("[PuterServer] ✗ Client not ready")
+                plog.warning(f"[PuterServer.text_to_speech] ✗ Client not ready | connected={self.client_connected} | puter_ready={self.puter_ready}")
                 return None
 
-            self.log(f"Text-to-Speech request ({provider}): {text[:50]}...")
+            plog.info(f"[PuterServer.text_to_speech] ── TTS request | provider={provider} | model={model} | voice={voice} | text='{text[:50]}...' ──")
+            plog.info(f"[PuterServer] Text-to-Speech request ({provider}): {text[:50]}...")
 
             self.latest_response = None
             self.response_ready.clear()
@@ -1279,9 +1324,11 @@ class PuterServer:
                 if provider == 'elevenlabs' and output_format:
                     request_data['output_format'] = output_format
 
+                plog.debug(f"[PuterServer.text_to_speech] Emitting 'text_to_speech_request'")
                 self.socketio.emit('text_to_speech_request', request_data)
 
-                self.log(f"Waiting for audio generation (timeout: {timeout}s)...")
+                plog.info(f"[PuterServer] Waiting for audio generation (timeout: {timeout}s)...")
+                plog.debug(f"[PuterServer.text_to_speech] Waiting for audio response | timeout={timeout}s")
                 if self.response_ready.wait(timeout=timeout):
                     response = self.latest_response
                     if response and response.get('success'):
@@ -1290,75 +1337,92 @@ class PuterServer:
                         response_provider = response.get('provider', 'standard')
 
                         if is_base64:
-                            self.log(f"✓ Received base64 audio data ({response_provider})")
+                            plog.info(f"[PuterServer] ✓ Received base64 audio data ({response_provider})")
+                            plog.info(f"[PuterServer.text_to_speech] ✓ Base64 audio received | provider={response_provider}")
                             if save_to:
+                                plog.debug(f"[PuterServer.text_to_speech] Saving audio to | path={save_to}")
                                 self._save_base64_to_file(audio_data, save_to)
                             return audio_data
                         else:
-                            self.log(f"✓ Audio URL ({response_provider}): {audio_data}")
+                            plog.info(f"[PuterServer] ✓ Audio URL ({response_provider}): {audio_data}")
+                            plog.info(f"[PuterServer.text_to_speech] ✓ Audio URL received | provider={response_provider} | url={audio_data}")
                             return audio_data
                     else:
                         error = response.get('error', 'Unknown error')
-                        self.log(f"✗ Generation failed: {error}")
+                        plog.error(f"[PuterServer] ✗ Generation failed: {error}")
+                        plog.error(f"[PuterServer.text_to_speech] ✗ Generation failed | error={error}")
                         return None
                 else:
-                    self.log("✗ Timeout waiting for audio generation")
+                    plog.error("[PuterServer] ✗ Timeout waiting for audio generation")
+                    plog.error(f"[PuterServer.text_to_speech] ✗ Timeout after {timeout}s")
                     return None
 
         except Exception as e:
-            self.log(f"✗ Error: {e}")
+            plog.error(f"[PuterServer] ✗ Error: {e}")
+            plog.error(f"[PuterServer.text_to_speech] ✗ Exception | error={e}")
             return None
 
     def speech_to_text(self, audio_url, model='faster-whisper-large-v3', timeout=90):
         """Convert speech to text"""
+        plog.info(f"[PuterServer.speech_to_text] ── STT request | model={model} | url={audio_url} ──")
         try:
             if not self.client_connected or not self.puter_ready:
-                self.log("✗ Client not ready")
+                plog.warning("[PuterServer] ✗ Client not ready")
+                plog.warning(f"[PuterServer.speech_to_text] ✗ Client not ready")
                 return None
 
-            self.log(f"Speech-to-Text request for: {audio_url}")
+            plog.info(f"[PuterServer] Speech-to-Text request for: {audio_url}")
 
             self.latest_response = None
             self.response_ready.clear()
 
             if self.socketio:
+                plog.debug(f"[PuterServer.speech_to_text] Emitting 'speech_to_text_request'")
                 self.socketio.emit('speech_to_text_request', {
                     'audio_url': audio_url,
                     'model': model
                 })
 
-                self.log(f"Waiting for transcription (timeout: {timeout}s)...")
+                plog.info(f"[PuterServer] Waiting for transcription (timeout: {timeout}s)...")
+                plog.debug(f"[PuterServer.speech_to_text] Waiting for transcription | timeout={timeout}s")
                 if self.response_ready.wait(timeout=timeout):
                     response = self.latest_response
                     if response and response.get('success'):
                         text = response.get('text')
-                        self.log(f"✓ Transcription completed successfully")
+                        plog.info("[PuterServer] ✓ Transcription completed successfully")
+                        plog.info(f"[PuterServer.speech_to_text] ✓ Transcription done | chars={len(text) if text else 0}")
                         return text
                     else:
                         error = response.get('error', 'Unknown error')
-                        self.log(f"✗ Transcription failed: {error}")
+                        plog.error(f"[PuterServer] ✗ Transcription failed: {error}")
+                        plog.error(f"[PuterServer.speech_to_text] ✗ Transcription failed | error={error}")
                         return None
                 else:
-                    self.log("✗ Timeout waiting for transcription")
+                    plog.error("[PuterServer] ✗ Timeout waiting for transcription")
+                    plog.error(f"[PuterServer.speech_to_text] ✗ Timeout after {timeout}s")
                     return None
 
         except Exception as e:
-            self.log(f"✗ Error: {e}")
+            plog.error(f"[PuterServer] ✗ Error: {e}")
             return None
 
     def reset_quota(self, email, password):
         """Reset Puter.com API quota using automation"""
+        plog.info(f"[PuterServer.reset_quota] ── Starting quota reset | email={email} ──")
         try:
             if not self.driver:
-                self.log("✗ Browser not initialized")
+                plog.error("[PuterServer] ✗ Browser not initialized")
+                plog.error(f"[PuterServer.reset_quota] ✗ Browser not initialized")
                 return False
 
-            self.log("Starting quota reset automation...")
-            self.log(f"Using account: {email}")
+            plog.info("[PuterServer] Starting quota reset automation...")
+            plog.info(f"[PuterServer] Using account: {email}")
+            plog.debug(f"[PuterServer.reset_quota] Browser driver available, starting automation")
 
             original_tab = self.driver.current_window_handle
 
-            self.log("Opening new tab for automation...")
+            plog.info("[PuterServer] Opening new tab for automation...")
+            plog.debug(f"[PuterServer.reset_quota] Opening new browser tab")
             self.driver.execute_script("window.open('');")
 
             self.driver.switch_to.window(self.driver.window_handles[-1])
@@ -1367,7 +1431,7 @@ class PuterServer:
                 wait = WebDriverWait(self.driver, 15)
                 fiveSec_wait = WebDriverWait(self.driver, 5)
 
-                self.log("Navigating to Puter dashboard...")
+                plog.info("[PuterServer] Navigating to Puter dashboard...")
                 self.driver.get("https://puter.com/dashboard")
                 time.sleep(2)
 
@@ -1377,9 +1441,9 @@ class PuterServer:
                     )
                     expand_button.click()
                     time.sleep(1)
-                    self.log("✓ Step 1 completed")
+                    plog.info("[PuterServer] ✓ Step 1 completed")
                 except Exception as e:
-                    self.log(f"  Step 1 skipped: {e}")
+                    plog.info(f"[PuterServer]   Step 1 skipped: {e}")
 
                 try:
                     element1 = wait.until(
@@ -1387,9 +1451,9 @@ class PuterServer:
                     )
                     element1.click()
                     time.sleep(1)
-                    self.log("✓ Step 2 completed")
+                    plog.info("[PuterServer] ✓ Step 2 completed")
                 except Exception as e:
-                    self.log(f"✗ Step 2 failed: {e}")
+                    plog.error(f"[PuterServer] ✗ Step 2 failed: {e}")
                     return False
 
                 try:
@@ -1399,9 +1463,9 @@ class PuterServer:
                     )
                     element2.click()
                     time.sleep(1)
-                    self.log("✓ Step 3 completed")
+                    plog.info("[PuterServer] ✓ Step 3 completed")
                 except Exception as e:
-                    self.log(f"✗ Step 3 failed: {e}")
+                    plog.error(f"[PuterServer] ✗ Step 3 failed: {e}")
                     return False
 
                 try:
@@ -1410,9 +1474,9 @@ class PuterServer:
                     )
                     element3.click()
                     time.sleep(1)
-                    self.log("✓ Step 4 completed")
+                    plog.info("[PuterServer] ✓ Step 4 completed")
                 except Exception as e:
-                    self.log(f"✗ Step 4 failed: {e}")
+                    plog.error(f"[PuterServer] ✗ Step 4 failed: {e}")
                     return False
 
                 try:
@@ -1427,7 +1491,7 @@ class PuterServer:
                             password_field = wait.until(
                                 EC.presence_of_element_located((By.XPATH, xpath))
                             )
-                            self.log(f"  Found password field using: {xpath}")
+                            plog.info(f"[PuterServer]   Found password field using: {xpath}")
                             break
                         except:
                             continue
@@ -1439,9 +1503,9 @@ class PuterServer:
                     time.sleep(0.5)
                     password_field.send_keys(password)
                     time.sleep(1)
-                    self.log("✓ Step 5 completed")
+                    plog.info("[PuterServer] ✓ Step 5 completed")
                 except Exception as e:
-                    self.log(f"✗ Step 5 failed: {e}")
+                    plog.error(f"[PuterServer] ✗ Step 5 failed: {e}")
                     return False
 
                 try:
@@ -1450,9 +1514,9 @@ class PuterServer:
                     )
                     final_button.click()
                     time.sleep(2)
-                    self.log("✓ Step 6 completed")
+                    plog.info("[PuterServer] ✓ Step 6 completed")
                 except Exception as e:
-                    self.log(f"✗ Step 6 failed: {e}")
+                    plog.error(f"[PuterServer] ✗ Step 6 failed: {e}")
                     return False
 
                 try:
@@ -1461,14 +1525,14 @@ class PuterServer:
                     )
                     setup_button.click()
                     time.sleep(2)
-                    self.log("✓ Step 7 completed")
+                    plog.info("[PuterServer] ✓ Step 7 completed")
                 except Exception as e:
-                    self.log(f"✗ Step 7 failed: {e}")
+                    plog.error(f"[PuterServer] ✗ Step 7 failed: {e}")
                     return False
 
                 try:
                     username = self._generate_random_username()
-                    self.log(f"  Generated username: {username}")
+                    plog.info(f"[PuterServer]   Generated username: {username}")
                     username_field = wait.until(
                         EC.presence_of_element_located(
                             (By.XPATH, '/html/body/div[2]/div[3]/div/div[1]/form/div[2]/input'))
@@ -1477,9 +1541,9 @@ class PuterServer:
                     time.sleep(0.5)
                     username_field.send_keys(username)
                     time.sleep(1)
-                    self.log("✓ Step 8 completed")
+                    plog.info("[PuterServer] ✓ Step 8 completed")
                 except Exception as e:
-                    self.log(f"✗ Step 8 failed: {e}")
+                    plog.error(f"[PuterServer] ✗ Step 8 failed: {e}")
                     return False
 
                 try:
@@ -1491,9 +1555,9 @@ class PuterServer:
                     time.sleep(0.5)
                     email_field.send_keys(email)
                     time.sleep(1)
-                    self.log("✓ Step 9 completed")
+                    plog.info("[PuterServer] ✓ Step 9 completed")
                 except Exception as e:
-                    self.log(f"✗ Step 9 failed: {e}")
+                    plog.error(f"[PuterServer] ✗ Step 9 failed: {e}")
                     return False
 
                 try:
@@ -1505,9 +1569,9 @@ class PuterServer:
                     time.sleep(0.5)
                     password_field.send_keys(password)
                     time.sleep(1)
-                    self.log("✓ Step 10 completed")
+                    plog.info("[PuterServer] ✓ Step 10 completed")
                 except Exception as e:
-                    self.log(f"✗ Step 10 failed: {e}")
+                    plog.error(f"[PuterServer] ✗ Step 10 failed: {e}")
                     return False
 
                 try:
@@ -1519,9 +1583,9 @@ class PuterServer:
                     time.sleep(0.5)
                     confirm_password_field.send_keys(password)
                     time.sleep(1)
-                    self.log("✓ Step 11 completed")
+                    plog.info("[PuterServer] ✓ Step 11 completed")
                 except Exception as e:
-                    self.log(f"✗ Step 11 failed: {e}")
+                    plog.error(f"[PuterServer] ✗ Step 11 failed: {e}")
                     return False
 
                 try:
@@ -1530,26 +1594,26 @@ class PuterServer:
                     )
                     submit_button.click()
                     time.sleep(3)
-                    self.log("✓ Step 12 completed")
+                    plog.info("[PuterServer] ✓ Step 12 completed")
                 except Exception as e:
-                    self.log(f"✗ Step 12 failed: {e}")
+                    plog.error(f"[PuterServer] ✗ Step 12 failed: {e}")
                     return False
 
-                self.log("✓ All 12 steps completed! Quota reset successful!")
+                plog.info("[PuterServer] ✓ All 12 steps completed! Quota reset successful!")
                 return True
 
             finally:
                 try:
-                    self.log("Closing automation tab...")
+                    plog.info("[PuterServer] Closing automation tab...")
                     time.sleep(7)
                     self.driver.close()
                     self.driver.switch_to.window(original_tab)
-                    self.log("✓ Returned to original tab")
+                    plog.info("[PuterServer] ✓ Returned to original tab")
 
                     messages = [{"role": "user", "content": "Test"}]
                     self.send_chat_request(messages=messages, model="gpt-5-nano", is_test=True)
 
-                    self.log("Waiting for auth dialog...")
+                    plog.info("[PuterServer] Waiting for auth dialog...")
                     time.sleep(2)
 
                     try:
@@ -1572,24 +1636,25 @@ class PuterServer:
                         for attempt in range(max_attempts):
                             result = self.driver.execute_script(click_script)
                             if result == 'clicked':
-                                self.log("✓ Clicked Authentication button")
+                                plog.info("[PuterServer] ✓ Clicked Authentication button")
                                 break
-                            self.log(f"  Attempt {attempt + 1}/{max_attempts}: Dialog not ready yet...")
+                            plog.info(f"[PuterServer]   Attempt {attempt + 1}/{max_attempts}: Dialog not ready yet...")
                             time.sleep(1)
                         else:
-                            self.log("⚠ Auth dialog did not appear (this is okay if not needed)")
+                            plog.warning("[PuterServer] ⚠ Auth dialog did not appear (this is okay if not needed)")
                     except Exception as e:
-                        self.log(f"⚠ Could not click auth button: {e}")
+                        plog.warning(f"[PuterServer] ⚠ Could not click auth button: {e}")
 
                 except Exception as e:
-                    self.log(f"⚠ Error closing tab: {e}")
+                    plog.warning(f"[PuterServer] ⚠ Error closing tab: {e}")
                     try:
                         self.driver.switch_to.window(original_tab)
                     except:
                         pass
 
         except Exception as e:
-            self.log(f"✗ Quota reset failed: {e}")
+            plog.error(f"[PuterServer] ✗ Quota reset failed: {e}")
+            plog.error(f"[PuterServer.reset_quota] ✗ Quota reset failed | error={e}")
             return False
 
     def _generate_random_username(self):
@@ -1609,12 +1674,15 @@ class PuterServer:
 
     def setup_account(self):
         """Open Puter.com for manual account setup"""
+        plog.info(f"[PuterServer.setup_account] ── Starting manual account setup ──")
         try:
             if not self.driver:
-                self.log("✗ Browser not initialized")
+                plog.error("[PuterServer] ✗ Browser not initialized")
+                plog.error(f"[PuterServer.setup_account] ✗ Browser not initialized")
                 return False
 
-            self.log("Opening Puter.com for account setup...")
+            plog.info("[PuterServer] Opening Puter.com for account setup...")
+            plog.debug(f"[PuterServer.setup_account] Navigating to https://puter.com")
             self.driver.get("https://puter.com")
 
             print("\n" + "="*60)
@@ -1627,29 +1695,37 @@ class PuterServer:
 
             input("Press Enter when account setup is complete...")
 
-            self.log("✓ Account setup session completed")
+            plog.info("[PuterServer] ✓ Account setup session completed")
+            plog.info(f"[PuterServer.setup_account] ✓ Account setup completed by user")
             return True
 
         except Exception as e:
-            self.log(f"✗ Setup failed: {e}")
+            plog.error(f"[PuterServer] ✗ Setup failed: {e}")
+            plog.error(f"[PuterServer.setup_account] ✗ Setup failed | error={e}")
             return False
 
     def check_health(self):
         """Check if server is healthy"""
+        plog.debug(f"[PuterServer.check_health] Checking health at port={self.port}")
         try:
             import requests
             response = requests.get(f'http://127.0.0.1:{self.port}/health', timeout=2)
-            return response.status_code == 200
-        except:
+            healthy = response.status_code == 200
+            plog.debug(f"[PuterServer.check_health] Health check result | status={response.status_code} | healthy={healthy}")
+            return healthy
+        except Exception as e:
+            plog.warning(f"[PuterServer.check_health] Health check failed | error={e}")
             return False
 
     def stop(self):
         """Stop the server and close browser"""
+        plog.info(f"[PuterServer.stop] ── Stopping PuterServer ──")
         self.is_running = False
         if self.driver:
             try:
                 self.driver.quit()
-                self.log("✓ Browser closed")
-            except:
+                plog.info(f"[PuterServer.stop] ✓ Browser driver closed")
+            except Exception as e:
+                plog.error(f"[PuterServer.stop] Browser close error | error={e}")
                 pass
-        self.log("Server stopped")
+        plog.info(f"[PuterServer.stop] ✓ Server stopped")
