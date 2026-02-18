@@ -1491,7 +1491,7 @@ class PuterServer:
                             password_field = wait.until(
                                 EC.presence_of_element_located((By.XPATH, xpath))
                             )
-                            plog.info(f"[PuterServer]   Found password field using: {xpath}")
+                            plog.info(f"[PuterServer] ACCOUNT DELETION PROCESS: Found password field using: {xpath}")
                             break
                         except:
                             continue
@@ -1503,7 +1503,7 @@ class PuterServer:
                     time.sleep(0.5)
                     password_field.send_keys(password)
                     time.sleep(1)
-                    plog.info("[PuterServer] ✓ Step 5 completed")
+                    plog.info("[PuterServer] ACCOUNT DELETION PROCESS: ✓ Step 5 completed CLICKING CONFIRM DELETE ACCOUND")
                 except Exception as e:
                     plog.error(f"[PuterServer] ✗ Step 5 failed: {e}")
                     return False
@@ -1521,13 +1521,13 @@ class PuterServer:
 
                 try:
                     setup_button = wait.until(
-                        EC.element_to_be_clickable((By.XPATH, '//*[@id="window-body-0"]/div/div[4]/button'))
+                        EC.element_to_be_clickable((By.XPATH, '/html/body/div[2]/div[3]/div/div[4]/button'))
                     )
                     setup_button.click()
                     time.sleep(2)
-                    plog.info("[PuterServer] ✓ Step 7 completed")
+                    plog.info("[PuterServer] ✓ Step 7 completed - CLICK CREATE FREE ACCOUNT")
                 except Exception as e:
-                    plog.error(f"[PuterServer] ✗ Step 7 failed: {e}")
+                    plog.error(f"[PuterServer] ✗ Step 7 - CLICK CREATE FREE ACCOUNT failed: {e}")
                     return False
 
                 try:
