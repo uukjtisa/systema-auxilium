@@ -50,6 +50,7 @@ class PuterServer:
 
         # Request/response handling
         self.latest_response = None
+        self._recent_image_host = None
         self.response_ready = threading.Event()
 
         # Profile path in working directory
@@ -882,7 +883,11 @@ class PuterServer:
             return False
 
     def upload_image_to_host(self, image_path, max_size_mb=512):
-        """Upload image to 0x0.st and return public URL"""
+        """Upload image to first available host, trying providers in order.
+
+        Caches the last working provider in self._recent_image_host and tries it
+        first on subsequent calls for speed, falling back to the full chain on failure.
+        """
         try:
             if not os.path.exists(image_path):
                 self.log(f"✗ Image file not found: {image_path}")
@@ -893,44 +898,163 @@ class PuterServer:
                 self.log(f"✗ Image too large: {file_size_mb:.2f}MB (max: {max_size_mb}MB)")
                 return None
 
-            self.log(f"Uploading image ({file_size_mb:.2f}MB) to 0x0.st...")
+            providers = [
+                {
+                    "name": "0x0.st",
+                    "url": "https://0x0.st",
+                    "max_mb": 512,
+                    "field": "file",
+                    "data": {},
+                    "headers": {"User-Agent": "curl/8.0.0", "Accept": "*/*"},
+                    "parse": lambda r: r.text.strip(),
+                },
+                {
+                    "name": "Catbox",
+                    "url": "https://catbox.moe/user/api.php",
+                    "max_mb": 200,
+                    "field": "fileToUpload",
+                    "data": {"reqtype": "fileupload", "userhash": ""},
+                    "headers": {},
+                    "parse": lambda r: r.text.strip(),
+                },
+                {
+                    "name": "Litterbox",
+                    "url": "https://litterbox.catbox.moe/resources/internals/api.php",
+                    "max_mb": 1024,
+                    "field": "fileToUpload",
+                    "data": {"reqtype": "fileupload", "time": "72h"},
+                    "headers": {},
+                    "parse": lambda r: r.text.strip(),
+                },
+                {
+                    "name": "uguu.se",
+                    "url": "https://uguu.se/upload",
+                    "max_mb": 100,
+                    "field": "files[]",
+                    "data": {},
+                    "headers": {},
+                    "parse": lambda r: r.json()["files"][0]["url"],
+                },
+                {
+                    "name": "Pixeldrain",
+                    "url": "https://pixeldrain.com/api/file",
+                    "max_mb": 5120,
+                    "field": "file",
+                    "data": {"anonymous": "true"},
+                    "headers": {},
+                    "parse": lambda r: "https://pixeldrain.com/u/" + r.json()["id"],
+                },
+                {
+                    # GoFile requires fetching a server list first, so we use a
+                    # custom_fn that handles its own retry/server-fallback logic.
+                    "name": "GoFile",
+                    "max_mb": float("inf"),
+                    "custom_fn": "_upload_gofile",
+                },
+            ]
 
-            headers = {
-                "User-Agent": "curl/8.0.0",
-                "Accept": "*/*"
-            }
+            def try_provider(p):
+                """Attempt an upload against a single provider. Returns URL or None."""
+                if file_size_mb > p["max_mb"]:
+                    self.log(f"⚠ [{p['name']}] Skipping — file too large ({file_size_mb:.2f}MB, max {p['max_mb']}MB)")
+                    return None
 
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    with open(image_path, "rb") as f:
-                        response = requests.post(
-                            "https://0x0.st",
-                            files={"file": f},
-                            headers=headers,
-                            timeout=120
-                        )
+                # GoFile has a dedicated handler
+                if "custom_fn" in p:
+                    return getattr(self, p["custom_fn"])(image_path, file_size_mb)
 
-                    if response.status_code == 200:
-                        url = response.text.strip()
-                        self.log(f"✓ Image uploaded: {url}")
-                        time.sleep(1)
-                        return url
-                    else:
-                        self.log(f"⚠ Upload attempt {attempt+1} failed: HTTP {response.status_code}")
-                        if attempt < max_retries - 1:
-                            time.sleep(2)
-                except Exception as e:
-                    self.log(f"⚠ Upload attempt {attempt+1} error: {e}")
-                    if attempt < max_retries - 1:
+                self.log(f"Uploading ({file_size_mb:.2f}MB) to {p['name']}...")
+                for attempt in range(3):
+                    try:
+                        with open(image_path, "rb") as f:
+                            response = requests.post(
+                                p["url"],
+                                files={p["field"]: f},
+                                data=p["data"],
+                                headers=p["headers"],
+                                timeout=120
+                            )
+                        if response.status_code == 200:
+                            url = p["parse"](response)
+                            self.log(f"✓ [{p['name']}] Uploaded: {url}")
+                            time.sleep(1)
+                            return url
+                        self.log(f"⚠ [{p['name']}] Attempt {attempt + 1} failed: HTTP {response.status_code}")
+                    except Exception as e:
+                        self.log(f"⚠ [{p['name']}] Attempt {attempt + 1} error: {e}")
+                    if attempt < 2:
                         time.sleep(2)
 
-            self.log(f"✗ Upload failed after {max_retries} attempts")
+                self.log(f"✗ [{p['name']}] Failed, trying next provider...")
+                return None
+
+            # --- Fast path: try the last known-good provider first ---
+            if self._recent_image_host:
+                recent = next((p for p in providers if p["name"] == self._recent_image_host), None)
+                if recent:
+                    self.log(f"[Fast path] Trying last successful provider: {self._recent_image_host}")
+                    url = try_provider(recent)
+                    if url:
+                        return url
+                    self.log(f"[Fast path] {self._recent_image_host} failed, falling back to full chain...")
+                    self._recent_image_host = None
+
+            # --- Full chain ---
+            for p in providers:
+                url = try_provider(p)
+                if url:
+                    self._recent_image_host = p["name"]
+                    return url
+
+            self.log("✗ All upload providers failed")
             return None
 
         except Exception as e:
             self.log(f"✗ Upload error: {e}")
             return None
+
+    def _upload_gofile(self, image_path, file_size_mb):
+        """GoFile upload with full server-list fallback.
+
+        Fetches all available servers from the API and tries each one in order
+        before giving up, so a single downed server won't block the upload.
+        """
+        self.log(f"Uploading ({file_size_mb:.2f}MB) to GoFile...")
+        try:
+            resp = requests.get("https://api.gofile.io/servers", timeout=15)
+            servers = resp.json()["data"]["servers"]  # [{"name": "store1", ...}, ...]
+            server_names = [s["name"] for s in servers]
+            self.log(f"[GoFile] Available servers: {server_names}")
+        except Exception as e:
+            self.log(f"✗ [GoFile] Could not fetch server list: {e}")
+            return None
+
+        for server in server_names:
+            upload_url = f"https://{server}.gofile.io/contents/uploadfile"
+            self.log(f"[GoFile] Trying server: {server}")
+            for attempt in range(3):
+                try:
+                    with open(image_path, "rb") as f:
+                        response = requests.post(upload_url, files={"file": f}, timeout=120)
+                    if response.status_code == 200:
+                        data = response.json()
+                        if data.get("status") == "ok":
+                            url = data["data"]["downloadPage"]
+                            self.log(f"✓ [GoFile/{server}] Uploaded: {url}")
+                            time.sleep(1)
+                            return url
+                        self.log(f"⚠ [GoFile/{server}] Bad response: {data.get('status')}")
+                    else:
+                        self.log(f"⚠ [GoFile/{server}] Attempt {attempt + 1} failed: HTTP {response.status_code}")
+                except Exception as e:
+                    self.log(f"⚠ [GoFile/{server}] Attempt {attempt + 1} error: {e}")
+                if attempt < 2:
+                    time.sleep(2)
+
+            self.log(f"✗ [GoFile/{server}] All attempts failed, trying next server...")
+
+        self.log("✗ [GoFile] All servers exhausted")
+        return None
 
     def send_chat_request(self, messages, model='gpt-5-chat-latest',
                          temperature=0.7, max_tokens=2000, image=None, timeout=60, is_test=False):
@@ -1259,7 +1383,7 @@ class PuterServer:
 
                 try:
                     element1 = wait.until(
-                        EC.element_to_be_clickable((By.XPATH, '/html/body/div[2]/div[3]/div/div[1]/div[1]/div[3]'))
+                        EC.element_to_be_clickable((By.XPATH, '/html/body/div[2]/div[3]/div/div[1]/div[1]/div[4]'))
                     )
                     element1.click()
                     time.sleep(1)
@@ -1271,7 +1395,7 @@ class PuterServer:
                 try:
                     element2 = wait.until(
                         EC.element_to_be_clickable(
-                            (By.XPATH, '/html/body/div[2]/div[3]/div/div[2]/div[3]/div/div[3]/div[5]/div/button'))
+                            (By.XPATH, '/html/body/div[2]/div[3]/div/div[2]/div[4]/div/div[3]/div[5]/div/button'))
                     )
                     element2.click()
                     time.sleep(1)
