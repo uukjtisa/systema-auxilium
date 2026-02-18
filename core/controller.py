@@ -1,5 +1,6 @@
 """
 Main Controller - Orchestrates the AI assistant with Voice Support
+MAIN INITIATOR FOR ALL UI AND CORE MODULES
 UPDATED: work_environment and execute_code integration, voice mode, device management, TTS control
 """
 
@@ -15,6 +16,13 @@ import os
 import json
 import random
 import socket
+from core.logger import _make_logger, _NoOpLogger
+
+
+# ─────────────────────────── Colored Logger Setup ────────────────────────────
+_verbose = True
+log = _make_logger("Controller") if _verbose else _NoOpLogger()
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 class AssistantController(QObject):
@@ -27,24 +35,37 @@ class AssistantController(QObject):
 
     def __init__(self):
         super().__init__()
+        log.info("[AssistantController.__init__] ── Initializing AssistantController ──────────────")
 
         # Settings
         self.settings_file = "assistant_settings.json"
+        log.debug(f"[AssistantController.__init__] Loading settings from '{self.settings_file}'")
         self.settings = self.load_settings()
+        log.info(f"[AssistantController.__init__] Settings loaded | "
+                 f"provider='{self.settings.get('ai_provider')}' | "
+                 f"has_api_key={bool(self.settings.get('api_key'))}")
 
         # Detect system information
         self.log("Detecting system information...")
+        log.debug("[AssistantController.__init__] Calling get_system_info()...")
         system_info_dict = get_system_info()
         system_info_text = format_system_info_for_prompt(system_info_dict)
         self.log(f"System detected: {system_info_dict['os']} {system_info_dict['os_release']}")
+        log.info(f"[AssistantController.__init__] System info formatted | "
+                 f"os='{system_info_dict['os']} {system_info_dict['os_release']}' | "
+                 f"text_len={len(system_info_text)}")
 
         # Puter server
         from pathlib import Path
+        log.debug("[AssistantController.__init__] Checking puter_port.txt...")
         if not Path('puter_port.txt').exists():
             Path('puter_port.txt').write_text(
                 '5555,8888,7777 #DO NOT DELETE THIS #ADD ANY PORT AS YOU WANT, IT WILL PRIORITIZE THE FIRST ON THE LEFT, SEPARATE WITH COMMAS. #ADD PORTS ON TOP ONLY. #CONTEXT IT IS BETTER IF THE PORT USED IS ONE THAT HAS BEEN USED BEFORE, SO IT WONT ASK FOR PUTER CONFIRMATION FOR THE FIRST MESSAGE.'
                 )
+            log.debug("[AssistantController.__init__] puter_port.txt created with defaults")
+
         ports = self._parse_ports()
+        log.debug(f"[AssistantController.__init__] Parsed {len(ports)} port candidate(s): {ports}")
 
         port = None
         for p in ports:
@@ -56,24 +77,33 @@ class AssistantController(QObject):
                     break
         if not port:
             self.log("No available ports within puter_port.txt was available, resorting to random ports instead")
+            log.warning("[AssistantController.__init__] No configured port available — will use random port")
 
         self.free_port = port if port else self.get_a_port()
+        log.info(f"[AssistantController.__init__] Selected port: {self.free_port}")
         self.puter_server = PuterServer(port=self.free_port, log_callback=self.log)
+        log.debug("[AssistantController.__init__] PuterServer instance created")
 
-        # Voice handler - NEW!
+        # Voice handler
+        log.debug("[AssistantController.__init__] Creating VoiceHandler...")
         self.voice_handler = VoiceHandler(log_callback=self.log)
         self.voice_mode_active = False
+        log.debug("[AssistantController.__init__] VoiceHandler created | voice_mode_active=False")
 
         # Load ElevenLabs settings into voice handler
         elevenlabs_enabled = self.settings.get('elevenlabs_enabled', False)
         elevenlabs_voice_id = self.settings.get('elevenlabs_voice_id', '')
         self.voice_handler.set_elevenlabs_settings(elevenlabs_enabled, elevenlabs_voice_id)
+        log.debug(f"[AssistantController.__init__] ElevenLabs settings applied: "
+                  f"enabled={elevenlabs_enabled} | has_voice_id={bool(elevenlabs_voice_id)}")
 
         # Set voice callbacks
         self.voice_handler.on_transcription = self.handle_voice_transcription
         self.voice_handler.on_state_change = self.handle_voice_state_change
+        log.debug("[AssistantController.__init__] Voice callbacks wired")
 
         # Initialize AI engine
+        log.debug("[AssistantController.__init__] Creating AIEngine...")
         self.ai = AIEngine(
             log_callback=self.log,
             api_key=self.settings.get('api_key', ''),
@@ -84,8 +114,10 @@ class AssistantController(QObject):
             elevenlabs_enabled=self.settings.get('elevenlabs_enabled', False),
             settings_callback=lambda: self.settings  # Pass settings getter
         )
+        log.info("[AssistantController.__init__] AIEngine created")
 
         # Apply settings
+        log.debug("[AssistantController.__init__] Applying AI provider settings...")
         self.ai.set_provider(self.settings.get('ai_provider', 'anthropic'))
         self.ai.set_puter_model(self.settings.get('puter_model', 'gpt-4o-mini'))
         self.ai.set_gemini_model(self.settings.get('gemini_model', 'gemini-2.0-flash-exp'))
@@ -93,54 +125,55 @@ class AssistantController(QObject):
         self.ai.set_puter_tts_model(self.settings.get('puter_tts_model', 'tts-1'))
         self.ai.set_puter_tts_voice(self.settings.get('puter_tts_voice'))
         self.ai.set_puter_timeout(self.settings.get('puter_timeout', 30))
+        log.debug("[AssistantController.__init__] All AI settings applied")
 
         # Auto-start Puter if selected
         if self.settings.get('ai_provider') == 'puter':
+            log.info("[AssistantController.__init__] ai_provider='puter' — auto-starting Puter server")
             self.start_puter_server()
 
         # Initialize UI
+        log.debug("[AssistantController.__init__] Creating FloatingWindow UI...")
         self.ui = FloatingWindow(self)
+        log.debug("[AssistantController.__init__] FloatingWindow created")
 
         # Tool mode timer
         self.work_mode_timer = QTimer()
         self.work_mode_timer.timeout.connect(self.auto_continue_work_mode)
         self.work_mode_timer.setInterval(1000)
+        log.debug("[AssistantController.__init__] work_mode_timer created | interval=1000ms")
 
         # Track processing
         self.is_processing = False
 
-        # NEW: Connect voice message signal to handler (main thread safe)
+        # Connect voice message signal to handler (main thread safe)
         self.voice_message_signal.connect(self._handle_voice_message_on_main_thread)
+        log.debug("[AssistantController.__init__] voice_message_signal connected to main thread handler")
 
         # SESSION MANAGEMENT - Initialize session manager
+        log.debug("[AssistantController.__init__] Initializing SessionManager...")
         self.session_manager = SessionManager()
         self.current_session_id = None
         self.session_has_messages = False
-        
+
         # Create initial session
         self._create_new_session()
+        log.debug(f"[AssistantController.__init__] Initial session created: '{self.current_session_id}'")
 
         self.log("System AI Assistant initialized", "SUCCESS")
+        log.info(f"[AssistantController.__init__] ✓ AssistantController ready | "
+                 f"provider='{self.ai.ai_provider}' | port={self.free_port} | "
+                 f"session='{self.current_session_id}' ──")
 
     def _parse_ports(self):
         """
         Parse port numbers from puter_port.txt file
-
-        Format:
-            5555,8888,7777 #comment here
-            1234,5678      #another comment
-            # full line comment (ignored)
-
-        Args:
-            filepath: Path to the port configuration file
-
-        Returns:
-            list: List of port numbers as integers (in order of priority)
         """
         import os
 
         filepath = 'puter_port.txt'
         ports = []
+        log.debug(f"[AssistantController._parse_ports] Reading port config from '{filepath}'")
 
         try:
             with open(filepath, 'r') as f:
@@ -158,20 +191,27 @@ class AssistantController(QObject):
                                 port = int(port_str)
                                 ports.append(port)
                             except ValueError:
+                                log.warning(f"[AssistantController._parse_ports] Skipping invalid "
+                                            f"port value: '{port_str}'")
                                 print(f"Warning: Skipping invalid port '{port_str}'")
                                 continue
 
         except FileNotFoundError:
             abs_path = os.path.abspath(filepath)
+            log.warning(f"[AssistantController._parse_ports] File not found: '{abs_path}'")
             print(f"Warning: {abs_path} not found, returning empty list")
             return []
         except Exception as e:
+            log.error(f"[AssistantController._parse_ports] Error parsing ports: {type(e).__name__}: {e}")
             print(f"Error parsing ports: {e}")
             return []
+
         self.log(f"CHECKING PORTS:  {ports}")
+        log.info(f"[AssistantController._parse_ports] Parsed {len(ports)} port(s): {ports}")
         return ports
 
     def _is_open_port(self, port):
+        log.debug(f"[AssistantController._is_open_port] Testing port {port}...")
         # Check if port is actually available (not bound AND not in zombie state)
         test = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         test.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -182,23 +222,23 @@ class AssistantController(QObject):
             test.close()
 
             # Double check - try to connect to see if something is actually listening
-            # (catches zombie processes that released bind but are still hanging)
             test2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            test2.settimeout(0.1)  # Quick timeout
+            test2.settimeout(0.1)
             result = test2.connect_ex(("127.0.0.1", port))
             test2.close()
 
-            # If connection refused (111) or timeout, port is truly free
-            # If it connects (0), something is listening = NOT free
             if result == 0:
+                log.warning(f"[AssistantController._is_open_port] Port {port} — something is listening, NOT free")
                 self.log(f"-----Port {port} is not available-----", "WARNING")
-                return False  # Something is still listening (zombie or active)
+                return False
+            log.debug(f"[AssistantController._is_open_port] Port {port} — confirmed free")
             self.log(f"-----Port {port} is available and will now be used-----", "SUCCESS")
-            return True  # Port is actually free
+            return True
 
         except OSError:
+            log.warning(f"[AssistantController._is_open_port] Port {port} — bind failed (in use)")
             self.log(f"-----Port {port} is not available-----", "WARNING")
-            return False  # Port is in use
+            return False
         finally:
             try:
                 test.close()
@@ -206,33 +246,40 @@ class AssistantController(QObject):
                 pass
 
     def get_a_port(self):
+        log.debug("[AssistantController.get_a_port] Searching for a random free port...")
         while True:
             port = random.randint(1000, 9999)
             if self._is_open_port(port):
+                log.info(f"[AssistantController.get_a_port] Found free random port: {port}")
                 return port
             else:
                 continue
 
     def log(self, message, level="INFO"):
-        colors = {
-            "INFO": "\033[94m",  # Blue
-            "ERROR": "\033[91m",  # Red
-            "WARNING": "\033[93m",  # Yellow
-            "SUCCESS": "\033[92m",  # Green
-        }
-        reset = "\033[0m"
-        color = colors.get(level, "")
-        print(f"{color}[Controller] {message}{reset}")
+        _level_fn = {
+            "INFO": log.info, "ERROR": log.error, "WARNING": log.warning,
+            "SUCCESS": log.info, "DEBUG": log.debug
+        }.get(level, log.info)
+        _level_fn(f"[Controller] {message}")
+        self.log_signal.emit(message, level)
 
     def load_settings(self):
+        log.debug(f"[AssistantController.load_settings] Loading from '{self.settings_file}'")
         try:
             if os.path.exists(self.settings_file):
                 with open(self.settings_file, 'r') as f:
-                    return json.load(f)
+                    settings = json.load(f)
+                log.info(f"[AssistantController.load_settings] ✓ Settings loaded | "
+                         f"provider='{settings.get('ai_provider')}' | "
+                         f"has_api_key={bool(settings.get('api_key'))}")
+                return settings
         except Exception as e:
+            log.error(f"[AssistantController.load_settings] ✗ Error loading settings: "
+                      f"{type(e).__name__}: {e}")
             print(f"Error loading settings: {e}")
 
         # FIRST-TIME LAUNCH DEFAULTS
+        log.info("[AssistantController.load_settings] No settings file found — using first-time defaults")
         default_provider = 'anthropic'
         default_tts = 'edge-tts'
 
@@ -266,32 +313,43 @@ class AssistantController(QObject):
         }
 
     def save_settings(self):
+        log.debug(f"[AssistantController.save_settings] Writing to '{self.settings_file}'")
         self.log("Saving settings...", "INFO")
         try:
             with open(self.settings_file, 'w') as f:
                 json.dump(self.settings, f, indent=2)
             self.log("Settings saved", "SUCCESS")
+            log.info(f"[AssistantController.save_settings] ✓ Settings saved to '{self.settings_file}'")
         except Exception as e:
+            log.error(f"[AssistantController.save_settings] ✗ Failed: {type(e).__name__}: {e}")
             self.log(f"Error saving settings: {e}", "ERROR")
 
     def enable_voice_mode(self):
         """Enable voice input/output"""
+        log.info("[AssistantController.enable_voice_mode] ── Enabling voice mode ──────────────")
         try:
             # List available devices
             input_devices, output_devices = self.voice_handler.list_audio_devices()
+            log.debug(f"[AssistantController.enable_voice_mode] Available devices: "
+                      f"input={len(input_devices)} | output={len(output_devices)}")
 
             # Get device selection from settings
             input_device = self.settings.get('voice_input_device')
             output_device = self.settings.get('voice_output_device')
+            log.debug(f"[AssistantController.enable_voice_mode] Device selection: "
+                      f"input_device={input_device} | output_device={output_device}")
 
             # Set devices
             self.voice_handler.set_devices(input_device, output_device)
 
-            # NEW: Set VAD configuration
+            # Set VAD configuration
             webrtc_enabled = self.settings.get('vad_webrtc_enabled', True)
             silero_enabled = self.settings.get('vad_silero_enabled', False)
             webrtc_aggressiveness = self.settings.get('vad_aggressiveness', 3)
             silero_threshold = self.settings.get('vad_silero_threshold', 0.5)
+            log.debug(f"[AssistantController.enable_voice_mode] VAD config: "
+                      f"webrtc={webrtc_enabled}(agg={webrtc_aggressiveness}) | "
+                      f"silero={silero_enabled}(thresh={silero_threshold})")
 
             self.voice_handler.set_vad_configuration(
                 webrtc_enabled,
@@ -317,6 +375,7 @@ class AssistantController(QObject):
                         break
 
             if self.settings.get('tts_provider') == 'puter':
+                log.debug("[AssistantController.enable_voice_mode] TTS provider is 'puter' — configuring Puter TTS")
                 self.voice_handler.set_puter_server(self.puter_server)
                 self.voice_handler.set_tts_provider('puter')
                 self.voice_handler.set_puter_tts_settings(
@@ -324,19 +383,24 @@ class AssistantController(QObject):
                     self.settings.get('puter_tts_voice')
                 )
 
-                # NEW: Set ElevenLabs settings if enabled
+                # Set ElevenLabs settings if enabled
                 elevenlabs_enabled = self.get_elevenlabs_enabled()
                 if elevenlabs_enabled:
                     voice_id = self.get_elevenlabs_voice_id()
                     self.voice_handler.set_elevenlabs_settings(True, voice_id)
+                    log.debug(f"[AssistantController.enable_voice_mode] ElevenLabs configured | "
+                              f"has_voice_id={bool(voice_id)}")
 
-            # NEW: Set up playback callback with null check
+            # Set up playback callback with null check
             if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
                 self.voice_handler.on_playback_started = self.ui.chat_window.on_voice_playback_started
                 self.log("Voice playback callback wired to chat window", "SUCCESS")
+                log.debug("[AssistantController.enable_voice_mode] Playback callback wired to chat window")
             else:
                 self.log("Chat window not available for voice callback", "WARNING")
+                log.warning("[AssistantController.enable_voice_mode] Chat window not available for callback")
 
+            log.debug("[AssistantController.enable_voice_mode] Starting voice listener...")
             if self.voice_handler.start_listening():
                 self.voice_mode_active = True
 
@@ -351,23 +415,30 @@ class AssistantController(QObject):
                 )
 
                 self.log("Voice mode enabled", "SUCCESS")
+                log.info(f"[AssistantController.enable_voice_mode] ✓ Voice mode active | "
+                         f"input='{input_name}' | output='{output_name}'")
                 return True, message
             else:
+                log.error("[AssistantController.enable_voice_mode] ✗ start_listening() returned False")
                 return False, "Failed to start voice capture"
 
         except Exception as e:
+            log.error(f"[AssistantController.enable_voice_mode] ✗ Exception: {type(e).__name__}: {e}")
             self.log(f"Voice mode error: {e}", "ERROR")
             return False, f"Error: {e}"
 
     def disable_voice_mode(self):
         """Disable voice mode"""
+        log.info("[AssistantController.disable_voice_mode] Disabling voice mode...")
         try:
             self.log("Disabling voice mode...")
 
             # Stop listening first
+            log.debug("[AssistantController.disable_voice_mode] Stopping listener...")
             self.voice_handler.stop_listening()
 
             # Then interrupt any ongoing speech
+            log.debug("[AssistantController.disable_voice_mode] Interrupting speech...")
             self.voice_handler.interrupt_speech()
 
             # Update state
@@ -377,33 +448,40 @@ class AssistantController(QObject):
             self.ai.update_voice_settings(False, False)
 
             self.log("Voice mode disabled", "SUCCESS")
+            log.info("[AssistantController.disable_voice_mode] ✓ Voice mode disabled")
         except Exception as e:
+            log.error(f"[AssistantController.disable_voice_mode] ✗ Exception: {type(e).__name__}: {e}")
             self.log(f"Error disabling voice: {e}", "ERROR")
 
     def handle_voice_transcription(self, text):
         """Handle transcribed voice input - SIGNAL VERSION"""
+        log.info(f"[AssistantController.handle_voice_transcription] Transcribed: '{text[:80]}'")
         self.log(f"Voice transcribed: {text}")
-
         # Emit signal - Qt will automatically marshal to main thread
         self.voice_message_signal.emit(text)
 
     def _handle_voice_message_on_main_thread(self, text):
         """Handle voice message on main Qt thread (slot for signal)"""
+        log.debug(f"[AssistantController._handle_voice_message_on_main_thread] text='{text[:80]}'")
         # FIXED: Ensure chat window exists (create it if needed)
         if not hasattr(self.ui, 'chat_window') or self.ui.chat_window is None:
             # Create chat window but don't show it
             from ui.chat_window import ChatWindow
             self.ui.chat_window = ChatWindow(self)
+            log.debug("[AssistantController._handle_voice_message_on_main_thread] "
+                      "Chat window created for voice message buffering")
             self.log("Chat window created for voice message buffering")
 
         # Always add to chat window (even if hidden)
         self.ui.chat_window.add_user_message(text)
 
         # Send to AI (works whether chat is visible or not)
+        log.debug("[AssistantController._handle_voice_message_on_main_thread] → send_message()")
         self.send_message(text)
 
     def handle_voice_state_change(self, state):
         """Handle voice state changes"""
+        log.debug(f"[AssistantController.handle_voice_state_change] state='{state}'")
         self.log(f"Voice state: {state}")
 
         # Update UI
@@ -755,11 +833,17 @@ class AssistantController(QObject):
 
     def send_message(self, user_message):
         """Send user message to AI (non-blocking)"""
+        log.info(f"[AssistantController.send_message] ── Incoming message | "
+                 f"len={len(user_message)} | preview='{user_message[:60].replace(chr(10), '↵')}' ──")
+
         if not user_message.strip():
+            log.debug("[AssistantController.send_message] Empty message — ignoring")
             return
 
         # If in tool mode and user sends message, cancel tool mode first
         if self.ai.tool_manager.in_work_mode:
+            log.warning("[AssistantController.send_message] Message received during work mode — "
+                        "canceling work mode")
             self.log("User interrupted tool mode - canceling")
             self.work_mode_timer.stop()
             self.ai.tool_manager.in_work_mode = False
@@ -770,10 +854,13 @@ class AssistantController(QObject):
 
         # Prevent overlapping requests
         if self.is_processing:
+            log.warning("[AssistantController.send_message] Already processing — ignoring request")
             self.log("Already processing a request - ignoring")
             return
 
         self.is_processing = True
+        log.debug(f"[AssistantController.send_message] is_processing=True | "
+                  f"provider='{self.ai.ai_provider}'")
 
         self.log(f"User: {user_message}")
 
@@ -785,10 +872,12 @@ class AssistantController(QObject):
         self.ui.show_thinking()
 
         # Create worker thread
+        log.debug("[AssistantController.send_message] Creating AIWorker for 'generate'...")
         self.current_worker = AIWorker(self.ai, 'generate', user_message)
         self.current_worker.response_ready.connect(self.handle_ai_response)
         self.current_worker.error_occurred.connect(self.handle_ai_error)
         self.current_worker.start()
+        log.debug("[AssistantController.send_message] AIWorker started")
 
     def send_message_with_image(self, user_message, image_path):
         """Send user message with image attachment to AI (Puter only)"""
@@ -823,8 +912,14 @@ class AssistantController(QObject):
 
     def handle_ai_response(self, result):
         """Handle AI response from worker thread"""
+        log.info(f"[AssistantController.handle_ai_response] ── Response received | "
+                 f"executed={result.get('executed', False)} | "
+                 f"has_work_call={result.get('has_work_call', False)} | "
+                 f"exited_work_mode={result.get('exited_work_mode', False)} | "
+                 f"thinking={result.get('thinking', False)} ──")
         self.ui.hide_thinking()
         self.is_processing = False
+        log.debug("[AssistantController.handle_ai_response] is_processing=False | thinking hidden")
 
         # Debug mode: show COMPLETE raw AI response with detailed parsing
         if self.settings.get('debug_mode'):
@@ -853,45 +948,49 @@ class AssistantController(QObject):
                                                f"Visible Text to User:\n{result.get('response', '(none)')}\n\n"
                                                f"🐛 AI will see output and can chain more executions")
 
-        # NEW: Handle execute_code in voice mode specially
+        # Handle execute_code in voice mode specially
         if result.get('executed') and self.voice_mode_active:
+            log.debug("[AssistantController.handle_ai_response] execute_code in voice mode")
             self.log("EXECUTE_CODE in voice mode - will wait for voice then execute")
 
-            # Show message and start voice
             if result.get('response') and result['response'].strip():
                 self.ui.show_ai_message(result['response'])
 
-            # Execute_code has already been executed immediately by ai_engine,
-            # so we just need to ensure the response was shown
             self.log("Execute_code completed")
             return
 
         # Show visible text immediately (only if not empty) - NORMAL MODE or TOOL MODE
         if result.get('response'):
+            log.debug(f"[AssistantController.handle_ai_response] Showing AI message | "
+                      f"len={len(result['response'])}")
             self.ui.show_ai_message(result['response'])
             
             # SESSION SAVE: Mark session as having messages and auto-save
             if not self.session_has_messages:
                 self.session_has_messages = True
+                log.debug("[AssistantController.handle_ai_response] session_has_messages=True")
             self._auto_save_session()
         
         # Check if AI set a session name
         if result.get('session_name'):
+            log.debug(f"[AssistantController.handle_ai_response] AI set session name: "
+                      f"'{result['session_name']}'")
             self.set_session_name(result['session_name'])
 
-        # NEW: Check if AI just exited tool mode
+        # Check if AI just exited tool mode
         if result.get('exited_work_mode'):
+            log.info("[AssistantController.handle_ai_response] AI exited work mode — "
+                     "scheduling post-exit prompt in 500ms")
             self.log("AI exited work mode - sending post-exit prompt")
-            # Show system message in chat FIRST
             if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
                 self.ui.chat_window.add_system_message(
                     "🔄 **Work Completed** - AI is now preparing its report..."
                 )
-            # Send post-exit prompt with delay
             QTimer.singleShot(500, self.send_post_exit_prompt)
             return
 
         if result['thinking']:
+            log.debug("[AssistantController.handle_ai_response] thinking=True — starting work_mode_timer")
             # Start tool mode timer
             self.work_mode_timer.start()
 
@@ -1003,7 +1102,11 @@ class AssistantController(QObject):
 
     def auto_continue_work_mode(self):
         """Automatically continue tool mode (non-blocking)"""
+        log.debug("[AssistantController.auto_continue_work_mode] Timer fired | "
+                  f"in_work_mode={self.ai.tool_manager.in_work_mode} | "
+                  f"is_processing={self.is_processing}")
         if not self.ai.tool_manager.in_work_mode:
+            log.debug("[AssistantController.auto_continue_work_mode] Not in work mode — stopping timer")
             self.work_mode_timer.stop()
             return
 
@@ -1012,10 +1115,12 @@ class AssistantController(QObject):
 
         # Check if already processing
         if self.is_processing:
+            log.warning("[AssistantController.auto_continue_work_mode] Already processing — skipping")
             self.log("Already processing - skipping tool mode continuation")
             return
 
         self.is_processing = True
+        log.info("[AssistantController.auto_continue_work_mode] ── Continuing work mode ──────────────")
 
         # Debug: Show tool mode prompt being sent
         if self.settings.get('debug_mode'):
@@ -1023,14 +1128,19 @@ class AssistantController(QObject):
             self.ui.show_debug_message("system", f"••• CONTINUING TOOL MODE •••\nSending to AI:\n{tool_prompt}")
 
         # Create worker thread
+        log.debug("[AssistantController.auto_continue_work_mode] Creating AIWorker for 'continue_tool'")
         self.current_worker = AIWorker(self.ai, 'continue_tool')
         self.current_worker.response_ready.connect(self.handle_work_mode_response)
         self.current_worker.error_occurred.connect(self.handle_ai_error)
         self.current_worker.start()
+        log.debug("[AssistantController.auto_continue_work_mode] Worker started")
 
     def interrupt_work_mode(self):
         """Interrupt and cancel tool mode"""
+        log.info(f"[AssistantController.interrupt_work_mode] in_work_mode="
+                 f"{self.ai.tool_manager.in_work_mode}")
         if self.ai.tool_manager.in_work_mode:
+            log.warning("[AssistantController.interrupt_work_mode] Interrupting tool mode by user")
             self.log("Tool mode interrupted by user")
             self.work_mode_timer.stop()
             self.ai.tool_manager.in_work_mode = False
@@ -1044,21 +1154,28 @@ class AssistantController(QObject):
                 self.ui.chat_window.set_input_enabled(True)
 
             return True
+        log.debug("[AssistantController.interrupt_work_mode] Not in work mode — nothing to interrupt")
         return False
 
     def interrupt_request(self):
         """Interrupt current AI request and clean up state"""
+        log.info(f"[AssistantController.interrupt_request] Interrupting | "
+                 f"is_processing={self.is_processing} | "
+                 f"in_work_mode={self.ai.tool_manager.in_work_mode}")
         interrupted = False
 
         # Stop the current worker thread if it exists
         if hasattr(self, 'current_worker') and self.current_worker and self.current_worker.isRunning():
+            log.warning("[AssistantController.interrupt_request] Terminating running AIWorker thread")
             self.log("Interrupting AI worker thread...")
             self.current_worker.terminate()  # Force terminate the thread
             self.current_worker.wait(1000)  # Wait up to 1 second
             interrupted = True
+            log.debug("[AssistantController.interrupt_request] Worker terminated")
 
         # Cancel work mode if active
         if self.ai.tool_manager.in_work_mode:
+            log.warning("[AssistantController.interrupt_request] Canceling active work mode")
             self.log("Tool mode interrupted by user")
             self.work_mode_timer.stop()
             self.ai.tool_manager.in_work_mode = False
@@ -1069,13 +1186,17 @@ class AssistantController(QObject):
         if self.is_processing:
             self.is_processing = False
             interrupted = True
+            log.debug("[AssistantController.interrupt_request] is_processing cleared")
 
         # Remove the last user message from conversation history
         if interrupted:
             removed = self.ai.remove_last_user_message()
             if removed:
+                log.info("[AssistantController.interrupt_request] ✓ Last user message removed from history")
                 self.log("Removed last user message from conversation history")
 
+        log.info(f"[AssistantController.interrupt_request] ✓ Interrupt complete | "
+                 f"interrupted={interrupted}")
         return interrupted
 
     # ═══════════════════════════════════════════════════════════
@@ -1084,29 +1205,41 @@ class AssistantController(QObject):
     
     def _create_new_session(self):
         """Create a new session"""
+        log.info(f"[AssistantController._create_new_session] current_session_id='{self.current_session_id}' | "
+                 f"session_has_messages={self.session_has_messages}")
         # Save current session if it has messages
         if self.current_session_id and self.session_has_messages:
+            log.debug("[AssistantController._create_new_session] Saving existing session before replacement")
             self._auto_save_session()
         
         # Delete current session if it's empty
         if self.current_session_id and not self.session_has_messages:
+            log.debug(f"[AssistantController._create_new_session] Deleting empty session: "
+                      f"'{self.current_session_id}'")
             self.session_manager.delete_session(self.current_session_id)
         
         # Create new session
         self.current_session_id = self.session_manager.create_session()
         self.session_has_messages = False
+        log.info(f"[AssistantController._create_new_session] ✓ New session created: "
+                 f"'{self.current_session_id}'")
         self.log(f"Created new session: {self.current_session_id}")
     
     def _auto_save_session(self):
         """Automatically save current session after AI response"""
+        log.debug(f"[AssistantController._auto_save_session] session_id='{self.current_session_id}' | "
+                  f"session_has_messages={self.session_has_messages}")
         if not self.current_session_id:
+            log.debug("[AssistantController._auto_save_session] No session_id — skipping")
             return
         
         if not self.session_has_messages:
+            log.debug("[AssistantController._auto_save_session] No messages yet — skipping save")
             return  # Don't save empty sessions
         
         # Get conversation history (already excludes system prompt - that's in construction)
         chat_history = self.ai.conversation_history.copy()
+        log.debug(f"[AssistantController._auto_save_session] Saving {len(chat_history)} history entries")
         
         # Save session
         success = self.session_manager.save_session(
@@ -1116,16 +1249,20 @@ class AssistantController(QObject):
         
         if success:
             self.ui.chat_window.refresh_session_list()
+            log.info(f"[AssistantController._auto_save_session] ✓ Session saved: '{self.current_session_id}'")
             self.log(f"Session auto-saved: {self.current_session_id}")
         else:
+            log.error(f"[AssistantController._auto_save_session] ✗ Save failed: '{self.current_session_id}'")
             self.log(f"Failed to save session: {self.current_session_id}", "ERROR")
     
     def create_new_session(self):
         """Create new session (called from UI)"""
+        log.info("[AssistantController.create_new_session] Creating new session from UI")
         # Save + create new session FIRST (while AI history is still intact)
         self._create_new_session()
 
         # NOW clear AI history and UI (after the old session has been saved)
+        log.debug("[AssistantController.create_new_session] Clearing AI history...")
         self.ai.clear_history()
 
         if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
@@ -1135,23 +1272,33 @@ class AssistantController(QObject):
         if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
             self.ui.chat_window.refresh_session_list()
             self.ui.chat_window.add_system_message("🆕 **New Session Created**")
+        log.info(f"[AssistantController.create_new_session] ✓ New session ready: '{self.current_session_id}'")
     
     def load_session(self, session_id):
         """Load a session"""
+        log.info(f"[AssistantController.load_session] Loading session_id='{session_id}'")
         # Save current session first
         if self.current_session_id and self.session_has_messages:
+            log.debug("[AssistantController.load_session] Auto-saving current session first")
             self._auto_save_session()
         
         # Delete current empty session
         if self.current_session_id and not self.session_has_messages:
+            log.debug(f"[AssistantController.load_session] Deleting empty current session: "
+                      f"'{self.current_session_id}'")
             self.session_manager.delete_session(self.current_session_id)
         
         # Load session data
         session_data = self.session_manager.load_session(session_id)
         
         if not session_data:
+            log.error(f"[AssistantController.load_session] ✗ Failed to load session: '{session_id}'")
             self.log(f"Failed to load session: {session_id}", "ERROR")
             return False
+        
+        history_len = len(session_data.get('chat_history', []))
+        log.debug(f"[AssistantController.load_session] Session data loaded | "
+                  f"name='{session_data.get('session_name')}' | history={history_len} entries")
         
         # Clear chat UI
         if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
@@ -1163,10 +1310,9 @@ class AssistantController(QObject):
         # Load chat history into AI
         for msg in session_data['chat_history']:
             self.ai.conversation_history.append(msg)
+        log.debug(f"[AssistantController.load_session] {history_len} messages loaded into AI history")
 
         # Render messages in UI — strip tool call JSON from assistant messages
-        # so stored {"execute_code":...} / {"set_session_name":...} blocks are
-        # not shown as raw text.  The original chat_history is kept intact for AI context.
         if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
             display_history = []
             for msg in session_data['chat_history']:
@@ -1178,11 +1324,14 @@ class AssistantController(QObject):
                 else:
                     display_history.append(msg)
             self.ui.chat_window.render_loaded_messages(display_history)
+            log.debug("[AssistantController.load_session] Messages rendered in UI (tool calls stripped)")
         
         # Update current session
         self.current_session_id = session_id
         self.session_has_messages = len(session_data['chat_history']) > 0
         
+        log.info(f"[AssistantController.load_session] ✓ Session loaded: '{session_id}' | "
+                 f"history={history_len} | session_has_messages={self.session_has_messages}")
         self.log(f"Session loaded: {session_id}")
         return True
     

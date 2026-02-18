@@ -1,12 +1,11 @@
 """
 Voice Handler - Complete voice input/output system
 FIXED: Added proper initialization and error handling to prevent hangs
+UPDATED: Unified colored logging system matching ToolManager style
 """
 
 import threading
 import queue
-import time
-import io
 import numpy as np
 import sounddevice as sd
 import webrtcvad
@@ -17,6 +16,7 @@ import pygame
 import tempfile
 import os
 import re
+from core.logger import _make_logger, _NoOpLogger
 
 # STT imports
 import speech_recognition as sr
@@ -42,114 +42,175 @@ try:
 except ImportError:
     PYTTSX3_AVAILABLE = False
 
+
+# ─────────────────────────── Colored Logger Setup ────────────────────────────
+_verbose = False
+log = _make_logger("VoiceHandler") if _verbose else _NoOpLogger()
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 class VoiceHandler:
     """Handles all voice input/output operations"""
 
     def __init__(self, log_callback=None):
+        log.info("[VoiceHandler.__init__] ── Initializing VoiceHandler ──────────────────────")
+        log.debug(f"[VoiceHandler.__init__] has_log_callback={log_callback is not None}")
+        log.debug(f"[VoiceHandler.__init__] Optional deps: VOSK={VOSK_AVAILABLE} | "
+                  f"SILERO={SILERO_AVAILABLE} | PYTTSX3={PYTTSX3_AVAILABLE}")
+
         self.log_callback = log_callback
 
         # State
         self.is_listening = False
         self.is_speaking = False
         self.is_processing = False
+        log.debug("[VoiceHandler.__init__] State flags: is_listening=False | is_speaking=False | "
+                  "is_processing=False")
 
         # pyttsx3 engine
         self.pyttsx3_engine = None
         if PYTTSX3_AVAILABLE:
+            log.debug("[VoiceHandler.__init__] Attempting pyttsx3 engine init...")
             try:
                 self.pyttsx3_engine = pyttsx3.init()
-            except:
-                pass
+                log.info("[VoiceHandler.__init__] ✓ pyttsx3 engine initialized")
+            except Exception as e:
+                log.warning(f"[VoiceHandler.__init__] pyttsx3 init failed: {type(e).__name__}: {e}")
+        else:
+            log.debug("[VoiceHandler.__init__] pyttsx3 not available — skipping engine init")
 
-        # NEW: Interrupt mode
+        # Interrupt mode
         self.interrupt_mode = 'manual'  # 'auto' or 'manual'
+        log.debug(f"[VoiceHandler.__init__] interrupt_mode='{self.interrupt_mode}'")
 
-        # NEW: Playback callback
-        self.on_playback_started = None  # Called when audio starts playing
+        # Playback callback
+        self.on_playback_started = None
+        log.debug("[VoiceHandler.__init__] on_playback_started=None")
 
-        # CRITICAL FIX: Thread locks for thread safety
-        self.vad_lock = threading.Lock()  # Protects VAD access
+        # Thread locks
+        log.debug("[VoiceHandler.__init__] Creating thread locks...")
+        self.vad_lock = threading.Lock()    # Protects VAD access
         self.state_lock = threading.Lock()  # Protects state changes
-        self.config_lock = threading.Lock()  # Protects configuration changes
+        self.config_lock = threading.Lock() # Protects configuration changes
+        log.debug("[VoiceHandler.__init__] ✓ Locks created: vad_lock | state_lock | config_lock")
 
         # Audio settings
         self.sample_rate = 16000
         self.frame_duration = 30  # ms (10, 20, or 30 for webrtcvad)
         self.frame_size = int(self.sample_rate * self.frame_duration / 1000)
+        log.debug(f"[VoiceHandler.__init__] Audio settings: sample_rate={self.sample_rate} | "
+                  f"frame_duration={self.frame_duration}ms | frame_size={self.frame_size} samples")
 
-        # VAD settings - NOW SUPPORTS BOTH WEBRTC AND SILERO
+        # VAD settings
         self.vad_webrtc_enabled = True
         self.vad_silero_enabled = False
-        self.vad_aggressiveness = 3  # WebRTC: 0-3, higher = more aggressive
-        self.silero_threshold = 0.5  # Silero: 0.0-1.0, higher = more conservative
-        self.silence_duration = 1.5  # seconds of silence before sending
+        self.vad_aggressiveness = 3
+        self.silero_threshold = 0.5
+        self.silence_duration = 1.5
+        log.debug(f"[VoiceHandler.__init__] VAD settings: webrtc_enabled={self.vad_webrtc_enabled} | "
+                  f"silero_enabled={self.vad_silero_enabled} | aggressiveness={self.vad_aggressiveness} | "
+                  f"silero_threshold={self.silero_threshold} | silence_duration={self.silence_duration}s")
 
+        # Puter TTS settings
         self.puter_server = None
         self.puter_tts_model = 'tts-1'
         self.puter_tts_voice = None
+        log.debug(f"[VoiceHandler.__init__] Puter TTS: model='{self.puter_tts_model}' | "
+                  f"voice={self.puter_tts_voice} | server=None")
 
         # Buffers
         self.audio_queue = queue.Queue()
         self.speech_buffer = deque(maxlen=50)
         self.silence_frames = 0
+        log.debug("[VoiceHandler.__init__] Buffers initialized: audio_queue | speech_buffer(maxlen=50) | "
+                  "silence_frames=0")
 
         # VAD - WebRTC
+        log.debug(f"[VoiceHandler.__init__] Initializing WebRTC VAD with aggressiveness={self.vad_aggressiveness}")
         self.vad_webrtc = webrtcvad.Vad(self.vad_aggressiveness)
+        log.info("[VoiceHandler.__init__] ✓ WebRTC VAD initialized")
 
         # VAD - Silero (lazy load when enabled)
         self.vad_silero_model = None
         self.silero_utils = None
+        log.debug("[VoiceHandler.__init__] Silero VAD: model=None (lazy load)")
 
         # Initialize Silero if available and enabled
         if SILERO_AVAILABLE and self.vad_silero_enabled:
+            log.info("[VoiceHandler.__init__] Silero available and enabled — loading model now...")
             self._init_silero_vad()
+        else:
+            log.debug(f"[VoiceHandler.__init__] Silero not loading at init: "
+                      f"available={SILERO_AVAILABLE} | enabled={self.vad_silero_enabled}")
 
         # Threads
         self.capture_thread = None
         self.processing_thread = None
+        log.debug("[VoiceHandler.__init__] Thread handles: capture_thread=None | processing_thread=None")
 
         # Speech recognition
+        log.debug("[VoiceHandler.__init__] Initializing speech_recognition.Recognizer...")
         self.recognizer = sr.Recognizer()
+        log.info("[VoiceHandler.__init__] ✓ Speech recognizer initialized")
 
-        # TTS settings - NOW CONFIGURABLE!
+        # TTS settings
         self.tts_provider = 'edge-tts'
         self.tts_voice = 'en-CA-ClaraNeural'
         self.tts_rate = '+0%'
         self.tts_volume = '+0%'
+        log.debug(f"[VoiceHandler.__init__] TTS settings: provider='{self.tts_provider}' | "
+                  f"voice='{self.tts_voice}' | rate='{self.tts_rate}' | volume='{self.tts_volume}'")
 
         # Audio device settings
         self.input_device = None
         self.output_device = None
+        log.debug("[VoiceHandler.__init__] Audio devices: input=None (system default) | "
+                  "output=None (system default)")
 
         # Callbacks
         self.on_transcription = None
         self.on_state_change = None
+        log.debug("[VoiceHandler.__init__] Callbacks: on_transcription=None | on_state_change=None")
 
         # Initialize pygame for audio playback
+        log.debug("[VoiceHandler.__init__] Initializing pygame mixer (freq=22050, size=-16, "
+                  "channels=1, buffer=512)...")
         try:
             pygame.mixer.init(frequency=22050, size=-16, channels=1, buffer=512)
+            log.info("[VoiceHandler.__init__] ✓ pygame mixer initialized")
         except Exception as e:
-            self.log(f"Warning: Could not initialize audio: {e}", "WARNING")
+            log.warning(f"[VoiceHandler.__init__] pygame mixer init failed: {type(e).__name__}: {e}")
 
         # Vosk model (if available)
         self.vosk_model = None
         self.vosk_recognizer = None
+        log.debug(f"[VoiceHandler.__init__] Vosk: available={VOSK_AVAILABLE} | model=None | "
+                  "recognizer=None (not loaded at init)")
 
-    def log(self, message, level="INFO"):
-        """Log message"""
-        print(f"[Voice] {message}")
+        log.info("[VoiceHandler.__init__] ✓ VoiceHandler initialization complete")
+
+    def _emit_log_callback(self, message, level="INFO"):
+        """Forward a message to the external log_callback if set."""
         if self.log_callback:
-            self.log_callback(f"[Voice] {message}", level)
+            try:
+                self.log_callback(f"[Voice] {message}", level)
+            except Exception as e:
+                log.warning(f"[VoiceHandler._emit_log_callback] log_callback raised: "
+                            f"{type(e).__name__}: {e}")
 
     def _init_silero_vad(self):
         """Initialize Silero VAD model (lazy loading)"""
+        log.info("[VoiceHandler._init_silero_vad] ── Loading Silero VAD model ──────────────")
         if not SILERO_AVAILABLE:
-            self.log("Silero VAD not available (torch/torchaudio not installed)", "WARNING")
+            log.warning("[VoiceHandler._init_silero_vad] ✗ Silero not available "
+                        "(torch/torchaudio not installed) — aborting")
+            self._emit_log_callback("Silero VAD not available (torch/torchaudio not installed)", "WARNING")
             return False
 
         try:
             if self.vad_silero_model is None:
-                self.log("Loading Silero VAD model...")
+                log.debug("[VoiceHandler._init_silero_vad] Model not yet loaded — calling torch.hub.load...")
+                self._emit_log_callback("Loading Silero VAD model...")
                 model, utils = torch.hub.load(
                     repo_or_dir='snakers4/silero-vad',
                     model='silero_vad',
@@ -158,36 +219,63 @@ class VoiceHandler:
                 )
                 self.vad_silero_model = model
                 self.silero_utils = utils
-                self.log("Silero VAD model loaded successfully", "SUCCESS")
+                log.info("[VoiceHandler._init_silero_vad] ✓ Silero VAD model loaded successfully")
+                self._emit_log_callback("Silero VAD model loaded successfully", "SUCCESS")
+            else:
+                log.debug("[VoiceHandler._init_silero_vad] Model already loaded — no action")
             return True
         except Exception as e:
-            self.log(f"Failed to load Silero VAD: {e}", "ERROR")
+            log.error(f"[VoiceHandler._init_silero_vad] ✗ Failed to load Silero VAD: "
+                      f"{type(e).__name__}: {e}")
+            self._emit_log_callback(f"Failed to load Silero VAD: {e}", "ERROR")
             self.vad_silero_enabled = False
+            log.warning("[VoiceHandler._init_silero_vad] vad_silero_enabled forced to False due to load failure")
             return False
 
     def set_vad_configuration(self, webrtc_enabled, silero_enabled, webrtc_aggressiveness, silero_threshold):
         """Configure VAD settings - THREAD SAFE"""
-        with self.config_lock:  # CRITICAL: Prevent concurrent config changes
+        log.info(f"[VoiceHandler.set_vad_configuration] ── Updating VAD config ──────────────")
+        log.debug(f"[VoiceHandler.set_vad_configuration] webrtc_enabled={webrtc_enabled} | "
+                  f"silero_enabled={silero_enabled} | webrtc_aggressiveness={webrtc_aggressiveness} | "
+                  f"silero_threshold={silero_threshold}")
+
+        with self.config_lock:
+            log.debug("[VoiceHandler.set_vad_configuration] Acquired config_lock")
             self.vad_webrtc_enabled = webrtc_enabled
             self.vad_silero_enabled = silero_enabled
             self.vad_aggressiveness = webrtc_aggressiveness
             self.silero_threshold = silero_threshold
 
-            # Update WebRTC VAD with lock
             if webrtc_enabled:
+                log.debug(f"[VoiceHandler.set_vad_configuration] Rebuilding WebRTC VAD with "
+                          f"aggressiveness={webrtc_aggressiveness}")
                 with self.vad_lock:
                     self.vad_webrtc = webrtcvad.Vad(webrtc_aggressiveness)
-                self.log(f"WebRTC VAD aggressiveness set to {webrtc_aggressiveness}")
+                log.info(f"[VoiceHandler.set_vad_configuration] ✓ WebRTC VAD aggressiveness "
+                         f"updated to {webrtc_aggressiveness}")
+                self._emit_log_callback(f"WebRTC VAD aggressiveness set to {webrtc_aggressiveness}")
+            else:
+                log.debug("[VoiceHandler.set_vad_configuration] WebRTC VAD disabled — skipping rebuild")
 
-            # Initialize/update Silero VAD
             if silero_enabled:
+                log.debug("[VoiceHandler.set_vad_configuration] Silero enabled — initializing...")
                 if not self._init_silero_vad():
-                    self.log("Silero VAD initialization failed, disabled", "WARNING")
+                    log.warning("[VoiceHandler.set_vad_configuration] ✗ Silero init failed — "
+                                "silero_enabled forced False")
+                    self._emit_log_callback("Silero VAD initialization failed, disabled", "WARNING")
+            else:
+                log.debug("[VoiceHandler.set_vad_configuration] Silero disabled — skipping init")
 
-            self.log(f"VAD Config: WebRTC={'ON' if webrtc_enabled else 'OFF'}, Silero={'ON' if silero_enabled else 'OFF'}")
+        status_msg = (f"VAD Config: WebRTC={'ON' if webrtc_enabled else 'OFF'} | "
+                      f"Silero={'ON' if silero_enabled else 'OFF'}")
+        log.info(f"[VoiceHandler.set_vad_configuration] ✓ {status_msg}")
+        self._emit_log_callback(status_msg)
 
     def _audio_capture_loop(self):
         """Continuously capture audio from microphone"""
+        log.info("[VoiceHandler._audio_capture_loop] ── Audio capture thread started ────────")
+        log.debug(f"[VoiceHandler._audio_capture_loop] sample_rate={self.sample_rate} | "
+                  f"frame_size={self.frame_size} | input_device={self.input_device}")
         try:
             with sd.InputStream(
                     samplerate=self.sample_rate,
@@ -196,36 +284,51 @@ class VoiceHandler:
                     blocksize=self.frame_size,
                     device=self.input_device
             ) as stream:
-                self.log("Audio capture started")
+                log.info("[VoiceHandler._audio_capture_loop] ✓ InputStream opened — capturing audio")
+                self._emit_log_callback("Audio capture started")
 
+                frame_count = 0
                 while self.is_listening:
                     try:
                         audio_data, overflowed = stream.read(self.frame_size)
+                        frame_count += 1
 
                         if overflowed:
-                            self.log("Audio buffer overflowed", "WARNING")
+                            log.warning(f"[VoiceHandler._audio_capture_loop] ⚠ Audio buffer overflow "
+                                        f"at frame {frame_count}")
+                            self._emit_log_callback("Audio buffer overflowed", "WARNING")
 
-                        # Convert to bytes for VAD
                         audio_bytes = audio_data.tobytes()
-
-                        # ENHANCED: Check with enabled VAD(s)
                         is_speech = self._check_speech(audio_bytes, audio_data)
 
-                        # Put in queue for processing
+                        if frame_count % 100 == 0:
+                            log.debug(f"[VoiceHandler._audio_capture_loop] Heartbeat: "
+                                      f"frames_captured={frame_count} | last_is_speech={is_speech}")
+
                         self.audio_queue.put((audio_bytes, is_speech))
+
                     except Exception as e:
                         if self.is_listening:
-                            self.log(f"Audio read error: {e}", "WARNING")
+                            log.error(f"[VoiceHandler._audio_capture_loop] ✗ Audio read error at "
+                                      f"frame {frame_count}: {type(e).__name__}: {e}")
+                            self._emit_log_callback(f"Audio read error: {e}", "WARNING")
+                        else:
+                            log.debug("[VoiceHandler._audio_capture_loop] Read error after stop — "
+                                      "expected, ignoring")
                         break
 
         except Exception as e:
-            self.log(f"Audio capture error: {e}", "ERROR")
+            log.error(f"[VoiceHandler._audio_capture_loop] ✗ InputStream error: "
+                      f"{type(e).__name__}: {e}")
+            self._emit_log_callback(f"Audio capture error: {e}", "ERROR")
             self.is_listening = False
+
+        log.info("[VoiceHandler._audio_capture_loop] ── Audio capture thread exiting ────────")
 
     def _check_speech(self, audio_bytes, audio_array):
         """
-        Check if audio contains speech using enabled VAD(s)
-        THREAD SAFE - Uses locks to prevent heap corruption
+        Check if audio contains speech using enabled VAD(s).
+        THREAD SAFE - Uses locks to prevent heap corruption.
 
         Args:
             audio_bytes: Raw audio bytes (for WebRTC VAD)
@@ -237,91 +340,116 @@ class VoiceHandler:
         webrtc_result = False
         silero_result = False
 
-        # Check WebRTC VAD if enabled - WITH LOCK
         with self.config_lock:
             webrtc_enabled = self.vad_webrtc_enabled
             silero_enabled = self.vad_silero_enabled
 
         if webrtc_enabled:
             try:
-                with self.vad_lock:  # CRITICAL: Lock access to VAD model
+                with self.vad_lock:
                     webrtc_result = self.vad_webrtc.is_speech(audio_bytes, self.sample_rate)
             except Exception as e:
-                self.log(f"WebRTC VAD error: {e}", "WARNING")
+                log.warning(f"[VoiceHandler._check_speech] WebRTC VAD error: {type(e).__name__}: {e}")
+                self._emit_log_callback(f"WebRTC VAD error: {e}", "WARNING")
                 webrtc_result = False
 
-        # Check Silero VAD if enabled - WITH LOCK
         if silero_enabled:
-            with self.vad_lock:  # CRITICAL: Lock access to Silero model
+            with self.vad_lock:
                 if self.vad_silero_model is not None:
                     try:
-                        # Convert int16 array to float32 tensor
                         audio_float = audio_array.astype(np.float32) / 32768.0
                         audio_tensor = torch.from_numpy(audio_float).squeeze()
 
-                        # Get speech probability from Silero
                         with torch.no_grad():
                             speech_prob = self.vad_silero_model(audio_tensor, self.sample_rate).item()
 
                         silero_result = speech_prob > self.silero_threshold
+                        log.debug(f"[VoiceHandler._check_speech] Silero speech_prob={speech_prob:.4f} | "
+                                  f"threshold={self.silero_threshold} | result={silero_result}")
                     except Exception as e:
-                        self.log(f"Silero VAD error: {e}", "WARNING")
+                        log.warning(f"[VoiceHandler._check_speech] Silero VAD error: "
+                                    f"{type(e).__name__}: {e}")
+                        self._emit_log_callback(f"Silero VAD error: {e}", "WARNING")
                         silero_result = False
+                else:
+                    log.warning("[VoiceHandler._check_speech] Silero enabled but model is None — "
+                                "defaulting silero_result=False")
 
-        # Logic: If both enabled, use OR logic (speech if either detects it)
-        # If only one enabled, use that one
-        # If neither enabled, default to True (always process)
         if webrtc_enabled and silero_enabled:
-            return webrtc_result or silero_result
+            combined = webrtc_result or silero_result
+            log.debug(f"[VoiceHandler._check_speech] Both VADs active — "
+                      f"webrtc={webrtc_result} | silero={silero_result} | combined={combined}")
+            return combined
         elif webrtc_enabled:
             return webrtc_result
         elif silero_enabled:
             return silero_result
         else:
-            # Neither enabled - always return True (no filtering)
+            log.debug("[VoiceHandler._check_speech] No VAD enabled — returning True (no filtering)")
             return True
 
     def set_tts_voice(self, voice):
         """Set TTS voice"""
+        log.info(f"[VoiceHandler.set_tts_voice] Changing TTS voice: '{self.tts_voice}' → '{voice}'")
         self.tts_voice = voice
-        self.log(f"TTS voice set to {voice}")
+        self._emit_log_callback(f"TTS voice set to {voice}")
+        log.debug("[VoiceHandler.set_tts_voice] ✓ Voice updated")
 
     def set_interrupt_mode(self, mode):
         """Set interrupt mode ('auto' or 'manual')"""
+        log.info(f"[VoiceHandler.set_interrupt_mode] Changing interrupt mode: "
+                 f"'{self.interrupt_mode}' → '{mode}'")
         self.interrupt_mode = mode
-        self.log(f"Interrupt mode set to {mode}")
+        self._emit_log_callback(f"Interrupt mode set to {mode}")
+        log.debug("[VoiceHandler.set_interrupt_mode] ✓ Interrupt mode updated")
 
     def set_puter_server(self, puter_server):
         """Set Puter server reference for TTS"""
+        log.info(f"[VoiceHandler.set_puter_server] Setting Puter server reference | "
+                 f"server_provided={puter_server is not None}")
         self.puter_server = puter_server
-        self.log("Puter server reference set")
+        self._emit_log_callback("Puter server reference set")
+        log.debug("[VoiceHandler.set_puter_server] ✓ Puter server reference updated")
 
     def set_tts_provider(self, provider):
         """Set TTS provider"""
+        log.info(f"[VoiceHandler.set_tts_provider] Changing TTS provider: "
+                 f"'{self.tts_provider}' → '{provider}'")
         self.tts_provider = provider
-        self.log(f"TTS provider set to {provider}")
+        self._emit_log_callback(f"TTS provider set to {provider}")
+        log.debug("[VoiceHandler.set_tts_provider] ✓ TTS provider updated")
 
     def set_puter_tts_settings(self, model, voice):
         """Set Puter TTS settings"""
+        log.info(f"[VoiceHandler.set_puter_tts_settings] model='{model}' | voice='{voice}'")
         self.puter_tts_model = model
         self.puter_tts_voice = voice
-        self.log(f"Puter TTS: model={model}, voice={voice}")
+        self._emit_log_callback(f"Puter TTS: model={model}, voice={voice}")
+        log.debug("[VoiceHandler.set_puter_tts_settings] ✓ Puter TTS settings updated")
 
     def set_vad_aggressiveness(self, level):
         """Set VAD aggressiveness (0-3)"""
+        log.info(f"[VoiceHandler.set_vad_aggressiveness] Requested level={level}")
         try:
             level = int(level)
             if 0 <= level <= 3:
+                old_level = self.vad_aggressiveness
                 self.vad_aggressiveness = level
-                self.vad = webrtcvad.Vad(level)
-                self.log(f"VAD aggressiveness set to {level}")
+                self.vad_webrtc = webrtcvad.Vad(level)
+                log.info(f"[VoiceHandler.set_vad_aggressiveness] ✓ VAD aggressiveness: "
+                         f"{old_level} → {level}")
+                self._emit_log_callback(f"VAD aggressiveness set to {level}")
             else:
-                self.log("VAD level must be 0-3", "WARNING")
+                log.warning(f"[VoiceHandler.set_vad_aggressiveness] ✗ Invalid level {level} — "
+                            "must be 0-3")
+                self._emit_log_callback("VAD level must be 0-3", "WARNING")
         except Exception as e:
-            self.log(f"Error setting VAD: {e}", "ERROR")
+            log.error(f"[VoiceHandler.set_vad_aggressiveness] ✗ Error: {type(e).__name__}: {e}")
+            self._emit_log_callback(f"Error setting VAD: {e}", "ERROR")
 
     def list_audio_devices(self):
         """List all available audio devices"""
+        log.info("[VoiceHandler.list_audio_devices] Querying available audio devices...")
         devices = sd.query_devices()
 
         input_devices = []
@@ -341,332 +469,424 @@ class VoiceHandler:
                     'channels': device['max_output_channels']
                 })
 
+        log.info(f"[VoiceHandler.list_audio_devices] ✓ Found {len(input_devices)} input device(s) | "
+                 f"{len(output_devices)} output device(s)")
+        log.debug(f"[VoiceHandler.list_audio_devices] Input devices: "
+                  f"{[d['name'] for d in input_devices]}")
+        log.debug(f"[VoiceHandler.list_audio_devices] Output devices: "
+                  f"{[d['name'] for d in output_devices]}")
+
         return input_devices, output_devices
 
     def set_devices(self, input_device_id=None, output_device_id=None):
         """Set audio input/output devices"""
+        log.info(f"[VoiceHandler.set_devices] input_device_id={input_device_id} | "
+                 f"output_device_id={output_device_id}")
         self.input_device = input_device_id
         self.output_device = output_device_id
 
         if input_device_id is not None:
             devices = sd.query_devices()
             device_name = devices[input_device_id]['name']
-            self.log(f"Input device: {device_name}")
+            log.info(f"[VoiceHandler.set_devices] ✓ Input device set: [{input_device_id}] '{device_name}'")
+            self._emit_log_callback(f"Input device: {device_name}")
+        else:
+            log.debug("[VoiceHandler.set_devices] Input device: using system default")
 
         if output_device_id is not None:
             devices = sd.query_devices()
             device_name = devices[output_device_id]['name']
-            self.log(f"Output device: {device_name}")
+            log.info(f"[VoiceHandler.set_devices] ✓ Output device set: [{output_device_id}] '{device_name}'")
+            self._emit_log_callback(f"Output device: {device_name}")
+        else:
+            log.debug("[VoiceHandler.set_devices] Output device: using system default")
 
     def start_listening(self):
         """Start listening for voice input"""
+        log.info("[VoiceHandler.start_listening] ── Start listening requested ────────────────")
+
         if self.is_listening:
-            self.log("Already listening")
+            log.warning("[VoiceHandler.start_listening] Already in listening state — ignoring request")
+            self._emit_log_callback("Already listening")
             return False
 
         try:
+            log.debug("[VoiceHandler.start_listening] Setting is_listening=True and clearing buffers...")
             self.is_listening = True
             self.speech_buffer.clear()
             self.silence_frames = 0
 
-            # Clear any existing queue items
+            # Drain any stale queue items
+            drained = 0
             while not self.audio_queue.empty():
                 try:
                     self.audio_queue.get_nowait()
-                except:
+                    drained += 1
+                except Exception:
                     break
+            if drained:
+                log.debug(f"[VoiceHandler.start_listening] Drained {drained} stale queue item(s)")
 
-            # Start capture thread
-            self.capture_thread = threading.Thread(target=self._audio_capture_loop, daemon=True)
+            log.debug("[VoiceHandler.start_listening] Spawning capture thread...")
+            self.capture_thread = threading.Thread(
+                target=self._audio_capture_loop, daemon=True, name="VoiceCapture"
+            )
             self.capture_thread.start()
+            log.info(f"[VoiceHandler.start_listening] ✓ Capture thread started | "
+                     f"tid={self.capture_thread.ident}")
 
-            # Start processing thread
-            self.processing_thread = threading.Thread(target=self._processing_loop, daemon=True)
+            log.debug("[VoiceHandler.start_listening] Spawning processing thread...")
+            self.processing_thread = threading.Thread(
+                target=self._processing_loop, daemon=True, name="VoiceProcessing"
+            )
             self.processing_thread.start()
+            log.info(f"[VoiceHandler.start_listening] ✓ Processing thread started | "
+                     f"tid={self.processing_thread.ident}")
 
-            self.log("Started listening")
+            self._emit_log_callback("Started listening")
             self._notify_state_change('listening')
+            log.info("[VoiceHandler.start_listening] ✓ Listening active")
             return True
 
         except Exception as e:
-            self.log(f"Error starting listening: {e}", "ERROR")
+            log.error(f"[VoiceHandler.start_listening] ✗ Failed to start: {type(e).__name__}: {e}")
+            self._emit_log_callback(f"Error starting listening: {e}", "ERROR")
             self.is_listening = False
             return False
 
     def stop_listening(self):
         """Stop listening for voice input - THREAD SAFE CLEANUP"""
+        log.info("[VoiceHandler.stop_listening] ── Stop listening requested ────────────────")
+
         if not self.is_listening:
+            log.debug("[VoiceHandler.stop_listening] Not currently listening — no-op")
             return
 
-        self.log("Stopping voice input...")
+        self._emit_log_callback("Stopping voice input...")
 
-        # CRITICAL: Set flag FIRST before waiting for threads
+        log.debug("[VoiceHandler.stop_listening] Acquiring state_lock to set is_listening=False...")
         with self.state_lock:
             self.is_listening = False
+        log.debug("[VoiceHandler.stop_listening] is_listening=False — threads will exit their loops")
 
-        # Wait for threads to finish with timeout
         if self.capture_thread and self.capture_thread.is_alive():
-            self.log("Waiting for capture thread...")
+            log.debug("[VoiceHandler.stop_listening] Waiting for capture thread (timeout=2.0s)...")
+            self._emit_log_callback("Waiting for capture thread...")
             self.capture_thread.join(timeout=2.0)
             if self.capture_thread.is_alive():
-                self.log("Capture thread did not stop cleanly", "WARNING")
+                log.warning("[VoiceHandler.stop_listening] ⚠ Capture thread did not stop within timeout")
+                self._emit_log_callback("Capture thread did not stop cleanly", "WARNING")
+            else:
+                log.debug("[VoiceHandler.stop_listening] ✓ Capture thread stopped cleanly")
+        else:
+            log.debug("[VoiceHandler.stop_listening] Capture thread not running — skipping join")
 
         if self.processing_thread and self.processing_thread.is_alive():
-            self.log("Waiting for processing thread...")
+            log.debug("[VoiceHandler.stop_listening] Waiting for processing thread (timeout=2.0s)...")
+            self._emit_log_callback("Waiting for processing thread...")
             self.processing_thread.join(timeout=2.0)
             if self.processing_thread.is_alive():
-                self.log("Processing thread did not stop cleanly", "WARNING")
+                log.warning("[VoiceHandler.stop_listening] ⚠ Processing thread did not stop within timeout")
+                self._emit_log_callback("Processing thread did not stop cleanly", "WARNING")
+            else:
+                log.debug("[VoiceHandler.stop_listening] ✓ Processing thread stopped cleanly")
+        else:
+            log.debug("[VoiceHandler.stop_listening] Processing thread not running — skipping join")
 
-        # Clear queue safely
+        drained = 0
         while not self.audio_queue.empty():
             try:
                 self.audio_queue.get_nowait()
+                drained += 1
             except queue.Empty:
                 break
+        log.debug(f"[VoiceHandler.stop_listening] Drained {drained} item(s) from audio queue")
 
-        # Clear threads
         self.capture_thread = None
         self.processing_thread = None
+        log.debug("[VoiceHandler.stop_listening] Thread handles cleared")
 
-        self.log("Stopped listening")
+        self._emit_log_callback("Stopped listening")
         self._notify_state_change('inactive')
+        log.info("[VoiceHandler.stop_listening] ✓ Listening stopped")
 
     def interrupt_speech(self):
         """Interrupt current TTS playback"""
+        log.info("[VoiceHandler.interrupt_speech] ── Speech interrupt requested ────────────")
+
         if not self.is_speaking:
+            log.debug("[VoiceHandler.interrupt_speech] Not currently speaking — no-op")
             return
 
-        self.log("Interrupting speech...")
+        self._emit_log_callback("Interrupting speech...")
         self.is_speaking = False
+        log.debug("[VoiceHandler.interrupt_speech] is_speaking=False")
 
         try:
-            # Check if pygame mixer is initialized
             if pygame.mixer.get_init():
                 pygame.mixer.music.stop()
+                log.info("[VoiceHandler.interrupt_speech] ✓ pygame mixer stopped")
+            else:
+                log.warning("[VoiceHandler.interrupt_speech] pygame mixer not initialized — "
+                            "nothing to stop")
         except Exception as e:
-            self.log(f"Error stopping playback: {e}", "WARNING")
+            log.warning(f"[VoiceHandler.interrupt_speech] Error stopping playback: "
+                        f"{type(e).__name__}: {e}")
+            self._emit_log_callback(f"Error stopping playback: {e}", "WARNING")
 
-        self.log("Speech interrupted")
-        self._notify_state_change('listening' if self.is_listening else 'inactive')
-
-    def _audio_capture_loop(self):
-        """Continuously capture audio from microphone"""
-        try:
-            with sd.InputStream(
-                    samplerate=self.sample_rate,
-                    channels=1,
-                    dtype='int16',
-                    blocksize=self.frame_size,
-                    device=self.input_device
-            ) as stream:
-                self.log("Audio capture started")
-
-                while self.is_listening:
-                    try:
-                        audio_data, overflowed = stream.read(self.frame_size)
-
-                        if overflowed:
-                            self.log("Audio buffer overflowed", "WARNING")
-
-                        # Convert to bytes for VAD
-                        audio_bytes = audio_data.tobytes()
-
-                        # VAD check
-                        is_speech = self.vad.is_speech(audio_bytes, self.sample_rate)
-
-                        # Put in queue for processing
-                        self.audio_queue.put((audio_bytes, is_speech))
-                    except Exception as e:
-                        if self.is_listening:  # Only log if we're still supposed to be listening
-                            self.log(f"Audio read error: {e}", "WARNING")
-                        break
-
-        except Exception as e:
-            self.log(f"Audio capture error: {e}", "ERROR")
-            self.is_listening = False
+        new_state = 'listening' if self.is_listening else 'inactive'
+        self._emit_log_callback("Speech interrupted")
+        self._notify_state_change(new_state)
+        log.info(f"[VoiceHandler.interrupt_speech] ✓ Speech interrupted | new_state='{new_state}'")
 
     def _processing_loop(self):
         """Process audio queue and detect speech segments"""
+        log.info("[VoiceHandler._processing_loop] ── Processing thread started ────────────")
         audio_buffer = []
         currently_speaking = False
+        frames_processed = 0
 
         while self.is_listening:
             try:
-                # Get audio frame
                 audio_bytes, is_speech = self.audio_queue.get(timeout=0.1)
+                frames_processed += 1
 
                 if is_speech:
-                    # Speech detected
                     if not currently_speaking:
-                        self.log("Speech started")
+                        log.info("[VoiceHandler._processing_loop] ▶ Speech segment started")
+                        self._emit_log_callback("Speech started")
                         currently_speaking = True
                         audio_buffer = []
 
                     audio_buffer.append(audio_bytes)
                     self.silence_frames = 0
 
-                    # NEW: Check interrupt mode
                     if self.interrupt_mode == 'auto' and self.is_speaking:
-                        self.log("Auto-interrupting TTS due to voice detection")
+                        log.info("[VoiceHandler._processing_loop] Auto-interrupt triggered — "
+                                 "calling interrupt_speech()")
+                        self._emit_log_callback("Auto-interrupting TTS due to voice detection")
                         self.interrupt_speech()
 
                 else:
-                    # Silence detected
                     if currently_speaking:
                         audio_buffer.append(audio_bytes)
                         self.silence_frames += 1
-
-                        # Check if silence threshold reached
                         silence_duration = (self.silence_frames * self.frame_duration) / 1000
 
-                        if silence_duration >= self.silence_duration:
-                            self.log(f"Silence detected ({silence_duration:.1f}s), processing speech")
+                        log.debug(f"[VoiceHandler._processing_loop] Silence frame "
+                                  f"{self.silence_frames} | duration={silence_duration:.2f}s / "
+                                  f"{self.silence_duration}s threshold")
 
-                            # Process the audio
+                        if silence_duration >= self.silence_duration:
+                            log.info(f"[VoiceHandler._processing_loop] ■ Silence threshold reached "
+                                     f"({silence_duration:.1f}s) — dispatching segment | "
+                                     f"buffer_frames={len(audio_buffer)}")
+                            self._emit_log_callback(
+                                f"Silence detected ({silence_duration:.1f}s), processing speech"
+                            )
                             self._process_audio_segment(audio_buffer)
 
-                            # Reset
                             audio_buffer = []
                             currently_speaking = False
                             self.silence_frames = 0
+                            log.debug("[VoiceHandler._processing_loop] Segment dispatched — "
+                                      "reset to idle state")
 
             except queue.Empty:
                 continue
             except Exception as e:
                 if self.is_listening:
-                    self.log(f"Processing error: {e}", "ERROR")
+                    log.error(f"[VoiceHandler._processing_loop] ✗ Processing error: "
+                              f"{type(e).__name__}: {e}")
+                    self._emit_log_callback(f"Processing error: {e}", "ERROR")
+
+        log.info(f"[VoiceHandler._processing_loop] ── Processing thread exiting | "
+                 f"total_frames_processed={frames_processed} ────────")
 
     def _process_audio_segment(self, audio_buffer):
         """Process captured audio segment with STT"""
+        log.info(f"[VoiceHandler._process_audio_segment] ── Processing audio segment | "
+                 f"frames={len(audio_buffer)} ──────────")
+
         if not audio_buffer:
+            log.warning("[VoiceHandler._process_audio_segment] Empty audio buffer — skipping")
             return
 
         self.is_processing = True
         self._notify_state_change('processing')
+        log.debug("[VoiceHandler._process_audio_segment] is_processing=True | state → 'processing'")
 
         try:
-            # Combine audio frames
             audio_data = b''.join(audio_buffer)
-
-            # Convert to audio for speech recognition
             audio_array = np.frombuffer(audio_data, dtype=np.int16)
+            total_bytes = len(audio_data)
+            duration_s = total_bytes / (self.sample_rate * 2)
+            log.debug(f"[VoiceHandler._process_audio_segment] Audio assembled: "
+                      f"bytes={total_bytes} | duration≈{duration_s:.2f}s")
 
-            # Use speech_recognition with Google Speech Recognition (FREE)
             audio_sr = sr.AudioData(audio_data, self.sample_rate, 2)
-
-            self.log("Transcribing with Google Speech Recognition...")
+            log.debug("[VoiceHandler._process_audio_segment] sr.AudioData created — "
+                      "sending to Google STT...")
+            self._emit_log_callback("Transcribing with Google Speech Recognition...")
 
             try:
-                # Try Google Speech Recognition (free, no API key needed!)
                 text = self.recognizer.recognize_google(audio_sr)
-                self.log(f"Transcribed: {text}")
+                log.info(f"[VoiceHandler._process_audio_segment] ✓ Transcription: '{text}'")
+                self._emit_log_callback(f"Transcribed: {text}")
 
                 if self.on_transcription and text and text.strip():
-                    # Call transcription callback in main thread
+                    log.debug("[VoiceHandler._process_audio_segment] Calling on_transcription callback...")
                     self.on_transcription(text)
+                    log.debug("[VoiceHandler._process_audio_segment] ✓ on_transcription callback complete")
+                else:
+                    log.debug(f"[VoiceHandler._process_audio_segment] No callback dispatched — "
+                              f"has_callback={self.on_transcription is not None} | "
+                              f"text_empty={not bool(text and text.strip())}")
 
             except sr.UnknownValueError:
-                self.log("Could not understand audio", "WARNING")
+                log.warning("[VoiceHandler._process_audio_segment] ✗ Could not understand audio "
+                            "(UnknownValueError)")
+                self._emit_log_callback("Could not understand audio", "WARNING")
             except sr.RequestError as e:
-                self.log(f"Speech recognition error: {e}", "ERROR")
+                log.error(f"[VoiceHandler._process_audio_segment] ✗ STT request error: "
+                          f"{type(e).__name__}: {e}")
+                self._emit_log_callback(f"Speech recognition error: {e}", "ERROR")
 
         except Exception as e:
-            self.log(f"STT error: {e}", "ERROR")
+            log.error(f"[VoiceHandler._process_audio_segment] ✗ STT error: {type(e).__name__}: {e}")
+            self._emit_log_callback(f"STT error: {e}", "ERROR")
 
         finally:
             self.is_processing = False
             self._notify_state_change('listening')
+            log.debug("[VoiceHandler._process_audio_segment] is_processing=False | state → 'listening'")
 
     async def speak_text(self, text):
         """Convert text to speech and play it"""
+        log.info(f"[VoiceHandler.speak_text] ── TTS requested | text_len={len(text)} ──────────")
+        log.debug(f"[VoiceHandler.speak_text] Raw text preview: '{text[:80].replace(chr(10), '↵')}'")
+
         if not text or not text.strip():
+            log.warning("[VoiceHandler.speak_text] Empty text — aborting TTS")
             return
 
-        # FILTER TEXT FOR TTS (removes code blocks only, keeps brackets)
         filtered_text = self._filter_text_for_tts(text)
+        log.debug(f"[VoiceHandler.speak_text] Filtered text_len={len(filtered_text)} | "
+                  f"preview='{filtered_text[:80].replace(chr(10), '↵')}'")
 
         if not filtered_text or not filtered_text.strip():
-            self.log("[TTS] No speakable text after filtering")
+            log.warning("[VoiceHandler.speak_text] No speakable text after filtering — aborting TTS")
+            self._emit_log_callback("[TTS] No speakable text after filtering")
             return
-
-        self.log(f"[TTS] Speaking: {filtered_text[:100]}...")  # Debug output
 
         self.is_speaking = True
         self._notify_state_change('speaking')
+        log.debug("[VoiceHandler.speak_text] is_speaking=True | state → 'speaking'")
 
         try:
-            # Check provider and route accordingly
+            log.info(f"[VoiceHandler.speak_text] Routing to provider='{self.tts_provider}'")
             if self.tts_provider == 'pyttsx3':
-                self.log("[TTS] Using pyttsx3 (offline)")
+                log.debug("[VoiceHandler.speak_text] → _speak_pyttsx3()")
+                self._emit_log_callback("[TTS] Using pyttsx3 (offline)")
                 await self._speak_pyttsx3(filtered_text)
+
             elif self.tts_provider == 'puter':
-                # Check if ElevenLabs is enabled
                 use_elevenlabs = getattr(self, 'use_elevenlabs', False)
-                if use_elevenlabs and hasattr(self, 'elevenlabs_voice_id') and self.elevenlabs_voice_id:
-                    self.log("[TTS] Using Puter + ElevenLabs")
+                has_voice_id = hasattr(self, 'elevenlabs_voice_id') and self.elevenlabs_voice_id
+                log.debug(f"[VoiceHandler.speak_text] Puter provider: use_elevenlabs={use_elevenlabs} | "
+                          f"has_voice_id={has_voice_id}")
+                if use_elevenlabs and has_voice_id:
+                    log.debug("[VoiceHandler.speak_text] → _speak_puter_elevenlabs()")
+                    self._emit_log_callback("[TTS] Using Puter + ElevenLabs")
                     await self._speak_puter_elevenlabs(filtered_text)
                 else:
-                    self.log("[TTS] Using Puter standard TTS")
+                    log.debug("[VoiceHandler.speak_text] → _speak_puter_tts()")
+                    self._emit_log_callback("[TTS] Using Puter standard TTS")
                     await self._speak_puter_tts(filtered_text)
+
             elif self.tts_provider == 'edge-tts':
-                self.log("[TTS] Using Edge TTS")
+                log.debug("[VoiceHandler.speak_text] → _speak_edge_tts()")
+                self._emit_log_callback("[TTS] Using Edge TTS")
                 await self._speak_edge_tts(filtered_text)
+
             else:
-                self.log(f"[TTS] Provider '{self.tts_provider}' not implemented", "WARNING")
+                log.warning(f"[VoiceHandler.speak_text] ✗ Unknown provider '{self.tts_provider}' — "
+                            "no audio produced")
+                self._emit_log_callback(
+                    f"[TTS] Provider '{self.tts_provider}' not implemented", "WARNING"
+                )
 
         except Exception as e:
-            self.log(f"[TTS] Error: {e}", "ERROR")
+            log.error(f"[VoiceHandler.speak_text] ✗ TTS exception: {type(e).__name__}: {e}")
+            self._emit_log_callback(f"[TTS] Error: {e}", "ERROR")
 
         finally:
             self.is_speaking = False
-            self._notify_state_change('listening' if self.is_listening else 'inactive')
+            new_state = 'listening' if self.is_listening else 'inactive'
+            self._notify_state_change(new_state)
+            log.info(f"[VoiceHandler.speak_text] ✓ TTS complete | is_speaking=False | "
+                     f"new_state='{new_state}'")
 
     async def _speak_pyttsx3(self, text):
         """Speak using pyttsx3 (offline TTS)"""
+        log.info(f"[VoiceHandler._speak_pyttsx3] ── pyttsx3 TTS | text_len={len(text)} ──────")
+
         try:
             if not PYTTSX3_AVAILABLE or not self.pyttsx3_engine:
-                self.log("pyttsx3 not available", "ERROR")
+                log.error("[VoiceHandler._speak_pyttsx3] ✗ pyttsx3 not available or engine not initialized")
+                self._emit_log_callback("pyttsx3 not available", "ERROR")
                 return
 
-            # Run in thread to avoid blocking
-            import threading
+            log.debug("[VoiceHandler._speak_pyttsx3] Spawning speak thread...")
 
             def speak_thread():
+                log.debug("[VoiceHandler._speak_pyttsx3:thread] pyttsx3 say() + runAndWait() starting")
                 try:
                     self.pyttsx3_engine.say(text)
                     self.pyttsx3_engine.runAndWait()
+                    log.debug("[VoiceHandler._speak_pyttsx3:thread] ✓ pyttsx3 runAndWait() complete")
                 except Exception as e:
-                    self.log(f"pyttsx3 error: {e}", "ERROR")
+                    log.error(f"[VoiceHandler._speak_pyttsx3:thread] ✗ Error: {type(e).__name__}: {e}")
+                    self._emit_log_callback(f"pyttsx3 error: {e}", "ERROR")
 
-            thread = threading.Thread(target=speak_thread, daemon=True)
+            thread = threading.Thread(target=speak_thread, daemon=True, name="pyttsx3Speak")
             thread.start()
+            log.debug(f"[VoiceHandler._speak_pyttsx3] Speak thread started | tid={thread.ident}")
 
-            # Notify playback started
             if self.on_playback_started:
+                log.debug("[VoiceHandler._speak_pyttsx3] Calling on_playback_started callback...")
                 try:
                     self.on_playback_started()
+                    log.debug("[VoiceHandler._speak_pyttsx3] ✓ on_playback_started callback complete")
                 except Exception as e:
-                    self.log(f"Error in playback callback: {e}", "ERROR")
+                    log.warning(f"[VoiceHandler._speak_pyttsx3] on_playback_started error: "
+                                f"{type(e).__name__}: {e}")
+                    self._emit_log_callback(f"Error in playback callback: {e}", "ERROR")
 
-            # Wait for thread
+            log.debug("[VoiceHandler._speak_pyttsx3] Waiting for speak thread to finish...")
             thread.join()
+            log.info("[VoiceHandler._speak_pyttsx3] ✓ pyttsx3 TTS complete")
 
         except Exception as e:
-            self.log(f"pyttsx3 TTS error: {e}", "ERROR")
+            log.error(f"[VoiceHandler._speak_pyttsx3] ✗ Outer error: {type(e).__name__}: {e}")
+            self._emit_log_callback(f"pyttsx3 TTS error: {e}", "ERROR")
 
     async def _speak_puter_tts(self, text):
         """Speak using Puter.js TTS"""
+        log.info(f"[VoiceHandler._speak_puter_tts] ── Puter TTS | text_len={len(text)} | "
+                 f"model='{self.puter_tts_model}' | voice='{self.puter_tts_voice}' ──────")
         try:
             if not self.puter_server:
-                self.log("Puter server not available for TTS", "ERROR")
+                log.error("[VoiceHandler._speak_puter_tts] ✗ puter_server is None — aborting")
+                self._emit_log_callback("Puter server not available for TTS", "ERROR")
                 return
 
-            # Create temporary file
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
             temp_path = temp_file.name
             temp_file.close()
+            log.debug(f"[VoiceHandler._speak_puter_tts] Temp file: '{temp_path}'")
 
-            # Generate speech with Puter
+            log.debug("[VoiceHandler._speak_puter_tts] Calling puter_server.text_to_speech()...")
             audio_url = self.puter_server.text_to_speech(
                 text=text,
                 model=self.puter_tts_model,
@@ -675,238 +895,316 @@ class VoiceHandler:
             )
 
             if not audio_url:
-                self.log("Failed to generate speech with Puter", "ERROR")
+                log.error("[VoiceHandler._speak_puter_tts] ✗ text_to_speech() returned None/empty")
+                self._emit_log_callback("Failed to generate speech with Puter", "ERROR")
                 return
 
-            # Load and play audio
+            log.debug(f"[VoiceHandler._speak_puter_tts] ✓ Audio generated | url='{audio_url}' | "
+                      f"loading into pygame...")
             pygame.mixer.music.load(temp_path)
             pygame.mixer.music.play()
+            log.info("[VoiceHandler._speak_puter_tts] ✓ Pygame playback started")
 
-            # NEW: Notify that playback started IMMEDIATELY after play() call
             if self.on_playback_started:
+                log.debug("[VoiceHandler._speak_puter_tts] Calling on_playback_started callback...")
                 try:
                     self.on_playback_started()
-                    self.log("Playback started callback executed")
+                    log.debug("[VoiceHandler._speak_puter_tts] ✓ on_playback_started complete")
+                    self._emit_log_callback("Playback started callback executed")
                 except Exception as e:
-                    self.log(f"Error in playback callback: {e}", "ERROR")
+                    log.warning(f"[VoiceHandler._speak_puter_tts] on_playback_started error: "
+                                f"{type(e).__name__}: {e}")
+                    self._emit_log_callback(f"Error in playback callback: {e}", "ERROR")
 
-            # Wait for playback to finish (with interruption check)
+            log.debug("[VoiceHandler._speak_puter_tts] Entering playback wait loop...")
+            wait_iters = 0
             while pygame.mixer.music.get_busy():
-                if not self.is_speaking:  # Interrupted
+                if not self.is_speaking:
+                    log.info("[VoiceHandler._speak_puter_tts] is_speaking=False detected — "
+                             "stopping playback")
                     pygame.mixer.music.stop()
                     break
                 await asyncio.sleep(0.1)
+                wait_iters += 1
 
-            # Cleanup
+            log.info(f"[VoiceHandler._speak_puter_tts] ✓ Playback finished | "
+                     f"wait_iters={wait_iters}")
+
             try:
                 os.unlink(temp_path)
-            except:
-                pass
+                log.debug(f"[VoiceHandler._speak_puter_tts] ✓ Temp file removed: '{temp_path}'")
+            except Exception as e:
+                log.warning(f"[VoiceHandler._speak_puter_tts] Could not remove temp file: "
+                            f"{type(e).__name__}: {e}")
 
         except Exception as e:
-            self.log(f"Puter TTS error: {e}", "ERROR")
+            log.error(f"[VoiceHandler._speak_puter_tts] ✗ Puter TTS error: {type(e).__name__}: {e}")
+            self._emit_log_callback(f"Puter TTS error: {e}", "ERROR")
 
     async def _speak_puter_elevenlabs(self, text):
         """Speak using Puter.js with ElevenLabs"""
+        voice_id = getattr(self, 'elevenlabs_voice_id', None)
+        log.info(f"[VoiceHandler._speak_puter_elevenlabs] ── Puter+ElevenLabs TTS | "
+                 f"text_len={len(text)} | voice_id='{voice_id}' ──────")
         try:
             if not self.puter_server:
-                self.log("Puter server not available for ElevenLabs TTS", "ERROR")
+                log.error("[VoiceHandler._speak_puter_elevenlabs] ✗ puter_server is None — aborting")
+                self._emit_log_callback("Puter server not available for ElevenLabs TTS", "ERROR")
                 return
 
-            # Create temporary file
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
             temp_path = temp_file.name
             temp_file.close()
+            log.debug(f"[VoiceHandler._speak_puter_elevenlabs] Temp file: '{temp_path}'")
 
-            # Get ElevenLabs voice ID from settings
-            voice_id = getattr(self, 'elevenlabs_voice_id', None)
-
-            # Generate speech with Puter + ElevenLabs
+            log.debug("[VoiceHandler._speak_puter_elevenlabs] Calling puter_server.text_to_speech() "
+                      "with ElevenLabs provider...")
             audio_url = self.puter_server.text_to_speech(
                 text=text,
-                model='eleven_v3',  # Default model
+                model='eleven_v3',
                 voice=voice_id,
                 provider='elevenlabs',
                 save_to=temp_path
             )
 
             if not audio_url:
-                self.log("Failed to generate speech with ElevenLabs", "ERROR")
+                log.error("[VoiceHandler._speak_puter_elevenlabs] ✗ text_to_speech() returned "
+                          "None/empty")
+                self._emit_log_callback("Failed to generate speech with ElevenLabs", "ERROR")
                 return
 
-            # Load and play audio
+            log.debug(f"[VoiceHandler._speak_puter_elevenlabs] ✓ Audio generated | url='{audio_url}' "
+                      f"| loading into pygame...")
             pygame.mixer.music.load(temp_path)
             pygame.mixer.music.play()
+            log.info("[VoiceHandler._speak_puter_elevenlabs] ✓ Pygame playback started")
 
-            # NEW: Notify that playback started IMMEDIATELY after play() call
             if self.on_playback_started:
+                log.debug("[VoiceHandler._speak_puter_elevenlabs] Calling on_playback_started...")
                 try:
                     self.on_playback_started()
-                    self.log("Playback started callback executed")
+                    log.debug("[VoiceHandler._speak_puter_elevenlabs] ✓ on_playback_started complete")
+                    self._emit_log_callback("Playback started callback executed")
                 except Exception as e:
-                    self.log(f"Error in playback callback: {e}", "ERROR")
+                    log.warning(f"[VoiceHandler._speak_puter_elevenlabs] on_playback_started error: "
+                                f"{type(e).__name__}: {e}")
+                    self._emit_log_callback(f"Error in playback callback: {e}", "ERROR")
 
-            # Wait for playback to finish (with interruption check)
+            log.debug("[VoiceHandler._speak_puter_elevenlabs] Entering playback wait loop...")
+            wait_iters = 0
             while pygame.mixer.music.get_busy():
-                if not self.is_speaking:  # Interrupted
+                if not self.is_speaking:
+                    log.info("[VoiceHandler._speak_puter_elevenlabs] is_speaking=False — "
+                             "stopping playback")
                     pygame.mixer.music.stop()
                     break
                 await asyncio.sleep(0.1)
+                wait_iters += 1
 
-            # Cleanup
+            log.info(f"[VoiceHandler._speak_puter_elevenlabs] ✓ Playback finished | "
+                     f"wait_iters={wait_iters}")
+
             try:
                 os.unlink(temp_path)
-            except:
-                pass
+                log.debug(f"[VoiceHandler._speak_puter_elevenlabs] ✓ Temp file removed: '{temp_path}'")
+            except Exception as e:
+                log.warning(f"[VoiceHandler._speak_puter_elevenlabs] Could not remove temp file: "
+                            f"{type(e).__name__}: {e}")
 
         except Exception as e:
-            self.log(f"ElevenLabs TTS error: {e}", "ERROR")
+            log.error(f"[VoiceHandler._speak_puter_elevenlabs] ✗ ElevenLabs TTS error: "
+                      f"{type(e).__name__}: {e}")
+            self._emit_log_callback(f"ElevenLabs TTS error: {e}", "ERROR")
+
+    async def _speak_edge_tts(self, text):
+        """Speak using Edge TTS (FREE)"""
+        log.info(f"[VoiceHandler._speak_edge_tts] ── Edge TTS | text_len={len(text)} | "
+                 f"voice='{self.tts_voice}' | rate='{self.tts_rate}' | "
+                 f"volume='{self.tts_volume}' ──────")
+        try:
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+            temp_path = temp_file.name
+            temp_file.close()
+            log.debug(f"[VoiceHandler._speak_edge_tts] Temp file: '{temp_path}'")
+
+            log.debug("[VoiceHandler._speak_edge_tts] Creating edge_tts.Communicate and saving...")
+            communicate = edge_tts.Communicate(
+                text, self.tts_voice, rate=self.tts_rate, volume=self.tts_volume
+            )
+            await communicate.save(temp_path)
+            log.debug(f"[VoiceHandler._speak_edge_tts] ✓ Audio saved to '{temp_path}'")
+
+            pygame.mixer.music.load(temp_path)
+            pygame.mixer.music.play()
+            log.info("[VoiceHandler._speak_edge_tts] ✓ Pygame playback started")
+
+            if self.on_playback_started:
+                log.debug("[VoiceHandler._speak_edge_tts] Calling on_playback_started callback...")
+                try:
+                    self.on_playback_started()
+                    log.debug("[VoiceHandler._speak_edge_tts] ✓ on_playback_started complete")
+                    self._emit_log_callback("Playback started callback executed")
+                except Exception as e:
+                    log.warning(f"[VoiceHandler._speak_edge_tts] on_playback_started error: "
+                                f"{type(e).__name__}: {e}")
+                    self._emit_log_callback(f"Error in playback callback: {e}", "ERROR")
+
+            log.debug("[VoiceHandler._speak_edge_tts] Entering playback wait loop...")
+            wait_iters = 0
+            while pygame.mixer.music.get_busy():
+                if not self.is_speaking:
+                    log.info("[VoiceHandler._speak_edge_tts] is_speaking=False — stopping playback")
+                    pygame.mixer.music.stop()
+                    break
+                await asyncio.sleep(0.1)
+                wait_iters += 1
+
+            log.info(f"[VoiceHandler._speak_edge_tts] ✓ Playback finished | wait_iters={wait_iters}")
+
+            try:
+                os.unlink(temp_path)
+                log.debug(f"[VoiceHandler._speak_edge_tts] ✓ Temp file removed: '{temp_path}'")
+            except Exception as e:
+                log.warning(f"[VoiceHandler._speak_edge_tts] Could not remove temp file: "
+                            f"{type(e).__name__}: {e}")
+
+        except Exception as e:
+            log.error(f"[VoiceHandler._speak_edge_tts] ✗ Edge TTS error: {type(e).__name__}: {e}")
+            self._emit_log_callback(f"Edge TTS error: {e}", "ERROR")
 
     def _filter_text_for_tts(self, text):
         """
-        Filter text for TTS - remove code blocks ONLY, keep everything else
-        Preserves: emojis, brackets, symbols, expressive text
+        Filter text for TTS - remove code blocks ONLY, keep everything else.
+        Preserves: emojis, brackets, symbols, expressive text.
         """
+        log.debug(f"[VoiceHandler._filter_text_for_tts] Filtering {len(text)} chars...")
+        original_text = text
 
-        original_text = text  # Store for debug
+        # Remove code blocks
+        text = re.sub(r'```[\s\S]*?```', '', text)
+        text = re.sub(r'`[^`]+`', '', text)
 
-        # ONLY remove code blocks (triple backticks and inline code)
-        text = re.sub(r'```[\s\S]*?```', '', text)  # Fenced code blocks
-        text = re.sub(r'`[^`]+`', '', text)  # Inline code
-
-        # Remove markdown formatting but KEEP the content
-        text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)  # **bold** → bold
-        text = re.sub(r'\*([^*]+)\*', r'\1', text)  # *italic* → italic
-        text = re.sub(r'__([^_]+)__', r'\1', text)  # __bold__ → bold
-        text = re.sub(r'_([^_]+)_', r'\1', text)  # _italic_ → italic
-        text = re.sub(r'~~([^~]+)~~', r'\1', text)  # ~~strike~~ → strike
+        # Strip markdown formatting while keeping content
+        text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
+        text = re.sub(r'\*([^*]+)\*', r'\1', text)
+        text = re.sub(r'__([^_]+)__', r'\1', text)
+        text = re.sub(r'_([^_]+)_', r'\1', text)
+        text = re.sub(r'~~([^~]+)~~', r'\1', text)
 
         # Remove links but keep text
-        text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)  # [text](url) → text
+        text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
 
         # Remove headers
-        text = re.sub(r'^#+\s+', '', text, flags=re.MULTILINE)  # ## Header → Header
+        text = re.sub(r'^#+\s+', '', text, flags=re.MULTILINE)
 
         # Remove list markers
-        text = re.sub(r'^\s*[-*+]\s+', '', text, flags=re.MULTILINE)  # - item → item
-        text = re.sub(r'^\s*\d+\.\s+', '', text, flags=re.MULTILINE)  # 1. item → item
+        text = re.sub(r'^\s*[-*+]\s+', '', text, flags=re.MULTILINE)
+        text = re.sub(r'^\s*\d+\.\s+', '', text, flags=re.MULTILINE)
 
-        # Clean up excessive whitespace
+        # Clean up whitespace
         text = re.sub(r'\s+', ' ', text)
         text = text.strip()
 
-        # Debug output
         if original_text != text:
-            self.log(f"[TTS Filter] Original: {original_text[:80]}...")
-            self.log(f"[TTS Filter] Filtered: {text[:80]}...")
+            log.debug(f"[VoiceHandler._filter_text_for_tts] Text was modified | "
+                      f"original_len={len(original_text)} → filtered_len={len(text)}")
+            self._emit_log_callback(f"[TTS Filter] Original: {original_text[:80]}...")
+            self._emit_log_callback(f"[TTS Filter] Filtered: {text[:80]}...")
+        else:
+            log.debug("[VoiceHandler._filter_text_for_tts] No changes after filtering")
 
         return text
 
     def _remove_emotion_brackets(self, text):
         """
-        Remove ElevenLabs emotion/voice effect brackets for DISPLAY only
+        Remove ElevenLabs emotion/voice effect brackets for DISPLAY only.
         Examples: [happy], [giggles], [whispers], [pause]
-
-        This is called AFTER TTS processing, before displaying in chat
+        Called AFTER TTS processing, before displaying in chat.
         """
-
-        # Remove emotion brackets like [happy], [giggles], [whispers], etc.
+        log.debug(f"[VoiceHandler._remove_emotion_brackets] Stripping emotion brackets from "
+                  f"{len(text)} chars...")
         cleaned = re.sub(r'\[([^\]]+)\]', '', text)
-
-        # Clean up any double spaces left behind
         cleaned = re.sub(r'\s+', ' ', cleaned)
         cleaned = cleaned.strip()
 
+        if cleaned != text:
+            removed_count = text.count('[') - cleaned.count('[')
+            log.debug(f"[VoiceHandler._remove_emotion_brackets] ✓ Removed ~{removed_count} bracket(s) | "
+                      f"original_len={len(text)} → cleaned_len={len(cleaned)}")
+        else:
+            log.debug("[VoiceHandler._remove_emotion_brackets] No brackets to remove")
+
         return cleaned
-
-    async def _speak_edge_tts(self, text):
-        """Speak using Edge TTS (FREE)"""
-        try:
-            # Create temporary file
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
-            temp_path = temp_file.name
-            temp_file.close()
-
-            # Generate speech with configured voice
-            communicate = edge_tts.Communicate(text, self.tts_voice, rate=self.tts_rate, volume=self.tts_volume)
-            await communicate.save(temp_path)
-
-            # Load and play audio
-            pygame.mixer.music.load(temp_path)
-            pygame.mixer.music.play()
-
-            # NEW: Notify that playback started IMMEDIATELY after play() call
-            if self.on_playback_started:
-                try:
-                    self.on_playback_started()
-                    self.log("Playback started callback executed")
-                except Exception as e:
-                    self.log(f"Error in playback callback: {e}", "ERROR")
-
-            # Wait for playback to finish (with interruption check)
-            while pygame.mixer.music.get_busy():
-                if not self.is_speaking:  # Interrupted
-                    pygame.mixer.music.stop()
-                    break
-                await asyncio.sleep(0.1)
-
-            # Cleanup
-            try:
-                os.unlink(temp_path)
-            except:
-                pass
-
-        except Exception as e:
-            self.log(f"Edge TTS error: {e}", "ERROR")
 
     def speak_text_sync(self, text):
         """Synchronous wrapper for speak_text"""
+        log.info(f"[VoiceHandler.speak_text_sync] ── Sync TTS wrapper | text_len={len(text)} ──")
+
         if not text or not text.strip():
+            log.warning("[VoiceHandler.speak_text_sync] Empty text — aborting")
             return
 
-        # Run in new event loop
+        log.debug("[VoiceHandler.speak_text_sync] Creating new event loop...")
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
+            log.debug("[VoiceHandler.speak_text_sync] Running speak_text() in event loop...")
             loop.run_until_complete(self.speak_text(text))
+            log.info("[VoiceHandler.speak_text_sync] ✓ Sync TTS complete")
         finally:
             loop.close()
+            log.debug("[VoiceHandler.speak_text_sync] Event loop closed")
 
     def set_elevenlabs_settings(self, enabled, voice_id):
         """Set ElevenLabs TTS settings"""
+        log.info(f"[VoiceHandler.set_elevenlabs_settings] enabled={enabled} | voice_id='{voice_id}'")
         self.use_elevenlabs = enabled
         self.elevenlabs_voice_id = voice_id
         if enabled:
-            self.log(f"ElevenLabs enabled with voice: {voice_id}")
+            log.info(f"[VoiceHandler.set_elevenlabs_settings] ✓ ElevenLabs enabled with "
+                     f"voice_id='{voice_id}'")
+            self._emit_log_callback(f"ElevenLabs enabled with voice: {voice_id}")
+        else:
+            log.debug("[VoiceHandler.set_elevenlabs_settings] ElevenLabs disabled")
 
     def _notify_state_change(self, state):
         """Notify state change (thread-safe)"""
+        log.debug(f"[VoiceHandler._notify_state_change] state='{state}' | "
+                  f"has_callback={self.on_state_change is not None}")
         if self.on_state_change:
             try:
                 self.on_state_change(state)
             except Exception as e:
-                self.log(f"Error in state change callback: {e}", "ERROR")
+                log.warning(f"[VoiceHandler._notify_state_change] ✗ Callback error: "
+                            f"{type(e).__name__}: {e}")
+                self._emit_log_callback(f"Error in state change callback: {e}", "ERROR")
 
     def cleanup(self):
         """Cleanup resources"""
-        self.log("Cleaning up voice handler...")
+        log.info("[VoiceHandler.cleanup] ── Cleanup started ──────────────────────────────────")
 
-        # Stop listening first
+        log.debug("[VoiceHandler.cleanup] Stopping listening...")
         self.stop_listening()
 
-        # Interrupt any ongoing speech
+        log.debug("[VoiceHandler.cleanup] Interrupting any ongoing speech...")
         self.interrupt_speech()
 
-        # Clear callbacks to prevent post-cleanup calls
+        log.debug("[VoiceHandler.cleanup] Clearing all callbacks...")
         self.on_transcription = None
         self.on_state_change = None
         self.on_playback_started = None
+        log.debug("[VoiceHandler.cleanup] ✓ Callbacks cleared")
 
-        # Quit pygame mixer safely
+        log.debug("[VoiceHandler.cleanup] Quitting pygame mixer...")
         try:
             if pygame.mixer.get_init():
                 pygame.mixer.quit()
+                log.info("[VoiceHandler.cleanup] ✓ pygame mixer quit")
+            else:
+                log.debug("[VoiceHandler.cleanup] pygame mixer was not initialized — skipping quit")
         except Exception as e:
-            self.log(f"Error during mixer cleanup: {e}", "WARNING")
+            log.warning(f"[VoiceHandler.cleanup] Error during mixer cleanup: "
+                        f"{type(e).__name__}: {e}")
+            self._emit_log_callback(f"Error during mixer cleanup: {e}", "WARNING")
 
-        self.log("Voice handler cleaned up")
+        log.info("[VoiceHandler.cleanup] ✓ VoiceHandler cleanup complete")

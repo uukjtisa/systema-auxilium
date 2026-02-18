@@ -5,7 +5,14 @@ Detects system info at startup and formats it for AI prompt
 
 import platform
 import os
+from core.logger import _make_logger, _NoOpLogger
 import psutil
+
+
+# ─────────────────────────── Colored Logger Setup ────────────────────────────
+_verbose = False
+log = _make_logger("SystemInfo") if _verbose else _NoOpLogger()
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 def get_system_info():
@@ -15,58 +22,88 @@ def get_system_info():
     Returns:
         dict: System information including OS, paths, specs
     """
-    info = {
-        'os': platform.system(),
-        'os_release': platform.release(),
-        'os_version': platform.version(),
-        'machine': platform.machine(),
-        'processor': platform.processor(),
-        'python_version': platform.python_version(),
-        'hostname': platform.node(),
-        'username': os.getenv('USER') or os.getenv('USERNAME') or 'unknown',
-        'home_dir': os.path.expanduser('~'),
-        'current_dir': os.getcwd(),
-        'cpu_count': psutil.cpu_count(logical=True),
-        'cpu_count_physical': psutil.cpu_count(logical=False),
-        'ram_total': psutil.virtual_memory().total,
-        'ram_total_gb': round(psutil.virtual_memory().total / (1024 ** 3), 2),
-    }
+    log.info("[get_system_info] ── Starting system information collection ──────────────")
 
-    # Get disk partitions
+    # ── OS / Identity ──────────────────────────────────────────────────────────
+    log.debug("[get_system_info] Collecting OS and identity info via platform module")
+    info = {
+        'os':             platform.system(),
+        'os_release':     platform.release(),
+        'os_version':     platform.version(),
+        'machine':        platform.machine(),
+        'processor':      platform.processor(),
+        'python_version': platform.python_version(),
+        'hostname':       platform.node(),
+        'username':       os.getenv('USER') or os.getenv('USERNAME') or 'unknown',
+        'home_dir':       os.path.expanduser('~'),
+        'current_dir':    os.getcwd(),
+    }
+    log.info(f"[get_system_info] OS: {info['os']} {info['os_release']} | "
+             f"machine: {info['machine']} | user: {info['username']} | "
+             f"python: {info['python_version']}")
+    log.debug(f"[get_system_info] hostname='{info['hostname']}' | "
+              f"home='{info['home_dir']}' | cwd='{info['current_dir']}'")
+
+    # ── Hardware / CPU ─────────────────────────────────────────────────────────
+    log.debug("[get_system_info] Querying CPU and RAM via psutil")
+    info['cpu_count']          = psutil.cpu_count(logical=True)
+    info['cpu_count_physical'] = psutil.cpu_count(logical=False)
+    info['ram_total']          = psutil.virtual_memory().total
+    info['ram_total_gb']       = round(psutil.virtual_memory().total / (1024 ** 3), 2)
+    log.info(f"[get_system_info] CPU: {info['cpu_count']} logical / "
+             f"{info['cpu_count_physical']} physical | RAM: {info['ram_total_gb']} GB")
+
+    # ── Disk Partitions ────────────────────────────────────────────────────────
+    log.debug("[get_system_info] Enumerating disk partitions")
     partitions = []
     for partition in psutil.disk_partitions():
+        log.debug(f"[get_system_info] Inspecting partition: device='{partition.device}' | "
+                  f"mountpoint='{partition.mountpoint}' | fstype='{partition.fstype}'")
         try:
             usage = psutil.disk_usage(partition.mountpoint)
-            partitions.append({
-                'device': partition.device,
+            entry = {
+                'device':     partition.device,
                 'mountpoint': partition.mountpoint,
-                'fstype': partition.fstype,
-                'total_gb': round(usage.total / (1024 ** 3), 2),
-                'free_gb': round(usage.free / (1024 ** 3), 2),
-                'used_gb': round(usage.used / (1024 ** 3), 2),
-            })
-        except:
-            pass
+                'fstype':     partition.fstype,
+                'total_gb':   round(usage.total / (1024 ** 3), 2),
+                'free_gb':    round(usage.free  / (1024 ** 3), 2),
+                'used_gb':    round(usage.used  / (1024 ** 3), 2),
+            }
+            partitions.append(entry)
+            log.info(f"[get_system_info] Partition '{partition.mountpoint}': "
+                     f"{entry['used_gb']} GB used / {entry['total_gb']} GB total "
+                     f"({entry['free_gb']} GB free) [{entry['fstype']}]")
+        except Exception as e:
+            log.warning(f"[get_system_info] Could not read usage for '{partition.mountpoint}': "
+                        f"{type(e).__name__}: {e} — skipping")
 
     info['disk_partitions'] = partitions
+    log.debug(f"[get_system_info] {len(partitions)} readable partition(s) collected")
 
-    # Detect common paths
+    # ── Common Paths ───────────────────────────────────────────────────────────
+    log.debug(f"[get_system_info] Detecting common paths for OS: '{info['os']}'")
     common_paths = {}
     if info['os'] == 'Windows':
-        common_paths['desktop'] = os.path.join(info['home_dir'], 'Desktop')
+        common_paths['desktop']   = os.path.join(info['home_dir'], 'Desktop')
         common_paths['documents'] = os.path.join(info['home_dir'], 'Documents')
         common_paths['downloads'] = os.path.join(info['home_dir'], 'Downloads')
-        common_paths['pictures'] = os.path.join(info['home_dir'], 'Pictures')
-        common_paths['music'] = os.path.join(info['home_dir'], 'Music')
-        common_paths['videos'] = os.path.join(info['home_dir'], 'Videos')
-        common_paths['appdata'] = os.path.join(info['home_dir'], 'AppData')
+        common_paths['pictures']  = os.path.join(info['home_dir'], 'Pictures')
+        common_paths['music']     = os.path.join(info['home_dir'], 'Music')
+        common_paths['videos']    = os.path.join(info['home_dir'], 'Videos')
+        common_paths['appdata']   = os.path.join(info['home_dir'], 'AppData')
+        log.debug("[get_system_info] Windows paths set (7 entries incl. AppData)")
     else:
-        common_paths['desktop'] = os.path.join(info['home_dir'], 'Desktop')
+        common_paths['desktop']   = os.path.join(info['home_dir'], 'Desktop')
         common_paths['documents'] = os.path.join(info['home_dir'], 'Documents')
         common_paths['downloads'] = os.path.join(info['home_dir'], 'Downloads')
+        log.debug("[get_system_info] Non-Windows paths set (3 entries)")
+
+    for path_name, path_val in common_paths.items():
+        exists = os.path.exists(path_val)
+        log.debug(f"[get_system_info] Path '{path_name}': '{path_val}' | exists={exists}")
 
     info['common_paths'] = common_paths
-
+    log.info(f"[get_system_info] ── Collection complete — {len(info)} top-level keys gathered ──")
     return info
 
 
@@ -80,7 +117,11 @@ def format_system_info_for_prompt(info):
     Returns:
         str: Formatted system information
     """
+    log.info("[format_system_info_for_prompt] Formatting system info dict into prompt string")
+    log.debug(f"[format_system_info_for_prompt] Input keys: {list(info.keys())}")
+
     # Format disk partitions
+    log.debug(f"[format_system_info_for_prompt] Formatting {len(info['disk_partitions'])} partition(s)")
     partitions_text = []
     for p in info['disk_partitions']:
         partitions_text.append(
@@ -88,6 +129,7 @@ def format_system_info_for_prompt(info):
         )
 
     # Format common paths
+    log.debug(f"[format_system_info_for_prompt] Formatting {len(info['common_paths'])} common path(s)")
     paths_text = []
     for name, path in info['common_paths'].items():
         paths_text.append(f"  - {name.capitalize()}: {path}")
@@ -120,6 +162,7 @@ def format_system_info_for_prompt(info):
 === END SYSTEM INFORMATION ===
 """
 
+    log.info(f"[format_system_info_for_prompt] ✓ Formatted — output length: {len(formatted)} chars")
     return formatted.strip()
 
 
@@ -133,7 +176,10 @@ def get_app_launch_method(os_name):
     Returns:
         str: Code example for launching apps
     """
+    log.info(f"[get_app_launch_method] Determining launch method for OS: '{os_name}'")
+
     if os_name == 'Windows':
+        log.debug("[get_app_launch_method] Returning Windows os.startfile() snippet")
         return """# Windows: Use os.startfile() - it's the most reliable
 import os
 
@@ -146,6 +192,7 @@ os.startfile('C:\\Users\\Username\\Desktop')  # Opens in Explorer
 os.startfile('document.pdf')  # Opens with default app"""
 
     elif os_name == 'Linux':
+        log.debug("[get_app_launch_method] Returning Linux subprocess/xdg-open snippet")
         return """# Linux: Use subprocess with detached process
 import subprocess
 
@@ -159,6 +206,7 @@ subprocess.Popen(['spotify'],
                 stderr=subprocess.DEVNULL)"""
 
     elif os_name == 'Darwin':  # macOS
+        log.debug("[get_app_launch_method] Returning macOS 'open' command snippet")
         return """# macOS: Use subprocess with 'open' command
 import subprocess
 
@@ -169,6 +217,7 @@ subprocess.Popen(['open', '-a', 'Spotify'])
 subprocess.Popen(['open', '/path/to/file.pdf'])"""
 
     else:
+        log.warning(f"[get_app_launch_method] Unrecognized OS '{os_name}' — returning generic snippet")
         return """# Generic: Try subprocess
 import subprocess
 subprocess.Popen(['app-name'])"""
