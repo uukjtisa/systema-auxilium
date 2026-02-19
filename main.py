@@ -139,6 +139,23 @@ def _setup_session_logger():
 # Run setup FIRST — before importing anything from core
 _setup_session_logger()
 
+# ── Hide console immediately after logger grabs the handles ──────────────────
+if sys.platform == "win32":
+    try:
+        _hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if _hwnd:
+            _SWP_NOSIZE     = 0x0001
+            _SWP_NOMOVE     = 0x0002
+            _SWP_NOZORDER   = 0x0004
+            _SWP_HIDEWINDOW = 0x0080
+            ctypes.windll.user32.SetWindowPos(
+                _hwnd, None, 0, 0, 0, 0,
+                _SWP_NOSIZE | _SWP_NOMOVE | _SWP_NOZORDER | _SWP_HIDEWINDOW
+            )
+    except Exception:
+        pass
+# ─────────────────────────────────────────────────────────────────────────────
+
 # ── Core imports come AFTER the Tee is in place ──────────────────────────────
 from PyQt6.QtWidgets import QApplication
 from core.controller import AssistantController
@@ -146,12 +163,19 @@ from core.controller import AssistantController
 
 
 def hide_console_window():
-    """Hide the console window on Windows if launched from CMD"""
+    """Hide the console window on Windows (used for debug toggle)"""
     if sys.platform == "win32":
         try:
             hwnd = ctypes.windll.kernel32.GetConsoleWindow()
             if hwnd:
-                ctypes.windll.user32.ShowWindow(hwnd, 0)
+                SWP_NOSIZE     = 0x0001
+                SWP_NOMOVE     = 0x0002
+                SWP_NOZORDER   = 0x0004
+                SWP_HIDEWINDOW = 0x0080
+                ctypes.windll.user32.SetWindowPos(
+                    hwnd, None, 0, 0, 0, 0,
+                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_HIDEWINDOW
+                )
                 return True
         except Exception:
             pass
@@ -173,10 +197,6 @@ def main():
 
     controller = AssistantController()
     controller.show()
-
-    console_hidden = hide_console_window()
-    if console_hidden:
-        print("[Startup] Console window hidden (toggle in Debug Window)")
 
     sys.exit(app.exec())
 

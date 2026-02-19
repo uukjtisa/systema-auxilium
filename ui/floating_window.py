@@ -549,7 +549,7 @@ class FloatingWindow(QWidget):
             )
         )
 
-        def should_show_debug_window(item):
+        def should_show_debug_window():
             return self.controller.get_debug_mode()
 
         menu_items.append(
@@ -582,14 +582,14 @@ class FloatingWindow(QWidget):
         tray_thread = threading.Thread(target=self.tray_icon.run, daemon=True)
         tray_thread.start()
 
-    def show_from_tray(self, icon=None, item=None):
+    def show_from_tray(self):
         """Show floating icon and hide from tray"""
         self.show()
         if self.tray_icon:
             self.tray_icon.stop()
             self.tray_icon = None
 
-    def shutdown_app(self, icon=None, item=None):
+    def shutdown_app(self):
         """Properly shutdown the application"""
         self.save_settings()
         if self.tray_icon:
