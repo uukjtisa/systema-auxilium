@@ -266,6 +266,7 @@ class AIEngine:
         log.debug(f"[AIEngine.generate_response] User message appended to history | "
                   f"total history entries={len(self.conversation_history)}")
 
+
         if self.ai_provider == 'puter':
             log.debug("[AIEngine.generate_response] → Dispatching to _generate_puter_response()")
             return self._generate_puter_response()

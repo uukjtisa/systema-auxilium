@@ -1,6 +1,7 @@
 """
 Python Interpreter Tool - Full interactive Python interpreter using code module
-FIXED: Now handles both single-line expressions AND multi-line code blocks
+Handles both single-line expressions AND multi-line code blocks
+HANDLES ALL CODE FROM CODE EXECUTION TOOL CALLS
 """
 
 import sys
