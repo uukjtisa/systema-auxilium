@@ -6,6 +6,7 @@ from .python_interpreter import PythonInterpreter
 from .controller import AssistantController
 from .ai_worker import AIWorker
 from .system_info import get_system_info, format_system_info_for_prompt
+from .path_syncer import PathSyncer, get_syncer
 
 __all__ = [
     'AIEngine',
@@ -14,5 +15,7 @@ __all__ = [
     'AssistantController',
     'AIWorker',
     'get_system_info',
-    'format_system_info_for_prompt'
+    'format_system_info_for_prompt',
+    'PathSyncer',
+    'get_syncer',
 ]

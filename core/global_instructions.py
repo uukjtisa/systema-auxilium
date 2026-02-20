@@ -285,7 +285,7 @@ REMEMBER
 - execute_code = Don't see output, ask user if it worked
 - ONE code execution tool per message (JSON at the END)
 - YOU MUST NAME THE SESSION SO THE USER KNOWS WHAT CONVERSATION THIGNS HAPPENED, AND IS EASY FOR THE USER TO GET BACK TO.
-- set_session_name is EXEMPT from the one-tool limit — place it ANYWHERE in the response, USE ONLY WHEN THE TOPIC IS SIGNIFICANTLY CHANGED, DO NOT USE ALL OVER YOUR RESPONSES, THIS IS NOT A CHORE!
+- set_session_name is EXEMPT from the one-tool limit — place it ON TOP OF YOUR RESPONSE BEFORE ANY TOOL OR EXPLANATION OR DIALOGUE, USE ONLY WHEN THE TOPIC IS SIGNIFICANTLY CHANGED, DO NOT USE ALL OVER YOUR RESPONSES, THIS IS NOT A CHORE!
 - STAY IN WORK MODE until task is COMPLETE
 - Chain 3-10+ executions for complex tasks
 - Use exact JSON format with "tool" and "input" keys (strict syntax required)
@@ -361,7 +361,6 @@ Previous execution output:
 2. Could I provide a more complete answer?
 3. Are there follow-up checks needed?
 4. What was the user's original request?
-5. Has the session been named yet? If not, include set_session_name when you exit!
 
 IF YOU NEED MORE INFO → Execute more code!
 IF TASK IS INCOMPLETE → Execute more code!
@@ -371,13 +370,17 @@ Options:
 - More code: {{"tool": "work_environment", "input": "..."}}
 - Exit:      {{"tool": "work_environment", "input": "exit"}}
 
-Don't rush! Chain executions for complete answers!
+VERY IMPORTANT: Don't rush! Chain executions for complete answers if you feel you are not yet ready!
+CRITICAL: IF YOU ARE SEEING THIS MESSAGE THEN YOU MUST NOT YET TALK! YOU ARE INSIDE YOUR WORK ENVIRONMENT! IF YOU WANNA TALK TO THE USER AND IF YOU ARE READY WITH ALL YOU NEED, THEN EXIT FIRST!
+VERY CRITICAL: WHEN YOU ARE GONNA EXIT, YOU CAN ONLY HAVE AN EXIT TOOL CALL IN YOUR RESPONSE, NO REPORTS, NO CHAT, NO OTHER WORDS! BECAUSE YOU CAN ONLY TALK TO THE USER AFTER EXITING, NOT WHILE EXITING!
 </SYSTEM_MESSAGE>"""
 
 
 POST_EXIT_PROMPT = """<SYSTEM_MESSAGE>
-You have exited work mode. Now talking to the user.
+You have exited work mode. You are now talking to the user.
 Report what you discovered. Give a clear, comprehensive summary.
+If you haven't named the session then name it now, UNLESS YOU ALREADY HAVE!
+IF THE TOPIC HAS CHANGED SIGNIFICANTLY THEN YOU CAN RENAME THE SESSION AGAIN.
 </SYSTEM_MESSAGE>"""
 
 

@@ -12,6 +12,7 @@ from core.voice_handler import VoiceHandler
 from ui.floating_window import FloatingWindow
 from core.ai_worker import AIWorker
 from core.session_manager import SessionManager
+from pathlib import Path
 import os
 import json
 import random
@@ -22,6 +23,11 @@ from core.logger import _make_logger, _NoOpLogger
 # ─────────────────────────── Colored Logger Setup ────────────────────────────
 _verbose = True
 log = _make_logger("Controller") if _verbose else _NoOpLogger()
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Anchor to app root at import time — immune to os.chdir() ─────────────────
+# controller.py lives in core/, so parent = core/, parent.parent = app root
+_APP_ROOT = Path(__file__).resolve().parent.parent
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -37,8 +43,8 @@ class AssistantController(QObject):
         super().__init__()
         log.info("[AssistantController.__init__] ── Initializing AssistantController ──────────────")
 
-        # Settings
-        self.settings_file = "assistant_settings.json"
+        # Settings — absolute path anchored to app root, safe after os.chdir()
+        self.settings_file = _APP_ROOT / "assistant_settings.json"
         log.debug(f"[AssistantController.__init__] Loading settings from '{self.settings_file}'")
         self.settings = self.load_settings()
         log.info(f"[AssistantController.__init__] Settings loaded | "
@@ -56,10 +62,10 @@ class AssistantController(QObject):
                  f"text_len={len(system_info_text)}")
 
         # Puter server
-        from pathlib import Path
+        _puter_port_file = _APP_ROOT / 'puter_port.txt'
         log.debug("[AssistantController.__init__] Checking puter_port.txt...")
-        if not Path('puter_port.txt').exists():
-            Path('puter_port.txt').write_text(
+        if not _puter_port_file.exists():
+            _puter_port_file.write_text(
                 '5555,8888,7777 #DO NOT DELETE THIS #ADD ANY PORT AS YOU WANT, IT WILL PRIORITIZE THE FIRST ON THE LEFT, SEPARATE WITH COMMAS. #ADD PORTS ON TOP ONLY. #CONTEXT IT IS BETTER IF THE PORT USED IS ONE THAT HAS BEEN USED BEFORE, SO IT WONT ASK FOR PUTER CONFIRMATION FOR THE FIRST MESSAGE.'
                 )
             log.debug("[AssistantController.__init__] puter_port.txt created with defaults")
@@ -169,9 +175,7 @@ class AssistantController(QObject):
         """
         Parse port numbers from puter_port.txt file
         """
-        import os
-
-        filepath = 'puter_port.txt'
+        filepath = _APP_ROOT / 'puter_port.txt'
         ports = []
         log.debug(f"[AssistantController._parse_ports] Reading port config from '{filepath}'")
 
@@ -197,9 +201,8 @@ class AssistantController(QObject):
                                 continue
 
         except FileNotFoundError:
-            abs_path = os.path.abspath(filepath)
-            log.warning(f"[AssistantController._parse_ports] File not found: '{abs_path}'")
-            print(f"Warning: {abs_path} not found, returning empty list")
+            log.warning(f"[AssistantController._parse_ports] File not found: '{filepath}'")
+            print(f"Warning: {filepath} not found, returning empty list")
             return []
         except Exception as e:
             log.error(f"[AssistantController._parse_ports] Error parsing ports: {type(e).__name__}: {e}")
@@ -256,11 +259,7 @@ class AssistantController(QObject):
                 continue
 
     def log(self, message, level="INFO"):
-        _level_fn = {
-            "INFO": log.info, "ERROR": log.error, "WARNING": log.warning,
-            "SUCCESS": log.info, "DEBUG": log.debug
-        }.get(level, log.info)
-        _level_fn(f"[Controller] {message}")
+        """Emit message to UI log panel."""
         self.log_signal.emit(message, level)
 
     def load_settings(self):
@@ -490,6 +489,7 @@ class AssistantController(QObject):
 
     def wait_for_voice_completion(self):
         """Wait for current voice playback to complete"""
+        log.debug(f"[AssistantController.wait_for_voice_completion] voice_mode_active={self.voice_mode_active}")
         if not self.voice_mode_active:
             return
 
@@ -501,6 +501,7 @@ class AssistantController(QObject):
             time.sleep(0.1)
             waited += 0.1
 
+        log.debug(f"[AssistantController.wait_for_voice_completion] Completed after {waited:.1f}s")
         self.log(f"Voice completed after {waited:.1f}s")
 
     def get_user_name(self):
@@ -509,6 +510,7 @@ class AssistantController(QObject):
 
     def set_user_name(self, name):
         """Set user name"""
+        log.info(f"[AssistantController.set_user_name] name='{name}'")
         self.settings['user_name'] = name
         self.save_settings()
         # Regenerate system info with new name
@@ -521,6 +523,7 @@ class AssistantController(QObject):
 
     def set_custom_instructions(self, instructions):
         """Set custom instructions"""
+        log.info(f"[AssistantController.set_custom_instructions] len={len(instructions)} chars")
         self.settings['custom_instructions'] = instructions
         self.save_settings()
         # Regenerate system prompt
@@ -529,6 +532,7 @@ class AssistantController(QObject):
 
     def _update_system_prompt(self):
         """Update system prompt with personalization"""
+        log.info("[AssistantController._update_system_prompt] Rebuilding system prompt...")
         from core.system_info import get_system_info, format_system_info_for_prompt
 
         system_info_dict = get_system_info()
@@ -537,26 +541,35 @@ class AssistantController(QObject):
         # Add user name if set
         user_name = self.get_user_name()
         if user_name:
+            log.debug(f"[AssistantController._update_system_prompt] Injecting user_name='{user_name}'")
             system_info_text += f"\n\n**USER NAME:** {user_name}\nAddress the user by their name when appropriate."
 
         # Add custom instructions if set
         custom_instructions = self.get_custom_instructions()
         if custom_instructions:
+            log.debug(f"[AssistantController._update_system_prompt] Injecting custom_instructions "
+                      f"({len(custom_instructions)} chars)")
             system_info_text += f"\n\n**CUSTOM USER INSTRUCTIONS:**\n{custom_instructions}"
 
         # Update AI engine
         self.ai.system_info = system_info_text
         self.ai.update_voice_settings(self.ai.voice_mode, self.ai.elevenlabs_enabled)
+        log.info("[AssistantController._update_system_prompt] ✓ System prompt updated")
 
     def speak_text(self, text):
         """Speak text using TTS (only if voice mode is active and not in tool mode)"""
+        log.debug(f"[AssistantController.speak_text] voice_mode_active={self.voice_mode_active} | "
+                  f"in_work_mode={self.ai.tool_manager.in_work_mode} | "
+                  f"text_preview='{text[:50]}'")
         if not self.voice_mode_active:
             return
 
         if self.ai.tool_manager.in_work_mode:
+            log.debug("[AssistantController.speak_text] Skipping TTS — in work mode")
             self.log("Skipping TTS - in tool mode")
             return
 
+        log.debug("[AssistantController.speak_text] Speaking...")
         self.log(f"Speaking: {text[:50]}...")
         self.voice_handler.speak_text_sync(text)
 
@@ -566,6 +579,7 @@ class AssistantController(QObject):
 
     def set_voice_interrupt_mode(self, mode):
         """Set voice interrupt mode ('auto' or 'manual')"""
+        log.info(f"[AssistantController.set_voice_interrupt_mode] mode='{mode}'")
         self.settings['voice_interrupt_mode'] = mode
         self.voice_handler.set_interrupt_mode(mode)
         self.save_settings()
@@ -577,6 +591,7 @@ class AssistantController(QObject):
 
     def set_elevenlabs_enabled(self, enabled):
         """Set ElevenLabs enabled state"""
+        log.info(f"[AssistantController.set_elevenlabs_enabled] enabled={enabled}")
         self.settings['elevenlabs_enabled'] = enabled
         self.save_settings()
 
@@ -592,6 +607,7 @@ class AssistantController(QObject):
 
     def set_elevenlabs_voice_id(self, voice_id):
         """Set ElevenLabs voice ID"""
+        log.info(f"[AssistantController.set_elevenlabs_voice_id] has_voice_id={bool(voice_id)}")
         self.settings['elevenlabs_voice_id'] = voice_id
         self.save_settings()
 
@@ -605,6 +621,7 @@ class AssistantController(QObject):
         return self.settings.get('tts_provider', 'edge-tts')
 
     def set_tts_provider(self, provider):
+        log.info(f"[AssistantController.set_tts_provider] provider='{provider}'")
         self.settings['tts_provider'] = provider
         self.ai.set_tts_provider(provider)
         self.save_settings()
@@ -614,6 +631,7 @@ class AssistantController(QObject):
         return self.settings.get('puter_tts_model', 'tts-1')
 
     def set_puter_tts_model(self, model):
+        log.info(f"[AssistantController.set_puter_tts_model] model='{model}'")
         self.settings['puter_tts_model'] = model
         self.ai.set_puter_tts_model(model)
         self.save_settings()
@@ -623,6 +641,7 @@ class AssistantController(QObject):
         return self.settings.get('puter_tts_voice')
 
     def set_puter_tts_voice(self, voice):
+        log.info(f"[AssistantController.set_puter_tts_voice] voice='{voice}'")
         self.settings['puter_tts_voice'] = voice
         self.ai.set_puter_tts_voice(voice)
         self.save_settings()
@@ -635,6 +654,7 @@ class AssistantController(QObject):
         }
 
     def set_puter_credentials(self, email, password):
+        log.info(f"[AssistantController.set_puter_credentials] email='{email}' | has_password={bool(password)}")
         self.settings['puter_email'] = email
         self.settings['puter_password'] = password
         self.save_settings()
@@ -642,6 +662,7 @@ class AssistantController(QObject):
 
     def set_puter_timeout(self, timeout):
         """Set Puter.js server timeout in seconds"""
+        log.info(f"[AssistantController.set_puter_timeout] timeout={timeout}s")
         self.settings['puter_timeout'] = timeout
         self.ai.set_puter_timeout(timeout)
         self.save_settings()
@@ -649,30 +670,39 @@ class AssistantController(QObject):
 
     def reset_puter_quota(self):
         """Reset Puter quota using saved credentials"""
+        log.info("[AssistantController.reset_puter_quota] Attempting quota reset...")
         creds = self.get_puter_credentials()
         if not creds['email'] or not creds['password']:
+            log.warning("[AssistantController.reset_puter_quota] No credentials set — aborting")
             self.log("Puter credentials not set", "ERROR")
             return False
 
         if not self.puter_server or not self.puter_server.is_running:
+            log.warning("[AssistantController.reset_puter_quota] Puter server not running — aborting")
             self.log("Puter server not running", "ERROR")
             return False
 
         self.log("Resetting Puter quota...", "INFO")
         success = self.puter_server.reset_quota(creds['email'], creds['password'])
         if success:
+            log.info("[AssistantController.reset_puter_quota] ✓ Quota reset successful")
             self.log("✓ Quota reset successful!", "SUCCESS")
         else:
+            log.error("[AssistantController.reset_puter_quota] ✗ Quota reset failed")
             self.log("✗ Quota reset failed", "ERROR")
         return success
 
     def setup_puter_account(self):
         """Open Puter for account setup"""
+        log.info("[AssistantController.setup_puter_account] Starting Puter account setup...")
         if not self.puter_server or not self.puter_server.is_running:
+            log.info("[AssistantController.setup_puter_account] Puter server not running — starting it first")
             self.log("Starting Puter server for account setup...", "INFO")
             if not self.start_puter_server():
+                log.error("[AssistantController.setup_puter_account] ✗ Failed to start Puter server")
                 return False
 
+        log.debug("[AssistantController.setup_puter_account] → puter_server.setup_account()")
         return self.puter_server.setup_account()
 
     def get_puter_tts_models(self):
@@ -706,6 +736,7 @@ class AssistantController(QObject):
 
     def set_api_key(self, api_key):
         """Set new API key"""
+        log.info(f"[AssistantController.set_api_key] has_key={bool(api_key)}")
         self.settings['api_key'] = api_key
         self.ai.set_api_key(api_key)
         self.save_settings()
@@ -717,6 +748,7 @@ class AssistantController(QObject):
 
     def set_gemini_api_key(self, api_key):
         """Set new Gemini API key"""
+        log.info(f"[AssistantController.set_gemini_api_key] has_key={bool(api_key)}")
         self.settings['gemini_api_key'] = api_key
         self.ai.set_gemini_api_key(api_key)
         self.save_settings()
@@ -728,9 +760,11 @@ class AssistantController(QObject):
 
     def set_ai_provider(self, provider):
         """Set AI provider"""
+        log.info(f"[AssistantController.set_ai_provider] provider='{provider}'")
         # Check if we're switching AWAY from Puter
         current_provider = self.settings.get('ai_provider', 'anthropic')
         if current_provider == 'puter' and provider != 'puter':
+            log.info(f"[AssistantController.set_ai_provider] Switching away from Puter — stopping server")
             # Switching away from Puter - close the browser
             self.log("Switching away from Puter - closing browser window...", "INFO")
             self.stop_puter_server()
@@ -750,6 +784,7 @@ class AssistantController(QObject):
 
     def set_puter_model(self, model):
         """Set Puter model"""
+        log.info(f"[AssistantController.set_puter_model] model='{model}'")
         self.settings['puter_model'] = model
         self.ai.set_puter_model(model)
         self.save_settings()
@@ -761,6 +796,7 @@ class AssistantController(QObject):
 
     def set_gemini_model(self, model):
         """Set Gemini model"""
+        log.info(f"[AssistantController.set_gemini_model] model='{model}'")
         self.settings['gemini_model'] = model
         self.ai.set_gemini_model(model)
         self.save_settings()
@@ -772,12 +808,14 @@ class AssistantController(QObject):
 
     def set_debug_mode(self, enabled):
         """Set debug mode"""
+        log.info(f"[AssistantController.set_debug_mode] enabled={enabled}")
         self.settings['debug_mode'] = enabled
         self.save_settings()
         self.log(f"Debug mode: {'enabled' if enabled else 'disabled'}", "SUCCESS")
 
     def set_tts_voice(self, voice):
         """Set TTS voice"""
+        log.info(f"[AssistantController.set_tts_voice] voice='{voice}'")
         self.settings['tts_voice'] = voice
         self.log(f"SAVING: Setting TTS voice to {voice}", "INFO")
         self.voice_handler.set_tts_voice(voice)
@@ -786,6 +824,7 @@ class AssistantController(QObject):
 
     def set_vad_aggressiveness(self, level):
         """Set VAD aggressiveness (0-3)"""
+        log.info(f"[AssistantController.set_vad_aggressiveness] level={level}")
         self.settings['vad_aggressiveness'] = level
         self.log(f"SAVING: Setting VAD aggressiveness to {level}", "INFO")
         self.voice_handler.set_vad_aggressiveness(level)
@@ -794,20 +833,25 @@ class AssistantController(QObject):
 
     def start_puter_server(self):
         """Start Puter.js server"""
+        log.info("[AssistantController.start_puter_server] ── Starting Puter.js server ──────────────")
         try:
             self.log("Starting Puter.js server...")
 
             if self.puter_server.is_running:
+                log.debug("[AssistantController.start_puter_server] Server already running — checking health")
                 self.log("Puter server already running")
                 if self.puter_server.check_health():
+                    log.info("[AssistantController.start_puter_server] ✓ Already healthy — skipping start")
                     return True
                 else:
+                    log.warning("[AssistantController.start_puter_server] Not responding — restarting...")
                     self.log("Server not responding, restarting...")
                     self.puter_server.stop()
                     import time
                     time.sleep(1)
 
             if self.puter_server.start():
+                log.info(f"[AssistantController.start_puter_server] ✓ Started at http://127.0.0.1:{self.free_port}")
                 self.log(f"✓ Puter.js server started at http://127.0.0.1:{self.free_port}", "SUCCESS")
 
                 # Wait a moment
@@ -816,19 +860,24 @@ class AssistantController(QObject):
 
                 return True
             else:
+                log.error("[AssistantController.start_puter_server] ✗ puter_server.start() returned False")
                 self.log("✗ Failed to start Puter server", "ERROR")
                 return False
 
         except Exception as e:
+            log.error(f"[AssistantController.start_puter_server] ✗ Exception: {type(e).__name__}: {e}")
             self.log(f"Error starting Puter server: {e}", "ERROR")
             return False
 
     def stop_puter_server(self):
         """Stop Puter.js server"""
+        log.info("[AssistantController.stop_puter_server] Stopping Puter.js server...")
         try:
             self.puter_server.stop()
+            log.info("[AssistantController.stop_puter_server] ✓ Server stopped")
             self.log("Puter.js server stopped", "SUCCESS")
         except Exception as e:
+            log.error(f"[AssistantController.stop_puter_server] ✗ Exception: {type(e).__name__}: {e}")
             self.log(f"Error stopping Puter server: {e}", "ERROR")
 
     def send_message(self, user_message):
@@ -881,19 +930,27 @@ class AssistantController(QObject):
 
     def send_message_with_image(self, user_message, image_path):
         """Send user message with image attachment to AI (Puter only)"""
+        log.info(f"[AssistantController.send_message_with_image] ── Incoming image message | "
+                 f"image_path='{image_path}' | msg_preview='{user_message[:60].replace(chr(10), '↵')}' ──")
+
         if not user_message.strip():
+            log.debug("[AssistantController.send_message_with_image] Empty message — ignoring")
             return
 
         if self.get_ai_provider() != 'puter':
+            log.warning("[AssistantController.send_message_with_image] Non-Puter provider — image not supported")
             self.log("Image attachment only supported with Puter provider", "ERROR")
             return
 
         # Prevent overlapping requests
         if self.is_processing:
+            log.warning("[AssistantController.send_message_with_image] Already processing — ignoring request")
             self.log("Already processing a request - ignoring")
             return
 
         self.is_processing = True
+        log.debug(f"[AssistantController.send_message_with_image] is_processing=True | "
+                  f"provider='{self.ai.ai_provider}'")
 
         self.log(f"User (with image): {user_message}")
 
@@ -905,10 +962,12 @@ class AssistantController(QObject):
         self.ui.show_thinking()
 
         # Create worker thread with image
+        log.debug("[AssistantController.send_message_with_image] Creating AIWorker for 'generate_with_image'...")
         self.current_worker = AIWorker(self.ai, 'generate_with_image', user_message, image_path)
         self.current_worker.response_ready.connect(self.handle_ai_response)
         self.current_worker.error_occurred.connect(self.handle_ai_error)
         self.current_worker.start()
+        log.debug("[AssistantController.send_message_with_image] AIWorker started")
 
     def handle_ai_response(self, result):
         """Handle AI response from worker thread"""
@@ -964,13 +1023,13 @@ class AssistantController(QObject):
             log.debug(f"[AssistantController.handle_ai_response] Showing AI message | "
                       f"len={len(result['response'])}")
             self.ui.show_ai_message(result['response'])
-            
+
             # SESSION SAVE: Mark session as having messages and auto-save
             if not self.session_has_messages:
                 self.session_has_messages = True
                 log.debug("[AssistantController.handle_ai_response] session_has_messages=True")
             self._auto_save_session()
-        
+
         # Check if AI set a session name
         if result.get('session_name'):
             log.debug(f"[AssistantController.handle_ai_response] AI set session name: "
@@ -996,11 +1055,14 @@ class AssistantController(QObject):
 
     def send_post_exit_prompt(self):
         """NEW: Send post-exit prompt to guide AI to report findings"""
+        log.info("[AssistantController.send_post_exit_prompt] ── Sending post-exit prompt ──────────────")
         if self.is_processing:
+            log.warning("[AssistantController.send_post_exit_prompt] Already processing — skipping")
             self.log("Already processing - skipping post-exit prompt")
             return
 
         self.is_processing = True
+        log.debug("[AssistantController.send_post_exit_prompt] is_processing=True | showing thinking")
         self.ui.show_thinking()
 
         # Debug: Show that we're sending post-exit prompt
@@ -1017,8 +1079,12 @@ class AssistantController(QObject):
 
     def handle_post_exit_response(self, result):
         """Handle response after post-exit prompt"""
+        log.info(f"[AssistantController.handle_post_exit_response] ── Response received | "
+                 f"has_response={bool(result.get('response'))} | "
+                 f"session_name={repr(result.get('session_name'))} ──")
         self.ui.hide_thinking()
         self.is_processing = False
+        log.debug("[AssistantController.handle_post_exit_response] is_processing=False | thinking hidden")
 
         # Debug mode
         if self.settings.get('debug_mode'):
@@ -1029,16 +1095,30 @@ class AssistantController(QObject):
 
         # Show the AI's report to user
         if result.get('response'):
+            log.debug(f"[AssistantController.handle_post_exit_response] Showing AI message | "
+                      f"len={len(result['response'])}")
             self.ui.show_ai_message(result['response'])
-            
+
             # SESSION SAVE: Mark session as having messages and auto-save
             if not self.session_has_messages:
                 self.session_has_messages = True
+                log.debug("[AssistantController.handle_post_exit_response] session_has_messages=True")
             self._auto_save_session()
+
+        # Handle session rename (AI may set name in post-exit report)
+        if result.get('session_name'):
+            log.debug(f"[AssistantController.handle_post_exit_response] AI set session name: "
+                      f"'{result['session_name']}'")
+            self.set_session_name(result['session_name'])
 
     def handle_work_mode_response(self, result):
         """Handle tool mode response from worker thread"""
+        log.info(f"[AssistantController.handle_work_mode_response] ── Response received | "
+                 f"exited_work_mode={result.get('exited_work_mode', False)} | "
+                 f"has_work_call={result.get('has_work_call', False)} | "
+                 f"thinking={result.get('thinking', False)} ──")
         self.is_processing = False
+        log.debug("[AssistantController.handle_work_mode_response] is_processing=False")
 
         # Debug mode: show everything that happened
         if self.settings.get('debug_mode'):
@@ -1090,10 +1170,12 @@ class AssistantController(QObject):
 
     def handle_ai_error(self, error_message):
         """Handle AI error from worker thread"""
+        log.error(f"[AssistantController.handle_ai_error] ✗ Error received: '{error_message[:120]}'")
         self.ui.hide_thinking()
         self.ui.show_ai_message(f"Error: {error_message}")
         self.work_mode_timer.stop()
         self.is_processing = False
+        log.debug("[AssistantController.handle_ai_error] is_processing=False | timer stopped")
         self.log(f"AI Error: {error_message}", "ERROR")
 
         # Debug: Show error details
@@ -1202,7 +1284,7 @@ class AssistantController(QObject):
     # ═══════════════════════════════════════════════════════════
     # SESSION MANAGEMENT METHODS
     # ═══════════════════════════════════════════════════════════
-    
+
     def _create_new_session(self):
         """Create a new session"""
         log.info(f"[AssistantController._create_new_session] current_session_id='{self.current_session_id}' | "
@@ -1211,20 +1293,20 @@ class AssistantController(QObject):
         if self.current_session_id and self.session_has_messages:
             log.debug("[AssistantController._create_new_session] Saving existing session before replacement")
             self._auto_save_session()
-        
+
         # Delete current session if it's empty
         if self.current_session_id and not self.session_has_messages:
             log.debug(f"[AssistantController._create_new_session] Deleting empty session: "
                       f"'{self.current_session_id}'")
             self.session_manager.delete_session(self.current_session_id)
-        
+
         # Create new session
         self.current_session_id = self.session_manager.create_session()
         self.session_has_messages = False
         log.info(f"[AssistantController._create_new_session] ✓ New session created: "
                  f"'{self.current_session_id}'")
         self.log(f"Created new session: {self.current_session_id}")
-    
+
     def _auto_save_session(self):
         """Automatically save current session after AI response"""
         log.debug(f"[AssistantController._auto_save_session] session_id='{self.current_session_id}' | "
@@ -1232,21 +1314,21 @@ class AssistantController(QObject):
         if not self.current_session_id:
             log.debug("[AssistantController._auto_save_session] No session_id — skipping")
             return
-        
+
         if not self.session_has_messages:
             log.debug("[AssistantController._auto_save_session] No messages yet — skipping save")
             return  # Don't save empty sessions
-        
+
         # Get conversation history (already excludes system prompt - that's in construction)
         chat_history = self.ai.conversation_history.copy()
         log.debug(f"[AssistantController._auto_save_session] Saving {len(chat_history)} history entries")
-        
+
         # Save session
         success = self.session_manager.save_session(
-            self.current_session_id, 
+            self.current_session_id,
             chat_history
         )
-        
+
         if success:
             self.ui.chat_window.refresh_session_list()
             log.info(f"[AssistantController._auto_save_session] ✓ Session saved: '{self.current_session_id}'")
@@ -1254,7 +1336,7 @@ class AssistantController(QObject):
         else:
             log.error(f"[AssistantController._auto_save_session] ✗ Save failed: '{self.current_session_id}'")
             self.log(f"Failed to save session: {self.current_session_id}", "ERROR")
-    
+
     def create_new_session(self):
         """Create new session (called from UI)"""
         log.info("[AssistantController.create_new_session] Creating new session from UI")
@@ -1267,13 +1349,13 @@ class AssistantController(QObject):
 
         if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
             self.ui.chat_window.clear_chat_silent()
-        
+
         # Refresh UI
         if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
             self.ui.chat_window.refresh_session_list()
             self.ui.chat_window.add_system_message("🆕 **New Session Created**")
         log.info(f"[AssistantController.create_new_session] ✓ New session ready: '{self.current_session_id}'")
-    
+
     def load_session(self, session_id):
         """Load a session"""
         log.info(f"[AssistantController.load_session] Loading session_id='{session_id}'")
@@ -1281,32 +1363,32 @@ class AssistantController(QObject):
         if self.current_session_id and self.session_has_messages:
             log.debug("[AssistantController.load_session] Auto-saving current session first")
             self._auto_save_session()
-        
+
         # Delete current empty session
         if self.current_session_id and not self.session_has_messages:
             log.debug(f"[AssistantController.load_session] Deleting empty current session: "
                       f"'{self.current_session_id}'")
             self.session_manager.delete_session(self.current_session_id)
-        
+
         # Load session data
         session_data = self.session_manager.load_session(session_id)
-        
+
         if not session_data:
             log.error(f"[AssistantController.load_session] ✗ Failed to load session: '{session_id}'")
             self.log(f"Failed to load session: {session_id}", "ERROR")
             return False
-        
+
         history_len = len(session_data.get('chat_history', []))
         log.debug(f"[AssistantController.load_session] Session data loaded | "
                   f"name='{session_data.get('session_name')}' | history={history_len} entries")
-        
+
         # Clear chat UI
         if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
             self.ui.chat_window.clear_chat_silent()
-        
+
         # Clear AI history
         self.ai.clear_history()
-        
+
         # Load chat history into AI
         for msg in session_data['chat_history']:
             self.ai.conversation_history.append(msg)
@@ -1325,62 +1407,73 @@ class AssistantController(QObject):
                     display_history.append(msg)
             self.ui.chat_window.render_loaded_messages(display_history)
             log.debug("[AssistantController.load_session] Messages rendered in UI (tool calls stripped)")
-        
+
         # Update current session
         self.current_session_id = session_id
         self.session_has_messages = len(session_data['chat_history']) > 0
-        
+
         log.info(f"[AssistantController.load_session] ✓ Session loaded: '{session_id}' | "
                  f"history={history_len} | session_has_messages={self.session_has_messages}")
         self.log(f"Session loaded: {session_id}")
         return True
-    
+
     def delete_session(self, session_id):
         """Delete a session"""
+        log.info(f"[AssistantController.delete_session] session_id='{session_id}' | "
+                 f"is_active={session_id == self.current_session_id}")
         # If deleting active session, create new one
         if session_id == self.current_session_id:
+            log.debug("[AssistantController.delete_session] Deleting active session — clearing UI and creating new")
             # Clear chat
             if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
                 self.ui.chat_window.clear_chat_silent()
-            
+
             # Clear AI history
             self.ai.clear_history()
-            
+
             # Delete the session
             self.session_manager.delete_session(session_id)
-            
+
             # Create new session
             self._create_new_session()
-            
+
             # Refresh UI
             if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
                 self.ui.chat_window.refresh_session_list()
                 self.ui.chat_window.add_system_message("🗑️ **Session Deleted** - New session created")
+            log.info(f"[AssistantController.delete_session] ✓ Active session deleted and replaced")
         else:
+            log.debug(f"[AssistantController.delete_session] Deleting non-active session '{session_id}'")
             # Just delete the session
             self.session_manager.delete_session(session_id)
-            
+
             # Refresh UI
             if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
                 self.ui.chat_window.refresh_session_list()
-    
+            log.info(f"[AssistantController.delete_session] ✓ Session deleted")
+
     def set_session_name(self, name):
         """Set name for current session (called by AI tool)"""
+        log.info(f"[AssistantController.set_session_name] name='{name}' | "
+                 f"session_id='{self.current_session_id}'")
         if not self.current_session_id:
+            log.warning("[AssistantController.set_session_name] No current_session_id — aborting")
             return
-        
+
         # Rename session
         success = self.session_manager.rename_session(self.current_session_id, name)
-        
+
         if success:
+            log.info(f"[AssistantController.set_session_name] ✓ Renamed to '{name}'")
             self.log(f"Session renamed to: {name}")
-            
+
             # Refresh UI session list
             if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
                 self.ui.chat_window.refresh_session_list()
         else:
+            log.error(f"[AssistantController.set_session_name] ✗ Failed to rename to '{name}'")
             self.log(f"Failed to rename session", "ERROR")
-    
+
     def get_session_list(self):
         """Get list of all sessions"""
         return self.session_manager.list_sessions()
@@ -1391,7 +1484,9 @@ class AssistantController(QObject):
 
     def reset_python_interpreter(self):
         """Reset the Python interpreter"""
+        log.info("[AssistantController.reset_python_interpreter] Resetting Python interpreter...")
         self.ai.tool_manager.reset_python()
+        log.info("[AssistantController.reset_python_interpreter] ✓ Reset complete")
         self.log("Python interpreter reset", "SUCCESS")
 
     def get_puter_models(self):
@@ -2418,3 +2513,4 @@ class AssistantController(QObject):
                 'description': '✅ FREE: 30 RPM, 14,400/day - Smallest, ultra-fast'
             },
         ]
+
