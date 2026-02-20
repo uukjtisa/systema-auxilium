@@ -20,6 +20,7 @@ import markdown2
 import os
 import json
 import threading
+from pathlib import Path
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -56,6 +57,10 @@ ANIM_COPY_FEEDBACK_MS        = 1500   # "✓ Copied!" button state duration (ms)
 ANIM_STATUS_CLEAR_MS         = 2000   # Status-bar message clear delay (ms)
 
 # ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Anchor to app root at import time — immune to os.chdir() ─────────────────
+_APP_ROOT = Path(__file__).resolve().parent.parent
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 class MultiLineInput(QTextEdit):
@@ -927,7 +932,7 @@ class ChatWindow(QWidget):
         self.resize_timer.timeout.connect(self.save_window_geometry)
 
         # Avatar settings
-        self.config_file = "chat_config.json"
+        self.config_file = _APP_ROOT / "chat_config.json"
         self.load_config()
 
         self.setMouseTracking(True)
@@ -1421,25 +1426,6 @@ class ChatWindow(QWidget):
         """)
         minimize_btn.clicked.connect(self.showMinimized)
         header_layout.addWidget(minimize_btn)
-
-        # Maximize button
-        self.maximize_btn = QPushButton("□")
-        self.maximize_btn.setFixedSize(32, 32)
-        self.maximize_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                border: none;
-                border-radius: 6px;
-                font-size: 16px;
-                color: #9AA0A6;
-            }
-            QPushButton:hover {
-                background: #2A2A2A;
-                color: #E8EAED;
-            }
-        """)
-        self.maximize_btn.clicked.connect(self.toggle_maximize)
-        header_layout.addWidget(self.maximize_btn)
 
         # Close button
         close_btn = QPushButton("×")
@@ -3513,21 +3499,8 @@ class ChatWindow(QWidget):
                             geometry['width'],
                             geometry['height']
                         )
-                        if self.isMaximized():
-                            self.maximize_btn.setText("❐")
-                        else:
-                            self.maximize_btn.setText("□")
         except Exception as e:
             print(f"Error loading window geometry: {e}")
-
-    def toggle_maximize(self):
-        """Toggle maximize/restore"""
-        if self.isMaximized():
-            self.showNormal()
-            self.maximize_btn.setText("□")
-        else:
-            self.showMaximized()
-            self.maximize_btn.setText("❐")
 
     def header_mouse_press(self, event):
         """Handle mouse press on header for dragging"""
