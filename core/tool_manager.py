@@ -189,27 +189,10 @@ class ToolManager:
         """
         Parse set_session_name from AI output using multi-strategy aggressive extraction.
 
-        Works regardless of:
-          - Position in text (start, middle, end, after other tool calls)
-          - Whether JSON is valid or slightly malformed
-          - Whether the AI is in work mode or normal mode
-          - Format (new unified, legacy, raw key-value)
-
-        Strategy order (most-specific → most-permissive):
-          1. Valid JSON via _extract_json — handles well-formed code-fence and bare blocks
-          2. Regex on code-fence block — catches new format even if outer JSON is borderline
-          3. Regex on code-fence block — catches legacy format in fences
-          4. Regex anywhere in raw text for "set_session_name": "value" key-value pair
-          5. Regex anywhere for  "tool": "set_session_name" ... "input": "value"
-
-        After the name is found, the surrounding JSON/fence block is removed from text.
-        If only a raw key-value was found (no enclosing block) the key-value pair itself
-        is removed.
-
         Returns:
             tuple: (session_name, remaining_text) or None if not found
         """
-        log.debug(f"[ToolManager.parse_set_session_name] ── Parsing {len(text)} char text "
+        log.info(f"[ToolManager.parse_set_session_name] ── Parsing {len(text)} char text "
                   f"(aggressive multi-strategy) ──")
 
         # ── Strategy 1: well-formed JSON (existing robust path) ──────────────
@@ -996,6 +979,30 @@ class ToolManager:
                     depth -= 1
         return max(0, -depth)
 
+    def _strip_orphaned_fence_markers(self, text: str) -> str:
+        """
+        Remove dangling ```json / ``` / ``` code-fence markers that remain
+        after the bare JSON brace-counting scanner removes a {…} block that
+        was originally inside a fenced code block.
+
+        Only removes lines whose ENTIRE content is a fence marker so we never
+        accidentally delete real content.
+        """
+        lines = text.splitlines()
+        cleaned = []
+        for line in lines:
+            stripped = line.strip()
+            # Match lines that are ONLY a fence marker (with optional "json" or "json ")
+            if re.fullmatch(r'```(?:json)?', stripped):
+                log.debug(f"[ToolManager._strip_orphaned_fence_markers] Removed orphaned marker: {stripped!r}")
+                continue
+            cleaned.append(line)
+        result = '\n'.join(cleaned)
+        if result != text:
+            log.debug(f"[ToolManager._strip_orphaned_fence_markers] Stripped fence markers | "
+                      f"before={len(text)} chars → after={len(result)} chars")
+        return result
+
     def _cleanup_orphaned_braces(self, text):
         """
         Strip lone } lines from the END of text, but only as many as are
@@ -1043,7 +1050,9 @@ class ToolManager:
         seen_spans = []  # track (start, end) of code-fence spans to avoid double-counting
 
         # ── Collect code-block JSONs: ```json {...} ``` ──────────────────────
-        code_block_pattern = r'```(?:json)?\s*(\{[^`]+\})\s*```'
+        # Uses (?:[^`]|`(?!``))* instead of [^`]+ so single backticks INSIDE
+        # JSON string values are matched correctly — only TRIPLE backtick stops.
+        code_block_pattern = r'```(?:json)?\s*(\{(?:[^`]|`(?!``))*\})\s*```'
         for match in re.finditer(code_block_pattern, text, re.DOTALL):
             try:
                 data = json.loads(match.group(1).strip())
@@ -1146,7 +1155,9 @@ class ToolManager:
         log.debug(f"[ToolManager._remove_json_from_text] text_len={len(text)} | tool_key='{tool_key}'")
 
         # ── Pattern 1: code-fence blocks ────────────────────────────────────
-        code_block_pattern = r'```(?:json)?\s*(\{[^`]+\})\s*```'
+        # Uses (?:[^`]|`(?!``))* so single backticks inside JSON values don't
+        # break the match — only TRIPLE backtick terminates the fence.
+        code_block_pattern = r'```(?:json)?\s*(\{(?:[^`]|`(?!``))*\})\s*```'
         for match in re.finditer(code_block_pattern, text, re.DOTALL):
             try:
                 found_json = json.loads(match.group(1))
@@ -1163,6 +1174,9 @@ class ToolManager:
                 log.debug(f"[ToolManager._remove_json_from_text] Code-fence JSON error: {e}")
 
         # ── Pattern 2: bare JSON — brace counting ────────────────────────────
+        # After removing {…}, also strip any orphaned ```json / ``` fence markers
+        # that were left behind (this happens when the JSON value contained a
+        # backtick which broke the code-fence regex in Pattern 1).
         search_start = 0
         while True:
             start_pos = text.find('{', search_start)
@@ -1204,7 +1218,12 @@ class ToolManager:
                     if should_remove:
                         log.debug(f"[ToolManager._remove_json_from_text] Removing bare JSON block "
                                   f"at ({start_pos}, {end_pos}) | tool_key='{tool_key}'")
+                        # Remove the {…} block
                         text = text[:start_pos] + text[end_pos:]
+                        # ── Cleanup orphaned fence markers left by the removal ──
+                        # If the JSON was inside a ```json … ``` fence, the fence
+                        # opening/closing markers are now dangling — strip them.
+                        text = self._strip_orphaned_fence_markers(text)
                         return self._cleanup_orphaned_braces(text.strip())
                 except json.JSONDecodeError:
                     pass

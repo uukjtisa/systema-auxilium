@@ -707,8 +707,26 @@ class AIEngine:
         log.debug("[AIEngine._process_ai_response] Response appended to history | "
                   f"total history entries={len(self.conversation_history)}")
 
+        # ── Safety net: strip any remaining tool JSON from display text ───────
+        # Catches edge cases where parse_set_session_name detected the name but
+        # removal failed (e.g. backtick in value broke code-fence regex), or
+        # where parse_set_session_name missed entirely.  History keeps ai_text
+        # as-is; only the display copy gets stripped.
+        display_text = self.tool_manager.strip_tool_calls(ai_text)
+        if display_text != ai_text:
+            log.warning(f"[AIEngine._process_ai_response] Safety net stripped residual tool JSON | "
+                        f"before={len(ai_text)} → after={len(display_text)} chars")
+            # Attempt to recover session name if parsing missed it earlier
+            if not session_name:
+                missed_call = self.tool_manager.parse_set_session_name(ai_text)
+                if missed_call:
+                    session_name = missed_call[0]
+                    log.info(f"[AIEngine._process_ai_response] Safety net recovered session_name: "
+                             f"'{session_name}'")
+        # ──────────────────────────────────────────────────────────────────────
+
         return {
-            'response': ai_text,
+            'response': display_text,
             'has_work_call': False,
             'in_work_mode': False,
             'thinking': False,
@@ -770,11 +788,11 @@ class AIEngine:
                   f"{len(self.conversation_history)}")
 
         if self.ai_provider == 'puter':
-            return self._continue_work_mode_puter()
+            return self._generate_puter_response()
         elif self.ai_provider == 'gemini':
-            return self._continue_work_mode_gemini()
+            return self._generate_gemini_response()
         else:
-            return self._continue_work_mode_anthropic()
+            return self._generate_anthropic_response()
 
     def _continue_work_mode_puter(self):
         log.info(f"[AIEngine._continue_work_mode_puter] model='{self.puter_model}' | "

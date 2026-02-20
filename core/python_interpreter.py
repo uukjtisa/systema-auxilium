@@ -9,6 +9,7 @@ import io
 import traceback
 import code
 from core.logger import _make_logger, _NoOpLogger
+from core.path_syncer import get_syncer
 from contextlib import redirect_stdout, redirect_stderr
 
 
@@ -100,6 +101,13 @@ class PythonInterpreter:
                 'execution_count': int
             }
         """
+        # ── Sync system paths before every execution ──────────────────────────
+        try:
+            get_syncer().merge()
+        except Exception as _sync_err:
+            log.warning(f"[PythonInterpreter.execute] PathSyncer merge failed (non-fatal): {_sync_err}")
+        # ──────────────────────────────────────────────────────────────────────
+
         self.execution_count += 1
         code_preview = code_str.strip()[:80].replace('\n', '↵')
         log.info(f"[PythonInterpreter.execute] ── Execution #{self.execution_count} ──────────────")
