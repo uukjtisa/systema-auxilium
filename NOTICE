@@ -1,25 +1,31 @@
 Systema Auxilium
+================
 
-This software was originally architected by:
+Copyright (c) 2026 Nic2007 (https://github.com/uukjtisa)
 
-Niccc2007
+ARCHITECTURE & AUTHORSHIP
 
-This exact NOTICE file, including all text, the author attribution above,
-and the disclaimer below, MUST be preserved in all private-use copies of Systema Auxilium.
+The tool architecture, system design, code flow, and all core ideas behind
+Systema Auxilium were conceived and structured by Nic2007.
+
+AI tooling (specifically Claude by Anthropic) was used throughout development
+to accelerate implementation, generate boilerplate, and assist with code —
+but the architecture, logic, and direction of this project are the original
+work of the author. This is disclosed openly in the spirit of transparency.
+
+DISCLAIMER
 
 Systema Auxilium provides AI-assisted control over system-level operations via Python.
-Improper use, unsafe prompts, or misconfiguration may result in data loss or system instability.
+Improper use, unsafe prompts, or misconfiguration may result in data loss or system
+instability. The author assumes no responsibility or liability for any damage, loss,
+or consequences resulting from the use or misuse of this software.
 
-The author assumes no responsibility or liability for any damage, loss, or consequences
-resulting from the use or misuse of this software.
+COMMUNITY
 
-Redistribution, modification, publication, or derivative works without explicit written permission
-from the Creator is strictly prohibited.
+This project is a work in progress and the author is actively looking for collaborators.
+Suggestions, feedback, and contributions of any kind are very welcome.
 
-This license is temporary. The Creator may release a new license at any time
-to convert Systema Auxilium into an open community project. Only the Creator controls
-the timing and terms of such a license change.
+  Email:   trescariasa2007@gmail.com
+  Project: https://github.com/uukjtisa/systema-auxilia
 
-feel free to contribute: https://github.com/uukjtisa/systema-auxilia
-
-this is my first project please be kind :)
+This is a personal project. Please be kind. :)

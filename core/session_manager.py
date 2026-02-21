@@ -10,7 +10,7 @@ import re
 
 
 # ─────────────────────────── Colored Logger Setup ────────────────────────────
-_verbose = True
+_verbose = False
 log = _make_logger("SessionManager") if _verbose else _NoOpLogger()
 # ─────────────────────────────────────────────────────────────────────────────
 

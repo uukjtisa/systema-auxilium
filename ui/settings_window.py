@@ -8,6 +8,12 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
 from PyQt6.QtCore import Qt, QPoint, QTimer, QRect
 from PyQt6.QtGui import QRegion
 
+# ── Debug flag ────────────────────────────────────────────────────────────────
+# Set to True to show the Puter Account Management section (email, password,
+# Setup New Account, Reset Quota). For your eyes only — keep False in public builds.
+DEBUG_MODE = False
+# ─────────────────────────────────────────────────────────────────────────────
+
 
 class SettingsWindow(QWidget):
     """Settings window for configuring the AI assistant"""
@@ -356,15 +362,8 @@ class SettingsWindow(QWidget):
         puter_layout = QVBoxLayout()
 
         puter_info = QLabel(
-            "🚀 Puter.js runs in a local browser window (no API key needed!)\n\n"
-            "When you select Puter.js:\n"
-            "• A Flask server starts on port 5555\n"
-            "• A browser window opens automatically\n"
-            "• Click PLAY on the visible audio player (it LOOPS FOREVER!)\n"
-            "• You'll see a 🔊 speaker icon in the browser tab (that's good!)\n"
-            "• Minimize the window (DON'T CLOSE THE TAB!)\n"
-            "• The audio keeps playing infinitely, keeping the tab active\n"
-            "• All AI requests are FREE and work all day long"
+            "Uses Puter.js free rate limited API (Can be upgraded for more usage) "
+            "[THIS PROVIDER IS HIGHLY SUPPORTED]"
         )
         puter_info.setWordWrap(True)
         puter_info.setStyleSheet(
@@ -433,171 +432,178 @@ class SettingsWindow(QWidget):
         self.puter_group.setLayout(puter_layout)
         scroll_layout.addWidget(self.puter_group)
 
-        # Puter Account & Quota Management
-        self.puter_account_group = QGroupBox("Puter Account Management")
-        puter_account_layout = QVBoxLayout()
+        # Puter Account & Quota Management — only built and shown in debug mode
+        if DEBUG_MODE:
+            self.puter_account_group = QGroupBox("Puter Account Management")
+            puter_account_layout = QVBoxLayout()
 
-        puter_account_info = QLabel(
-            "💡 Manage your Puter.js account and API quotas"
-        )
-        puter_account_info.setWordWrap(True)
-        puter_account_info.setStyleSheet(
-            "color: #ccc; font-size: 10pt; padding: 10px; background: #2d2d2d; border-radius: 5px;")
-        puter_account_layout.addWidget(puter_account_info)
+            puter_account_info = QLabel(
+                "💡 Manage your Puter.js account and API quotas"
+            )
+            puter_account_info.setWordWrap(True)
+            puter_account_info.setStyleSheet(
+                "color: #ccc; font-size: 10pt; padding: 10px; background: #2d2d2d; border-radius: 5px;")
+            puter_account_layout.addWidget(puter_account_info)
 
-        # Email
-        email_label = QLabel("Email:")
-        self.puter_email_input = QLineEdit()
-        self.puter_email_input.setPlaceholderText("your@email.com")
-        self.puter_email_input.setStyleSheet("""
-            QLineEdit {
-                background-color: #2d2d2d;
-                border: 1px solid #3d3d3d;
-                border-radius: 5px;
-                padding: 8px;
-                font-size: 12px;
-                color: #ffffff;
-            }
-        """)
-        puter_account_layout.addWidget(email_label)
-        puter_account_layout.addWidget(self.puter_email_input)
+            # Email
+            email_label = QLabel("Email:")
+            self.puter_email_input = QLineEdit()
+            self.puter_email_input.setPlaceholderText("your@email.com")
+            self.puter_email_input.setStyleSheet("""
+                QLineEdit {
+                    background-color: #2d2d2d;
+                    border: 1px solid #3d3d3d;
+                    border-radius: 5px;
+                    padding: 8px;
+                    font-size: 12px;
+                    color: #ffffff;
+                }
+            """)
+            puter_account_layout.addWidget(email_label)
+            puter_account_layout.addWidget(self.puter_email_input)
 
-        # Password
-        password_label = QLabel("Password:")
-        self.puter_password_input = QLineEdit()
-        self.puter_password_input.setPlaceholderText("Your password")
-        self.puter_password_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.puter_password_input.setStyleSheet("""
-            QLineEdit {
-                background-color: #2d2d2d;
-                border: 1px solid #3d3d3d;
-                border-radius: 5px;
-                padding: 8px;
-                font-size: 12px;
-                color: #ffffff;
-            }
-        """)
-        puter_account_layout.addWidget(password_label)
-        puter_account_layout.addWidget(self.puter_password_input)
+            # Password
+            password_label = QLabel("Password:")
+            self.puter_password_input = QLineEdit()
+            self.puter_password_input.setPlaceholderText("Your password")
+            self.puter_password_input.setEchoMode(QLineEdit.EchoMode.Password)
+            self.puter_password_input.setStyleSheet("""
+                QLineEdit {
+                    background-color: #2d2d2d;
+                    border: 1px solid #3d3d3d;
+                    border-radius: 5px;
+                    padding: 8px;
+                    font-size: 12px;
+                    color: #ffffff;
+                }
+            """)
+            puter_account_layout.addWidget(password_label)
+            puter_account_layout.addWidget(self.puter_password_input)
 
-        # Show password toggle
-        show_puter_password_layout = QHBoxLayout()
-        self.show_puter_password_btn = QPushButton("👁️ Show")
-        self.show_puter_password_btn.setMaximumWidth(80)
-        self.show_puter_password_btn.setCheckable(True)
-        self.show_puter_password_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3d3d3d;
-                border: none;
-                border-radius: 5px;
-                padding: 5px;
-                font-size: 11px;
-                color: #ffffff;
-            }
-            QPushButton:hover {
-                background-color: #4d4d4d;
-            }
-            QPushButton:checked {
-                background-color: #5555ff;
-            }
-        """)
-        self.show_puter_password_btn.toggled.connect(self.toggle_puter_password_visibility)
-        show_puter_password_layout.addWidget(self.show_puter_password_btn)
-        show_puter_password_layout.addStretch()
-        puter_account_layout.addLayout(show_puter_password_layout)
+            # Show password toggle
+            show_puter_password_layout = QHBoxLayout()
+            self.show_puter_password_btn = QPushButton("👁️ Show")
+            self.show_puter_password_btn.setMaximumWidth(80)
+            self.show_puter_password_btn.setCheckable(True)
+            self.show_puter_password_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #3d3d3d;
+                    border: none;
+                    border-radius: 5px;
+                    padding: 5px;
+                    font-size: 11px;
+                    color: #ffffff;
+                }
+                QPushButton:hover {
+                    background-color: #4d4d4d;
+                }
+                QPushButton:checked {
+                    background-color: #5555ff;
+                }
+            """)
+            self.show_puter_password_btn.toggled.connect(self.toggle_puter_password_visibility)
+            show_puter_password_layout.addWidget(self.show_puter_password_btn)
+            show_puter_password_layout.addStretch()
+            puter_account_layout.addLayout(show_puter_password_layout)
 
-        # Response Timeout
-        timeout_label = QLabel("⏱️ Response Timeout (seconds):")
-        timeout_label.setStyleSheet("font-weight: bold; margin-top: 15px; color: #ffffff;")
-        puter_account_layout.addWidget(timeout_label)
+            # Response Timeout
+            timeout_label = QLabel("⏱️ Response Timeout (seconds):")
+            timeout_label.setStyleSheet("font-weight: bold; margin-top: 15px; color: #ffffff;")
+            puter_account_layout.addWidget(timeout_label)
 
-        timeout_container = QHBoxLayout()
-        self.puter_timeout_input = QLineEdit()
-        self.puter_timeout_input.setPlaceholderText("30")
-        self.puter_timeout_input.setMaximumWidth(100)
-        self.puter_timeout_input.setStyleSheet("""
-            QLineEdit {
-                background-color: #2d2d2d;
-                border: 1px solid #3d3d3d;
-                border-radius: 5px;
-                padding: 8px;
-                font-size: 12px;
-                color: #ffffff;
-            }
-        """)
-        timeout_container.addWidget(self.puter_timeout_input)
+            timeout_container = QHBoxLayout()
+            self.puter_timeout_input = QLineEdit()
+            self.puter_timeout_input.setPlaceholderText("30")
+            self.puter_timeout_input.setMaximumWidth(100)
+            self.puter_timeout_input.setStyleSheet("""
+                QLineEdit {
+                    background-color: #2d2d2d;
+                    border: 1px solid #3d3d3d;
+                    border-radius: 5px;
+                    padding: 8px;
+                    font-size: 12px;
+                    color: #ffffff;
+                }
+            """)
+            timeout_container.addWidget(self.puter_timeout_input)
 
-        timeout_info = QLabel("How long to wait for AI response")
-        timeout_info.setStyleSheet("color: #888; font-size: 9pt; margin-left: 10px;")
-        timeout_container.addWidget(timeout_info)
-        timeout_container.addStretch()
+            timeout_info = QLabel("How long to wait for AI response")
+            timeout_info.setStyleSheet("color: #888; font-size: 9pt; margin-left: 10px;")
+            timeout_container.addWidget(timeout_info)
+            timeout_container.addStretch()
 
-        puter_account_layout.addLayout(timeout_container)
+            puter_account_layout.addLayout(timeout_container)
 
-        timeout_desc = QLabel(
-            "💡 Increase this if using ultra-smart models that take longer to respond\n"
-            "   Default: 30 seconds. Try 60-90 for complex queries."
-        )
-        timeout_desc.setWordWrap(True)
-        timeout_desc.setStyleSheet("color: #888; font-size: 9pt; margin-left: 20px;")
-        puter_account_layout.addWidget(timeout_desc)
+            timeout_desc = QLabel(
+                "💡 Increase this if using ultra-smart models that take longer to respond\n"
+                "   Default: 30 seconds. Try 60-90 for complex queries."
+            )
+            timeout_desc.setWordWrap(True)
+            timeout_desc.setStyleSheet("color: #888; font-size: 9pt; margin-left: 20px;")
+            puter_account_layout.addWidget(timeout_desc)
 
-        # Account action buttons
-        puter_action_layout = QHBoxLayout()
+            # Account action buttons
+            puter_action_layout = QHBoxLayout()
 
-        setup_account_btn = QPushButton("🆕 Setup New Account")
-        setup_account_btn.clicked.connect(self.setup_puter_account)
-        setup_account_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3d3d3d;
-                border: none;
-                border-radius: 5px;
-                padding: 8px;
-                font-size: 11px;
-                color: #ffffff;
-            }
-            QPushButton:hover {
-                background-color: #4d4d4d;
-            }
-        """)
-        puter_action_layout.addWidget(setup_account_btn)
+            setup_account_btn = QPushButton("🆕 Setup New Account")
+            setup_account_btn.clicked.connect(self.setup_puter_account)
+            setup_account_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #3d3d3d;
+                    border: none;
+                    border-radius: 5px;
+                    padding: 8px;
+                    font-size: 11px;
+                    color: #ffffff;
+                }
+                QPushButton:hover {
+                    background-color: #4d4d4d;
+                }
+            """)
+            puter_action_layout.addWidget(setup_account_btn)
 
-        reset_quota_btn = QPushButton("♻️ Reset Quota")
-        reset_quota_btn.clicked.connect(self.reset_puter_quota)
-        reset_quota_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #ff9900;
-                color: #ffffff;
-                border: none;
-                border-radius: 5px;
-                padding: 8px;
-                font-size: 11px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #ffaa22;
-            }
-        """)
-        puter_action_layout.addWidget(reset_quota_btn)
+            reset_quota_btn = QPushButton("♻️ Reset Quota")
+            reset_quota_btn.clicked.connect(self.reset_puter_quota)
+            reset_quota_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #ff9900;
+                    color: #ffffff;
+                    border: none;
+                    border-radius: 5px;
+                    padding: 8px;
+                    font-size: 11px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #ffaa22;
+                }
+            """)
+            puter_action_layout.addWidget(reset_quota_btn)
 
-        puter_account_layout.addLayout(puter_action_layout)
+            puter_account_layout.addLayout(puter_action_layout)
 
-        self.puter_account_group.setLayout(puter_account_layout)
-        scroll_layout.addWidget(self.puter_account_group)
+            self.puter_account_group.setLayout(puter_account_layout)
+            scroll_layout.addWidget(self.puter_account_group)
 
         # Recommended API Provider info
         self.recommended_group = QGroupBox("💡 Recommended Free API")
         recommended_layout = QVBoxLayout()
 
-        recommended_info = QLabel(
-            "**Recommended: Puter.js + TempMail**\n\n"
-            "1. Get a temporary email from: https://temp-mail.org\n"
-            "2. Click 'Setup New Account' above\n"
-            "3. Use the temp email to create account\n"
-            "4. Copy email & password here\n"
-            "5. Use 'Reset Quota' button when you run out\n\n"
-            "✨ Unlimited free usage by creating new accounts!"
-        )
+        if DEBUG_MODE:
+            recommended_info = QLabel(
+                "**Recommended: Puter.js + TempMail**\n\n"
+                "1. Get a temporary email from: https://temp-mail.org\n"
+                "2. Click 'Setup New Account' above\n"
+                "3. Use the temp email to create account\n"
+                "4. Copy email & password here\n"
+                "5. Use 'Reset Quota' button when you run out\n\n"
+                "✨ Unlimited free usage by creating new accounts!"
+            )
+        else:
+            recommended_info = QLabel(
+                "✅ Puter.js is the recommended provider for Systema Auxilium.\n\n"
+                "It uses a free rate-limited API — no account or API key required to get started."
+            )
         recommended_info.setWordWrap(True)
         recommended_info.setStyleSheet(
             "color: #ccc; font-size: 10pt; padding: 10px; background: #2d2d2d; border-radius: 5px;")
@@ -1076,14 +1082,16 @@ class SettingsWindow(QWidget):
         self.puter_group.hide()
 
         # CRITICAL: Always hide Puter-specific sections first
-        self.puter_account_group.hide()
+        if DEBUG_MODE:
+            self.puter_account_group.hide()
         self.recommended_group.hide()
         self.puter_tts_group.hide()
 
         # Show relevant sections based on provider
         if provider == 'puter':
             self.puter_group.show()
-            self.puter_account_group.show()
+            if DEBUG_MODE:
+                self.puter_account_group.show()
             self.recommended_group.show()
             self.update_tts_provider_options(show_puter=True)
         elif provider == 'gemini':
@@ -1185,6 +1193,8 @@ class SettingsWindow(QWidget):
 
     def toggle_puter_password_visibility(self, checked):
         """Toggle Puter password visibility"""
+        if not DEBUG_MODE:
+            return
         if checked:
             self.puter_password_input.setEchoMode(QLineEdit.EchoMode.Normal)
             self.show_puter_password_btn.setText("🙈 Hide")
@@ -1330,12 +1340,14 @@ class SettingsWindow(QWidget):
 
         # Load Puter credentials
         creds = self.controller.get_puter_credentials()
-        self.puter_email_input.setText(creds['email'])
-        self.puter_password_input.setText(creds['password'])
+        if DEBUG_MODE:
+            self.puter_email_input.setText(creds['email'])
+            self.puter_password_input.setText(creds['password'])
 
         # Load Puter timeout
         puter_timeout = self.controller.settings.get('puter_timeout', 30)
-        self.puter_timeout_input.setText(str(puter_timeout))
+        if DEBUG_MODE:
+            self.puter_timeout_input.setText(str(puter_timeout))
 
         # Load TTS provider
         tts_provider = self.controller.get_tts_provider()
@@ -1445,23 +1457,25 @@ class SettingsWindow(QWidget):
         self.controller.set_voice_output_device(output_device)
 
         # Save Puter credentials
-        email = self.puter_email_input.text().strip()
-        password = self.puter_password_input.text().strip()
-        self.controller.set_puter_credentials(email, password)
+        if DEBUG_MODE:
+            email = self.puter_email_input.text().strip()
+            password = self.puter_password_input.text().strip()
+            self.controller.set_puter_credentials(email, password)
 
         # Save Puter timeout
-        timeout_text = self.puter_timeout_input.text().strip()
-        if timeout_text:
-            try:
-                timeout = int(timeout_text)
-                if timeout > 0:
-                    self.controller.set_puter_timeout(timeout)
-                else:
-                    self.controller.set_puter_timeout(30)  # Default if invalid
-            except ValueError:
-                self.controller.set_puter_timeout(30)  # Default if invalid
-        else:
-            self.controller.set_puter_timeout(30)  # Default if empty
+        if DEBUG_MODE:
+            timeout_text = self.puter_timeout_input.text().strip()
+            if timeout_text:
+                try:
+                    timeout = int(timeout_text)
+                    if timeout > 0:
+                        self.controller.set_puter_timeout(timeout)
+                    else:
+                        self.controller.set_puter_timeout(30)
+                except ValueError:
+                    self.controller.set_puter_timeout(30)
+            else:
+                self.controller.set_puter_timeout(30)
 
         # Save TTS provider
         tts_provider = self.tts_provider_combo.currentData()
