@@ -3,7 +3,7 @@
 **Current License:** Systema Auxilium Community License v2.0
 **Author / Architect:** Nic2007 ([@uukjtisa](https://github.com/uukjtisa))
 
-> ⚠️ **Work in Progress** — This project is actively being developed. Not all features are fully polished or tested. Currently, [Puter.js](https://puter.com) is the primary tested AI provider. Other providers (Anthropic Claude API, Google Gemini) are integrated but remain largely untested due to resource constraints. Contributions and patience are greatly appreciated.
+> ⚠️ **Work in Progress** — This project is actively being developed. Not all features are fully polished or tested. Currently, [Puter.js](https://puter.com) is the primary tested API provider. Other providers (Anthropic Claude API, Google Gemini) are integrated but remain largely untested due to resource constraints as I am currently a grade 12 graduating student with no significant income. Contributions and patience are greatly appreciated.
 
 ---
 
