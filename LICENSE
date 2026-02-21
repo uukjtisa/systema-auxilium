@@ -1,53 +1,46 @@
-## Systema Auxilium Controlled Access License v1.0
+Systema Auxilium Community License v2.0
 
-Copyright (c) 2026
-**Nicanor III W. Cariasa**
+Copyright (c) 2026 Nic2007 (https://github.com/uukjtisa)
 
-### 1. **Ownership**
+OWNERSHIP AND AUTHORSHIP
 
-* All rights, title, and interest in Systema Auxilium, including all source code,
-  documentation, and associated materials, are owned exclusively by
-  **Nicanor III W. Cariasa**.
+The original architecture, tool design, code flow, and core concepts of Systema Auxilium
+were conceived and developed by Nic2007. This software is the original intellectual work
+of its author.
 
-### 2. **Permitted Use**
+PERMITTED USE
 
-* Licensees may run the software privately for personal use only.
-* Redistribution, sublicensing, or creation of derivative works is
-  **strictly prohibited**.
+Permission is hereby granted, free of charge, to any person obtaining a copy of this
+software and associated documentation files (the "Software"), to use, copy, and modify
+the Software for personal, non-commercial purposes, subject to the following conditions:
 
-### 3. **NOTICE and Attribution**
+  1. Redistribution of modified versions of the Software, in whole or in part, as an
+     original or independent work is not permitted without prior written agreement from
+     the original author.
 
-* The NOTICE file, including all author attribution and disclaimers, must be
-  preserved in full for any private-use copy.
-* Removal or modification of NOTICE is strictly forbidden.
+  2. The above copyright notice and this permission notice shall be included in all
+     copies or substantial portions of the Software.
 
-### 4. **Liability**
+CONTRIBUTIONS AND COLLABORATION
 
-* Systema Auxilium provides AI-assisted system-level operations via Python.
-* Improper prompts, misconfiguration, or misuse may result in system damage.
-* The Creator assumes no responsibility or liability for any damage, loss, or
-  consequences.
+Contributions to this project — including bug reports, feature suggestions, and pull
+requests — are welcome and encouraged. Accepted contributions will be credited in the
+project's commit history, release notes, or documentation as appropriate. Submission of
+a contribution does not transfer ownership or licensing rights of the Software.
 
-### 5. **License Change Clause**
+DISCLAIMER
 
-* The Creator reserves the exclusive right to release a new license version
-  at any time.
-* Any new license published by the Creator automatically supersedes this
-  license for all existing and future use of Systema Auxilium.
-* Future versions of Systema Auxilium must retain this property:
-  **only the Creator may change the license**.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+PURPOSE, AND NONINFRINGEMENT. SYSTEMA AUXILIUM PROVIDES AI-ASSISTED SYSTEM-LEVEL
+OPERATIONS VIA PYTHON. IMPROPER USE, UNSAFE PROMPTS, OR MISCONFIGURATION MAY RESULT IN
+DATA LOSS OR SYSTEM INSTABILITY. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY CLAIM,
+DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE,
+ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+IN THE SOFTWARE.
 
-### 6. **Contributions, Bug Reports, and Proposed Fixes**
+LICENSE VERSIONING
 
-* Bug reports, issue reports, and improvement suggestions are **welcome and appreciated**.
-* Contributors may propose fixes or enhancements (including commits or pull requests)
-  for review by the Creator.
-* Accepted contributions will be **acknowledged and credited** to their respective
-  authors where appropriate (e.g., commit history, release notes, or documentation).
-* Submission of a contribution does not alter the ownership or license of
-  Systema Auxilium, which remains under the Creator’s control.
-
-### 7. **Acceptance**
-
-* Use of Systema Auxilium constitutes acceptance of all terms in this license.
-
+The author reserves the right to publish updated versions of this license at any time.
+Any newly published version automatically supersedes this license for all future use
+of the Software.

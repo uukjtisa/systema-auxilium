@@ -27,6 +27,13 @@ _verbose = True
 plog = _make_logger("PuterServer") if _verbose else _NoOpLogger()
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────── Debug Mode Flag ─────────────────────────────────
+# Set to True to show the Puter Account Management section in Settings
+# (email, password, Setup New Account, Reset Quota). For debugging only.
+# Keep False in production/public builds.
+DEBUG_MODE = False
+# ─────────────────────────────────────────────────────────────────────────────
+
 
 class PuterServer:
     """Selenium-based Flask-SocketIO server for Puter.js AI with full feature support including ElevenLabs"""
