@@ -19,7 +19,9 @@ import os
 from datetime import datetime
 from PyQt6.QtCore import QObject, pyqtSignal
 from core.python_interpreter import PythonInterpreter
+from core.memory_manager import get_memory_manager
 from core.logger import _make_logger, _NoOpLogger
+
 
 # ─────────────────────────── Colored Logger Setup ────────────────────────────
 _verbose = True
@@ -100,7 +102,7 @@ class ToolManager:
         # ── Tool registry ─────────────────────────────────────────────────────
         # Canonical tool names.  To add a new tool, append its name here and
         # implement the corresponding parse_/run_ methods.
-        self._tool_keys = ['work_environment', 'execute_code', 'set_session_name']
+        self._tool_keys = ['work_environment', 'execute_code', 'set_session_name', 'memorize']
         # Maps normalised (no-underscore, lowercase) form → canonical name
         self._tool_keys_norm = {k.replace('_', '').lower(): k for k in self._tool_keys}
         log.debug(f"[ToolManager.__init__] Registered tool keys: {self._tool_keys}")
@@ -240,6 +242,27 @@ class ToolManager:
             return session_name, remaining_text
 
         log.debug("[ToolManager.parse_set_session_name] All strategies failed — no set_session_name found")
+        return None
+
+    def parse_memorize(self, text):
+        """
+        Parse memorize tool call from AI output.
+        Format: {"tool": "memorize", "input": "memory text here"}
+
+        Returns:
+            tuple: (memory_text, remaining_text) or None if not found
+        """
+        log.debug(f"[ToolManager.parse_memorize] Parsing {len(text)} chars for memorize call")
+        json_data = self._extract_json(text, tool_key='memorize')
+
+        if json_data and self._has_tool_key(json_data, 'memorize'):
+            memory_text = (self._get_tool_value(json_data, 'input') or '').strip()
+            remaining_text = self._remove_json_from_text(text, json_data, tool_key='memorize')
+            log.info(f"[ToolManager.parse_memorize] ✓ Found memorize call | "
+                     f"text='{memory_text[:60]}' | remaining_len={len(remaining_text)}")
+            return memory_text, remaining_text
+
+        log.debug("[ToolManager.parse_memorize] No memorize call found")
         return None
 
     def _extract_session_name_aggressive(self, text):

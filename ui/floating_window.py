@@ -15,7 +15,13 @@ from PIL import Image, ImageDraw
 import json
 import os
 import math
+from pathlib import Path
 
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Anchor to app root at import time — immune to os.chdir() ─────────────────
+_APP_ROOT = Path(__file__).resolve().parent.parent
+# ─────────────────────────────────────────────────────────────────────────────
 
 class FloatingWindow(QWidget):
     """Floating AI assistant icon with configurable appearance"""
@@ -174,7 +180,7 @@ class FloatingWindow(QWidget):
 
     def load_settings(self):
         """Load appearance settings from file"""
-        settings_file = os.path.expanduser('floating_window_config.json')
+        settings_file = _APP_ROOT / "floating_window_config.json"
         try:
             if os.path.exists(settings_file):
                 with open(settings_file, 'r') as f:
@@ -189,7 +195,7 @@ class FloatingWindow(QWidget):
 
     def save_settings(self):
         """Save appearance settings to file"""
-        settings_file = 'floating_window_config.json'
+        settings_file = _APP_ROOT / "floating_window_config.json"
         try:
             # Save current position
             self.settings['position'] = (self.x(), self.y())

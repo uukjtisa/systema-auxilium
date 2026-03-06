@@ -8,6 +8,7 @@ UPDATED: Appends error traceback to execute_code failures
 import requests
 from core.logger import _make_logger, _NoOpLogger
 from core.tool_manager import ToolManager
+from core.memory_manager import get_memory_manager
 from core.global_instructions import (
     get_system_prompt,
     POST_EXIT_PROMPT,
@@ -35,6 +36,7 @@ class AIEngine:
                   f"has_settings_callback={settings_callback is not None}")
 
         self.log_callback = log_callback
+        self.settings_callback = settings_callback
         self.conversation_history = []
         log.debug("[AIEngine.__init__] conversation_history initialized (empty)")
 
@@ -51,6 +53,11 @@ class AIEngine:
             ai_engine=self  # Pass self so dialog can call AI for explanations
         )
         log.info("[AIEngine.__init__] ToolManager created and attached")
+
+        # INIT MEMORY ENGINE
+        self.memory_manager = get_memory_manager()
+        self._pending_memory_context = ""  # Cleared after each API call
+        log.info(f"[AIEngine.__init__] MemoryManager attached | ready={self.memory_manager.is_ready}")
 
         # LLaMA provider removed
 
@@ -259,6 +266,7 @@ class AIEngine:
                  f"history_len={len(self.conversation_history)} | "
                  f"msg='{msg_preview}' ──")
 
+        self._inject_memories(user_message)
         self.conversation_history.append({
             'role': 'user',
             'content': user_message
@@ -329,12 +337,22 @@ class AIEngine:
                  "content": "I understand. I will use My Work Environment when I need to complete complex tasks or need information, and Execute Single commands for quick actions."}
             ]
 
-            # Add conversation history
-            for msg in self.conversation_history:
-                messages.append({
-                    "role": msg['role'],
-                    "content": msg['content']
-                })
+            # Add conversation history — inject memory as separate system message
+            # before the last user message (never mutate the stored user content).
+            history_copy = list(self.conversation_history)
+            if self._pending_memory_context and history_copy:
+                insert_at = None
+                for i in range(len(history_copy) - 1, -1, -1):
+                    if history_copy[i]['role'] == 'user':
+                        insert_at = i
+                        break
+                if insert_at is not None:
+                    history_copy.insert(insert_at, {
+                        'role': 'system',
+                        'content': self._pending_memory_context
+                    })
+            for msg in history_copy:
+                messages.append({"role": msg['role'], "content": msg['content']})
 
             log.debug(f"[AIEngine._generate_puter_response_with_image] Sending to Puter | "
                       f"model='{self.puter_model}' | messages={len(messages)} | "
@@ -400,12 +418,22 @@ class AIEngine:
                  "content": "I understand. I will use My Work Environment when I need to complete complex tasks or need information, and Execute Single commands for quick actions."}
             ]
 
-            # Add conversation history
-            for msg in self.conversation_history:
-                messages.append({
-                    "role": msg['role'],
-                    "content": msg['content']
-                })
+            # Add conversation history — inject memory as separate system message
+            # before the last user message (never mutate the stored user content).
+            history_copy = list(self.conversation_history)
+            if self._pending_memory_context and history_copy:
+                insert_at = None
+                for i in range(len(history_copy) - 1, -1, -1):
+                    if history_copy[i]['role'] == 'user':
+                        insert_at = i
+                        break
+                if insert_at is not None:
+                    history_copy.insert(insert_at, {
+                        'role': 'system',
+                        'content': self._pending_memory_context
+                    })
+            for msg in history_copy:
+                messages.append({"role": msg['role'], "content": msg['content']})
 
             log.debug(f"[AIEngine._generate_puter_response] Sending to Puter | "
                       f"total messages={len(messages)}")
@@ -584,6 +612,7 @@ class AIEngine:
         log.info(f"[AIEngine._process_ai_response] ── Processing response | "
                  f"length={len(ai_text)} chars ──")
         log.debug(f"[AIEngine._process_ai_response] Preview: '{ai_text[:120].replace(chr(10), '↵')}'")
+        self._clear_memory_context()
         self.last_raw_response = ai_text
 
         # Check for set_session_name call (handle first as it's simple)
@@ -597,6 +626,12 @@ class AIEngine:
             self.log(f"Set session name call detected: {session_name}")
             # Use the cleaned text for further processing
             ai_text = remaining_text
+
+        memorize_result = self.tool_manager.parse_memorize(ai_text)
+        if memorize_result:
+            memory_text, ai_text = memorize_result
+            self.memory_manager.memorize(memory_text)
+            log.info(f"[AIEngine] Memory stored: '{memory_text[:60]}'")
 
         # Check for work_environment call
         log.debug("[AIEngine._process_ai_response] Checking for work_environment call...")
@@ -1048,7 +1083,23 @@ class AIEngine:
             }
         ]
 
-        messages.extend(self.conversation_history)
+        # Inject memory context as a dedicated system message right before the
+        # last user message, so it never pollutes the stored user message text.
+        history_copy = list(self.conversation_history)
+        if self._pending_memory_context and history_copy:
+            # Find index of the last user message
+            insert_at = None
+            for i in range(len(history_copy) - 1, -1, -1):
+                if history_copy[i]['role'] == 'user':
+                    insert_at = i
+                    break
+            if insert_at is not None:
+                history_copy.insert(insert_at, {
+                    'role': 'system',
+                    'content': self._pending_memory_context
+                })
+
+        messages.extend(history_copy)
         log.debug(f"[AIEngine._build_messages] Built {len(messages)} total messages")
         return messages
 
@@ -1071,7 +1122,22 @@ class AIEngine:
             "role": "model"
         })
 
-        for msg in self.conversation_history:
+        # Inject memory context as a dedicated system message right before the
+        # last user message, so it never pollutes the stored user message text.
+        history_copy = list(self.conversation_history)
+        if self._pending_memory_context and history_copy:
+            insert_at = None
+            for i in range(len(history_copy) - 1, -1, -1):
+                if history_copy[i]['role'] == 'user':
+                    insert_at = i
+                    break
+            if insert_at is not None:
+                history_copy.insert(insert_at, {
+                    'role': 'system',
+                    'content': self._pending_memory_context
+                })
+
+        for msg in history_copy:
             role = "model" if msg['role'] == 'assistant' else "user"
             messages.append({
                 "parts": [{"text": msg['content']}],
@@ -1080,6 +1146,52 @@ class AIEngine:
 
         log.debug(f"[AIEngine._build_gemini_messages] Built {len(messages)} total messages")
         return messages
+
+    def _inject_memories(self, user_message: str):
+        """
+        Perform semantic recall and stage memory context for the next API call.
+        Call this BEFORE building messages. Clears itself after use in _clear_memory_context().
+        """
+        self._pending_memory_context = ""
+
+        if not self.memory_manager or not self.memory_manager.is_ready:
+            return
+
+        # Read settings (with safe fallbacks)
+        memory_enabled = True
+        memory_threshold = 0.4
+        memory_max = 5
+
+        if self.settings_callback:
+            settings = self.settings_callback()
+            memory_enabled = settings.get('memory_enabled', True)
+            memory_threshold = float(settings.get('memory_threshold', 0.4))
+            memory_max = int(settings.get('memory_max_results', 5))
+
+        if not memory_enabled:
+            return
+
+        recalled = self.memory_manager.recall(
+            query=user_message,
+            threshold=memory_threshold,
+            max_results=memory_max
+        )
+
+        if recalled:
+            lines = "\n".join(f"- {m['text']}" for m in recalled)
+            self._pending_memory_context = (
+                f"<SYSTEM_MEM_RECALL>\n"
+                f"MEMORIES DETECTED:\n"
+                f"{lines}\n"
+                f"<SYSTEM_MEM_RECALL/>"
+            )
+            log.info(f"[AIEngine._inject_memories] Staged {len(recalled)} memories as system message")
+        else:
+            log.debug("[AIEngine._inject_memories] No memories passed threshold — skipping injection")
+
+    def _clear_memory_context(self):
+        """Call after the API response is received to remove temporary memory context."""
+        self._pending_memory_context = ""
 
     def clear_history(self):
         """Clear conversation history and reset work mode"""

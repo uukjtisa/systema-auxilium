@@ -30,7 +30,13 @@ except ImportError:
 
 # Silero VAD import
 try:
-    import torch
+    try:
+        import torch
+
+        TORCH_AVAILABLE = True
+    except (ImportError, OSError):
+        torch = None
+        TORCH_AVAILABLE = False
     import torchaudio
     SILERO_AVAILABLE = True
 except ImportError:
