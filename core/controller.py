@@ -166,6 +166,17 @@ class AssistantController(QObject):
         self._create_new_session()
         log.debug(f"[AssistantController.__init__] Initial session created: '{self.current_session_id}'")
 
+        # MEMORY MANAGER - Persistent RAG memory
+        log.debug("[AssistantController.__init__] Initializing MemoryManager...")
+        try:
+            from core.memory_manager import get_memory_manager
+            self.memory_manager = get_memory_manager()
+            log.info(f"[AssistantController.__init__] ✓ MemoryManager ready | "
+                     f"count={self.memory_manager.count()} | is_ready={self.memory_manager.is_ready}")
+        except Exception as e:
+            log.error(f"[AssistantController.__init__] ✗ MemoryManager failed: {type(e).__name__}: {e}")
+            self.memory_manager = None
+
         self.log("System AI Assistant initialized", "SUCCESS")
         log.info(f"[AssistantController.__init__] ✓ AssistantController ready | "
                  f"provider='{self.ai.ai_provider}' | port={self.free_port} | "
@@ -309,6 +320,9 @@ class AssistantController(QObject):
             'vad_aggressiveness': 3,
             'vad_silero_threshold': 0.5,
             'supervised_execution': True,  # Default ON for safety
+            'memory_enabled': True,
+            'memory_threshold': 0.4,  # float 0.0–1.0
+            'memory_max_results': 5,
         }
 
     def save_settings(self):
@@ -2513,4 +2527,3 @@ class AssistantController(QObject):
                 'description': '✅ FREE: 30 RPM, 14,400/day - Smallest, ultra-fast'
             },
         ]
-

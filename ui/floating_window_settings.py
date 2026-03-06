@@ -10,7 +10,6 @@ from PyQt6.QtCore import Qt, QTimer, QPoint, QRect, QRectF, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen, QFont, QRegion, QImage, QPolygonF, QBrush, QLinearGradient
 import math
 
-
 # ── ColorPicker2D (unchanged) ────────────────────────────────────────────────
 
 class ColorPicker2D(QWidget):

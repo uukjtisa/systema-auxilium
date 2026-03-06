@@ -7,12 +7,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QLineEdit, QPushButton, QTextEdit, QComboBox, QGroupBox, QCheckBox, QScrollArea, QFrame)
 from PyQt6.QtCore import Qt, QPoint, QTimer, QRect
 from PyQt6.QtGui import QRegion
-
-# ── Debug flag ────────────────────────────────────────────────────────────────
-# Set to True to show the Puter Account Management section (email, password,
-# Setup New Account, Reset Quota). For your eyes only — keep False in public builds.
-DEBUG_MODE = False
-# ─────────────────────────────────────────────────────────────────────────────
+from core.puter_server import DEBUG_MODE
 
 
 class SettingsWindow(QWidget):
@@ -1023,6 +1018,57 @@ class SettingsWindow(QWidget):
         supervised_group.setLayout(supervised_layout)
         scroll_layout.addWidget(supervised_group)
 
+        # ── Memory Settings ───────────────────────────────────────────────────
+        memory_group = QGroupBox("🧠 Memory (RAG)")
+        memory_layout = QVBoxLayout()
+
+        self.memory_enabled_checkbox = QCheckBox("Enable persistent memory across sessions")
+        self.memory_enabled_checkbox.setStyleSheet("color: #ccc;")
+        memory_layout.addWidget(self.memory_enabled_checkbox)
+
+        threshold_row = QHBoxLayout()
+        threshold_lbl = QLabel("Similarity threshold:")
+        self.memory_threshold_combo = QComboBox()
+        for label, val in [
+            ("0.3 – More memories (less strict)", 0.3),
+            ("0.4 – Balanced (default)",          0.4),
+            ("0.5 – Fewer memories (stricter)",   0.5),
+            ("0.6 – Very strict",                 0.6),
+            ("0.7 – Highly relevant only",        0.7),
+        ]:
+            self.memory_threshold_combo.addItem(label, val)
+        threshold_row.addWidget(threshold_lbl)
+        threshold_row.addWidget(self.memory_threshold_combo)
+        memory_layout.addLayout(threshold_row)
+
+        max_row = QHBoxLayout()
+        max_lbl = QLabel("Max memories injected per message:")
+        self.memory_max_combo = QComboBox()
+        for n in [3, 5, 8, 10, 15]:
+            self.memory_max_combo.addItem(str(n), n)
+        max_row.addWidget(max_lbl)
+        max_row.addWidget(self.memory_max_combo)
+        memory_layout.addLayout(max_row)
+
+        open_memory_btn = QPushButton("🧠 Open Memory Manager")
+        open_memory_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1a2a1a;
+                border: 1px solid #2a4a2a;
+                border-radius: 5px;
+                color: #7ec87e;
+                padding: 6px 14px;
+                font-size: 12px;
+            }
+            QPushButton:hover { background-color: #223322; }
+        """)
+        open_memory_btn.clicked.connect(self._open_memory_window)
+        memory_layout.addWidget(open_memory_btn)
+
+        memory_group.setLayout(memory_layout)
+        scroll_layout.addWidget(memory_group)
+        # ─────────────────────────────────────────────────────────────────────
+
         scroll_layout.addStretch()
 
         scroll.setWidget(scroll_widget)
@@ -1104,6 +1150,15 @@ class SettingsWindow(QWidget):
     def log_status(self, message):
         """Helper to log status messages"""
         print(f"[Settings] {message}")
+
+    def _open_memory_window(self):
+        """Open the memory manager window."""
+        if not hasattr(self, '_memory_window') or not self._memory_window.isVisible():
+            from ui.memory_window import MemoryWindow
+            self._memory_window = MemoryWindow(self.controller)
+        self._memory_window.show()
+        self._memory_window.raise_()
+        self._memory_window.refresh_memories()
 
     def on_elevenlabs_toggled(self, state):
         """Handle ElevenLabs checkbox toggle"""
@@ -1359,6 +1414,21 @@ class SettingsWindow(QWidget):
         puter_tts_model = self.controller.get_puter_tts_model()
         puter_tts_voice = self.controller.get_puter_tts_voice()
 
+        #Load memory engine settings
+        self.memory_enabled_checkbox.setChecked(
+            self.controller.settings.get('memory_enabled', True)
+        )
+        threshold = self.controller.settings.get('memory_threshold', 0.4)
+        for i in range(self.memory_threshold_combo.count()):
+            if self.memory_threshold_combo.itemData(i) == threshold:
+                self.memory_threshold_combo.setCurrentIndex(i)
+                break
+        max_results = self.controller.settings.get('memory_max_results', 5)
+        for i in range(self.memory_max_combo.count()):
+            if self.memory_max_combo.itemData(i) == max_results:
+                self.memory_max_combo.setCurrentIndex(i)
+                break
+
         # Load models
         models = self.controller.get_puter_tts_models()
         self.puter_tts_model_combo.clear()
@@ -1508,6 +1578,11 @@ class SettingsWindow(QWidget):
         elevenlabs_voice = self.elevenlabs_voice_input.text().strip()
         if elevenlabs_voice:
             self.controller.set_elevenlabs_voice_id(elevenlabs_voice)
+
+        # Save memory engine settings
+        self.controller.settings['memory_enabled'] = self.memory_enabled_checkbox.isChecked()
+        self.controller.settings['memory_threshold'] = self.memory_threshold_combo.currentData()
+        self.controller.settings['memory_max_results'] = self.memory_max_combo.currentData()
 
         # Save VAD settings
         webrtc_enabled = self.webrtc_vad_checkbox.isChecked()
