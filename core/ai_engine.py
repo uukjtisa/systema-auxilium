@@ -27,7 +27,7 @@ class AIEngine:
     """AI conversation engine"""
 
     def __init__(self, log_callback=None, api_key='', puter_server=None, gemini_api_key='', system_info='',
-                 voice_mode=False, elevenlabs_enabled=False, settings_callback=None):
+                 voice_mode=False, elevenlabs_enabled=False, settings_callback=None, skill_manager=None):
         log.info("[AIEngine.__init__] ── Initializing AI Engine ──────────────────────────────")
         log.debug(f"[AIEngine.__init__] Parameters: voice_mode={voice_mode} | "
                   f"elevenlabs_enabled={elevenlabs_enabled} | "
@@ -73,8 +73,20 @@ class AIEngine:
 
         # Generate system prompt with voice flags
         log.debug("[AIEngine.__init__] Generating system prompt via get_system_prompt()")
-        self.system_prompt = get_system_prompt(system_info, voice_mode, elevenlabs_enabled)
+        self.skill_manager = skill_manager
+        if skill_manager:
+            skill_manager.skills_changed.connect(self._on_skills_changed)
+            skill_manager.loaded_skills_changed.connect(self._on_skills_changed)
+            log.info("[AIEngine.__init__] SkillManager wired — skills_changed + loaded_skills_changed connected")
+        self.system_prompt = get_system_prompt(
+            system_info, voice_mode, elevenlabs_enabled,
+            skills=skill_manager.get_skills() if skill_manager else []
+        )
         log.info(f"[AIEngine.__init__] System prompt generated | length={len(self.system_prompt)} chars")
+
+        # Skills loaded during sessions are now managed by SkillManager directly.
+        # _active_skills is kept as a shim that reads from skill_manager.
+        log.info(f"[AIEngine.__init__] Active skills managed by SkillManager")
 
         # Store last raw response
         self.last_raw_response = None
@@ -103,7 +115,8 @@ class AIEngine:
                  f"regenerating system prompt")
         self.voice_mode = enabled
         # Regenerate prompt
-        self.system_prompt = get_system_prompt(self.system_info, self.voice_mode, self.elevenlabs_enabled)
+        self.system_prompt = get_system_prompt(self.system_info, self.voice_mode, self.elevenlabs_enabled,
+                                               skills=self.skill_manager.get_skills() if self.skill_manager else [])
         log.debug(f"[AIEngine.set_voice_mode] System prompt regenerated | "
                   f"length={len(self.system_prompt)} chars")
         if enabled:
@@ -117,10 +130,44 @@ class AIEngine:
                  f"elevenlabs_enabled={elevenlabs_enabled} | regenerating prompt")
         self.voice_mode = voice_mode
         self.elevenlabs_enabled = elevenlabs_enabled
-        self.system_prompt = get_system_prompt(self.system_info, voice_mode, elevenlabs_enabled)
+        self.system_prompt = get_system_prompt(self.system_info, voice_mode, elevenlabs_enabled,
+                                               skills=self.skill_manager.get_skills() if self.skill_manager else [])
         log.debug(f"[AIEngine.update_voice_settings] Prompt regenerated | "
                   f"length={len(self.system_prompt)} chars")
         self.log(f"Voice settings updated: voice_mode={voice_mode}, elevenlabs={elevenlabs_enabled}")
+
+    def _on_skills_changed(self):
+        """Regenerate system prompt when the skills folder changes."""
+        log.info("[AIEngine._on_skills_changed] Skills changed — regenerating system prompt")
+        self.system_prompt = get_system_prompt(
+            self.system_info,
+            self.voice_mode,
+            self.elevenlabs_enabled,
+            skills=self.skill_manager.get_skills() if self.skill_manager else []
+        )
+        log.info(f"[AIEngine._on_skills_changed] System prompt regenerated | "
+                 f"length={len(self.system_prompt)} chars")
+
+    def _render_active_skills(self) -> str:
+        """Build the skill injection block appended to the system prompt."""
+        active = self.skill_manager.get_loaded_skills() if self.skill_manager else {}
+        if not active:
+            return ""
+        lines = [
+            "",
+            "═══════════════════════════════════════════════════════════",
+            "LOADED SKILLS (currently active)",
+            "═══════════════════════════════════════════════════════════",
+        ]
+        for name, content in active.items():
+            lines.append(f"\n── SKILL: {name} ──────────────────────────────────────")
+            lines.append(content.strip())
+        lines.append("═══════════════════════════════════════════════════════════")
+        return "\n".join(lines)
+
+    def _get_effective_system_prompt(self) -> str:
+        """Return the system prompt enriched with any currently active skills."""
+        return self.system_prompt + self._render_active_skills()
 
     def _get_ai_response_internal(self, prompt):
         """Get AI response without adding to conversation history"""
@@ -332,7 +379,7 @@ class AIEngine:
 
             # NEW FORMAT: Build messages array
             messages = [
-                {"role": "system", "content": self.system_prompt},
+                {"role": "system", "content": self._get_effective_system_prompt()},
                 {"role": "assistant",
                  "content": "I understand. I will use My Work Environment when I need to complete complex tasks or need information, and Execute Single commands for quick actions."}
             ]
@@ -413,7 +460,7 @@ class AIEngine:
 
             # NEW FORMAT: Build messages array with system prompt and history
             messages = [
-                {"role": "system", "content": self.system_prompt},
+                {"role": "system", "content": self._get_effective_system_prompt()},
                 {"role": "assistant",
                  "content": "I understand. I will use My Work Environment when I need to complete complex tasks or need information, and Execute Single commands for quick actions."}
             ]
@@ -633,6 +680,68 @@ class AIEngine:
             self.memory_manager.memorize(memory_text)
             log.info(f"[AIEngine] Memory stored: '{memory_text[:60]}'")
 
+        # ── Check for load_skill call (now valid anywhere) ────────────────────
+        load_skill_result = self.tool_manager.parse_load_skill(ai_text)
+        if load_skill_result:
+            from core.global_instructions import SKILL_LOADED_CHAT_PROMPT, SKILL_ALREADY_LOADED_PROMPT
+            skill_name, remaining_text = load_skill_result
+            log.info(f"[AIEngine._process_ai_response] load_skill detected (outside work) → '{skill_name}'")
+            if self.skill_manager:
+                success, msg = self.skill_manager.load_skill(skill_name)
+            else:
+                success, msg = False, "ERROR: No skill manager"
+            if not success:
+                self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+                self.conversation_history.append({
+                    'role': 'system',
+                    'content': SKILL_ALREADY_LOADED_PROMPT.format(skill_name=skill_name, reason=msg)
+                })
+            else:
+                self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+                self.conversation_history.append({
+                    'role': 'system',
+                    'content': SKILL_LOADED_CHAT_PROMPT.format(skill_name=skill_name)
+                })
+            return {
+                'response': remaining_text.strip() if remaining_text and remaining_text.strip()
+                            else (f"✅ Skill '{skill_name}' loaded." if success else f"⚠ {msg}"),
+                'has_work_call': False,
+                'in_work_mode': False,
+                'thinking': False,
+                'skill_loaded': skill_name if success else None,
+            }
+
+        # ── Check for unload_skill call (valid anywhere) ──────────────────────
+        unload_skill_result = self.tool_manager.parse_unload_skill(ai_text)
+        if unload_skill_result:
+            from core.global_instructions import SKILL_UNLOADED_CHAT_PROMPT, SKILL_NOT_LOADED_PROMPT
+            skill_name, remaining_text = unload_skill_result
+            log.info(f"[AIEngine._process_ai_response] unload_skill detected (outside work) → '{skill_name}'")
+            if self.skill_manager:
+                success, msg = self.skill_manager.unload_skill(skill_name)
+            else:
+                success, msg = False, "ERROR: No skill manager"
+            if not success:
+                self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+                self.conversation_history.append({
+                    'role': 'system',
+                    'content': SKILL_NOT_LOADED_PROMPT.format(skill_name=skill_name, reason=msg)
+                })
+            else:
+                self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+                self.conversation_history.append({
+                    'role': 'system',
+                    'content': SKILL_UNLOADED_CHAT_PROMPT.format(skill_name=skill_name)
+                })
+            return {
+                'response': remaining_text.strip() if remaining_text and remaining_text.strip()
+                            else (f"🗑 Skill '{skill_name}' unloaded." if success else f"⚠ {msg}"),
+                'has_work_call': False,
+                'in_work_mode': False,
+                'thinking': False,
+                'skill_unloaded': skill_name if success else None,
+            }
+
         # Check for work_environment call
         log.debug("[AIEngine._process_ai_response] Checking for work_environment call...")
         work_call = self.tool_manager.parse_work_environment(ai_text)
@@ -650,8 +759,9 @@ class AIEngine:
             # Check if AI exited work mode
             if work_output == "EXITED_WORK_MODE":
                 log.info("[AIEngine._process_ai_response] Work environment returned EXITED_WORK_MODE — "
-                         "clearing work mode flag")
+                         "clearing work mode flag (skills persist)")
                 self.tool_manager.in_work_mode = False
+                # NOTE: skills are NOT cleared on exit — they persist until manually unloaded
 
                 # Add FULL AI TEXT to history for consistency
                 if ai_text and ai_text.strip():
@@ -835,7 +945,7 @@ class AIEngine:
         try:
             # NEW FORMAT: Build full message history
             messages = [
-                {"role": "system", "content": self.system_prompt},
+                {"role": "system", "content": self._get_effective_system_prompt()},
                 {"role": "assistant",
                  "content": "I understand. I will use My Work Environment when I need to complete complex tasks or need information, and Execute Single commands for quick actions."}
             ]
@@ -999,6 +1109,102 @@ class AIEngine:
         self.last_raw_response = ai_text
 
         log.debug("[AIEngine._process_work_mode_response] Checking for consecutive work_environment call...")
+        # ── Check for load_skill call (work_environment exclusive) ────────────
+        load_skill_result = self.tool_manager.parse_load_skill(ai_text)
+        if load_skill_result:
+            from core.global_instructions import SKILL_LOADED_WORK_PROMPT, SKILL_ALREADY_LOADED_PROMPT
+            skill_name, remaining_text = load_skill_result
+            log.info(f"[AIEngine._process_work_mode_response] load_skill detected → '{skill_name}'")
+
+            # Delegate to skill_manager (handles duplicate check)
+            if self.skill_manager:
+                success, msg = self.skill_manager.load_skill(skill_name)
+            else:
+                success, msg = False, f"ERROR: No skill manager — cannot load '{skill_name}'"
+
+            if not success:
+                # Already loaded or not found — notify AI so it doesn't retry
+                log.warning(f"[AIEngine._process_work_mode_response] load_skill failed: {msg}")
+                already_msg = SKILL_ALREADY_LOADED_PROMPT.format(skill_name=skill_name, reason=msg)
+                self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+                self.conversation_history.append({'role': 'system', 'content': already_msg})
+                return {
+                    'response': f"⚠ {msg}",
+                    'has_work_call': True,
+                    'in_work_mode': True,
+                    'thinking': True,
+                }
+
+            log.info(f"[AIEngine._process_work_mode_response] Skill '{skill_name}' loaded | "
+                     f"total loaded: {list(self.skill_manager.get_loaded_skills().keys())}")
+
+            # Save AI's text (before the load_skill JSON) to history
+            if remaining_text and remaining_text.strip():
+                self.conversation_history.append({
+                    'role': 'assistant',
+                    'content': ai_text  # keep full text with JSON for AI memory
+                })
+
+            # Build the skill-loaded work prompt so the AI continues the loop
+            work_output = self.tool_manager.last_work_output or "No previous output"
+            skill_loaded_msg = SKILL_LOADED_WORK_PROMPT.format(
+                skill_name=skill_name,
+                work_output=work_output
+            )
+            self.conversation_history.append({
+                'role': 'system',
+                'content': skill_loaded_msg
+            })
+            log.debug("[AIEngine._process_work_mode_response] Skill-loaded work prompt appended to history")
+
+            return {
+                'response': f"Loading skill: {skill_name}...",
+                'has_work_call': True,
+                'in_work_mode': True,
+                'thinking': True,
+                'skill_loaded': skill_name,
+            }
+
+        # ── Check for unload_skill call ────────────────────────────────────────
+        unload_skill_result = self.tool_manager.parse_unload_skill(ai_text)
+        if unload_skill_result:
+            from core.global_instructions import SKILL_UNLOADED_WORK_PROMPT, SKILL_NOT_LOADED_PROMPT
+            skill_name, remaining_text = unload_skill_result
+            log.info(f"[AIEngine._process_work_mode_response] unload_skill detected → '{skill_name}'")
+
+            if self.skill_manager:
+                success, msg = self.skill_manager.unload_skill(skill_name)
+            else:
+                success, msg = False, "ERROR: No skill manager"
+
+            if not success:
+                log.warning(f"[AIEngine._process_work_mode_response] unload_skill failed: {msg}")
+                not_loaded_msg = SKILL_NOT_LOADED_PROMPT.format(skill_name=skill_name, reason=msg)
+                self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+                self.conversation_history.append({'role': 'system', 'content': not_loaded_msg})
+                return {
+                    'response': f"⚠ {msg}",
+                    'has_work_call': True,
+                    'in_work_mode': True,
+                    'thinking': True,
+                }
+
+            log.info(f"[AIEngine._process_work_mode_response] Skill '{skill_name}' unloaded")
+            work_output = self.tool_manager.last_work_output or "No previous output"
+            unloaded_msg = SKILL_UNLOADED_WORK_PROMPT.format(
+                skill_name=skill_name,
+                work_output=work_output
+            )
+            self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+            self.conversation_history.append({'role': 'system', 'content': unloaded_msg})
+            return {
+                'response': f"Unloading skill: {skill_name}...",
+                'has_work_call': True,
+                'in_work_mode': True,
+                'thinking': True,
+                'skill_unloaded': skill_name,
+            }
+
         work_call = self.tool_manager.parse_work_environment(ai_text)
 
         if work_call:
@@ -1012,8 +1218,9 @@ class AIEngine:
 
             if work_output == "EXITED_WORK_MODE":
                 log.info("[AIEngine._process_work_mode_response] Work environment exited — "
-                         "clearing in_work_mode flag")
+                         "clearing in_work_mode flag (skills persist)")
                 self.tool_manager.in_work_mode = False
+                # NOTE: skills are NOT cleared on exit — they persist until manually unloaded
 
                 # Add FULL AI TEXT to history for consistency
                 if ai_text and ai_text.strip():
@@ -1052,8 +1259,9 @@ class AIEngine:
 
         else:
             log.info("[AIEngine._process_work_mode_response] No more work_environment calls — "
-                     "AI is done, clearing in_work_mode")
+                     "AI is done, clearing in_work_mode (skills persist)")
             self.tool_manager.in_work_mode = False
+            # NOTE: skills are NOT cleared — they persist until manually unloaded
 
             self.conversation_history.append({
                 'role': 'assistant',
@@ -1075,7 +1283,7 @@ class AIEngine:
         messages = [
             {
                 'role': 'system',
-                'content': self.system_prompt
+                'content': self._get_effective_system_prompt()
             },
             {
                 'role': 'assistant',
@@ -1110,6 +1318,9 @@ class AIEngine:
 
         # Use voice-aware prompt
         gemini_prompt = get_gemini_system_prompt(self.system_info, self.voice_mode, self.elevenlabs_enabled)
+        active_skills_block = self._render_active_skills()
+        if active_skills_block:
+            gemini_prompt = gemini_prompt + active_skills_block
         log.debug(f"[AIEngine._build_gemini_messages] Gemini system prompt length={len(gemini_prompt)}")
 
         messages.append({

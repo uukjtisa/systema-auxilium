@@ -102,7 +102,7 @@ class ToolManager:
         # ── Tool registry ─────────────────────────────────────────────────────
         # Canonical tool names.  To add a new tool, append its name here and
         # implement the corresponding parse_/run_ methods.
-        self._tool_keys = ['work_environment', 'execute_code', 'set_session_name', 'memorize']
+        self._tool_keys = ['work_environment', 'execute_code', 'set_session_name', 'memorize', 'load_skill', 'unload_skill']
         # Maps normalised (no-underscore, lowercase) form → canonical name
         self._tool_keys_norm = {k.replace('_', '').lower(): k for k in self._tool_keys}
         log.debug(f"[ToolManager.__init__] Registered tool keys: {self._tool_keys}")
@@ -264,6 +264,50 @@ class ToolManager:
 
         log.debug("[ToolManager.parse_memorize] No memorize call found")
         return None
+
+    def parse_load_skill(self, text):
+        """
+        Parse load_skill tool call from AI output.
+        Format: {"tool": "load_skill", "input": "skill_name"}
+
+        Returns:
+            tuple: (skill_name, remaining_text) or None if not found
+        """
+        log.debug(f"[ToolManager.parse_load_skill] Parsing {len(text)} chars for load_skill call")
+        json_data = self._extract_json(text, tool_key='load_skill')
+
+        if json_data and self._has_tool_key(json_data, 'load_skill'):
+            skill_name = (self._get_tool_value(json_data, 'input') or '').strip()
+            remaining_text = self._remove_json_from_text(text, json_data, tool_key='load_skill')
+            log.info(f"[ToolManager.parse_load_skill] ✓ Found load_skill call | "
+                     f"skill_name='{skill_name}' | remaining_len={len(remaining_text)}")
+            return skill_name, remaining_text
+
+        log.debug("[ToolManager.parse_load_skill] No load_skill call found")
+        return None
+
+    def parse_unload_skill(self, text):
+        """
+        Parse unload_skill tool call from AI output.
+        Format: {"tool": "unload_skill", "input": "skill_name"}
+
+        Returns:
+            tuple: (skill_name, remaining_text) or None if not found
+        """
+        log.debug(f"[ToolManager.parse_unload_skill] Parsing {len(text)} chars for unload_skill call")
+        json_data = self._extract_json(text, tool_key='unload_skill')
+
+        if json_data and self._has_tool_key(json_data, 'unload_skill'):
+            skill_name = (self._get_tool_value(json_data, 'input') or '').strip()
+            remaining_text = self._remove_json_from_text(text, json_data, tool_key='unload_skill')
+            log.info(f"[ToolManager.parse_unload_skill] ✓ Found unload_skill call | "
+                     f"skill_name='{skill_name}' | remaining_len={len(remaining_text)}")
+            return skill_name, remaining_text
+
+        log.debug("[ToolManager.parse_unload_skill] No unload_skill call found")
+        return None
+
+
 
     def _extract_session_name_aggressive(self, text):
         """
