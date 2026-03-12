@@ -1388,6 +1388,7 @@ class AssistantController(QObject):
         if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
             self.ui.chat_window.refresh_session_list()
             self.ui.chat_window.add_system_message("🆕 **New Session Created**")
+            self.ui.chat_window.warn_loaded_skills_if_any()
         log.info(f"[AssistantController.create_new_session] ✓ New session ready: '{self.current_session_id}'")
 
     def load_session(self, session_id):

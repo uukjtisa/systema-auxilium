@@ -1,8 +1,10 @@
 """
 SkillManager — watches the skills/ folder every 0.5 s, parses SKILL.md
-frontmatter, and emits a Qt signal whenever anything changes.
+frontmatter, emits Qt signals on changes, and persists loaded-state to
+skills/skills_state.json.
 """
 
+import json
 import re
 import shutil
 from pathlib import Path
@@ -13,6 +15,8 @@ from core.logger import _make_logger, _NoOpLogger
 
 _verbose = True
 log = _make_logger("SkillManager") if _verbose else _NoOpLogger()
+
+_STATE_FILE = "skills_state.json"  # relative to skills_dir
 
 
 class SkillManager(QObject):
@@ -35,6 +39,44 @@ class SkillManager(QObject):
 
         # Tracks which skills are currently loaded (name → content)
         self._loaded_skills: dict[str, str] = {}
+
+        # Load persisted state from disk
+        self._load_state()
+
+    # ── State persistence ──────────────────────────────────────────────────────
+
+    @property
+    def _state_path(self) -> Path:
+        return self.skills_dir / _STATE_FILE
+
+    def _load_state(self):
+        """Read skills_state.json and restore loaded skills."""
+        if not self._state_path.exists():
+            log.info("[SkillManager._load_state] No state file — starting fresh")
+            return
+        try:
+            data = json.loads(self._state_path.read_text(encoding='utf-8'))
+            loaded_names: list[str] = data.get('loaded', [])
+            log.info(f"[SkillManager._load_state] Restoring {len(loaded_names)} skill(s): {loaded_names}")
+            for name in loaded_names:
+                # We load lazily — content will be fetched when first needed
+                # but we mark the name in _loaded_skills now using actual file
+                ok, _ = self.load_skill(name)
+                if not ok:
+                    log.warning(f"[SkillManager._load_state] Could not restore '{name}' — skipping")
+        except Exception as exc:
+            log.warning(f"[SkillManager._load_state] Failed to read state: {exc}")
+
+    def _save_state(self):
+        """Write currently loaded skill names to skills_state.json."""
+        try:
+            data = {'loaded': list(self._loaded_skills.keys())}
+            self._state_path.write_text(json.dumps(data, indent=2), encoding='utf-8')
+            log.debug(f"[SkillManager._save_state] Saved state: {data['loaded']}")
+        except Exception as exc:
+            log.warning(f"[SkillManager._save_state] Failed to save state: {exc}")
+
+
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -119,6 +161,7 @@ class SkillManager(QObject):
                 self._loaded_skills[canonical] = content
                 log.info(f"[SkillManager.load_skill] Loaded '{canonical}' | "
                          f"total loaded: {list(self._loaded_skills.keys())}")
+                self._save_state()
                 self.loaded_skills_changed.emit()
                 return True, f"Skill '{canonical}' loaded."
         log.warning(f"[SkillManager.load_skill] Skill '{name}' not found")
@@ -135,6 +178,7 @@ class SkillManager(QObject):
                 del self._loaded_skills[canonical]
                 log.info(f"[SkillManager.unload_skill] Unloaded '{canonical}' | "
                          f"remaining: {list(self._loaded_skills.keys())}")
+                self._save_state()
                 self.loaded_skills_changed.emit()
                 return True, f"Skill '{canonical}' unloaded."
         log.warning(f"[SkillManager.unload_skill] Skill '{name}' is not loaded — cannot unload")
@@ -153,6 +197,7 @@ class SkillManager(QObject):
         if self._loaded_skills:
             self._loaded_skills.clear()
             log.info("[SkillManager.clear_loaded_skills] All skills cleared")
+            self._save_state()
             self.loaded_skills_changed.emit()
 
     def create_skill_template(self, name: str):
