@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
 from PyQt6.QtCore import Qt, QTimer, QPoint, pyqtSignal, QRect, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup
 from PyQt6.QtGui import QAction, QCursor, QRegion
 from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QFont
+from ui.skills_panel import SkillsPanel
 import re
 import markdown2
 import os
@@ -1263,12 +1264,12 @@ class ChatWindow(QWidget):
         separator.setStyleSheet("background-color: #2A2A2A; max-height: 1px; margin: 8px 0;")
         sidebar_layout.addWidget(separator)
 
-        # Mode info
+        # Skills info
         mode_info = QLabel(
-            "<b>Force Modes:</b><br>"
-            "Use the dropdown in the<br>"
-            "message box to force AI<br>"
-            "to use specific modes."
+            "<b>Skills:</b><br>"
+            "Click ⚡ in the header to<br>"
+            "open the Skills panel.<br>"
+            "Skills auto-load every 0.5 s."
         )
         mode_info.setWordWrap(True)
         mode_info.setStyleSheet("""
@@ -1405,6 +1406,38 @@ class ChatWindow(QWidget):
                     }
                 """)
         header_layout.addWidget(self.voice_status_label)
+
+        # Skills button — shows/hides the SkillsPanel overlay
+        skill_manager = getattr(self.controller, 'skill_manager', None)
+        self.skills_panel = SkillsPanel(skill_manager, parent=self) if skill_manager else None
+        if self.skills_panel:
+            self.skills_panel.hide()
+
+        if self.skills_panel:
+            skills_btn = QPushButton("⚡")
+            skills_btn.setFixedSize(32, 32)
+            skills_btn.setToolTip("Skills")
+            skills_btn.setStyleSheet("""
+                QPushButton {
+                    background: transparent;
+                    border: none;
+                    border-radius: 6px;
+                    font-size: 16px;
+                    color: #9AA0A6;
+                }
+                QPushButton:hover {
+                    background: #2A2A2A;
+                    color: #E8EAED;
+                }
+                QPushButton:checked {
+                    background: #2A2A2A;
+                    color: #5865F2;
+                }
+            """)
+            skills_btn.setCheckable(True)
+            skills_btn.clicked.connect(self._toggle_skills_panel)
+            header_layout.addWidget(skills_btn)
+            self._skills_btn = skills_btn
 
         # ==========Window control buttons==========
 
@@ -1736,6 +1769,33 @@ class ChatWindow(QWidget):
         """Toggle sidebar visibility with a smooth slide animation."""
         self.sidebar_visible = not self.sidebar_visible
         self._animate_sidebar(self.sidebar_visible)
+
+    def _toggle_skills_panel(self):
+        """Show or hide the SkillsPanel overlay on the right side."""
+        if not self.skills_panel:
+            return
+        if self.skills_panel.isVisible():
+            self.skills_panel.hide()
+            if hasattr(self, '_skills_btn'):
+                self._skills_btn.setChecked(False)
+        else:
+            # Position the panel flush with the right edge of this window
+            panel_w = 300
+            panel_h = self.height() - 50  # below header
+            self.skills_panel.setParent(self)
+            self.skills_panel.setGeometry(self.width() - panel_w, 50, panel_w, panel_h)
+            self.skills_panel.raise_()
+            self.skills_panel.show()
+            if hasattr(self, '_skills_btn'):
+                self._skills_btn.setChecked(True)
+
+    def resizeEvent(self, event):
+        """Keep SkillsPanel anchored to the right on resize."""
+        super().resizeEvent(event)
+        if self.skills_panel and self.skills_panel.isVisible():
+            panel_w = 300
+            panel_h = self.height() - 50
+            self.skills_panel.setGeometry(self.width() - panel_w, 50, panel_w, panel_h)
 
     def _animate_sidebar(self, show: bool):
         """Slide the sidebar in (show=True) or out (show=False)."""
@@ -2819,7 +2879,217 @@ class ChatWindow(QWidget):
         self._animate_message_in(message_widget,
                                  on_settled=lambda: self.scroll_to_widget(message_widget))
 
-    def copy_to_clipboard(self, text):
+    def add_skill_card_message(self, skill_name: str, loaded: bool):
+        """
+        Add a skill-status entity card to the chat message list.
+        Shows the skill name, a loaded/unloaded badge, and an Unload/Load button
+        for manual user control.
+        """
+        from PyQt6.QtWidgets import QSizePolicy
+
+        # Determine styling based on state
+        if loaded:
+            badge_text = "● Loaded"
+            badge_color = "#4CAF50"
+            badge_bg = "#1A2B1A"
+            action_text = "Unload"
+            action_color = "#C0392B"
+            action_bg = "#3C1A1A"
+            action_hover = "#4A2020"
+            icon = "⚡"
+        else:
+            badge_text = "○ Unloaded"
+            badge_color = "#9AA0A6"
+            badge_bg = "#2A2A2A"
+            action_text = "Load"
+            action_color = "#4CAF50"
+            action_bg = "#1A2B1A"
+            action_hover = "#223322"
+            icon = "⚡"
+
+        card = QFrame()
+        card.setStyleSheet(f"""
+            QFrame {{
+                background-color: #1E1E2E;
+                border: 1px solid #3C3C5C;
+                border-radius: 8px;
+                margin: 2px 40px;
+            }}
+        """)
+        card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        card_layout = QHBoxLayout(card)
+        card_layout.setContentsMargins(12, 8, 12, 8)
+        card_layout.setSpacing(10)
+
+        # Icon
+        icon_lbl = QLabel(icon)
+        icon_lbl.setStyleSheet("color: #7C7CFF; font-size: 14px; background: transparent;")
+        icon_lbl.setFixedWidth(18)
+        card_layout.addWidget(icon_lbl)
+
+        # Skill name
+        name_lbl = QLabel(f"<b>{skill_name}</b>")
+        name_lbl.setStyleSheet(f"color: #C8CAFF; font-size: 12px; background: transparent;")
+        card_layout.addWidget(name_lbl, stretch=1)
+
+        # Badge
+        badge_lbl = QLabel(badge_text)
+        badge_lbl.setStyleSheet(f"""
+            QLabel {{
+                background-color: {badge_bg};
+                color: {badge_color};
+                border-radius: 4px;
+                font-size: 10px;
+                padding: 2px 8px;
+            }}
+        """)
+        card_layout.addWidget(badge_lbl)
+
+        # Action button
+        action_btn = QPushButton(action_text)
+        action_btn.setFixedHeight(24)
+        action_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {action_bg};
+                color: {action_color};
+                border: 1px solid {action_color};
+                border-radius: 4px;
+                font-size: 10px;
+                padding: 0 10px;
+            }}
+            QPushButton:hover {{
+                background-color: {action_hover};
+            }}
+        """)
+
+        # Capture current state in closure
+        _loaded = loaded
+        _name = skill_name
+
+        def _on_action():
+            skill_mgr = None
+            if hasattr(self, 'controller') and self.controller:
+                skill_mgr = getattr(self.controller.ai, 'skill_manager', None)
+            if skill_mgr is None:
+                return
+            if _loaded:
+                ok, msg = skill_mgr.unload_skill(_name)
+            else:
+                ok, msg = skill_mgr.load_skill(_name)
+            if ok:
+                # Update badge and button to reflect new state
+                new_loaded = not _loaded
+                if new_loaded:
+                    badge_lbl.setText("● Loaded")
+                    badge_lbl.setStyleSheet(f"""
+                        QLabel {{
+                            background-color: #1A2B1A; color: #4CAF50;
+                            border-radius: 4px; font-size: 10px; padding: 2px 8px;
+                        }}
+                    """)
+                    action_btn.setText("Unload")
+                    action_btn.setStyleSheet(f"""
+                        QPushButton {{
+                            background-color: #3C1A1A; color: #C0392B;
+                            border: 1px solid #C0392B; border-radius: 4px;
+                            font-size: 10px; padding: 0 10px;
+                        }}
+                        QPushButton:hover {{ background-color: #4A2020; }}
+                    """)
+                else:
+                    badge_lbl.setText("○ Unloaded")
+                    badge_lbl.setStyleSheet(f"""
+                        QLabel {{
+                            background-color: #2A2A2A; color: #9AA0A6;
+                            border-radius: 4px; font-size: 10px; padding: 2px 8px;
+                        }}
+                    """)
+                    action_btn.setText("Load")
+                    action_btn.setStyleSheet(f"""
+                        QPushButton {{
+                            background-color: #1A2B1A; color: #4CAF50;
+                            border: 1px solid #4CAF50; border-radius: 4px;
+                            font-size: 10px; padding: 0 10px;
+                        }}
+                        QPushButton:hover {{ background-color: #223322; }}
+                    """)
+                # Rewire button with new state
+                action_btn.clicked.disconnect()
+                _new_loaded_ref = [new_loaded]
+
+                def _on_action_updated(loaded_ref=_new_loaded_ref):
+                    smgr = None
+                    if hasattr(self, 'controller') and self.controller:
+                        smgr = getattr(self.controller.ai, 'skill_manager', None)
+                    if smgr is None:
+                        return
+                    if loaded_ref[0]:
+                        ok2, _ = smgr.unload_skill(_name)
+                        if ok2:
+                            loaded_ref[0] = False
+                            badge_lbl.setText("○ Unloaded")
+                            badge_lbl.setStyleSheet("""
+                                QLabel {
+                                    background-color: #2A2A2A; color: #9AA0A6;
+                                    border-radius: 4px; font-size: 10px; padding: 2px 8px;
+                                }
+                            """)
+                            action_btn.setText("Load")
+                            action_btn.setStyleSheet("""
+                                QPushButton {
+                                    background-color: #1A2B1A; color: #4CAF50;
+                                    border: 1px solid #4CAF50; border-radius: 4px;
+                                    font-size: 10px; padding: 0 10px;
+                                }
+                                QPushButton:hover { background-color: #223322; }
+                            """)
+                    else:
+                        ok2, _ = smgr.load_skill(_name)
+                        if ok2:
+                            loaded_ref[0] = True
+                            badge_lbl.setText("● Loaded")
+                            badge_lbl.setStyleSheet("""
+                                QLabel {
+                                    background-color: #1A2B1A; color: #4CAF50;
+                                    border-radius: 4px; font-size: 10px; padding: 2px 8px;
+                                }
+                            """)
+                            action_btn.setText("Unload")
+                            action_btn.setStyleSheet("""
+                                QPushButton {
+                                    background-color: #3C1A1A; color: #C0392B;
+                                    border: 1px solid #C0392B; border-radius: 4px;
+                                    font-size: 10px; padding: 0 10px;
+                                }
+                                QPushButton:hover { background-color: #4A2020; }
+                            """)
+
+                action_btn.clicked.connect(_on_action_updated)
+            else:
+                # Show brief error feedback on badge
+                badge_lbl.setText(f"⚠ {msg[:30]}")
+                badge_lbl.setStyleSheet("""
+                    QLabel {
+                        background-color: #3C2A00; color: #FFC107;
+                        border-radius: 4px; font-size: 10px; padding: 2px 8px;
+                    }
+                """)
+
+        action_btn.clicked.connect(_on_action)
+        card_layout.addWidget(action_btn)
+
+        # Outer wrapper for spacing
+        outer = QWidget()
+        outer.setStyleSheet("background: transparent;")
+        outer_layout = QHBoxLayout(outer)
+        outer_layout.setContentsMargins(0, 2, 0, 2)
+        outer_layout.addWidget(card)
+
+        self.chat_layout.insertWidget(self.chat_layout.count() - 1, outer)
+        self._animate_message_in(outer, on_settled=lambda: self.scroll_to_widget(outer))
+
+
         """Copy text to clipboard"""
         clipboard = QApplication.clipboard()
         clipboard.setText(text)

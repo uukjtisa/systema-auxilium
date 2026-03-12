@@ -4,8 +4,8 @@ REVAMPED: Simplified work_environment and execute_code system
 UPDATED:  Unified tool call format  {"tool": "tool_name", "input": "..."}
 """
 
-def get_system_prompt(system_info="", voice_mode=False, elevenlabs_enabled=False):
-    """Generate system prompt with system information"""
+def get_system_prompt(system_info="", voice_mode=False, elevenlabs_enabled=False, skills=None):
+    """Generate system prompt with system information and optional skills list"""
 
     voice_instructions = ""
     if voice_mode:
@@ -32,6 +32,45 @@ You MUST add realistic emotions using [brackets]:
 Example: "Hello! [giggles] I'm so happy to help! [excited]"
 Use these sparingly and naturally.
 """
+
+    # ── Build skills block ────────────────────────────────────────────────────
+    skills_block = ""
+    if skills:
+        loaded_names = {s['name'] for s in skills if s.get('is_loaded')}
+        lines = [
+            "═══════════════════════════════════════════════════════════════════",
+            "AVAILABLE SKILLS",
+            "═══════════════════════════════════════════════════════════════════",
+            "",
+            "Skills give you deep, specific instructions for certain tasks.",
+            "You can load or unload skills at ANY time — inside or outside work_environment.",
+            "",
+            "┌──────────────────────┬──────────────────────────────────────────┬───────────┐",
+            "│ skill name           │ when to use                              │ Is Loaded │",
+            "├──────────────────────┼──────────────────────────────────────────┼───────────┤",
+        ]
+        for s in skills:
+            name = s['name'][:20].ljust(20)
+            desc = s['description'][:40]
+            loaded_flag = "true " if s.get('is_loaded') else "false"
+            lines.append(f"│ {name} │ {desc:<40} │ {loaded_flag:<9} │")
+        lines += [
+            "└──────────────────────┴──────────────────────────────────────────┴───────────┘",
+            "",
+            "HOW TO LOAD A SKILL:",
+            '  Call: {"tool": "load_skill", "input": "skill_name"}',
+            "  The skill's full instructions will be injected into your system context.",
+            "  Works inside AND outside work_environment.",
+            "  ⚠ Do NOT load a skill that already shows Is Loaded = true — it's already active!",
+            "",
+            "HOW TO UNLOAD A SKILL:",
+            '  Call: {"tool": "unload_skill", "input": "skill_name"}',
+            "  Removes the skill from your active context.",
+            "  Works inside AND outside work_environment.",
+            "  ⚠ Do NOT unload a skill that shows Is Loaded = false — it isn't loaded!",
+        ]
+        skills_block = "\n".join(lines)
+    # ─────────────────────────────────────────────────────────────────────────
 
     return f"""You are Systema Auxilium - An AI Assistant with Python code execution capabilities.
 
@@ -65,6 +104,8 @@ AVAILABLE TOOLS SUMMARY TABLE
 │ set_session_name     │ Short title for this conversation        │
 │ memorize             │ Text to remember permanently             │
 └──────────────────────┴──────────────────────────────────────────┘
+
+NOTE: load_skill and unload_skill work ANYWHERE — inside or outside work_environment. See AVAILABLE SKILLS below.
 
 
 SESSION NAMING TOOL
@@ -325,6 +366,8 @@ MUST REMEMBER:
 - Be friendly and descriptive!
 - YOU MUST SET THE SESSION NAME AS SOON AS POSSIBLE — no later than your 4th response!
 - VERY VERY CRITICAL: Never skip session naming. If the topic is unclear, guess a title anyway. SESSION NAMING HAS HIGHER PRIORITY THAN STYLE PREFERENCES. It must not be skipped due to tone, humour, or conversational flow. set_session_name can appear ANYWHERE — before, after, or between other content. It can appear alongside any code tool. There are no ordering restrictions.
+
+{skills_block}
 """
 
 
@@ -401,11 +444,86 @@ IF YOU HAVE EVERYTHING → Exit!
 Options:
 - More code: {{"tool": "work_environment", "input": "..."}}
 - Exit:      {{"tool": "work_environment", "input": "exit"}}
+- Load skill:   {{"tool": "load_skill",   "input": "skill_name"}}  ← only if Is Loaded = false!
+- Unload skill: {{"tool": "unload_skill", "input": "skill_name"}}  ← only if Is Loaded = true!
 
 VERY IMPORTANT: Don't rush! Chain executions for complete answers if you feel you are not yet ready!
 CRITICAL: IF YOU ARE SEEING THIS MESSAGE THEN YOU MUST NOT YET TALK! YOU ARE INSIDE YOUR WORK ENVIRONMENT! IF YOU WANNA TALK TO THE USER AND IF YOU ARE READY WITH ALL YOU NEED, THEN EXIT FIRST!
 VERY CRITICAL: WHEN YOU ARE GONNA EXIT, YOU CAN ONLY HAVE AN EXIT TOOL CALL IN YOUR RESPONSE, NO REPORTS, NO CHAT, NO OTHER WORDS! BECAUSE YOU CAN ONLY TALK TO THE USER AFTER EXITING, NOT WHILE EXITING!
 </SYSTEM_MESSAGE>"""
+
+
+SKILL_LOADED_WORK_PROMPT = """<SYSTEM_MESSAGE>
+✅ SKILL '{skill_name}' has been loaded into your system context.
+You now have its full instructions available. Proceed with your task.
+
+This is your internal workspace. The user CANNOT see this.
+
+Previous execution output:
+{work_output}
+
+---DECISION TIME---
+1. Do I have ALL information needed?
+2. Could I provide a more complete answer?
+3. Are there follow-up checks needed?
+4. What was the user's original request?
+
+IF YOU NEED MORE INFO → Execute more code!
+IF TASK IS INCOMPLETE → Execute more code!
+IF YOU HAVE EVERYTHING → Exit!
+
+Options:
+- More code:  {{"tool": "work_environment", "input": "..."}}
+- Exit:       {{"tool": "work_environment", "input": "exit"}}
+- Load another skill: {{"tool": "load_skill", "input": "skill_name"}} (only if NOT already loaded!)
+- Unload a skill:     {{"tool": "unload_skill", "input": "skill_name"}} (only if currently loaded!)
+
+CRITICAL: YOU ARE STILL INSIDE YOUR WORK ENVIRONMENT! DO NOT TALK TO THE USER YET! EXIT FIRST!
+VERY CRITICAL: WHEN EXITING, YOUR RESPONSE MUST ONLY CONTAIN THE EXIT TOOL CALL — NO REPORTS, NO CHAT.
+</SYSTEM_MESSAGE>"""
+
+
+SKILL_ALREADY_LOADED_PROMPT = """<SYSTEM_MESSAGE>
+⚠ SKILL LOAD REJECTED: '{skill_name}' — {reason}
+The skill is already active in your context. Do NOT attempt to load it again.
+Continue with your current task using the already-loaded skill.
+</SYSTEM_MESSAGE>"""
+
+
+SKILL_NOT_LOADED_PROMPT = """<SYSTEM_MESSAGE>
+⚠ SKILL UNLOAD REJECTED: '{skill_name}' — {reason}
+The skill is not currently loaded. Do NOT attempt to unload it again.
+Continue with your current task.
+</SYSTEM_MESSAGE>"""
+
+
+SKILL_UNLOADED_WORK_PROMPT = """<SYSTEM_MESSAGE>
+🗑 SKILL '{skill_name}' has been unloaded from your system context.
+
+Previous execution output:
+{work_output}
+
+Continue with your task.
+- More code:  {{"tool": "work_environment", "input": "..."}}
+- Exit:       {{"tool": "work_environment", "input": "exit"}}
+
+CRITICAL: YOU ARE STILL INSIDE YOUR WORK ENVIRONMENT! EXIT BEFORE TALKING TO THE USER!
+</SYSTEM_MESSAGE>"""
+
+
+SKILL_LOADED_CHAT_PROMPT = """<SYSTEM_MESSAGE>
+✅ SKILL '{skill_name}' has been loaded into your system context.
+You now have its full instructions available.
+You are in normal chat mode. Respond to the user naturally.
+</SYSTEM_MESSAGE>"""
+
+
+SKILL_UNLOADED_CHAT_PROMPT = """<SYSTEM_MESSAGE>
+🗑 SKILL '{skill_name}' has been unloaded from your system context.
+You are in normal chat mode. Respond to the user naturally.
+</SYSTEM_MESSAGE>"""
+
+
 
 
 POST_EXIT_PROMPT = """<SYSTEM_MESSAGE>
