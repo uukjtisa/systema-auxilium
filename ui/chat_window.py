@@ -11,11 +11,326 @@ Features:
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                              QTextEdit, QLineEdit, QPushButton, QLabel,
                              QFrame, QMenu, QScrollArea, QApplication,
-                             QGraphicsOpacityEffect)
+                             QGraphicsOpacityEffect, QSizePolicy)
 from PyQt6.QtCore import Qt, QTimer, QPoint, pyqtSignal, QRect, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup
 from PyQt6.QtGui import QAction, QCursor, QRegion
 from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QFont
-from ui.skills_panel import SkillsPanel
+from core.skill_manager import SkillManager as _SkillManagerType
+
+
+_SK_SURFACE  = "#242424"
+_SK_SURFACE2 = "#2A2A2A"
+_SK_BORDER   = "#2E2E2E"
+_SK_ACCENT   = "#5865F2"
+_SK_TEXT     = "#E8EAED"
+_SK_MUTED    = "#9AA0A6"
+
+
+class _SkillRow(QWidget):
+    """
+    One skill row: two-line layout so the name always word-wraps cleanly.
+      Line 1 — chevron + skill name (full width, word-wrap)
+      Line 2 — badge  +  Load/Unload btn  +  delete btn  (right-aligned)
+    """
+
+    def __init__(self, skill: dict, skill_manager, parent=None):
+        super().__init__(parent)
+        self._skill = skill
+        self._skill_manager = skill_manager
+        self._expanded = False
+        self._build_ui()
+
+    def _build_ui(self):
+        self.setStyleSheet(
+            f"QWidget {{ background-color: {_SK_SURFACE}; border-radius: 6px; }}")
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # ── clickable header ──────────────────────────────────────────────────
+        hdr = QWidget()
+        hdr.setStyleSheet(f"""
+            QWidget {{ background-color: {_SK_SURFACE}; border-radius: 6px; }}
+            QWidget:hover {{ background-color: #2C2C2C; }}
+        """)
+        hdr_vl = QVBoxLayout(hdr)
+        hdr_vl.setContentsMargins(8, 6, 8, 6)
+        hdr_vl.setSpacing(4)
+
+        # row 1: chevron + name
+        r1 = QWidget()
+        r1.setStyleSheet("background: transparent;")
+        r1l = QHBoxLayout(r1)
+        r1l.setContentsMargins(0, 0, 0, 0)
+        r1l.setSpacing(5)
+
+        self._chevron = QPushButton("▶")
+        self._chevron.setFixedSize(14, 14)
+        self._chevron.setStyleSheet(f"""
+            QPushButton {{ background: transparent; border: none;
+                          color: {_SK_MUTED}; font-size: 8px; padding: 0; }}
+            QPushButton:hover {{ color: {_SK_TEXT}; }}
+        """)
+        self._chevron.clicked.connect(self._toggle_expand)
+        r1l.addWidget(self._chevron)
+
+        display_name = self._skill['name'].replace('_', '_\u200b')
+        name_lbl = QLabel(display_name)
+        name_lbl.setWordWrap(True)
+        name_lbl.setMinimumWidth(0)
+        name_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        name_lbl.setStyleSheet(
+            f"color: {_SK_TEXT}; font-size: 11px; font-weight: 500; background: transparent;")
+        r1l.addWidget(name_lbl, stretch=1)
+        hdr_vl.addWidget(r1)
+
+        # row 2: badge + load-btn + del-btn  (right-aligned)
+        r2 = QWidget()
+        r2.setStyleSheet("background: transparent;")
+        r2l = QHBoxLayout(r2)
+        r2l.setContentsMargins(19, 0, 0, 0)   # 19 = chevron width + spacing
+        r2l.setSpacing(4)
+
+        is_loaded = self._skill.get('is_loaded', False)
+
+        self._badge = QLabel("● Loaded" if is_loaded else "○ Unloaded")
+        self._badge.setStyleSheet(self._badge_style(is_loaded))
+        r2l.addWidget(self._badge)
+
+        r2l.addStretch(1)
+
+        self._load_btn = QPushButton("Unload" if is_loaded else "Load")
+        self._load_btn.setFixedSize(52, 22)
+        self._load_btn.setStyleSheet(self._load_btn_style(is_loaded))
+        self._load_btn.clicked.connect(self._toggle_load)
+        r2l.addWidget(self._load_btn)
+
+        del_btn = QPushButton("🗑")
+        del_btn.setFixedSize(22, 22)
+        del_btn.setToolTip(f"Delete '{self._skill['name']}'")
+        del_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; border: none; font-size: 12px;
+                          color: {_SK_MUTED}; border-radius: 4px; }}
+            QPushButton:hover {{ background-color: #3C1A1A; color: #FF6B6B; }}
+        """)
+        del_btn.clicked.connect(self._delete)
+        r2l.addWidget(del_btn)
+
+        hdr_vl.addWidget(r2)
+        outer.addWidget(hdr)
+
+        # ── expandable detail ─────────────────────────────────────────────────
+        self._detail = QWidget()
+        self._detail.setStyleSheet(
+            f"background-color: {_SK_SURFACE};")
+        self._detail.hide()
+        dl = QVBoxLayout(self._detail)
+        dl.setContentsMargins(14, 2, 14, 8)
+        dl.setSpacing(3)
+
+        if self._skill.get('description'):
+            d = QLabel(self._skill['description'])
+            d.setWordWrap(True)
+            d.setMinimumWidth(0)
+            d.setStyleSheet(f"color: {_SK_MUTED}; font-size: 10px; background-color: {_SK_SURFACE};")
+            dl.addWidget(d)
+
+        if self._skill.get('files'):
+            fl = QLabel("\n".join(f"  📄 {f}" for f in self._skill['files'][:8]))
+            fl.setWordWrap(True)
+            fl.setMinimumWidth(0)
+            fl.setStyleSheet(
+                f"color: #5F6368; font-size: 9px; font-family: monospace; background-color: {_SK_SURFACE};")
+            dl.addWidget(fl)
+
+        outer.addWidget(self._detail)
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+
+    def _badge_style(self, loaded):
+        if loaded:
+            return ("QLabel { background-color: #1A2B1A; color: #4CAF50; "
+                    "border-radius: 4px; font-size: 9px; padding: 1px 5px; }")
+        return (f"QLabel {{ background-color: transparent; color: {_SK_MUTED}; "
+                "font-size: 9px; padding: 1px 3px; }")
+
+    def _load_btn_style(self, loaded):
+        if loaded:
+            return ("QPushButton { background-color: #3C1A1A; color: #C0392B; "
+                    "border: 1px solid #C0392B; border-radius: 4px; font-size: 9px; padding: 0; }"
+                    "QPushButton:hover { background-color: #4A2020; }")
+        return ("QPushButton { background-color: #1A2B1A; color: #4CAF50; "
+                "border: 1px solid #4CAF50; border-radius: 4px; font-size: 9px; padding: 0; }"
+                "QPushButton:hover { background-color: #223322; }")
+
+    def _toggle_expand(self):
+        self._expanded = not self._expanded
+        self._chevron.setText("▼" if self._expanded else "▶")
+        self._detail.setVisible(self._expanded)
+
+    def _toggle_load(self):
+        name = self._skill['name']
+        if self._skill_manager.is_loaded(name):
+            ok, _ = self._skill_manager.unload_skill(name)
+        else:
+            ok, _ = self._skill_manager.load_skill(name)
+        if ok:
+            new_state = not self._skill.get('is_loaded', False)
+            self._skill['is_loaded'] = new_state
+            self._badge.setText("● Loaded" if new_state else "○ Unloaded")
+            self._badge.setStyleSheet(self._badge_style(new_state))
+            self._load_btn.setText("Unload" if new_state else "Load")
+            self._load_btn.setStyleSheet(self._load_btn_style(new_state))
+
+    def _delete(self):
+        self._skill_manager.delete_skill(self._skill['name'])
+
+
+class SkillsSidebarSection(QWidget):
+    """Collapsible ⚡ Skills block — lives inside the sidebar layout."""
+
+    def __init__(self, skill_manager, parent=None):
+        super().__init__(parent)
+        self._skill_manager = skill_manager
+        self._expanded = False          # default collapsed at startup
+        self._build_ui()
+        skill_manager.skills_changed.connect(self.refresh)
+        skill_manager.loaded_skills_changed.connect(self.refresh)
+        self.refresh()
+
+    def _build_ui(self):
+        self.setStyleSheet("background: transparent;")
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(4)
+
+        # section header — click to expand/collapse
+        hdr = QWidget()
+        hdr.setStyleSheet("""
+            QWidget { background-color: transparent; border-radius: 4px; }
+            QWidget:hover { background-color: #222222; }
+        """)
+        hdr.setCursor(Qt.CursorShape.PointingHandCursor)
+        hl = QHBoxLayout(hdr)
+        hl.setContentsMargins(4, 6, 4, 6)
+        hl.setSpacing(6)
+
+        self._sec_chevron = QLabel("▶")   # starts collapsed
+        self._sec_chevron.setStyleSheet(
+            f"color: {_SK_MUTED}; font-size: 9px; background: transparent;")
+        hl.addWidget(self._sec_chevron)
+
+        sec_lbl = QLabel("⚡ Skills")
+        sec_lbl.setStyleSheet(
+            f"color: {_SK_TEXT}; font-size: 12px; font-weight: 600; background: transparent;")
+        hl.addWidget(sec_lbl, stretch=1)
+
+        self._count_lbl = QLabel("")
+        self._count_lbl.setStyleSheet(
+            f"color: {_SK_MUTED}; font-size: 9px; background: transparent;")
+        hl.addWidget(self._count_lbl)
+
+        hdr.mousePressEvent = lambda e: self._toggle_section()
+        root.addWidget(hdr)
+
+        # collapsible body — hidden by default
+        self._body = QWidget()
+        self._body.setStyleSheet("background: transparent;")
+        self._body.hide()      # starts hidden (collapsed)
+        bl = QVBoxLayout(self._body)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.setSpacing(4)
+
+        self._rows_widget = QWidget()
+        self._rows_widget.setStyleSheet("background: transparent;")
+        self._rows_layout = QVBoxLayout(self._rows_widget)
+        self._rows_layout.setContentsMargins(0, 0, 0, 0)
+        self._rows_layout.setSpacing(4)
+        bl.addWidget(self._rows_widget)
+
+        # new-skill input row
+        add_w = QWidget()
+        add_w.setStyleSheet("background: transparent;")
+        al = QHBoxLayout(add_w)
+        al.setContentsMargins(0, 2, 0, 0)
+        al.setSpacing(4)
+
+        self._name_input = QLineEdit()
+        self._name_input.setPlaceholderText("New skill name…")
+        self._name_input.setMinimumWidth(0)
+        self._name_input.setStyleSheet(f"""
+            QLineEdit {{ background-color: {_SK_SURFACE2}; border: 1px solid {_SK_BORDER};
+                        border-radius: 5px; color: {_SK_TEXT}; font-size: 10px; padding: 4px 7px; }}
+            QLineEdit:focus {{ border-color: {_SK_ACCENT}; }}
+        """)
+        self._name_input.returnPressed.connect(self._create_skill)
+        al.addWidget(self._name_input, stretch=1)
+
+        create_btn = QPushButton("＋")
+        create_btn.setFixedSize(26, 26)
+        create_btn.setStyleSheet(f"""
+            QPushButton {{ background-color: {_SK_ACCENT}; border: none; border-radius: 5px;
+                          color: white; font-size: 14px; }}
+            QPushButton:hover {{ background-color: #4752C4; }}
+        """)
+        create_btn.clicked.connect(self._create_skill)
+        al.addWidget(create_btn)
+        bl.addWidget(add_w)
+
+        from PyQt6.QtGui import QDesktopServices
+        from PyQt6.QtCore import QUrl
+        open_btn = QPushButton("📁  Open skills folder")
+        open_btn.setMinimumWidth(0)
+        open_btn.setStyleSheet(f"""
+            QPushButton {{ background-color: transparent; border: 1px dashed {_SK_BORDER};
+                          border-radius: 5px; color: {_SK_MUTED}; font-size: 10px;
+                          padding: 5px; text-align: left; }}
+            QPushButton:hover {{ border-color: #5F6368; color: {_SK_TEXT}; }}
+        """)
+        open_btn.clicked.connect(
+            lambda: QDesktopServices.openUrl(
+                QUrl.fromLocalFile(str(self._skill_manager.skills_dir))))
+        bl.addWidget(open_btn)
+
+        root.addWidget(self._body)
+
+    def _toggle_section(self):
+        self._expanded = not self._expanded
+        self._sec_chevron.setText("▼" if self._expanded else "▶")
+        self._body.setVisible(self._expanded)
+
+    def refresh(self):
+        while self._rows_layout.count():
+            item = self._rows_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        skills = self._skill_manager.get_skills()
+        loaded_count = sum(1 for s in skills if s.get('is_loaded'))
+        self._count_lbl.setText(f"{len(skills)} · {loaded_count} loaded")
+
+        if not skills:
+            empty = QLabel("No skills installed.\nCreate one below ↓")
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty.setStyleSheet(
+                f"color: {_SK_MUTED}; font-size: 10px; padding: 12px;")
+            self._rows_layout.addWidget(empty)
+        else:
+            for skill in skills:
+                self._rows_layout.addWidget(_SkillRow(skill, self._skill_manager))
+
+    def _create_skill(self):
+        name = self._name_input.text().strip()
+        if name:
+            self._skill_manager.create_skill_template(name)
+            self._name_input.clear()
+
+
+# Backwards-compat alias (used by controller.py skill_card messages)
+SkillsPanel = SkillsSidebarSection
+
+
 import re
 import markdown2
 import os
@@ -34,6 +349,9 @@ ANIM_WINDOW_FADE_IN_MS       = 340    # Chat window fade-in when shown (ms)
 
 # --- Sidebar ---
 ANIM_SIDEBAR_SLIDE_MS        = 360    # Sidebar slide in / out (ms)
+SIDEBAR_DEFAULT_W            = 240    # Default sidebar width (px)
+SIDEBAR_MIN_W                = 200    # Minimum sidebar width when dragging
+SIDEBAR_MAX_W                = 420    # Maximum sidebar width when dragging
 
 # --- Messages ---
 ANIM_MSG_IN_HEIGHT_MS        = 480    # Message pop-in: height expand (ms)
@@ -873,6 +1191,11 @@ class ChatWindow(QWidget):
         self.thinking_dots = 0
         self.thinking_label_shown = False
         self.sidebar_visible = False
+        # Sidebar resize state (drag handle on right edge)
+        self._sidebar_w = SIDEBAR_DEFAULT_W        # current width (persists across open/close)
+        self._sidebar_resize_active = False        # True while user is dragging
+        self._sidebar_resize_start_x = 0          # global X at drag start
+        self._sidebar_resize_start_w = 0          # sidebar width at drag start
 
         # ── Smooth scroll state (main chat) ───────────────────────────────
         self._scroll_anim = None
@@ -976,6 +1299,9 @@ class ChatWindow(QWidget):
 
         self.create_resize_handles()
 
+        # Warn about any already-loaded skills from previous session (delayed so chat renders first)
+        QTimer.singleShot(800, self.warn_loaded_skills_if_any)
+
     def load_config(self):
         try:
             if os.path.exists(self.config_file):
@@ -1015,7 +1341,7 @@ class ChatWindow(QWidget):
         # Slides in/out via QPropertyAnimation on geometry.
         # ═══════════════════════════════════════════════════════════════════════
         self.sidebar = QFrame(self.container)
-        self.sidebar.setFixedWidth(240)
+        self.sidebar.setFixedWidth(self._sidebar_w)
         self.sidebar.setStyleSheet("""
             QFrame {
                 background-color: #171717;
@@ -1025,13 +1351,45 @@ class ChatWindow(QWidget):
             }
         """)
         # Start the sidebar parked off-screen to the left (hidden)
-        self.sidebar.setGeometry(-240, 0, 240, 650)
+        self.sidebar.setGeometry(-self._sidebar_w, 0, self._sidebar_w, 650)
         self.sidebar.hide()
 
-        # Create main sidebar layout (contains scroll area)
-        sidebar_main_layout = QVBoxLayout(self.sidebar)
+        # Create main sidebar layout: scrollable content + right drag-handle
+        sidebar_main_layout = QHBoxLayout(self.sidebar)
         sidebar_main_layout.setContentsMargins(0, 0, 0, 0)
         sidebar_main_layout.setSpacing(0)
+
+        # Inner VBox for scroll area
+        sidebar_scroll_vbox = QWidget()
+        sidebar_scroll_vbox.setStyleSheet("background: transparent;")
+        sidebar_scroll_vbox_layout = QVBoxLayout(sidebar_scroll_vbox)
+        sidebar_scroll_vbox_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_scroll_vbox_layout.setSpacing(0)
+        sidebar_main_layout.addWidget(sidebar_scroll_vbox, stretch=1)
+
+        # ── Right-edge resize handle ──────────────────────────────────────────
+        self._sidebar_drag_handle = QFrame(self.sidebar)
+        self._sidebar_drag_handle.setFixedWidth(6)
+        self._sidebar_drag_handle.setStyleSheet("""
+            QFrame {
+                background-color: rgba(168, 199, 250, 0.12);
+                border-radius: 3px;
+            }
+            QFrame:hover {
+                background-color: rgba(168, 199, 250, 0.35);
+            }
+        """)
+        self._sidebar_drag_handle.setCursor(Qt.CursorShape.SizeHorCursor)
+        self._sidebar_drag_handle.setToolTip("Drag to resize sidebar")
+        # wire mouse events with distinct names to avoid clashing with code-block handles
+        self._sidebar_drag_handle.mousePressEvent   = self._sidebar_resize_press
+        self._sidebar_drag_handle.mouseMoveEvent    = self._sidebar_resize_move
+        self._sidebar_drag_handle.mouseReleaseEvent = self._sidebar_resize_release
+        sidebar_main_layout.addWidget(self._sidebar_drag_handle)
+
+        # All scroll/content setup goes into sidebar_scroll_vbox_layout
+        # (we replace sidebar_main_layout usages below)
+
 
         # ── Sidebar scroll area (saved as instance var for smooth scroll) ──
         self.sidebar_scroll = QScrollArea()
@@ -1264,37 +1622,58 @@ class ChatWindow(QWidget):
         separator.setStyleSheet("background-color: #2A2A2A; max-height: 1px; margin: 8px 0;")
         sidebar_layout.addWidget(separator)
 
-        # Skills info
-        mode_info = QLabel(
-            "<b>Skills:</b><br>"
-            "Click ⚡ in the header to<br>"
-            "open the Skills panel.<br>"
-            "Skills auto-load every 0.5 s."
-        )
-        mode_info.setWordWrap(True)
-        mode_info.setStyleSheet("""
-            QLabel {
-                color: #9AA0A6;
-                font-size: 10px;
-                padding: 8px;
-                background-color: #252525;
-                border-radius: 6px;
-                line-height: 1.4;
-            }
-        """)
-        sidebar_layout.addWidget(mode_info)
+        # ═══════════════════════════════════════════════════════════
+        # ⚡ SKILLS SECTION (integrated in sidebar)
+        # ═══════════════════════════════════════════════════════════
+        skill_manager = getattr(self.controller, 'skill_manager', None)
+        if skill_manager:
+            self._skills_section = SkillsSidebarSection(skill_manager)
+            sidebar_layout.addWidget(self._skills_section)
+        else:
+            no_skills_lbl = QLabel("Skills unavailable")
+            no_skills_lbl.setStyleSheet(
+                "color: #9AA0A6; font-size: 10px; padding: 8px;")
+            sidebar_layout.addWidget(no_skills_lbl)
 
         # ═══════════════════════════════════════════════════════════
         # SESSION HISTORY SECTION
         # ═══════════════════════════════════════════════════════════
 
-        # Header
-        session_header = QLabel("📁 Session History")
-        session_header.setStyleSheet("font-size: 12px; font-weight: 600; color: #9AA0A6; padding: 8px 4px; margin-top: 12px;")
-        sidebar_layout.addWidget(session_header)
+        # Clickable header (collapses list when ≥20 sessions)
+        session_section_hdr = QWidget()
+        session_section_hdr.setStyleSheet("""
+            QWidget { background-color: transparent; border-radius: 4px; }
+            QWidget:hover { background-color: #222222; }
+        """)
+        session_section_hdr.setCursor(Qt.CursorShape.PointingHandCursor)
+        ssh_layout = QHBoxLayout(session_section_hdr)
+        ssh_layout.setContentsMargins(4, 6, 4, 6)
+        ssh_layout.setSpacing(6)
+
+        self._session_chevron = QLabel("▼")
+        self._session_chevron.setStyleSheet(
+            "color: #9AA0A6; font-size: 9px; background: transparent;")
+        ssh_layout.addWidget(self._session_chevron)
+
+        session_header_lbl = QLabel("📁 Session History")
+        session_header_lbl.setStyleSheet(
+            "font-size: 12px; font-weight: 600; color: #9AA0A6; "
+            "background: transparent; margin-top: 4px;")
+        ssh_layout.addWidget(session_header_lbl, stretch=1)
+
+        self._session_count_lbl = QLabel("")
+        self._session_count_lbl.setStyleSheet(
+            "color: #9AA0A6; font-size: 9px; background: transparent;")
+        ssh_layout.addWidget(self._session_count_lbl)
+
+        self._session_list_expanded = True   # collapses automatically at ≥
+        self._session_list_auto_collapsed = False  # only auto-collapse once20
+        session_section_hdr.mousePressEvent = lambda e: self._toggle_session_list()
+        sidebar_layout.addWidget(session_section_hdr)
 
         # New Session Button
         new_session_btn = QPushButton("➕ New Session")
+        new_session_btn.setMinimumWidth(0)
         new_session_btn.setStyleSheet("""
             QPushButton {
                 background-color: #1A73E8;
@@ -1305,21 +1684,27 @@ class ChatWindow(QWidget):
                 color: white;
                 font-weight: 500;
             }
-            QPushButton:hover {
-                background-color: #1557B0;
-            }
+            QPushButton:hover { background-color: #1557B0; }
         """)
         new_session_btn.clicked.connect(lambda: self.controller.create_new_session())
         new_session_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         sidebar_layout.addWidget(new_session_btn)
 
-        # Session list container (scrollable)
+        # Session list container — wrapped in a collapsible body widget
+        self._session_list_body = QWidget()
+        self._session_list_body.setStyleSheet("background-color: transparent;")
+        slb_layout = QVBoxLayout(self._session_list_body)
+        slb_layout.setContentsMargins(0, 0, 0, 0)
+        slb_layout.setSpacing(0)
+
         session_list_container = QWidget()
         session_list_container.setStyleSheet("background-color: transparent;")
         self.session_list_layout = QVBoxLayout(session_list_container)
         self.session_list_layout.setContentsMargins(0, 0, 0, 0)
         self.session_list_layout.setSpacing(2)
-        sidebar_layout.addWidget(session_list_container)
+        slb_layout.addWidget(session_list_container)
+
+        sidebar_layout.addWidget(self._session_list_body)
 
         # Load initial sessions
         QTimer.singleShot(100, self.refresh_session_list)
@@ -1330,8 +1715,8 @@ class ChatWindow(QWidget):
         # Set the content widget to the scroll area
         self.sidebar_scroll.setWidget(sidebar_content)
 
-        # Add scroll area to main sidebar layout
-        sidebar_main_layout.addWidget(self.sidebar_scroll)
+        # Add scroll area to sidebar scroll vbox
+        sidebar_scroll_vbox_layout.addWidget(self.sidebar_scroll)
 
         # NOTE: sidebar is NOT added to main_layout — it is an overlay.
 
@@ -1407,37 +1792,8 @@ class ChatWindow(QWidget):
                 """)
         header_layout.addWidget(self.voice_status_label)
 
-        # Skills button — shows/hides the SkillsPanel overlay
-        skill_manager = getattr(self.controller, 'skill_manager', None)
-        self.skills_panel = SkillsPanel(skill_manager, parent=self) if skill_manager else None
-        if self.skills_panel:
-            self.skills_panel.hide()
-
-        if self.skills_panel:
-            skills_btn = QPushButton("⚡")
-            skills_btn.setFixedSize(32, 32)
-            skills_btn.setToolTip("Skills")
-            skills_btn.setStyleSheet("""
-                QPushButton {
-                    background: transparent;
-                    border: none;
-                    border-radius: 6px;
-                    font-size: 16px;
-                    color: #9AA0A6;
-                }
-                QPushButton:hover {
-                    background: #2A2A2A;
-                    color: #E8EAED;
-                }
-                QPushButton:checked {
-                    background: #2A2A2A;
-                    color: #5865F2;
-                }
-            """)
-            skills_btn.setCheckable(True)
-            skills_btn.clicked.connect(self._toggle_skills_panel)
-            header_layout.addWidget(skills_btn)
-            self._skills_btn = skills_btn
+        # Skills are now integrated in the sidebar — no header button needed.
+        self.skills_panel = None   # kept as attribute for any legacy references
 
         # ==========Window control buttons==========
 
@@ -1770,32 +2126,43 @@ class ChatWindow(QWidget):
         self.sidebar_visible = not self.sidebar_visible
         self._animate_sidebar(self.sidebar_visible)
 
-    def _toggle_skills_panel(self):
-        """Show or hide the SkillsPanel overlay on the right side."""
-        if not self.skills_panel:
+    # ── Sidebar right-edge resize ──────────────────────────────────────────────
+    # These are distinct from the code-block handles (handle_vertical_press etc.)
+
+    def _sidebar_resize_press(self, event):
+        """Start sidebar width drag."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._sidebar_resize_active = True
+            self._sidebar_resize_start_x = event.globalPosition().toPoint().x()
+            self._sidebar_resize_start_w = self._sidebar_w
+            event.accept()
+
+    def _sidebar_resize_move(self, event):
+        """Update sidebar width while dragging."""
+        if not self._sidebar_resize_active:
             return
-        if self.skills_panel.isVisible():
-            self.skills_panel.hide()
-            if hasattr(self, '_skills_btn'):
-                self._skills_btn.setChecked(False)
-        else:
-            # Position the panel flush with the right edge of this window
-            panel_w = 300
-            panel_h = self.height() - 50  # below header
-            self.skills_panel.setParent(self)
-            self.skills_panel.setGeometry(self.width() - panel_w, 50, panel_w, panel_h)
-            self.skills_panel.raise_()
-            self.skills_panel.show()
-            if hasattr(self, '_skills_btn'):
-                self._skills_btn.setChecked(True)
+        dx = event.globalPosition().toPoint().x() - self._sidebar_resize_start_x
+        new_w = max(SIDEBAR_MIN_W, min(SIDEBAR_MAX_W, self._sidebar_resize_start_w + dx))
+        if new_w != self._sidebar_w:
+            self._sidebar_w = new_w
+            container_h = self.container.height()
+            self.sidebar.setFixedWidth(new_w)
+            self.sidebar.setGeometry(0, 0, new_w, container_h)
+        event.accept()
+
+    def _sidebar_resize_release(self, event):
+        """Finish sidebar width drag."""
+        self._sidebar_resize_active = False
+        event.accept()
 
     def resizeEvent(self, event):
-        """Keep SkillsPanel anchored to the right on resize."""
+        """Keep sidebar height in sync with container on window resize."""
         super().resizeEvent(event)
-        if self.skills_panel and self.skills_panel.isVisible():
-            panel_w = 300
-            panel_h = self.height() - 50
-            self.skills_panel.setGeometry(self.width() - panel_w, 50, panel_w, panel_h)
+        # sidebar height tracks container
+        if self.sidebar_visible and self.sidebar.isVisible():
+            container_h = self.container.height()
+            self.sidebar.setGeometry(0, 0, self._sidebar_w, container_h)
+
 
     def _animate_sidebar(self, show: bool):
         """Slide the sidebar in (show=True) or out (show=False)."""
@@ -1804,9 +2171,10 @@ class ChatWindow(QWidget):
                 self._sidebar_anim.stop()
 
         container_h = self.container.height()
-        sidebar_w = 240
+        sidebar_w = self._sidebar_w
 
         if show:
+            self.sidebar.setFixedWidth(sidebar_w)
             self.sidebar.setGeometry(-sidebar_w, 0, sidebar_w, container_h)
             self.sidebar.show()
             self.sidebar.raise_()
@@ -2395,8 +2763,16 @@ class ChatWindow(QWidget):
         cleaned = re.sub(r'\n\s*\n\s*\n+', '\n\n', cleaned)
         return cleaned.strip()
 
+    def _toggle_session_list(self):
+        """Toggle session list collapsed/expanded."""
+        if not hasattr(self, '_session_list_body'):
+            return
+        self._session_list_expanded = not self._session_list_expanded
+        self._session_chevron.setText("▼" if self._session_list_expanded else "▶")
+        self._session_list_body.setVisible(self._session_list_expanded)
+
     def refresh_session_list(self):
-        """Refresh the session list in sidebar"""
+        """Refresh the session list in sidebar."""
         if not hasattr(self, 'session_list_layout'):
             return
 
@@ -2406,6 +2782,19 @@ class ChatWindow(QWidget):
                 item.widget().deleteLater()
 
         sessions = self.controller.get_session_list()
+        count = len(sessions)
+
+        # Update count label
+        if hasattr(self, '_session_count_lbl'):
+            self._session_count_lbl.setText(str(count) if count else "")
+
+        # Auto-collapse when ≥20 sessions (only on the first refresh that crosses the threshold)
+        if hasattr(self, '_session_list_body') and hasattr(self, '_session_list_expanded'):
+            if count >= 20 and self._session_list_expanded and not self._session_list_auto_collapsed:
+                self._session_list_auto_collapsed = True
+                self._session_list_expanded = False
+                self._session_chevron.setText("▶")
+                self._session_list_body.setVisible(False)
 
         for session in sessions:
             session_item = self._create_session_item(
@@ -2417,6 +2806,7 @@ class ChatWindow(QWidget):
             self.session_list_layout.addWidget(session_item)
 
         self.session_list_layout.addStretch()
+
 
     def _create_session_item(self, session_id, session_name, creation_date, is_active=False):
         """Create a session list item widget"""
@@ -3089,12 +3479,40 @@ class ChatWindow(QWidget):
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, outer)
         self._animate_message_in(outer, on_settled=lambda: self.scroll_to_widget(outer))
 
-
+    def copy_to_clipboard(self, text):
         """Copy text to clipboard"""
         clipboard = QApplication.clipboard()
         clipboard.setText(text)
         self.status_label.setText("✓ Copied to clipboard")
         QTimer.singleShot(ANIM_STATUS_CLEAR_MS, lambda: self.status_label.setText(""))
+
+    def warn_loaded_skills_if_any(self):
+        """
+        If any skills are currently loaded, emit a light system warning message
+        in the chat so the user knows context window is being used.
+        Called on startup and on new-session creation.
+        """
+        skill_manager = None
+        if hasattr(self, 'controller') and self.controller:
+            skill_manager = getattr(self.controller.ai, 'skill_manager', None)
+        if not skill_manager:
+            return
+        loaded = skill_manager.get_loaded_skills()
+        if not loaded:
+            return
+        names = list(loaded.keys())
+        if len(names) == 1:
+            label = f"**{names[0]}**"
+        else:
+            label = ", ".join(f"**{n}**" for n in names)
+        msg = (
+            f"⚡ Skill{'s' if len(names) > 1 else ''} {label} "
+            f"{'are' if len(names) > 1 else 'is'} still loaded from a previous session. "
+            f"This uses extra LLM context window space on every message. "
+            f"Unload in the sidebar under ⚡ Skills, or tell Systema Auxilium to unload "
+            f"{'them' if len(names) > 1 else 'it'}."
+        )
+        self.add_system_message(msg)
 
     def scroll_to_bottom(self):
         """Legacy helper — scrolls to absolute bottom (used by voice/thinking flows)."""
