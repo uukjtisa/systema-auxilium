@@ -189,7 +189,7 @@ def main():
 
     print(
         "======================CAUTION======================\n\n"
-        "This AI can execute system-level actions if ran with "
+        "This Agent can execute system-level actions if ran with "
         "sufficient permissions.\nUse caution when issuing prompts.\n"
         "You are responsible for the actions taken.\n\n"
         "======================CAUTION======================"
