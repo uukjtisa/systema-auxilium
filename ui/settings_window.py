@@ -1069,6 +1069,78 @@ class SettingsWindow(QWidget):
         scroll_layout.addWidget(memory_group)
         # ─────────────────────────────────────────────────────────────────────
 
+        # ── Glass Background ──────────────────────────────────────────────────
+        glass_group = QGroupBox("🪟 Chat Glass Background")
+        glass_group.setStyleSheet("""
+            QGroupBox {
+                color: #E8EAED;
+                font-weight: 600;
+                border: 1px solid #3C3C3C;
+                border-radius: 8px;
+                padding-top: 16px;
+                margin-top: 8px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 4px;
+            }
+        """)
+        glass_layout = QVBoxLayout()
+        glass_layout.setSpacing(10)
+
+        glass_info = QLabel(
+            "Enable a semi-transparent glass effect on the chat messages area.\n"
+            "This lets your desktop wallpaper show through the background."
+        )
+        glass_info.setWordWrap(True)
+        glass_info.setStyleSheet("color: #9AA0A6; font-size: 11px; padding: 4px 0;")
+        glass_layout.addWidget(glass_info)
+
+        self.glass_enabled_checkbox = QCheckBox("Enable glass background")
+        self.glass_enabled_checkbox.setStyleSheet("""
+            QCheckBox { color: #E8EAED; font-size: 12px; }
+            QCheckBox::indicator { width: 16px; height: 16px; }
+        """)
+        glass_layout.addWidget(self.glass_enabled_checkbox)
+
+        from PyQt6.QtWidgets import QSlider
+        from PyQt6.QtCore import Qt as _Qt
+        opacity_row = QHBoxLayout()
+        opacity_label = QLabel("Opacity:")
+        opacity_label.setStyleSheet("color: #9AA0A6; font-size: 11px;")
+        opacity_row.addWidget(opacity_label)
+
+        self.glass_opacity_slider = QSlider(_Qt.Orientation.Horizontal)
+        self.glass_opacity_slider.setMinimum(10)
+        self.glass_opacity_slider.setMaximum(98)
+        self.glass_opacity_slider.setValue(75)
+        self.glass_opacity_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                height: 4px; background: #3C3C3C; border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                background: #1A73E8; border: none;
+                width: 14px; height: 14px; margin: -5px 0; border-radius: 7px;
+            }
+            QSlider::sub-page:horizontal { background: #1A73E8; border-radius: 2px; }
+        """)
+        opacity_row.addWidget(self.glass_opacity_slider, stretch=1)
+
+        self.glass_opacity_value_label = QLabel("75%")
+        self.glass_opacity_value_label.setFixedWidth(36)
+        self.glass_opacity_value_label.setStyleSheet("color: #9AA0A6; font-size: 11px;")
+        opacity_row.addWidget(self.glass_opacity_value_label)
+        glass_layout.addLayout(opacity_row)
+
+        self.glass_opacity_slider.valueChanged.connect(
+            lambda v: self.glass_opacity_value_label.setText(f"{v}%")
+        )
+
+        glass_group.setLayout(glass_layout)
+        scroll_layout.addWidget(glass_group)
+        # ─────────────────────────────────────────────────────────────────────
+
         scroll_layout.addStretch()
 
         scroll.setWidget(scroll_widget)
@@ -1429,6 +1501,13 @@ class SettingsWindow(QWidget):
                 self.memory_max_combo.setCurrentIndex(i)
                 break
 
+        # Load glass background settings
+        glass_enabled = self.controller.settings.get('glass_background_enabled', False)
+        self.glass_enabled_checkbox.setChecked(glass_enabled)
+        glass_opacity = self.controller.settings.get('glass_background_opacity', 0.75)
+        self.glass_opacity_slider.setValue(int(glass_opacity * 100))
+        self.glass_opacity_value_label.setText(f"{int(glass_opacity * 100)}%")
+
         # Load models
         models = self.controller.get_puter_tts_models()
         self.puter_tts_model_combo.clear()
@@ -1583,6 +1662,21 @@ class SettingsWindow(QWidget):
         self.controller.settings['memory_enabled'] = self.memory_enabled_checkbox.isChecked()
         self.controller.settings['memory_threshold'] = self.memory_threshold_combo.currentData()
         self.controller.settings['memory_max_results'] = self.memory_max_combo.currentData()
+
+        # Save glass background settings
+        glass_enabled = self.glass_enabled_checkbox.isChecked()
+        glass_opacity = self.glass_opacity_slider.value() / 100.0
+        self.controller.settings['glass_background_enabled'] = glass_enabled
+        self.controller.settings['glass_background_opacity'] = glass_opacity
+
+        # Apply glass background to chat window immediately
+        try:
+            if hasattr(self.controller, 'ui') and self.controller.ui:
+                chat_win = getattr(self.controller.ui, 'chat_window', None)
+                if chat_win and hasattr(chat_win, 'apply_glass_background'):
+                    chat_win.apply_glass_background(glass_enabled, glass_opacity)
+        except Exception as _ge:
+            pass
 
         # Save VAD settings
         webrtc_enabled = self.webrtc_vad_checkbox.isChecked()

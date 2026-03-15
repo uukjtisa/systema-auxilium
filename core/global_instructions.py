@@ -38,9 +38,9 @@ Use these sparingly and naturally.
     if skills:
         loaded_names = {s['name'] for s in skills if s.get('is_loaded')}
         lines = [
-            "═══════════════════════════════════════════════════════════════════",
+            "",
+            "",
             "AVAILABLE SKILLS",
-            "═══════════════════════════════════════════════════════════════════",
             "",
             "Skills give you deep, specific instructions for certain tasks.",
             "You can load or unload skills at ANY time — inside or outside work_environment.",
@@ -72,16 +72,59 @@ Use these sparingly and naturally.
         skills_block = "\n".join(lines)
     # ─────────────────────────────────────────────────────────────────────────
 
+    # Only inject skill path rule when at least one skill is loaded
+    from pathlib import Path as _P
+    _any_loaded = skills and any(s.get('is_loaded') for s in skills)
+    if _any_loaded:
+        _app  = str(_P(__file__).resolve().parent.parent)
+        _skls = str(_P(__file__).resolve().parent.parent / "skills")
+        _skill_path_rule = (
+            "╔═══════════════════════════════════════════════════════════════════╗\n"
+            "║          SKILL SCRIPTS — FULL PATH RULE (NON-NEGOTIABLE)          ║\n"
+            "╚═══════════════════════════════════════════════════════════════════╝\n"
+            "\n"
+            "Your app root and skills directory are the following:\n"
+            f"\n  APP_ROOT   = {_app}\n"
+            f"  SKILLS_DIR = {_skls}\n"
+            "\n"
+            f"Skill scripts live at:\n  {_skls}\\<skill-name>\\scripts\\<script.py>\n"
+            "\n"
+            "⚠ CRITICAL — WHEN EXEC'ING SKILL SCRIPTS YOU MUST ALWAYS:\n"
+            "\n"
+            "  1. Use the FULL ABSOLUTE PATH — never relative paths\n"
+            "  2. Build from SKILLS_DIR shown above\n"
+            '  3. Use raw strings r"..." or double-backslashes on Windows paths\n'
+            "\n"
+            "Reason: Most skills only show relative path examples. Always use\n"
+            "the full path instead to avoid FileNotFoundError.\n"
+            "\n"
+            "✅ CORRECT:\n"
+            f'  exec(open(rf"{_skls}\\\\data-viz\\\\scripts\\\\setup.py").read())\n'
+            f'  exec(open(rf"{_skls}\\\\data-viz\\\\scripts\\\\chart.py").read())\n'
+            "\n"
+            "❌ WRONG — WILL BREAK:\n"
+            '  exec(open("scripts/setup.py").read())\n'
+            '  exec(open("chart.py").read())\n'
+            '  exec(open("data-viz/scripts/chart.py").read())\n'
+            "\n"
+            "THIS RULE APPLIES TO EVERY SKILL, EVERY SCRIPT, EVERY TIME. NO EXCEPTIONS.\n"
+            "RELATIVE PATHS FOR SKILL SCRIPTS WILL ALWAYS FAIL. USE FULL PATHS."
+        )
+    else:
+        _skill_path_rule = ""
+
     return f"""You are Systema Auxilium - An AI Assistant with Python code execution capabilities.
 
 {system_info}
 
 
+{_skill_path_rule}
+
+
 {voice_instructions}
 
-═══════════════════════════════════════════════════════════
+
 TOOL CALL FORMAT  (CRITICAL — READ CAREFULLY)
-═══════════════════════════════════════════════════════════
 
 ALL tool calls share the SAME unified JSON structure:
 

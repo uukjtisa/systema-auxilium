@@ -1623,6 +1623,32 @@ class ChatWindow(QWidget):
         sidebar_layout.addWidget(separator)
 
         # ═══════════════════════════════════════════════════════════
+        # 🧠 MEMORY BUTTON  (above skills)
+        # ═══════════════════════════════════════════════════════════
+        memory_btn = QPushButton("🧠  Manage Memories")
+        memory_btn.setMinimumWidth(0)
+        memory_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: 1px solid #2E2E2E;
+                border-radius: 6px;
+                color: #9AA0A6;
+                font-size: 11px;
+                font-weight: 500;
+                padding: 7px 10px;
+                text-align: left;
+            }
+            QPushButton:hover {
+                background-color: #252525;
+                border-color: #555555;
+                color: #E8EAED;
+            }
+        """)
+        memory_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        memory_btn.clicked.connect(self._open_memory_window)
+        sidebar_layout.addWidget(memory_btn)
+
+        # ═══════════════════════════════════════════════════════════
         # ⚡ SKILLS SECTION (integrated in sidebar)
         # ═══════════════════════════════════════════════════════════
         skill_manager = getattr(self.controller, 'skill_manager', None)
@@ -1728,6 +1754,7 @@ class ChatWindow(QWidget):
 
         # Header bar
         header_bar = QFrame()
+        self.header_bar = header_bar          # stored for glass background toggle
         header_bar.setFixedHeight(50)
         header_bar.mousePressEvent = self.header_mouse_press
         header_bar.mouseMoveEvent = self.header_mouse_move
@@ -1889,15 +1916,17 @@ class ChatWindow(QWidget):
 
         # Install event filter on the viewport for smooth inertia scrolling (main chat)
         scroll_area.viewport().installEventFilter(self)
-
-        # Status label
+        # Status label (thinking indicator)
         self.status_label = QLabel("")
+        self.status_label.setObjectName("statusLabel")
         self.status_label.setStyleSheet("""
-            QLabel {
+            QLabel#statusLabel {
                 color: #9AA0A6;
                 font-style: italic;
                 font-size: 11px;
-                padding: 6px 16px;
+                padding: 5px 14px;
+                background-color: #1A1A1A;
+                border-top: 1px solid #2A2A2A;
             }
         """)
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1905,187 +1934,209 @@ class ChatWindow(QWidget):
 
         # Input area
         input_container = QFrame()
+        input_container.setObjectName("inputContainer")
         input_container.setStyleSheet("""
-            QFrame {
-                background-color: #1F1F1F;
-                border-top: 1px solid #2A2A2A;
-                padding: 12px 16px;
+            QFrame#inputContainer {
+                background-color: transparent;
+                border-top: none;
             }
         """)
 
         input_layout = QVBoxLayout(input_container)
-        input_layout.setContentsMargins(0, 0, 0, 0)
-        input_layout.setSpacing(8)
+        input_layout.setContentsMargins(14, 8, 14, 12)
+        input_layout.setSpacing(0)
 
-        # Mode selector and input combined
+        # ── Pill-shaped input card ────────────────────────────────────────────
         combined_container = QFrame()
+        combined_container.setObjectName("inputCard")
         combined_container.setStyleSheet("""
-            QFrame {
-                background-color: #1F1F1F;
-                border: 1px solid #3C3C3C;
-                border-radius: 12px;
+            QFrame#inputCard {
+                background-color: #262626;
+                border: 1px solid #383838;
+                border-radius: 18px;
             }
         """)
 
-        combined_layout = QHBoxLayout(combined_container)
-        combined_layout.setContentsMargins(12, 4, 12, 4)
-        combined_layout.setSpacing(8)
-        combined_layout.setSizeConstraint(QHBoxLayout.SizeConstraint.SetMinimumSize)
+        combined_layout = QVBoxLayout(combined_container)
+        combined_layout.setContentsMargins(0, 0, 0, 0)
+        combined_layout.setSpacing(0)
+        combined_layout.setSizeConstraint(QVBoxLayout.SizeConstraint.SetMinimumSize)
 
-        # File browse button
-        browse_btn = QPushButton("📁")
-        browse_btn.setFixedSize(32, 32)
-        browse_btn.setStyleSheet("""
-                QPushButton {
-                    background: transparent;
-                    border: 2px solid #5F5F5F;
-                    border-radius: 16px;
-                    font-size: 14px;
-                }
-                QPushButton:hover {
-                    background: #2A2A2A;
-                    border-color: #7F7F7F;
-                }
-            """)
-        browse_btn.clicked.connect(self.browse_for_file)
-        browse_btn.setToolTip("Browse for files")
-        combined_layout.addWidget(browse_btn)
+        # ── Text input area ───────────────────────────────────────────────────
+        text_row = QWidget()
+        text_row.setObjectName("inputTextRow")
+        text_row.setStyleSheet("QWidget#inputTextRow { background: transparent; }")
+        text_row_layout = QHBoxLayout(text_row)
+        text_row_layout.setContentsMargins(16, 10, 16, 4)
+        text_row_layout.setSpacing(0)
+        text_row_layout.setSizeConstraint(QHBoxLayout.SizeConstraint.SetMinimumSize)
 
-        # Mode dropdown (ChatGPT-style)
-        self.mode_dropdown = QPushButton("💬")
-        self.mode_dropdown.setFixedSize(32, 32)
-        self.mode_dropdown.setStyleSheet("""
-            QPushButton {
-                background-color: transparent;
-                border: none;
-                border-radius: 6px;
-                font-size: 16px;
-            }
-            QPushButton:hover {
-                background-color: #3C3C3C;
-            }
-        """)
-        self.mode_dropdown.clicked.connect(self.show_mode_menu)
-        combined_layout.addWidget(self.mode_dropdown)
-
-        # Text input
         self.input_field = ResizableInput()
         self.input_field.text_input.setStyleSheet("""
             QTextEdit {
-                background-color: #1F1F1F;
+                background-color: transparent;
                 border: none;
                 color: #E8EAED;
                 font-size: 13px;
-                font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-                padding: 8px 4px;
+                font-family: 'Segoe UI', -apple-system, system-ui, sans-serif;
+                padding: 2px 0;
                 line-height: 1.6;
             }
-            QTextEdit:focus {
-                background-color: #1F1F1F;
+            QTextEdit:focus { background-color: transparent; }
+        """)
+        self.input_field.resize_handle.setStyleSheet("""
+            QLabel {
+                background-color: transparent;
+                color: #3A3A3A;
+                font-size: 6px;
+                letter-spacing: 2px;
+            }
+            QLabel:hover {
+                color: #6A6A6A;
+                background-color: rgba(255,255,255,0.05);
+                border-radius: 2px;
             }
         """)
         self.input_field.enterPressed.connect(self.send_message)
-        combined_layout.addWidget(self.input_field, 1)
+        text_row_layout.addWidget(self.input_field, 1)
+        combined_layout.addWidget(text_row)
 
         # Install inertia scroll on the input field's viewport
         self.input_field.text_input.viewport().installEventFilter(self)
 
-        # NEW: Voice button inside message box
-        self.voice_btn_inline = QPushButton("🎤")
-        self.voice_btn_inline.setFixedSize(32, 32)
-        self.voice_btn_inline.setCheckable(True)
-        self.voice_btn_inline.setStyleSheet("""
+        # ── Bottom action row: [attach][mode]  ·····  [voice][interrupt][send] ──
+        bottom_row = QWidget()
+        bottom_row.setObjectName("inputBottomRow")
+        bottom_row.setStyleSheet("QWidget#inputBottomRow { background: transparent; }")
+        bottom_row_layout = QHBoxLayout(bottom_row)
+        bottom_row_layout.setContentsMargins(10, 0, 10, 8)
+        bottom_row_layout.setSpacing(4)
+
+        # ── LEFT: attach + mode ───────────────────────────────────────────────
+        browse_btn = QPushButton("📎")
+        browse_btn.setFixedSize(30, 30)
+        browse_btn.setToolTip("Attach file")
+        browse_btn.setStyleSheet("""
             QPushButton {
-                background: transparent;
-                border: 2px solid #5F5F5F;
-                border-radius: 16px;
-                font-size: 16px;
-                color: #9AA0A6;
+                background: rgba(255,255,255,0.04);
+                border: 1px solid rgba(255,255,255,0.08);
+                border-radius: 8px;
+                font-size: 13px;
+                color: #6E7280;
             }
             QPushButton:hover {
-                background: #2A2A2A;
-                border-color: #7F7F7F;
-                color: #E8EAED;
+                background: rgba(255,255,255,0.1);
+                border-color: rgba(255,255,255,0.2);
+                color: #9AA0A6;
+            }
+        """)
+        browse_btn.clicked.connect(self.browse_for_file)
+        bottom_row_layout.addWidget(browse_btn)
+
+        self.mode_dropdown = QPushButton("💬")
+        self.mode_dropdown.setFixedSize(30, 30)
+        self.mode_dropdown.setToolTip("Set execution mode")
+        self.mode_dropdown.setStyleSheet("""
+            QPushButton {
+                background: rgba(255,255,255,0.04);
+                border: 1px solid rgba(255,255,255,0.08);
+                border-radius: 8px;
+                font-size: 13px;
+                color: #6E7280;
+            }
+            QPushButton:hover {
+                background: rgba(255,255,255,0.1);
+                border-color: rgba(255,255,255,0.2);
+                color: #9AA0A6;
+            }
+        """)
+        self.mode_dropdown.clicked.connect(self.show_mode_menu)
+        bottom_row_layout.addWidget(self.mode_dropdown)
+
+        bottom_row_layout.addStretch()
+
+        # ── RIGHT: voice + interrupt + send ──────────────────────────────────
+        self.voice_btn_inline = QPushButton("🎤")
+        self.voice_btn_inline.setFixedSize(30, 30)
+        self.voice_btn_inline.setCheckable(True)
+        self.voice_btn_inline.setToolTip("Toggle voice mode")
+        self.voice_btn_inline.setStyleSheet("""
+            QPushButton {
+                background: rgba(255,255,255,0.04);
+                border: 1px solid rgba(255,255,255,0.08);
+                border-radius: 8px;
+                font-size: 13px;
+                color: #6E7280;
+            }
+            QPushButton:hover {
+                background: rgba(255,255,255,0.1);
+                border-color: rgba(255,255,255,0.2);
+                color: #9AA0A6;
             }
             QPushButton:checked {
-                background: #34A853;
-                border-color: #34A853;
-                color: white;
+                background: rgba(52,168,83,0.22);
+                border-color: rgba(52,168,83,0.5);
+                color: #4CAF50;
             }
         """)
         self.voice_btn_inline.clicked.connect(self.toggle_voice)
-        combined_layout.addWidget(self.voice_btn_inline)
+        bottom_row_layout.addWidget(self.voice_btn_inline)
 
-        # NEW: Voice interrupt button (only shown during TTS in manual mode)
         self.voice_interrupt_btn = QPushButton("🔇")
-        self.voice_interrupt_btn.setFixedSize(32, 32)
+        self.voice_interrupt_btn.setFixedSize(30, 30)
         self.voice_interrupt_btn.setStyleSheet("""
             QPushButton {
-                background: #EA4335;
-                border: none;
-                border-radius: 16px;
-                font-size: 16px;
-                color: white;
+                background: rgba(234,67,53,0.18);
+                border: 1px solid rgba(234,67,53,0.45);
+                border-radius: 8px;
+                font-size: 13px;
+                color: #F07070;
             }
-            QPushButton:hover {
-                background: #C5372C;
-            }
+            QPushButton:hover { background: rgba(234,67,53,0.3); }
         """)
         self.voice_interrupt_btn.clicked.connect(self.interrupt_voice)
-        self.voice_interrupt_btn.hide()  # Hidden by default
-        combined_layout.addWidget(self.voice_interrupt_btn)
+        self.voice_interrupt_btn.hide()
+        bottom_row_layout.addWidget(self.voice_interrupt_btn)
 
-        # Interrupt response button
         self.interrupt_btn = QPushButton("⏹")
-        self.interrupt_btn.setFixedSize(32, 32)
+        self.interrupt_btn.setFixedSize(30, 30)
         self.interrupt_btn.setStyleSheet("""
             QPushButton {
-                background-color: #EA4335;
-                border: none;
-                border-radius: 16px;
-                font-size: 16px;
-                color: white;
+                background: rgba(234,67,53,0.18);
+                border: 1px solid rgba(234,67,53,0.45);
+                border-radius: 8px;
+                font-size: 14px;
+                color: #F07070;
                 font-weight: bold;
             }
-            QPushButton:hover {
-                background-color: #C5372C;
-            }
-            QPushButton:pressed {
-                background-color: #A62C23;
-            }
+            QPushButton:hover { background: rgba(234,67,53,0.3); }
         """)
         self.interrupt_btn.clicked.connect(self.interrupt_response)
-        self.interrupt_btn.hide()  # Hidden by default
-        combined_layout.addWidget(self.interrupt_btn)
+        self.interrupt_btn.hide()
+        bottom_row_layout.addWidget(self.interrupt_btn)
 
-        # Send button
         self.send_btn = QPushButton("↑")
-        self.send_btn.setFixedSize(32, 32)
+        self.send_btn.setFixedSize(30, 30)
         self.send_btn.setStyleSheet("""
             QPushButton {
                 background-color: #1A73E8;
                 border: none;
-                border-radius: 16px;
+                border-radius: 8px;
                 font-size: 16px;
                 color: white;
                 font-weight: bold;
             }
-            QPushButton:hover {
-                background-color: #1557B0;
-            }
-            QPushButton:pressed {
-                background-color: #103F7C;
-            }
-            QPushButton:disabled {
-                background-color: #3C3C3C;
-                color: #5F5F5F;
-            }
+            QPushButton:hover { background-color: #1557B0; }
+            QPushButton:pressed { background-color: #103F7C; }
+            QPushButton:disabled { background-color: #3C3C3C; color: #5F5F5F; }
         """)
         self.send_btn.clicked.connect(self.send_message)
-        combined_layout.addWidget(self.send_btn)
+        bottom_row_layout.addWidget(self.send_btn)
 
+        combined_layout.addWidget(bottom_row)
         input_layout.addWidget(combined_container)
 
+        self.input_container = input_container  # stored for glass background toggle
         chat_layout.addWidget(input_container)
 
         main_layout.addWidget(chat_container)
@@ -2098,6 +2149,9 @@ class ChatWindow(QWidget):
 
         # Notify if admin priveleges are available
         self.check_admin_mode()
+
+        # Apply glass background from saved settings (deferred so widgets are ready)
+        QTimer.singleShot(200, self._apply_glass_from_settings)
 
         # Welcome message
         self.add_system_message(
@@ -2937,14 +2991,14 @@ class ChatWindow(QWidget):
         text_label.setWordWrap(True)
         text_label.setOpenExternalLinks(True)
         text_label.setStyleSheet("""
-                    QLabel {
-                        color: #E8EAED;
-                        font-size: 13px;
-                        line-height: 1.5;
-                        background: transparent;
-                        border: none;
-                    }
-                """)
+            QLabel {
+                color: #E8EAED;
+                font-size: 13px;
+                line-height: 1.5;
+                background: transparent;
+                border: none;
+            }
+        """)
         text_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse |
             Qt.TextInteractionFlag.LinksAccessibleByMouse
@@ -4451,6 +4505,170 @@ class ChatWindow(QWidget):
                 return
 
         super().keyPressEvent(event)
+
+    def apply_glass_background(self, enabled: bool, opacity: float = 0.75):
+        """Apply or remove the glass (frosted-translucent) theme.
+
+        Glass mode zones:
+          • Main container       — fully transparent (desktop shows through)
+          • Chat messages area   — semi-transparent dark backdrop (opacity from slider)
+          • Scroll area          — transparent
+          • Header bar           — semi-opaque dark grey frosted panel
+          • Status/thinking bar  — semi-opaque dark grey so text always readable
+          • Input container      — semi-opaque dark grey frosted panel (VISIBLE, not removed)
+          • inputCard pill        — solid dark, unchanged
+          • Sidebar              — UNTOUCHED, always solid
+
+        Dark (non-glass) mode restores every zone to its solid colour.
+        All colours are neutral dark greys — no tints.
+        """
+        try:
+            op = max(0.15, min(0.95, float(opacity)))
+            # backdrop for messages area — darker as opacity goes up
+            base = int(op * 28)
+            bg_rgba = f"rgba({base},{base},{base},{op:.2f})"
+
+            _scrollbar = """
+                QScrollBar:vertical {
+                    background: transparent; width: 12px; margin: 0;
+                }
+                QScrollBar::handle:vertical {
+                    background: rgba(168,199,250,0.3);
+                    border-radius: 6px; min-height: 30px; margin: 2px;
+                }
+                QScrollBar::handle:vertical:hover  { background: rgba(168,199,250,0.5); }
+                QScrollBar::handle:vertical:pressed { background: rgba(168,199,250,0.7); }
+                QScrollBar::add-line:vertical,
+                QScrollBar::sub-line:vertical { height: 0px; }
+                QScrollBar::add-page:vertical,
+                QScrollBar::sub-page:vertical { background: transparent; }
+            """
+
+            if enabled:
+                # ── outer container: fully transparent ────────────────────────
+                self.container.setStyleSheet("""
+                    QWidget#container {
+                        background-color: transparent;
+                        border-radius: 12px;
+                    }
+                    QWidget {
+                        color: #E8EAED;
+                        font-family: 'Segoe UI', -apple-system, system-ui, sans-serif;
+                    }
+                """)
+
+                # ── chat messages backdrop ─────────────────────────────────────
+                self.chat_widget.setStyleSheet(
+                    f"QWidget {{ background-color: {bg_rgba}; }}"
+                )
+                self.chat_scroll_area.setStyleSheet(
+                    "QScrollArea { border: none; background-color: transparent; }"
+                    + _scrollbar
+                )
+
+                # ── header: frosted dark grey panel ───────────────────────────
+                self.header_bar.setStyleSheet("""
+                    QFrame {
+                        background-color: rgba(22, 22, 22, 0.82);
+                        border-bottom: 1px solid rgba(50, 50, 50, 0.7);
+                    }
+                """)
+
+                # ── status / thinking bar: frosted so text is always readable ─
+                self.status_label.setStyleSheet("""
+                    QLabel#statusLabel {
+                        color: #9AA0A6;
+                        font-style: italic;
+                        font-size: 11px;
+                        padding: 5px 14px;
+                        background-color: rgba(20, 20, 20, 0.82);
+                        border-top: 1px solid rgba(50, 50, 50, 0.6);
+                    }
+                """)
+
+                # ── input container: frosted opaque panel — stays visible ─────
+                # The outer frame has a frosted dark bg; the inputCard pill on top
+                # keeps its own solid style so it's clearly the typing area.
+                self.input_container.setStyleSheet("""
+                    QFrame#inputContainer {
+                        background-color: rgba(18, 18, 18, 0.85);
+                        border-top: 1px solid rgba(50, 50, 50, 0.6);
+                        border-bottom-left-radius: 12px;
+                        border-bottom-right-radius: 12px;
+                    }
+                """)
+
+            else:
+                # ── restore all solid dark surfaces ───────────────────────────
+                self.container.setStyleSheet("""
+                    QWidget#container {
+                        background-color: #212121;
+                        border-radius: 12px;
+                    }
+                    QWidget {
+                        color: #E8EAED;
+                        font-family: 'Segoe UI', -apple-system, system-ui, sans-serif;
+                    }
+                """)
+
+                self.chat_widget.setStyleSheet(
+                    "QWidget { background-color: #212121; }"
+                )
+                self.chat_scroll_area.setStyleSheet(
+                    "QScrollArea { border: none; background-color: #212121; }"
+                    + _scrollbar
+                )
+
+                self.header_bar.setStyleSheet("""
+                    QFrame {
+                        background-color: #212121;
+                        border-bottom: 1px solid #2A2A2A;
+                    }
+                """)
+
+                self.status_label.setStyleSheet("""
+                    QLabel#statusLabel {
+                        color: #9AA0A6;
+                        font-style: italic;
+                        font-size: 11px;
+                        padding: 5px 14px;
+                        background-color: #1A1A1A;
+                        border-top: 1px solid #2A2A2A;
+                    }
+                """)
+
+                self.input_container.setStyleSheet("""
+                    QFrame#inputContainer {
+                        background-color: #1A1A1A;
+                        border-top: 1px solid #2A2A2A;
+                    }
+                """)
+
+        except Exception as e:
+            print(f"[ChatWindow.apply_glass_background] Error: {e}")
+
+    def _apply_glass_from_settings(self):
+        """Read glass settings from controller and apply on startup."""
+        try:
+            settings = self.controller.settings
+            enabled = settings.get('glass_background_enabled', False)
+            opacity = float(settings.get('glass_background_opacity', 0.75))
+            if enabled:
+                self.apply_glass_background(enabled, opacity)
+        except Exception as e:
+            print(f"[ChatWindow._apply_glass_from_settings] Error: {e}")
+
+    def _open_memory_window(self):
+        """Open the memory management window."""
+        try:
+            from ui.memory_window import MemoryWindow
+            if not hasattr(self, '_memory_window') or self._memory_window is None:
+                self._memory_window = MemoryWindow(self.controller)
+            self._memory_window.show()
+            self._memory_window.raise_()
+            self._memory_window.activateWindow()
+        except Exception as e:
+            self.add_system_message(f"⚠️ Could not open Memory window: {e}")
 
     def check_admin_mode(self):
         """Check if running as admin and notify user"""
