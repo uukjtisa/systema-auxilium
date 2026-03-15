@@ -1,7 +1,5 @@
 """
 Global Instructions - AI system prompts
-REVAMPED: Simplified work_environment and execute_code system
-UPDATED:  Unified tool call format  {"tool": "tool_name", "input": "..."}
 """
 
 def get_system_prompt(system_info="", voice_mode=False, elevenlabs_enabled=False, skills=None):
@@ -89,7 +87,7 @@ Use these sparingly and naturally.
             "\n"
             f"Skill scripts live at:\n  {_skls}\\<skill-name>\\scripts\\<script.py>\n"
             "\n"
-            "⚠ CRITICAL — WHEN EXEC'ING SKILL SCRIPTS YOU MUST ALWAYS:\n"
+            "⚠ CRITICAL — WHEN EXECUTING SKILL SCRIPTS YOU MUST ALWAYS:\n"
             "\n"
             "  1. Use the FULL ABSOLUTE PATH — never relative paths\n"
             "  2. Build from SKILLS_DIR shown above\n"
