@@ -175,6 +175,15 @@ class AssistantController(QObject):
         self._create_new_session()
         log.debug(f"[AssistantController.__init__] Initial session created: '{self.current_session_id}'")
 
+        # PATH SYNCER - Start background environment sync tick
+        log.debug("[AssistantController.__init__] Starting PathSyncer background tick...")
+        try:
+            from core.path_syncer import get_syncer
+            get_syncer().start()
+            log.info("[AssistantController.__init__] ✓ PathSyncer started (initial merge + 20s tick)")
+        except Exception as e:
+            log.warning(f"[AssistantController.__init__] PathSyncer start failed (non-fatal): {e}")
+
         # MEMORY MANAGER - Persistent RAG memory
         log.debug("[AssistantController.__init__] Initializing MemoryManager...")
         try:
@@ -332,6 +341,8 @@ class AssistantController(QObject):
             'memory_enabled': True,
             'memory_threshold': 0.4,  # float 0.0–1.0
             'memory_max_results': 5,
+            'glass_background_enabled': False,
+            'glass_background_opacity': 0.75,
         }
 
     def save_settings(self):
