@@ -510,87 +510,115 @@ class AppearanceSettingsWindow(QWidget):
         self.container = QWidget()
         self.container.setStyleSheet("""
             QWidget#container {
-                background-color: #2d2d2d;
+                background-color: #161B22;
                 border-radius: 12px;
             }
             QWidget {
-                color: #e0e0e0;
+                color: #E6EDF3;
+                font-family: 'Segoe UI', -apple-system, system-ui, sans-serif;
             }
             QLabel {
-                color: #e0e0e0;
+                color: #E6EDF3;
             }
             QGroupBox {
-                color: #e0e0e0;
-                border: 2px solid #4a4a4a;
+                color: #E6EDF3;
+                border: 1px solid rgba(88, 166, 255, 0.18);
                 border-radius: 8px;
                 margin-top: 10px;
                 padding-top: 10px;
-                font-weight: bold;
+                font-weight: 600;
+                font-size: 11px;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
                 left: 10px;
                 padding: 0 5px;
+                color: #8B949E;
             }
             QPushButton {
-                background-color: #3a3a3a;
-                color: #e0e0e0;
-                border: 1px solid #555;
-                border-radius: 5px;
-                padding: 8px 15px;
-                font-weight: bold;
+                background-color: transparent;
+                color: #E6EDF3;
+                border: 1px solid #30363D;
+                border-radius: 6px;
+                padding: 7px 14px;
+                font-weight: 500;
             }
             QPushButton:hover {
-                background-color: #4a4a4a;
-                border: 1px solid #666;
+                background-color: rgba(88, 166, 255, 0.08);
+                border-color: rgba(88, 166, 255, 0.4);
+                color: #58A6FF;
             }
             QPushButton:pressed {
-                background-color: #2a2a2a;
+                background-color: rgba(88, 166, 255, 0.14);
             }
             QLineEdit {
-                background-color: #1a1a1a;
-                color: #e0e0e0;
-                border: 1px solid #555;
-                border-radius: 4px;
-                padding: 5px;
+                background-color: #0D1117;
+                color: #E6EDF3;
+                border: 1px solid rgba(88, 166, 255, 0.18);
+                border-radius: 5px;
+                padding: 5px 8px;
+            }
+            QLineEdit:focus {
+                border-color: rgba(88, 166, 255, 0.55);
             }
             QSlider::groove:horizontal {
-                height: 6px;
-                background: #1a1a1a;
-                border-radius: 3px;
+                height: 4px;
+                background: #21262D;
+                border-radius: 2px;
             }
             QSlider::handle:horizontal {
-                background: #5a5a5a;
-                border: 1px solid #888;
-                width: 16px;
+                background: #58A6FF;
+                border: none;
+                width: 14px;
                 margin: -5px 0;
-                border-radius: 8px;
+                border-radius: 7px;
             }
             QSlider::handle:horizontal:hover {
-                background: #6a6a6a;
+                background: #79BBFF;
+            }
+            QSlider::sub-page:horizontal {
+                background: rgba(88, 166, 255, 0.35);
+                border-radius: 2px;
             }
             QRadioButton {
-                color: #e0e0e0;
+                color: #E6EDF3;
                 spacing: 8px;
             }
             QRadioButton::indicator {
-                width: 18px;
-                height: 18px;
+                width: 16px;
+                height: 16px;
+                border-radius: 8px;
+                border: 2px solid #30363D;
+                background: #0D1117;
+            }
+            QRadioButton::indicator:checked {
+                background: #58A6FF;
+                border-color: #58A6FF;
             }
             QCheckBox {
-                color: #e0e0e0;
+                color: #E6EDF3;
                 spacing: 8px;
             }
             QCheckBox::indicator {
-                width: 18px;
-                height: 18px;
+                width: 15px;
+                height: 15px;
+                border-radius: 3px;
+                border: 2px solid #30363D;
+                background: #0D1117;
+            }
+            QCheckBox::indicator:checked {
+                background: #58A6FF;
+                border-color: #58A6FF;
             }
             QComboBox, QFontComboBox {
-                background-color: #1a1a1a;
-                color: #e0e0e0;
-                border: 1px solid #555;
-                border-radius: 4px;
-                padding: 5px;
+                background-color: #0D1117;
+                color: #E6EDF3;
+                border: 1px solid rgba(88, 166, 255, 0.18);
+                border-radius: 5px;
+                padding: 5px 8px;
+            }
+            QComboBox:hover, QFontComboBox:hover {
+                border-color: rgba(88, 166, 255, 0.4);
             }
             QComboBox::drop-down, QFontComboBox::drop-down {
                 border: none;
@@ -599,24 +627,25 @@ class AppearanceSettingsWindow(QWidget):
                 image: none;
                 border-left: 4px solid transparent;
                 border-right: 4px solid transparent;
-                border-top: 6px solid #e0e0e0;
-                margin-right: 5px;
+                border-top: 5px solid #8B949E;
+                margin-right: 6px;
             }
             QScrollArea {
                 border: none;
-                background-color: #2d2d2d;
+                background-color: #161B22;
             }
             QScrollBar:vertical {
-                background: #1a1a1a;
-                width: 12px;
-                border-radius: 6px;
+                background: transparent;
+                width: 6px;
+                border-radius: 3px;
             }
             QScrollBar::handle:vertical {
-                background: #5a5a5a;
-                border-radius: 6px;
+                background: #21262D;
+                border-radius: 3px;
+                min-height: 20px;
             }
             QScrollBar::handle:vertical:hover {
-                background: #6a6a6a;
+                background: #30363D;
             }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
                 height: 0px;
@@ -642,64 +671,60 @@ class AppearanceSettingsWindow(QWidget):
 
         # ── Header bar ── (FIX: use addStretch properly so title+buttons don't clip)
         header_bar = QFrame()
-        header_bar.setFixedHeight(44)
+        header_bar.setFixedHeight(48)
         header_bar.mousePressEvent = self.header_mouse_press
         header_bar.mouseMoveEvent = self.header_mouse_move
         header_bar.mouseReleaseEvent = self.header_mouse_release
         header_bar.setStyleSheet("""
             QFrame {
-                background-color: #2d2d2d;
-                border-bottom: 2px solid #5a5a5a;
+                background-color: #161B22;
+                border-bottom: 1px solid rgba(88, 166, 255, 0.18);
+                border-top-left-radius: 12px;
+                border-top-right-radius: 12px;
             }
         """)
 
         header_layout = QHBoxLayout(header_bar)
-        header_layout.setContentsMargins(12, 0, 8, 0)   # tighter right margin
-        header_layout.setSpacing(4)
+        header_layout.setContentsMargins(16, 0, 10, 0)
+        header_layout.setSpacing(8)
 
-        title = QLabel("🎨 Appearance Settings")
-        title.setStyleSheet("font-size: 15px; font-weight: bold; color: #e0e0e0; white-space: nowrap;")
+        # Traffic-light dots
+        for _col in ("#FF5F57", "#FEBC2E", "#28C840"):
+            dot = QFrame()
+            dot.setFixedSize(11, 11)
+            dot.setStyleSheet(f"QFrame {{ background: {_col}; border-radius: 5px; border: none; }}")
+            header_layout.addWidget(dot)
+
+        header_layout.addSpacing(10)
+
+        title = QLabel("Appearance Settings")
+        title.setStyleSheet("font-size: 13px; font-weight: 600; color: #E6EDF3; white-space: nowrap; background: transparent;")
         header_layout.addWidget(title)
 
-        header_layout.addStretch(1)   # pushes buttons to the right
+        header_layout.addStretch(1)
 
-        # Minimize – explicit size, no padding override
         minimize_btn = QPushButton("−")
         minimize_btn.setFixedSize(28, 28)
         minimize_btn.setStyleSheet("""
             QPushButton {
-                background: transparent;
-                border: none;
-                border-radius: 5px;
-                font-size: 20px;
-                color: #e0e0e0;
-                padding: 0px;
-                margin: 0px;
+                background: transparent; border: none;
+                border-radius: 5px; font-size: 18px;
+                color: #8B949E; padding: 0px; margin: 0px;
             }
-            QPushButton:hover {
-                background: #3a3a3a;
-            }
+            QPushButton:hover { background: #21262D; color: #E6EDF3; }
         """)
         minimize_btn.clicked.connect(self.showMinimized)
         header_layout.addWidget(minimize_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
 
-        # Close
         close_btn = QPushButton("×")
         close_btn.setFixedSize(28, 28)
         close_btn.setStyleSheet("""
             QPushButton {
-                background: transparent;
-                border: none;
-                border-radius: 5px;
-                font-size: 20px;
-                color: #e0e0e0;
-                padding: 0px;
-                margin: 0px;
+                background: transparent; border: none;
+                border-radius: 5px; font-size: 20px;
+                color: #8B949E; padding: 0px; margin: 0px;
             }
-            QPushButton:hover {
-                background: #EA4335;
-                color: white;
-            }
+            QPushButton:hover { background: #EA4335; color: white; }
         """)
         close_btn.clicked.connect(self.hide)
         header_layout.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
@@ -759,13 +784,16 @@ class AppearanceSettingsWindow(QWidget):
                 QPushButton {
                     font-size: 22px;
                     padding: 0px;
-                    background-color: #1a1a1a;
-                    border: 1px solid #555;
-                    border-radius: 5px;
+                    background-color: #0D1117;
+                    border: 1px solid rgba(88, 166, 255, 0.15);
+                    border-radius: 6px;
                 }
                 QPushButton:hover {
-                    background-color: #3a3a3a;
-                    border: 1px solid #888;
+                    background-color: rgba(88, 166, 255, 0.1);
+                    border-color: rgba(88, 166, 255, 0.45);
+                }
+                QPushButton:pressed {
+                    background-color: rgba(88, 166, 255, 0.18);
                 }
             """)
             btn.clicked.connect(lambda checked, e=emoji: self.select_emoji(e))
@@ -1011,7 +1039,7 @@ class AppearanceSettingsWindow(QWidget):
         bg_size_layout.addWidget(self.bg_preview, alignment=Qt.AlignmentFlag.AlignCenter)
 
         bg_info = QLabel("Green handles = drag to resize background")
-        bg_info.setStyleSheet("color: #999; font-style: italic;")
+        bg_info.setStyleSheet("color: #8B949E; font-style: italic;")
         bg_size_layout.addWidget(bg_info)
 
         bg_size_group.setLayout(bg_size_layout)
@@ -1079,7 +1107,7 @@ class AppearanceSettingsWindow(QWidget):
         hitbox_custom_layout.addWidget(self.hitbox_preview, alignment=Qt.AlignmentFlag.AlignCenter)
 
         info_label = QLabel("Red = clickable area | Green dot = drag to offset | Drag edges to resize")
-        info_label.setStyleSheet("color: #999; font-style: italic;")
+        info_label.setStyleSheet("color: #8B949E; font-style: italic;")
         hitbox_custom_layout.addWidget(info_label)
 
         # W slider
@@ -1155,13 +1183,17 @@ class AppearanceSettingsWindow(QWidget):
         apply_btn.clicked.connect(self.apply_settings)
         apply_btn.setStyleSheet("""
             QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                font-weight: bold;
-                border: none;
+                background-color: rgba(88, 166, 255, 0.14);
+                color: #58A6FF;
+                font-weight: 600;
+                border: 1px solid rgba(88, 166, 255, 0.40);
+                border-radius: 6px;
+                padding: 7px 16px;
             }
             QPushButton:hover {
-                background-color: #45a049;
+                background-color: rgba(88, 166, 255, 0.24);
+                border-color: #58A6FF;
+                color: #79BBFF;
             }
         """)
         button_layout.addWidget(apply_btn)
