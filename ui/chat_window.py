@@ -11,10 +11,326 @@ Features:
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                              QTextEdit, QLineEdit, QPushButton, QLabel,
                              QFrame, QMenu, QScrollArea, QApplication,
-                             QGraphicsOpacityEffect)
+                             QGraphicsOpacityEffect, QSizePolicy)
 from PyQt6.QtCore import Qt, QTimer, QPoint, pyqtSignal, QRect, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup
-from PyQt6.QtGui import QAction, QCursor, QRegion
+from PyQt6.QtGui import QAction, QCursor, QRegion, QPixmap
 from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QFont
+from core.skill_manager import SkillManager as _SkillManagerType
+
+
+_SK_SURFACE  = "#161B22"
+_SK_SURFACE2 = "#21262D"
+_SK_BORDER   = "#30363D"
+_SK_ACCENT   = "#58A6FF"
+_SK_TEXT     = "#E6EDF3"
+_SK_MUTED    = "#8B949E"
+
+
+class _SkillRow(QWidget):
+    """
+    One skill row: two-line layout so the name always word-wraps cleanly.
+      Line 1 — chevron + skill name (full width, word-wrap)
+      Line 2 — badge  +  Load/Unload btn  +  delete btn  (right-aligned)
+    """
+
+    def __init__(self, skill: dict, skill_manager, parent=None):
+        super().__init__(parent)
+        self._skill = skill
+        self._skill_manager = skill_manager
+        self._expanded = False
+        self._build_ui()
+
+    def _build_ui(self):
+        self.setStyleSheet(
+            f"QWidget {{ background-color: {_SK_SURFACE}; border-radius: 6px; }}")
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # ── clickable header ──────────────────────────────────────────────────
+        hdr = QWidget()
+        hdr.setStyleSheet(f"""
+            QWidget {{ background-color: {_SK_SURFACE}; border-radius: 6px; }}
+            QWidget:hover {{ background-color: #1E2530; }}
+        """)
+        hdr_vl = QVBoxLayout(hdr)
+        hdr_vl.setContentsMargins(8, 6, 8, 6)
+        hdr_vl.setSpacing(4)
+
+        # row 1: chevron + name
+        r1 = QWidget()
+        r1.setStyleSheet("background: transparent;")
+        r1l = QHBoxLayout(r1)
+        r1l.setContentsMargins(0, 0, 0, 0)
+        r1l.setSpacing(5)
+
+        self._chevron = QPushButton("▶")
+        self._chevron.setFixedSize(14, 14)
+        self._chevron.setStyleSheet(f"""
+            QPushButton {{ background: transparent; border: none;
+                          color: {_SK_MUTED}; font-size: 8px; padding: 0; }}
+            QPushButton:hover {{ color: {_SK_TEXT}; }}
+        """)
+        self._chevron.clicked.connect(self._toggle_expand)
+        r1l.addWidget(self._chevron)
+
+        display_name = self._skill['name'].replace('_', '_\u200b')
+        name_lbl = QLabel(display_name)
+        name_lbl.setWordWrap(True)
+        name_lbl.setMinimumWidth(0)
+        name_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        name_lbl.setStyleSheet(
+            f"color: {_SK_TEXT}; font-size: 11px; font-weight: 500; background: transparent;")
+        r1l.addWidget(name_lbl, stretch=1)
+        hdr_vl.addWidget(r1)
+
+        # row 2: badge + load-btn + del-btn  (right-aligned)
+        r2 = QWidget()
+        r2.setStyleSheet("background: transparent;")
+        r2l = QHBoxLayout(r2)
+        r2l.setContentsMargins(19, 0, 0, 0)   # 19 = chevron width + spacing
+        r2l.setSpacing(4)
+
+        is_loaded = self._skill.get('is_loaded', False)
+
+        self._badge = QLabel("● Loaded" if is_loaded else "○ Unloaded")
+        self._badge.setStyleSheet(self._badge_style(is_loaded))
+        r2l.addWidget(self._badge)
+
+        r2l.addStretch(1)
+
+        self._load_btn = QPushButton("Unload" if is_loaded else "Load")
+        self._load_btn.setFixedSize(52, 22)
+        self._load_btn.setStyleSheet(self._load_btn_style(is_loaded))
+        self._load_btn.clicked.connect(self._toggle_load)
+        r2l.addWidget(self._load_btn)
+
+        del_btn = QPushButton("🗑")
+        del_btn.setFixedSize(22, 22)
+        del_btn.setToolTip(f"Delete '{self._skill['name']}'")
+        del_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; border: none; font-size: 12px;
+                          color: {_SK_MUTED}; border-radius: 4px; }}
+            QPushButton:hover {{ background-color: #3C1A1A; color: #FF6B6B; }}
+        """)
+        del_btn.clicked.connect(self._delete)
+        r2l.addWidget(del_btn)
+
+        hdr_vl.addWidget(r2)
+        outer.addWidget(hdr)
+
+        # ── expandable detail ─────────────────────────────────────────────────
+        self._detail = QWidget()
+        self._detail.setStyleSheet(
+            f"background-color: {_SK_SURFACE};")
+        self._detail.hide()
+        dl = QVBoxLayout(self._detail)
+        dl.setContentsMargins(14, 2, 14, 8)
+        dl.setSpacing(3)
+
+        if self._skill.get('description'):
+            d = QLabel(self._skill['description'])
+            d.setWordWrap(True)
+            d.setMinimumWidth(0)
+            d.setStyleSheet(f"color: {_SK_MUTED}; font-size: 10px; background-color: {_SK_SURFACE};")
+            dl.addWidget(d)
+
+        if self._skill.get('files'):
+            fl = QLabel("\n".join(f"  📄 {f}" for f in self._skill['files'][:8]))
+            fl.setWordWrap(True)
+            fl.setMinimumWidth(0)
+            fl.setStyleSheet(
+                f"color: #5F6368; font-size: 9px; font-family: monospace; background-color: {_SK_SURFACE};")
+            dl.addWidget(fl)
+
+        outer.addWidget(self._detail)
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+
+    def _badge_style(self, loaded):
+        if loaded:
+            return ("QLabel { background-color: #1A2B1A; color: #4CAF50; "
+                    "border-radius: 4px; font-size: 9px; padding: 1px 5px; }")
+        return (f"QLabel {{ background-color: transparent; color: {_SK_MUTED}; "
+                "font-size: 9px; padding: 1px 3px; }")
+
+    def _load_btn_style(self, loaded):
+        if loaded:
+            return ("QPushButton { background-color: #3C1A1A; color: #C0392B; "
+                    "border: 1px solid #C0392B; border-radius: 4px; font-size: 9px; padding: 0; }"
+                    "QPushButton:hover { background-color: #4A2020; }")
+        return ("QPushButton { background-color: #1A2B1A; color: #4CAF50; "
+                "border: 1px solid #4CAF50; border-radius: 4px; font-size: 9px; padding: 0; }"
+                "QPushButton:hover { background-color: #223322; }")
+
+    def _toggle_expand(self):
+        self._expanded = not self._expanded
+        self._chevron.setText("▼" if self._expanded else "▶")
+        self._detail.setVisible(self._expanded)
+
+    def _toggle_load(self):
+        name = self._skill['name']
+        if self._skill_manager.is_loaded(name):
+            ok, _ = self._skill_manager.unload_skill(name)
+        else:
+            ok, _ = self._skill_manager.load_skill(name)
+        if ok:
+            new_state = not self._skill.get('is_loaded', False)
+            self._skill['is_loaded'] = new_state
+            self._badge.setText("● Loaded" if new_state else "○ Unloaded")
+            self._badge.setStyleSheet(self._badge_style(new_state))
+            self._load_btn.setText("Unload" if new_state else "Load")
+            self._load_btn.setStyleSheet(self._load_btn_style(new_state))
+
+    def _delete(self):
+        self._skill_manager.delete_skill(self._skill['name'])
+
+
+class SkillsSidebarSection(QWidget):
+    """Collapsible ⚡ Skills block — lives inside the sidebar layout."""
+
+    def __init__(self, skill_manager, parent=None):
+        super().__init__(parent)
+        self._skill_manager = skill_manager
+        self._expanded = False          # default collapsed at startup
+        self._build_ui()
+        skill_manager.skills_changed.connect(self.refresh)
+        skill_manager.loaded_skills_changed.connect(self.refresh)
+        self.refresh()
+
+    def _build_ui(self):
+        self.setStyleSheet("background: transparent;")
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(4)
+
+        # section header — click to expand/collapse
+        hdr = QWidget()
+        hdr.setStyleSheet("""
+            QWidget { background-color: transparent; border-radius: 4px; }
+            QWidget:hover { background-color: #222222; }
+        """)
+        hdr.setCursor(Qt.CursorShape.PointingHandCursor)
+        hl = QHBoxLayout(hdr)
+        hl.setContentsMargins(4, 6, 4, 6)
+        hl.setSpacing(6)
+
+        self._sec_chevron = QLabel("▶")   # starts collapsed
+        self._sec_chevron.setStyleSheet(
+            f"color: {_SK_MUTED}; font-size: 9px; background: transparent;")
+        hl.addWidget(self._sec_chevron)
+
+        sec_lbl = QLabel("⚡ Skills")
+        sec_lbl.setStyleSheet(
+            f"color: {_SK_TEXT}; font-size: 12px; font-weight: 600; background: transparent;")
+        hl.addWidget(sec_lbl, stretch=1)
+
+        self._count_lbl = QLabel("")
+        self._count_lbl.setStyleSheet(
+            f"color: {_SK_MUTED}; font-size: 9px; background: transparent;")
+        hl.addWidget(self._count_lbl)
+
+        hdr.mousePressEvent = lambda e: self._toggle_section()
+        root.addWidget(hdr)
+
+        # collapsible body — hidden by default
+        self._body = QWidget()
+        self._body.setStyleSheet("background: transparent;")
+        self._body.hide()      # starts hidden (collapsed)
+        bl = QVBoxLayout(self._body)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.setSpacing(4)
+
+        self._rows_widget = QWidget()
+        self._rows_widget.setStyleSheet("background: transparent;")
+        self._rows_layout = QVBoxLayout(self._rows_widget)
+        self._rows_layout.setContentsMargins(0, 0, 0, 0)
+        self._rows_layout.setSpacing(4)
+        bl.addWidget(self._rows_widget)
+
+        # new-skill input row
+        add_w = QWidget()
+        add_w.setStyleSheet("background: transparent;")
+        al = QHBoxLayout(add_w)
+        al.setContentsMargins(0, 2, 0, 0)
+        al.setSpacing(4)
+
+        self._name_input = QLineEdit()
+        self._name_input.setPlaceholderText("New skill name…")
+        self._name_input.setMinimumWidth(0)
+        self._name_input.setStyleSheet(f"""
+            QLineEdit {{ background-color: {_SK_SURFACE2}; border: 1px solid {_SK_BORDER};
+                        border-radius: 5px; color: {_SK_TEXT}; font-size: 10px; padding: 4px 7px; }}
+            QLineEdit:focus {{ border-color: {_SK_ACCENT}; }}
+        """)
+        self._name_input.returnPressed.connect(self._create_skill)
+        al.addWidget(self._name_input, stretch=1)
+
+        create_btn = QPushButton("＋")
+        create_btn.setFixedSize(26, 26)
+        create_btn.setStyleSheet(f"""
+            QPushButton {{ background-color: {_SK_ACCENT}; border: none; border-radius: 5px;
+                          color: white; font-size: 14px; }}
+            QPushButton:hover {{ background-color: #4752C4; }}
+        """)
+        create_btn.clicked.connect(self._create_skill)
+        al.addWidget(create_btn)
+        bl.addWidget(add_w)
+
+        from PyQt6.QtGui import QDesktopServices
+        from PyQt6.QtCore import QUrl
+        open_btn = QPushButton("📁  Open skills folder")
+        open_btn.setMinimumWidth(0)
+        open_btn.setStyleSheet(f"""
+            QPushButton {{ background-color: transparent; border: 1px dashed {_SK_BORDER};
+                          border-radius: 5px; color: {_SK_MUTED}; font-size: 10px;
+                          padding: 5px; text-align: left; }}
+            QPushButton:hover {{ border-color: #5F6368; color: {_SK_TEXT}; }}
+        """)
+        open_btn.clicked.connect(
+            lambda: QDesktopServices.openUrl(
+                QUrl.fromLocalFile(str(self._skill_manager.skills_dir))))
+        bl.addWidget(open_btn)
+
+        root.addWidget(self._body)
+
+    def _toggle_section(self):
+        self._expanded = not self._expanded
+        self._sec_chevron.setText("▼" if self._expanded else "▶")
+        self._body.setVisible(self._expanded)
+
+    def refresh(self):
+        while self._rows_layout.count():
+            item = self._rows_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        skills = self._skill_manager.get_skills()
+        loaded_count = sum(1 for s in skills if s.get('is_loaded'))
+        self._count_lbl.setText(f"{len(skills)} · {loaded_count} loaded")
+
+        if not skills:
+            empty = QLabel("No skills installed.\nCreate one below ↓")
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty.setStyleSheet(
+                f"color: {_SK_MUTED}; font-size: 10px; padding: 12px;")
+            self._rows_layout.addWidget(empty)
+        else:
+            for skill in skills:
+                self._rows_layout.addWidget(_SkillRow(skill, self._skill_manager))
+
+    def _create_skill(self):
+        name = self._name_input.text().strip()
+        if name:
+            self._skill_manager.create_skill_template(name)
+            self._name_input.clear()
+
+
+# Backwards-compat alias (used by controller.py skill_card messages)
+SkillsPanel = SkillsSidebarSection
+
+
 import re
 import markdown2
 import os
@@ -33,6 +349,9 @@ ANIM_WINDOW_FADE_IN_MS       = 340    # Chat window fade-in when shown (ms)
 
 # --- Sidebar ---
 ANIM_SIDEBAR_SLIDE_MS        = 360    # Sidebar slide in / out (ms)
+SIDEBAR_DEFAULT_W            = 260    # Default sidebar width (px) — wide enough for hero + pills
+SIDEBAR_MIN_W                = 260    # Minimum — same as default, don't allow inward squish
+SIDEBAR_MAX_W                = 420    # Maximum sidebar width when dragging
 
 # --- Messages ---
 ANIM_MSG_IN_HEIGHT_MS        = 480    # Message pop-in: height expand (ms)
@@ -198,7 +517,7 @@ class ResizableInput(QWidget):
         self.resize_handle.setStyleSheet("""
             QLabel {
                 background-color: transparent;
-                color: #4A4A4A;
+                color: #8B949E;
                 font-size: 6px;
                 letter-spacing: 1px;
             }
@@ -497,187 +816,164 @@ class CodeSyntaxHighlighter(QSyntaxHighlighter):
 class CodeBlockWidget(QWidget):
     """Widget for displaying code blocks with syntax highlighting and resize handles"""
 
+    # ── Obsidian Blue palette constants ───────────────────────────────────────
+    _CB_BASE    = "#0D1117"
+    _CB_HEADER  = "#161B22"
+    _CB_BORDER  = "rgba(88, 166, 255, 0.18)"
+    _CB_ACCENT  = "#58A6FF"
+    _CB_ACCENT2 = "rgba(88, 166, 255, 0.12)"
+    _CB_ACCENT3 = "rgba(88, 166, 255, 0.28)"
+    _CB_TEXT    = "#E6EDF3"
+    _CB_MUTED   = "#8B949E"
+    _CB_SB      = "#21262D"
+
     def __init__(self, language, code, parent=None):
         super().__init__(parent)
         self.code = code
         self.language = language
 
-        # Collapse state - START COLLAPSED
-        self.is_expanded = False
-
-        # Resize state (both vertical and horizontal)
-        self.is_resizing_vertical = False
-        self.is_resizing_horizontal = False
-        self.resize_start_y = 0
-        self.resize_start_x = 0
-        self.resize_start_height = 0
-        self.resize_start_width = 0
+        self.is_expanded        = False
+        self.is_resizing        = False
+        self.resize_start_pos   = None
+        self.resize_start_size  = None   # (width, height) of main_container at drag start
         self.min_height = 60
         self.max_height = 800
-        self.min_width = 300
-        self.max_width = 1200
+        self.min_width  = 300
+        self.max_width  = 1200
 
-        # Use horizontal layout to accommodate right resize handle
-        main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(0, 6, 0, 0)
-        main_layout.setSpacing(0)
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(0, 6, 0, 0)
+        root_layout.setSpacing(0)
 
-        # Vertical content container
-        content_widget = QWidget()
-        layout = QVBoxLayout(content_widget)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        # ── Main container ─────────────────────────────────────────────────────
+        # ── Main container ────────────────────────────────────────────────────
         self.main_container = QFrame()
         self.main_container.setObjectName("codeBlock")
-        self.main_container.setStyleSheet("""
-            QFrame#codeBlock {
-                background: #1E1E1E;
-                border: 1px solid rgba(168, 199, 250, 0.15);
-                border-radius: 8px;
-            }
+        self.main_container.setStyleSheet(f"""
+            QFrame#codeBlock {{
+                background: {self._CB_BASE};
+                border: 1px solid {self._CB_BORDER};
+                border-radius: 10px;
+            }}
         """)
         container_layout = QVBoxLayout(self.main_container)
         container_layout.setContentsMargins(0, 0, 0, 0)
         container_layout.setSpacing(0)
 
-        # ── Header ─────────────────────────────────────────────────────────────
+        # ── Header (taller so buttons are never clipped) ──────────────────────
         header = QFrame()
         header.setObjectName("codeHeader")
-        header.setFixedHeight(75)
-        header.setStyleSheet("""
-            QFrame#codeHeader {
-                background-color: #252525;
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
-                border-bottom: 1px solid rgba(168, 199, 250, 0.1);
-                border-left: none;
-                border-right: none;
-                border-top: none;
-            }
+        header.setFixedHeight(54)
+        header.setStyleSheet(f"""
+            QFrame#codeHeader {{
+                background-color: {self._CB_HEADER};
+                border-top-left-radius: 10px;
+                border-top-right-radius: 10px;
+                border-bottom: 1px solid {self._CB_BORDER};
+            }}
         """)
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(12, 7, 10, 7)
-        header_layout.setSpacing(8)
+        header_layout.setContentsMargins(14, 0, 12, 0)
+        header_layout.setSpacing(6)
         header_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
-        display_lang = language.upper() if language and language.lower() != 'text' else 'TEXT' #SHOW "TEXT" INSTEAD OF "CODE"
+        # Traffic-light dots
+        for _color in ("#FF5F57", "#FEBC2E", "#28C840"):
+            dot = QFrame()
+            dot.setFixedSize(11, 11)
+            dot.setStyleSheet(f"QFrame {{ background: {_color}; border-radius: 5px; border: none; }}")
+            header_layout.addWidget(dot)
+
+        header_layout.addSpacing(10)
+
+        # Language label — always visible
+        display_lang = language.strip().upper() if language and language.strip().lower() not in ('', 'text') else 'TEXT'
         lang_label = QLabel(display_lang)
-        lang_label.setObjectName("codeLangLabel")
-        lang_label.setStyleSheet("""
-            QLabel#codeLangLabel {
+        lang_label.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
+        )
+        lang_label.setStyleSheet(f"""
+            QLabel {{
                 background: transparent;
-                color: #9CDCFE;
+                color: {self._CB_MUTED};
                 font-size: 11px;
-                font-weight: 600;
-                letter-spacing: 1px;
+                font-weight: 700;
                 border: none;
-            }
+                padding: 0 4px;
+            }}
         """)
         header_layout.addWidget(lang_label)
         header_layout.addStretch()
 
-        # Toggle button (expand/collapse)
-        self.toggle_btn = QPushButton("▶")  # Start with right arrow (collapsed)
-        self.toggle_btn.setObjectName("codeToggleBtn")
-        self.toggle_btn.setStyleSheet("""
-            QPushButton#codeToggleBtn {
-                background-color: rgba(168, 199, 250, 0.08);
-                border: 1px solid rgba(168, 199, 250, 0.2);
-                border-radius: 4px;
-                padding: 6px 10px;
+        _btn_style = f"""
+            QPushButton {{
+                background-color: transparent;
+                border: 1px solid transparent;
+                border-radius: 5px;
+                padding: 4px 11px;
                 font-size: 11px;
                 font-weight: 500;
-                color: #9CDCFE;
-            }
-            QPushButton#codeToggleBtn:hover {
-                background-color: rgba(168, 199, 250, 0.15);
-                border-color: rgba(168, 199, 250, 0.35);
-            }
-            QPushButton#codeToggleBtn:pressed {
-                background-color: rgba(168, 199, 250, 0.25);
-            }
-        """)
+                color: {self._CB_MUTED};
+                min-width: 64px;
+            }}
+            QPushButton:hover {{
+                background-color: {self._CB_ACCENT2};
+                border-color: {self._CB_ACCENT3};
+                color: {self._CB_ACCENT};
+            }}
+            QPushButton:pressed {{
+                background-color: {self._CB_ACCENT3};
+            }}
+        """
+
+        self.toggle_btn = QPushButton("▶  Show")
+        self.toggle_btn.setObjectName("codeToggleBtn")
+        self.toggle_btn.setStyleSheet(_btn_style)
         self.toggle_btn.clicked.connect(self.toggle_expand)
         self.toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        header_layout.addWidget(self.toggle_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
+        header_layout.addWidget(self.toggle_btn)
 
-        # Copy button
-        self.copy_btn = QPushButton("📋")
+        self.copy_btn = QPushButton("📋  Copy")
         self.copy_btn.setObjectName("codeCopyBtn")
-        self.copy_btn.setStyleSheet("""
-            QPushButton#codeCopyBtn {
-                background-color: rgba(168, 199, 250, 0.08);
-                border: 1px solid rgba(168, 199, 250, 0.2);
-                border-radius: 4px;
-                padding: 6px 10px;
-                font-size: 11px;
-                font-weight: 500;
-                color: #9CDCFE;
-            }
-            QPushButton#codeCopyBtn:hover {
-                background-color: rgba(168, 199, 250, 0.15);
-                border-color: rgba(168, 199, 250, 0.35);
-            }
-            QPushButton#codeCopyBtn:pressed {
-                background-color: rgba(168, 199, 250, 0.25);
-            }
-        """)
+        self.copy_btn.setStyleSheet(_btn_style)
         self.copy_btn.clicked.connect(self.copy_code)
         self.copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        header_layout.addWidget(self.copy_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
+        header_layout.addWidget(self.copy_btn)
+
         container_layout.addWidget(header)
 
-        # ── Scrollable code area ───────────────────────────────────────────────
+        # ── Scrollable code area ──────────────────────────────────────────────
         self.scroll_area = QScrollArea()
         self.scroll_area.setObjectName("codeScrollArea")
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.scroll_area.setStyleSheet("""
-            QScrollArea#codeScrollArea {
-                background: #1E1E1E;
+        self.scroll_area.setStyleSheet(f"""
+            QScrollArea#codeScrollArea {{
+                background: {self._CB_BASE};
                 border: none;
-                border-bottom-left-radius: 8px;
-                border-bottom-right-radius: 8px;
-            }
-            QScrollBar:horizontal {
-                background: #252525;
-                height: 7px;
-                border: none;
-                border-radius: 3px;
-            }
-            QScrollBar::handle:horizontal {
-                background: #4A4A4A;
-                border-radius: 3px;
-                min-width: 20px;
-            }
-            QScrollBar::handle:horizontal:hover {
-                background: #5E5E5E;
-            }
-            QScrollBar:vertical {
-                background: #252525;
-                width: 7px;
-                border: none;
-                border-radius: 3px;
-            }
-            QScrollBar::handle:vertical {
-                background: #4A4A4A;
-                border-radius: 3px;
-                min-height: 20px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: #5E5E5E;
-            }
-            QScrollBar::add-line, QScrollBar::sub-line { border: none; background: none; height: 0; width: 0; }
-            QScrollBar::corner { background: #252525; }
+            }}
+            QScrollBar:horizontal {{
+                background: transparent; height: 6px; border: none;
+            }}
+            QScrollBar::handle:horizontal {{
+                background: {self._CB_SB}; border-radius: 3px; min-width: 20px;
+            }}
+            QScrollBar::handle:horizontal:hover {{ background: #30363D; }}
+            QScrollBar:vertical {{
+                background: transparent; width: 6px; border: none;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {self._CB_SB}; border-radius: 3px; min-height: 20px;
+            }}
+            QScrollBar::handle:vertical:hover {{ background: #30363D; }}
+            QScrollBar::add-line, QScrollBar::sub-line {{ border: none; background: none; height: 0; width: 0; }}
+            QScrollBar::corner {{ background: transparent; }}
         """)
 
         code_container = QWidget()
-        code_container.setStyleSheet("QWidget { background: #1E1E1E; border: none; }")
+        code_container.setStyleSheet(f"QWidget {{ background: {self._CB_BASE}; border: none; }}")
         code_container_layout = QVBoxLayout(code_container)
-        code_container_layout.setContentsMargins(14, 10, 14, 10)
+        code_container_layout.setContentsMargins(16, 12, 16, 12)
         code_container_layout.setSpacing(0)
 
         self.code_editor = QTextEdit()
@@ -686,16 +982,17 @@ class CodeBlockWidget(QWidget):
         self.code_editor.setReadOnly(True)
         self.code_editor.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         self.code_editor.setFrameShape(QTextEdit.Shape.NoFrame)
-        self.code_editor.setStyleSheet("""
-            QTextEdit#codeEditor {
-                background: transparent;
-                border: none;
-                color: #D4D4D4;
-                selection-background-color: rgba(168, 199, 250, 0.2);
-            }
+        # Disable the QTextEdit's own scrollbars — QScrollArea handles all scrolling
+        self.code_editor.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.code_editor.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.code_editor.setStyleSheet(f"""
+            QTextEdit#codeEditor {{
+                background: transparent; border: none;
+                color: {self._CB_TEXT};
+                selection-background-color: rgba(88, 166, 255, 0.25);
+            }}
         """)
 
-        # Match visual size of surrounding text
         font = QFont('Consolas', 10)
         if not font.exactMatch():
             font = QFont('Monaco', 10)
@@ -703,162 +1000,161 @@ class CodeBlockWidget(QWidget):
             font = QFont('Courier New', 10)
         self.code_editor.setFont(font)
 
+        self.code_editor.viewport().installEventFilter(self)
+
         self.highlighter = CodeSyntaxHighlighter(self.code_editor.document(), language)
         code_container_layout.addWidget(self.code_editor)
         self.scroll_area.setWidget(code_container)
 
-        # Auto-height based on line count
         line_count = len(code.split('\n'))
         calculated_height = min(max(line_count * 17 + 24, self.min_height), self.max_height)
         self.scroll_area.setFixedHeight(calculated_height)
-
-        # Set initial width
-        self.scroll_area.setMinimumWidth(self.min_width)
-        self.scroll_area.setMaximumWidth(self.max_width)
-
-        # START HIDDEN (collapsed)
         self.scroll_area.hide()
-        self.vertical_handle_visible = False
-
         container_layout.addWidget(self.scroll_area)
-        layout.addWidget(self.main_container)
 
-        # ── Bottom vertical resize handle ──────────────────────────────────────
-        self.vertical_handle = QFrame()
-        self.vertical_handle.setObjectName("codeResizeHandle")
-        self.vertical_handle.setFixedHeight(5)
-        self.vertical_handle.setStyleSheet("""
-            QFrame#codeResizeHandle {
-                background: rgba(168, 199, 250, 0.15);
-                border-radius: 0px 0px 4px 4px;
-            }
-            QFrame#codeResizeHandle:hover {
-                background: rgba(168, 199, 250, 0.35);
-            }
-        """)
-        self.vertical_handle.setCursor(Qt.CursorShape.SizeVerCursor)
-        self.vertical_handle.mousePressEvent = self.handle_vertical_press
-        self.vertical_handle.mouseMoveEvent = self.handle_vertical_move
-        self.vertical_handle.mouseReleaseEvent = self.handle_vertical_release
-        self.vertical_handle.hide()  # START HIDDEN
-        layout.addWidget(self.vertical_handle)
+        # ── Resize grip — inside the container, bottom-right ──────────────────
+        # A transparent footer row that floats at the bottom of the black box.
+        grip_row = QWidget()
+        grip_row.setObjectName("codeGripRow")
+        grip_row.setStyleSheet("QWidget#codeGripRow { background: transparent; }")
+        grip_row.setFixedHeight(28)
+        grip_row.hide()
+        grip_row_layout = QHBoxLayout(grip_row)
+        grip_row_layout.setContentsMargins(0, 0, 8, 4)
+        grip_row_layout.setSpacing(0)
+        grip_row_layout.addStretch()
 
-        main_layout.addWidget(content_widget)
-
-        # ── Right horizontal resize handle ─────────────────────────────────────
-        self.horizontal_handle = QFrame()
-        self.horizontal_handle.setObjectName("codeResizeHandleHorizontal")
-        self.horizontal_handle.setFixedWidth(5)
-        self.horizontal_handle.setStyleSheet("""
-            QFrame#codeResizeHandleHorizontal {
-                background: rgba(168, 199, 250, 0.15);
+        self.corner_grip = QLabel("⤡  Resize")
+        self.corner_grip.setStyleSheet(f"""
+            QLabel {{
+                background: rgba(88,166,255,0.08);
+                color: rgba(88,166,255,0.55);
+                font-size: 10px;
+                font-weight: 700;
+                padding: 2px 8px;
+                border: 1px solid rgba(88,166,255,0.20);
                 border-radius: 4px;
-            }
-            QFrame#codeResizeHandleHorizontal:hover {
-                background: rgba(168, 199, 250, 0.35);
-            }
+            }}
+            QLabel:hover {{
+                background: rgba(88,166,255,0.18);
+                color: {self._CB_ACCENT};
+                border-color: rgba(88,166,255,0.45);
+            }}
         """)
-        self.horizontal_handle.setCursor(Qt.CursorShape.SizeHorCursor)
-        self.horizontal_handle.mousePressEvent = self.handle_horizontal_press
-        self.horizontal_handle.mouseMoveEvent = self.handle_horizontal_move
-        self.horizontal_handle.mouseReleaseEvent = self.handle_horizontal_release
-        self.horizontal_handle.hide()  # START HIDDEN
-        main_layout.addWidget(self.horizontal_handle)
+        self.corner_grip.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        self.corner_grip.mousePressEvent   = self._corner_press
+        self.corner_grip.mouseMoveEvent    = self._corner_move
+        self.corner_grip.mouseReleaseEvent = self._corner_release
+        grip_row_layout.addWidget(self.corner_grip)
+
+        self._grip_row = grip_row
+        container_layout.addWidget(grip_row)
+        root_layout.addWidget(self.main_container)
+
+    # ── Ctrl+Scroll ───────────────────────────────────────────────────────────
+
+    def eventFilter(self, obj, event):
+        from PyQt6.QtCore import QEvent
+        if obj is self.code_editor.viewport() and event.type() == QEvent.Type.Wheel:
+            if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                chat_win = self._find_chat_window()
+                if chat_win:
+                    if event.angleDelta().y() > 0:
+                        chat_win.zoom_in()
+                    else:
+                        chat_win.zoom_out()
+                return True
+        return super().eventFilter(obj, event)
+
+    def _find_chat_window(self):
+        p = self.parent()
+        while p:
+            if p.__class__.__name__ == 'ChatWindow':
+                return p
+            p = p.parent()
+        return None
+
+    # ── Toggle ────────────────────────────────────────────────────────────────
 
     def toggle_expand(self):
-        """Toggle between expanded and collapsed states"""
         self.is_expanded = not self.is_expanded
-
         if self.is_expanded:
-            # Expand - show code area and resize handles
             self.scroll_area.show()
-            self.vertical_handle.show()
-            self.horizontal_handle.show()
-            self.toggle_btn.setText("▼")
+            self._grip_row.show()
+            self.toggle_btn.setText("▼  Hide")
         else:
-            # Collapse - hide code area and resize handles
             self.scroll_area.hide()
-            self.vertical_handle.hide()
-            self.horizontal_handle.hide()
-            self.toggle_btn.setText("▶")
+            self._grip_row.hide()
+            self.toggle_btn.setText("▶  Show")
 
-    def handle_vertical_press(self, event):
+    # ── Corner resize (width + height) ───────────────────────────────────────
+    # We resize main_container width so the whole block (header + scroll + bar)
+    # moves together, rather than just the inner scroll area.
+
+    def _corner_press(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self.is_resizing_vertical = True
-            self.resize_start_y = event.globalPosition().y()
-            self.resize_start_height = self.scroll_area.height()
+            self.is_resizing     = True
+            self.resize_start_pos  = event.globalPosition()
+            self.resize_start_size = (self.main_container.width(),
+                                      self.scroll_area.height())
             event.accept()
 
-    def handle_vertical_move(self, event):
-        if self.is_resizing_vertical:
-            delta = event.globalPosition().y() - self.resize_start_y
-            new_height = self.resize_start_height + delta
-            new_height = max(self.min_height, min(new_height, self.max_height))
-            self.scroll_area.setFixedHeight(int(new_height))
+    def _corner_move(self, event):
+        if self.is_resizing:
+            dx    = event.globalPosition().x() - self.resize_start_pos.x()
+            dy    = event.globalPosition().y() - self.resize_start_pos.y()
+            new_w = max(self.min_width,  min(self.resize_start_size[0] + dx, self.max_width))
+            new_h = max(self.min_height, min(self.resize_start_size[1] + dy, self.max_height))
+            # Fix the outer container width so header + scroll + bar all follow
+            self.main_container.setFixedWidth(int(new_w))
+            self.scroll_area.setFixedHeight(int(new_h))
             event.accept()
 
-    def handle_vertical_release(self, event):
-        if self.is_resizing_vertical:
-            self.is_resizing_vertical = False
-            event.accept()
+    def _corner_release(self, event):
+        self.is_resizing = False
+        event.accept()
 
-    def handle_horizontal_press(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.is_resizing_horizontal = True
-            self.resize_start_x = event.globalPosition().x()
-            self.resize_start_width = self.scroll_area.width()
-            event.accept()
-
-    def handle_horizontal_move(self, event):
-        if self.is_resizing_horizontal:
-            delta = event.globalPosition().x() - self.resize_start_x
-            new_width = self.resize_start_width + delta
-            new_width = max(self.min_width, min(new_width, self.max_width))
-            self.scroll_area.setFixedWidth(int(new_width))
-            event.accept()
-
-    def handle_horizontal_release(self, event):
-        if self.is_resizing_horizontal:
-            self.is_resizing_horizontal = False
-            event.accept()
+    # ── Copy ─────────────────────────────────────────────────────────────────
 
     def copy_code(self):
         clipboard = QApplication.clipboard()
         clipboard.setText(self.code)
-        self.copy_btn.setText("✓ Copied!")
-        self.copy_btn.setStyleSheet("""
-            QPushButton#codeCopyBtn {
-                background-color: rgba(52, 168, 83, 0.15);
-                border: 1px solid rgba(52, 168, 83, 0.35);
-                border-radius: 4px;
-                padding: 6px 10px;
+        self.copy_btn.setText("✓  Copied!")
+        self.copy_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: rgba(52, 168, 83, 0.12);
+                border: 1px solid rgba(52, 168, 83, 0.3);
+                border-radius: 5px;
+                padding: 4px 11px;
                 font-size: 11px;
-                color: #34A853;
-            }
+                min-width: 64px;
+                color: #3FB950;
+            }}
         """)
         QTimer.singleShot(ANIM_COPY_FEEDBACK_MS, self.reset_copy_button)
 
     def reset_copy_button(self):
-        self.copy_btn.setText("📋")
-        self.copy_btn.setStyleSheet("""
-            QPushButton#codeCopyBtn {
-                background-color: rgba(168, 199, 250, 0.08);
-                border: 1px solid rgba(168, 199, 250, 0.2);
-                border-radius: 4px;
-                padding: 6px 10px;
+        self.copy_btn.setText("📋  Copy")
+        self.copy_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                border: 1px solid transparent;
+                border-radius: 5px;
+                padding: 4px 11px;
                 font-size: 11px;
                 font-weight: 500;
-                color: #9CDCFE;
-            }
-            QPushButton#codeCopyBtn:hover {
-                background-color: rgba(168, 199, 250, 0.15);
-                border-color: rgba(168, 199, 250, 0.35);
-            }
-            QPushButton#codeCopyBtn:pressed {
-                background-color: rgba(168, 199, 250, 0.25);
-            }
+                min-width: 64px;
+                color: {self._CB_MUTED};
+            }}
+            QPushButton:hover {{
+                background-color: {self._CB_ACCENT2};
+                border-color: {self._CB_ACCENT3};
+                color: {self._CB_ACCENT};
+            }}
+            QPushButton:pressed {{
+                background-color: {self._CB_ACCENT3};
+            }}
         """)
-
 
 class ChatWindow(QWidget):
     """Modern chat window with AI conversation"""
@@ -872,6 +1168,11 @@ class ChatWindow(QWidget):
         self.thinking_dots = 0
         self.thinking_label_shown = False
         self.sidebar_visible = False
+        # Sidebar resize state (drag handle on right edge)
+        self._sidebar_w = SIDEBAR_DEFAULT_W        # current width (persists across open/close)
+        self._sidebar_resize_active = False        # True while user is dragging
+        self._sidebar_resize_start_x = 0          # global X at drag start
+        self._sidebar_resize_start_w = 0          # sidebar width at drag start
 
         # ── Smooth scroll state (main chat) ───────────────────────────────
         self._scroll_anim = None
@@ -951,7 +1252,7 @@ class ChatWindow(QWidget):
         self.container = QWidget()
         self.container.setStyleSheet("""
             QWidget#container {
-                background-color: #212121;
+                background-color: #161B22;
                 border-radius: 12px;
             }
             QWidget {
@@ -975,6 +1276,9 @@ class ChatWindow(QWidget):
 
         self.create_resize_handles()
 
+        # Warn about any already-loaded skills from previous session (delayed so chat renders first)
+        QTimer.singleShot(800, self.warn_loaded_skills_if_any)
+
     def load_config(self):
         try:
             if os.path.exists(self.config_file):
@@ -982,21 +1286,102 @@ class ChatWindow(QWidget):
                     config = json.load(f)
                     self.bot_avatar = config.get('bot_avatar', '🤖')
                     self.user_avatar = config.get('user_avatar', '👤')
+                    self.chat_zoom = float(config.get('chat_zoom', 1.0))
+                    self._bot_avatar_image_path  = config.get('bot_avatar_image_path', '')
+                    self._user_avatar_image_path = config.get('user_avatar_image_path', '')
+                    self._bot_avatar_size  = int(config.get('bot_avatar_size', 32))
+                    self._user_avatar_size = int(config.get('user_avatar_size', 32))
+                    self._avatar_size_uniform = bool(config.get('avatar_size_uniform', False))
             else:
                 self.bot_avatar = '🤖'
                 self.user_avatar = '👤'
+                self.chat_zoom = 1.0
+                self._bot_avatar_image_path  = ''
+                self._user_avatar_image_path = ''
+                self._bot_avatar_size  = 32
+                self._user_avatar_size = 32
+                self._avatar_size_uniform = False
         except:
             self.bot_avatar = '🤖'
             self.user_avatar = '👤'
-        # Load window geometry after config is loaded
+            self.chat_zoom = 1.0
+            self._bot_avatar_image_path  = ''
+            self._user_avatar_image_path = ''
+            self._bot_avatar_size  = 32
+            self._user_avatar_size = 32
+            self._avatar_size_uniform = False
+        self._bot_avatar_pixmap  = None
+        self._user_avatar_pixmap = None
+        # Clamp zoom to safe range
+        self.chat_zoom = max(0.6, min(1.8, self.chat_zoom))
+        self._glass_enabled = False
+        self._glass_opacity = 0.75
         QTimer.singleShot(100, self.load_window_geometry)
+        # Restore saved image avatars after UI is built
+        QTimer.singleShot(200, self._restore_avatar_images)
+
+    def _restore_avatar_images(self):
+        """Load saved avatar image paths back into pixmaps after UI is ready."""
+        from PyQt6.QtGui import QPixmap, QPainter, QPainterPath
+        from PyQt6.QtCore import QRectF
+
+        def _load_circular(path, size):
+            px = QPixmap(path)
+            if px.isNull():
+                return None
+            scaled = px.scaled(size, size,
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation)
+            cx = (scaled.width()  - size) // 2
+            cy = (scaled.height() - size) // 2
+            sq = scaled.copy(cx, cy, size, size)
+            out = QPixmap(size, size)
+            out.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(out)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            path2 = QPainterPath()
+            path2.addEllipse(QRectF(0, 0, size, size))
+            painter.setClipPath(path2)
+            painter.drawPixmap(0, 0, sq)
+            painter.end()
+            return out
+
+        if self._bot_avatar_image_path:
+            pm = _load_circular(self._bot_avatar_image_path, 48)
+            if pm:
+                self._bot_avatar_pixmap = pm
+                self.bot_avatar = ''
+                if hasattr(self, 'bot_avatar_display'):
+                    self.bot_avatar_display.setPixmap(
+                        pm.scaled(48, 48, Qt.AspectRatioMode.KeepAspectRatio,
+                                  Qt.TransformationMode.SmoothTransformation))
+                    self.bot_avatar_display.setText('')
+
+        if self._user_avatar_image_path:
+            pm = _load_circular(self._user_avatar_image_path, 48)
+            if pm:
+                self._user_avatar_pixmap = pm
+                self.user_avatar = ''
+                if hasattr(self, 'user_avatar_display'):
+                    self.user_avatar_display.setPixmap(
+                        pm.scaled(26, 26, Qt.AspectRatioMode.KeepAspectRatio,
+                                  Qt.TransformationMode.SmoothTransformation))
+                    self.user_avatar_display.setText('')
 
     def save_config(self):
         try:
-            config = {
-                'bot_avatar': self.bot_avatar,
-                'user_avatar': self.user_avatar
-            }
+            config = {}
+            if os.path.exists(self.config_file):
+                with open(self.config_file, 'r') as f:
+                    config = json.load(f)
+            config['bot_avatar']  = self.bot_avatar
+            config['user_avatar'] = self.user_avatar
+            config['chat_zoom']   = self.chat_zoom
+            config['bot_avatar_image_path']  = getattr(self, '_bot_avatar_image_path', '')
+            config['user_avatar_image_path'] = getattr(self, '_user_avatar_image_path', '')
+            config['bot_avatar_size']  = getattr(self, '_bot_avatar_size', 32)
+            config['user_avatar_size'] = getattr(self, '_user_avatar_size', 32)
+            config['avatar_size_uniform'] = getattr(self, '_avatar_size_uniform', False)
             with open(self.config_file, 'w') as f:
                 json.dump(config, f, indent=2)
         except Exception as e:
@@ -1014,323 +1399,459 @@ class ChatWindow(QWidget):
         # Slides in/out via QPropertyAnimation on geometry.
         # ═══════════════════════════════════════════════════════════════════════
         self.sidebar = QFrame(self.container)
-        self.sidebar.setFixedWidth(240)
-        self.sidebar.setStyleSheet("""
-            QFrame {
-                background-color: #171717;
-                border-right: 1px solid #2A2A2A;
+        self.sidebar.setObjectName("sidebar")
+        self.sidebar.setFixedWidth(self._sidebar_w)
+        _tc = self._t()
+        self.sidebar.setStyleSheet(f"""
+            QFrame#sidebar {{
+                background-color: {_tc['base']};
+                border-right: 1px solid {_tc['border']};
                 border-top-left-radius: 12px;
                 border-bottom-left-radius: 12px;
-            }
+            }}
         """)
-        # Start the sidebar parked off-screen to the left (hidden)
-        self.sidebar.setGeometry(-240, 0, 240, 650)
+        self.sidebar.setGeometry(-self._sidebar_w, 0, self._sidebar_w, 650)
         self.sidebar.hide()
 
-        # Create main sidebar layout (contains scroll area)
-        sidebar_main_layout = QVBoxLayout(self.sidebar)
+        sidebar_main_layout = QHBoxLayout(self.sidebar)
         sidebar_main_layout.setContentsMargins(0, 0, 0, 0)
         sidebar_main_layout.setSpacing(0)
 
-        # ── Sidebar scroll area (saved as instance var for smooth scroll) ──
+        sidebar_scroll_vbox = QWidget()
+        sidebar_scroll_vbox.setStyleSheet("background: transparent;")
+        sidebar_scroll_vbox_layout = QVBoxLayout(sidebar_scroll_vbox)
+        sidebar_scroll_vbox_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_scroll_vbox_layout.setSpacing(0)
+        sidebar_main_layout.addWidget(sidebar_scroll_vbox, stretch=1)
+
+        self._sidebar_drag_handle = QFrame(self.sidebar)
+        self._sidebar_drag_handle.setFixedWidth(6)
+        self._sidebar_drag_handle.setStyleSheet("""
+            QFrame { background-color: rgba(168,199,250,0.12); border-radius: 3px; }
+            QFrame:hover { background-color: rgba(168,199,250,0.35); }
+        """)
+        self._sidebar_drag_handle.setCursor(Qt.CursorShape.SizeHorCursor)
+        self._sidebar_drag_handle.setToolTip("Drag to resize sidebar")
+        self._sidebar_drag_handle.mousePressEvent   = self._sidebar_resize_press
+        self._sidebar_drag_handle.mouseMoveEvent    = self._sidebar_resize_move
+        self._sidebar_drag_handle.mouseReleaseEvent = self._sidebar_resize_release
+        sidebar_main_layout.addWidget(self._sidebar_drag_handle)
+
         self.sidebar_scroll = QScrollArea()
         self.sidebar_scroll.setWidgetResizable(True)
         self.sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.sidebar_scroll.setStyleSheet("""
-            QScrollArea {
-                border: none;
-                background-color: transparent;
-            }
-            QScrollBar:vertical {
-                background: transparent;
-                width: 12px;
-                margin: 0;
-            }
-            QScrollBar::handle:vertical {
-                background: rgba(168, 199, 250, 0.3);
-                border-radius: 6px;
-                min-height: 30px;
-                margin: 2px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: rgba(168, 199, 250, 0.5);
-            }
-            QScrollBar::handle:vertical:pressed {
-                background: rgba(168, 199, 250, 0.7);
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0px;
-            }
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
-                background: transparent;
-            }
+            QScrollArea { border: none; background: transparent; }
+            QScrollBar:vertical { background: transparent; width: 6px; margin: 0; }
+            QScrollBar::handle:vertical { background: rgba(168,199,250,0.25); border-radius: 3px; min-height: 20px; }
+            QScrollBar::handle:vertical:hover { background: rgba(168,199,250,0.45); }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
         """)
-        # Install viewport event filter for inertia scroll
         self.sidebar_scroll.viewport().installEventFilter(self)
 
-        # Create container widget for scrollable content
         sidebar_content = QWidget()
-        sidebar_content.setStyleSheet("""
-            QWidget {
-                background-color: #171717;
-            }
-        """)
+        sidebar_content.setObjectName("sidebarContent")
+        sidebar_content.setStyleSheet(f"QWidget#sidebarContent {{ background-color: {_tc['base']}; }}")
         sidebar_layout = QVBoxLayout(sidebar_content)
-        sidebar_layout.setContentsMargins(12, 12, 12, 12)
-        sidebar_layout.setSpacing(10)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_layout.setSpacing(0)
 
-        # Sidebar header
-        sidebar_header = QLabel("🎨 Appearance")
-        sidebar_header.setStyleSheet("font-size: 12px; font-weight: 600; color: #9AA0A6; padding: 8px 4px;")
-        sidebar_layout.addWidget(sidebar_header)
-
-        # Bot Avatar Selection
-        bot_avatar_container = QFrame()
-        bot_avatar_container.setStyleSheet("""
-            QFrame {
-                background-color: #252525;
-                border-radius: 8px;
-                padding: 10px;
-            }
+        # ─────────────────────────────────────────────────────────────────────
+        # HERO — avatar cluster + name + 3 action pills
+        # ─────────────────────────────────────────────────────────────────────
+        hero = QFrame()
+        hero.setObjectName("sidebarHero")
+        hero.setStyleSheet(f"""
+            QFrame#sidebarHero {{
+                background-color: {_tc['base']};
+                border-bottom: 1px solid {_tc['border']};
+            }}
         """)
-        bot_avatar_layout = QVBoxLayout(bot_avatar_container)
-        bot_avatar_layout.setSpacing(6)
-        bot_avatar_layout.setContentsMargins(10, 10, 10, 10)
+        hero_lay = QVBoxLayout(hero)
+        hero_lay.setContentsMargins(16, 18, 16, 14)
+        hero_lay.setSpacing(12)
 
-        bot_label = QLabel("Bot Avatar")
-        bot_label.setStyleSheet("color: #9AA0A6; font-size: 11px;")
-        bot_avatar_layout.addWidget(bot_label)
+        # Avatar cluster row
+        av_name_row = QHBoxLayout()
+        av_name_row.setSpacing(12)
+
+        # Stacked avatars widget (bot big, user badge)
+        av_stack = QWidget()
+        av_stack.setFixedSize(56, 56)
+        av_stack.setStyleSheet("background: transparent;")
 
         self.bot_avatar_display = QLabel(self.bot_avatar)
+        self.bot_avatar_display.setParent(av_stack)
         self.bot_avatar_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.bot_avatar_display.setGeometry(0, 0, 48, 48)
         self.bot_avatar_display.setStyleSheet("""
             QLabel {
-                font-size: 28px;
-                background-color: #1A73E8;
+                font-size: 24px;
+                background-color: #1a2a3a;
                 border-radius: 24px;
-                min-width: 48px;
-                min-height: 48px;
-                max-width: 48px;
-                max-height: 48px;
+                border: 2px solid transparent;
             }
         """)
-        bot_avatar_layout.addWidget(self.bot_avatar_display, alignment=Qt.AlignmentFlag.AlignCenter)
-
-        bot_btn = QPushButton("Change Bot Avatar")
-        bot_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2A2A2A;
-                border: 1px solid #3C3C3C;
-                border-radius: 6px;
-                padding: 6px;
-                font-size: 10px;
-                color: #E8EAED;
-            }
-            QPushButton:hover {
-                background-color: #333333;
-            }
-        """)
-        bot_btn.clicked.connect(self.change_bot_avatar)
-        bot_avatar_layout.addWidget(bot_btn)
-
-        sidebar_layout.addWidget(bot_avatar_container)
-
-        # User Avatar Selection
-        user_avatar_container = QFrame()
-        user_avatar_container.setStyleSheet("""
-            QFrame {
-                background-color: #252525;
-                border-radius: 8px;
-                padding: 10px;
-            }
-        """)
-        user_avatar_layout = QVBoxLayout(user_avatar_container)
-        user_avatar_layout.setSpacing(6)
-        bot_avatar_layout.setContentsMargins(10, 10, 10, 10)
-
-        user_label = QLabel("User Avatar")
-        user_label.setStyleSheet("color: #9AA0A6; font-size: 11px;")
-        user_avatar_layout.addWidget(user_label)
 
         self.user_avatar_display = QLabel(self.user_avatar)
+        self.user_avatar_display.setParent(av_stack)
         self.user_avatar_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.user_avatar_display.setStyleSheet("""
-            QLabel {
-                font-size: 28px;
-                background-color: #34A853;
-                border-radius: 24px;
-                min-width: 48px;
-                min-height: 48px;
-                max-width: 48px;
-                max-height: 48px;
-            }
+        self.user_avatar_display.setGeometry(28, 30, 26, 26)
+        self.user_avatar_display.setStyleSheet(f"""
+            QLabel {{
+                font-size: 12px;
+                background-color: #1a2a1a;
+                border-radius: 13px;
+                border: 2px solid {_tc['base']};
+            }}
         """)
-        user_avatar_layout.addWidget(self.user_avatar_display, alignment=Qt.AlignmentFlag.AlignCenter)
+        av_stack.show()
 
-        user_btn = QPushButton("Change User Avatar")
-        user_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2A2A2A;
-                border: 1px solid #3C3C3C;
-                border-radius: 6px;
-                padding: 6px;
-                font-size: 10px;
-                color: #E8EAED;
-            }
-            QPushButton:hover {
-                background-color: #333333;
-            }
-        """)
-        user_btn.clicked.connect(self.change_user_avatar)
-        user_avatar_layout.addWidget(user_btn)
+        av_name_row.addWidget(av_stack)
 
-        sidebar_layout.addWidget(user_avatar_container)
+        name_col = QVBoxLayout()
+        name_col.setSpacing(2)
+        name_col.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
-        # NEW: User Name Section
-        user_name_container = QFrame()
-        user_name_container.setStyleSheet("""
-            QFrame {
-                background-color: #252525;
-                border-radius: 8px;
-                padding: 10px;
-            }
-        """)
-        user_name_layout = QVBoxLayout(user_name_container)
-        user_name_layout.setSpacing(6)
-        user_name_layout.setContentsMargins(10, 10, 10, 10)
+        _assistant_display = self.controller.get_assistant_name() or "Systema Auxilium"
+        self._hero_bot_name = QLabel(_assistant_display)
+        self._hero_bot_name.setStyleSheet("font-size: 13px; font-weight: 600; color: #E6EDF3; background: transparent;")
+        name_col.addWidget(self._hero_bot_name)
 
-        user_name_label = QLabel("Your Name")
-        user_name_label.setStyleSheet("color: #9AA0A6; font-size: 11px;")
-        user_name_layout.addWidget(user_name_label)
+        _user_display = self.controller.get_user_name() or "You"
+        self._hero_user_name = QLabel(_user_display)
+        self._hero_user_name.setStyleSheet("font-size: 10px; color: #555; background: transparent;")
+        name_col.addWidget(self._hero_user_name)
 
-        self.user_name_input = QLineEdit()
-        self.user_name_input.setPlaceholderText("Enter your name...")
-        self.user_name_input.setStyleSheet("""
-                QLineEdit {
-                    background-color: #2A2A2A;
-                    border: 1px solid #3C3C3C;
-                    border-radius: 6px;
-                    padding: 6px;
-                    font-size: 11px;
-                    color: #E8EAED;
-                }
+        av_name_row.addLayout(name_col)
+        av_name_row.addStretch()
+        hero_lay.addLayout(av_name_row)
+
+        # 3 action pills — no borders, subtle text-only pill style
+        pills_row = QHBoxLayout()
+        pills_row.setSpacing(6)
+
+        def _action_pill(icon, label, slot):
+            btn = QPushButton(f"{icon}  {label}")
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {_tc['elevated']};
+                    border: none;
+                    border-radius: 20px;
+                    padding: 5px 10px;
+                    font-size: 10px;
+                    color: #8B949E;
+                }}
+                QPushButton:hover {{
+                    background-color: rgba(88,166,255,0.12);
+                    color: #58A6FF;
+                }}
+                QPushButton:pressed {{
+                    background-color: rgba(88,166,255,0.18);
+                }}
             """)
-        self.user_name_input.textChanged.connect(self.on_user_name_changed) # Connect to save immediately on text change
-        user_name_layout.addWidget(self.user_name_input)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(slot)
+            return btn
 
-        sidebar_layout.addWidget(user_name_container)
+        pills_row.addWidget(_action_pill("🖼", "Avatars", self._open_avatars_dialog))
+        pills_row.addWidget(_action_pill("🏷", "Names", self._open_names_dialog))
+        pills_row.addWidget(_action_pill("⚙️", "Instructions", self.open_instructions_window))
+        hero_lay.addLayout(pills_row)
 
-        # NEW: Personalization Instructions
-        personalization_container = QFrame()
-        personalization_container.setStyleSheet("""
-            QFrame {
-                background-color: #252525;
-                border-radius: 8px;
-                padding: 10px;
-            }
-        """)
-        personalization_layout = QVBoxLayout(personalization_container)
-        personalization_layout.setSpacing(6)
-        personalization_layout.setContentsMargins(10, 10, 10, 10)
+        sidebar_layout.addWidget(hero)
 
-        personalization_label = QLabel("Custom Instructions")
-        personalization_label.setStyleSheet("color: #9AA0A6; font-size: 11px;")
-        personalization_layout.addWidget(personalization_label)
+        # ─────────────────────────────────────────────────────────────────────
+        # PERSONALIZE rows — no section header, just the rows
+        # ─────────────────────────────────────────────────────────────────────
+        def _sec_header(icon, text):
+            lbl = QLabel(f"{icon}  {text}")
+            lbl.setStyleSheet(f"""
+                QLabel {{
+                    font-size: 11px; font-weight: 700;
+                    color: #9AA0A6;
+                    background: transparent;
+                    padding: 14px 16px 4px;
+                }}
+            """)
+            return lbl
 
-        # Single button to open instructions window
-        configure_instructions_btn = QPushButton("⚙️ Configure Instructions")
-        configure_instructions_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2A2A2A;
-                border: 1px solid #3C3C3C;
+        def _side_row(icon, label, slot=None, badge_text=None, arrow=True):
+            row = QWidget()
+            row.setStyleSheet(f"""
+                QWidget {{ background: transparent; }}
+                QWidget:hover {{ background: {_tc['surface']}; }}
+            """)
+            row.setCursor(Qt.CursorShape.PointingHandCursor)
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(16, 8, 16, 8)
+            rl.setSpacing(10)
+
+            icon_lbl = QLabel(icon)
+            icon_lbl.setFixedWidth(18)
+            icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            icon_lbl.setStyleSheet("font-size: 14px; background: transparent; color: #8B949E;")
+            rl.addWidget(icon_lbl)
+
+            text_lbl = QLabel(label)
+            text_lbl.setStyleSheet("font-size: 11px; color: #C9D1D9; background: transparent;")
+            rl.addWidget(text_lbl, stretch=1)
+
+            if badge_text:
+                badge = QLabel(badge_text)
+                badge.setStyleSheet("background: #21262D; color: #58A6FF; font-size: 9px; border-radius: 4px; padding: 1px 6px;")
+                rl.addWidget(badge)
+
+            if arrow:
+                arr = QLabel("›")
+                arr.setStyleSheet("color: #30363D; font-size: 14px; background: transparent;")
+                rl.addWidget(arr)
+
+            if slot:
+                row.mousePressEvent = lambda e: slot()
+            return row
+
+        sidebar_layout.addWidget(_side_row("🧠", "Manage Memories", self._open_memory_window))
+
+        # ── Skills — inline collapsible, matching _side_row style ────────────
+        skill_manager = getattr(self.controller, 'skill_manager', None)
+        if skill_manager:
+            # Build a custom skills row that matches _side_row exactly
+            skills_wrapper = QWidget()
+            skills_wrapper.setStyleSheet("background: transparent;")
+            sw_lay = QVBoxLayout(skills_wrapper)
+            sw_lay.setContentsMargins(0, 0, 0, 0)
+            sw_lay.setSpacing(0)
+
+            # Header row — same layout as _side_row
+            skills_hdr = QWidget()
+            skills_hdr.setStyleSheet(f"""
+                QWidget {{ background: transparent; }}
+                QWidget:hover {{ background: {_tc['surface']}; }}
+            """)
+            skills_hdr.setCursor(Qt.CursorShape.PointingHandCursor)
+            sh_lay = QHBoxLayout(skills_hdr)
+            sh_lay.setContentsMargins(16, 8, 16, 8)
+            sh_lay.setSpacing(10)
+
+            sk_icon = QLabel("⚡")
+            sk_icon.setFixedWidth(18)
+            sk_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            sk_icon.setStyleSheet("font-size: 14px; background: transparent; color: #8B949E;")
+            sh_lay.addWidget(sk_icon)
+
+            sk_text = QLabel("Skills")
+            sk_text.setStyleSheet("font-size: 11px; color: #C9D1D9; background: transparent;")
+            sh_lay.addWidget(sk_text, stretch=1)
+
+            sk_count = QLabel("")
+            sk_count.setStyleSheet("background: #21262D; color: #58A6FF; font-size: 9px; border-radius: 4px; padding: 1px 6px;")
+            sh_lay.addWidget(sk_count)
+
+            sk_chevron = QLabel("›")
+            sk_chevron.setStyleSheet("color: #30363D; font-size: 14px; background: transparent;")
+            sh_lay.addWidget(sk_chevron)
+
+            sw_lay.addWidget(skills_hdr)
+
+            # Body — hidden by default, contains the original SkillsSidebarSection internals
+            skills_body = QWidget()
+            skills_body.setStyleSheet(f"background: {_tc['base']};")
+            skills_body.hide()
+            sb_lay = QVBoxLayout(skills_body)
+            sb_lay.setContentsMargins(8, 4, 8, 8)
+            sb_lay.setSpacing(4)
+            self._skills_section = SkillsSidebarSection(skill_manager)
+            # Hide the SkillsSidebarSection's own header — we have our own
+            self._skills_section.layout().itemAt(0).widget().hide()
+            # Force-show the internal body (our outer skills_body handles hide/show)
+            self._skills_section._body.show()
+            self._skills_section._expanded = True
+            sb_lay.addWidget(self._skills_section)
+            sw_lay.addWidget(skills_body)
+
+            # Refresh count label
+            def _refresh_skill_count():
+                try:
+                    skills = skill_manager.get_skills()
+                    loaded = sum(1 for s in skills if s.get('is_loaded'))
+                    sk_count.setText(f"{len(skills)} · {loaded} loaded" if skills else "none")
+                except RuntimeError:
+                    # sk_count label was deleted (sidebar rebuilt) — disconnect signals
+                    try:
+                        skill_manager.skills_changed.disconnect(_refresh_skill_count)
+                        skill_manager.loaded_skills_changed.disconnect(_refresh_skill_count)
+                    except Exception:
+                        pass
+            _refresh_skill_count()
+            skill_manager.skills_changed.connect(_refresh_skill_count)
+            skill_manager.loaded_skills_changed.connect(_refresh_skill_count)
+
+            # Toggle expand
+            _sk_open = [False]
+            def _toggle_skills():
+                _sk_open[0] = not _sk_open[0]
+                skills_body.setVisible(_sk_open[0])
+                sk_chevron.setText("▼" if _sk_open[0] else "›")
+                if _sk_open[0]:
+                    self._skills_section.refresh()
+            skills_hdr.mousePressEvent = lambda e: _toggle_skills()
+
+            sidebar_layout.addWidget(skills_wrapper)
+        else:
+            sidebar_layout.addWidget(_side_row("⚡", "Skills", None, badge_text="unavailable", arrow=False))
+
+        # ─────────────────────────────────────────────────────────────────────
+        # SESSION HISTORY section
+        # ─────────────────────────────────────────────────────────────────────
+        sidebar_layout.addWidget(_sec_header("📁", "Session History"))
+
+        # Search + sort row — compact, matches bg
+        search_sort_row = QHBoxLayout()
+        search_sort_row.setContentsMargins(16, 2, 16, 6)
+        search_sort_row.setSpacing(6)
+
+        self._session_search = QLineEdit()
+        self._session_search.setPlaceholderText("Search sessions…")
+        self._session_search.setFixedHeight(28)
+        self._session_search.setStyleSheet(f"""
+            QLineEdit {{
+                background-color: {_tc['elevated']};
+                border: 1px solid {_tc['border']};
                 border-radius: 6px;
-                padding: 8px;
+                padding: 0 8px;
                 font-size: 10px;
-                color: #E8EAED;
-            }
-            QPushButton:hover {
-                background-color: #333333;
-            }
+                color: #8B949E;
+            }}
+            QLineEdit:focus {{
+                border-color: rgba(88,166,255,0.45);
+                color: #E6EDF3;
+            }}
         """)
-        configure_instructions_btn.clicked.connect(self.open_instructions_window)
-        personalization_layout.addWidget(configure_instructions_btn)
+        self._session_search.textChanged.connect(self.refresh_session_list)
+        search_sort_row.addWidget(self._session_search, stretch=1)
 
-        sidebar_layout.addWidget(personalization_container)
-
-        # Separator
-        separator = QFrame()
-        separator.setFrameShape(QFrame.Shape.HLine)
-        separator.setStyleSheet("background-color: #2A2A2A; max-height: 1px; margin: 8px 0;")
-        sidebar_layout.addWidget(separator)
-
-        # Mode info
-        mode_info = QLabel(
-            "<b>Force Modes:</b><br>"
-            "Use the dropdown in the<br>"
-            "message box to force AI<br>"
-            "to use specific modes."
-        )
-        mode_info.setWordWrap(True)
-        mode_info.setStyleSheet("""
-            QLabel {
-                color: #9AA0A6;
-                font-size: 10px;
-                padding: 8px;
-                background-color: #252525;
+        # Cycling sort button
+        self._session_sort_modes = ["Time", "A→Z", "Z→A"]
+        self._session_sort_idx   = 0
+        self._session_sort_btn = QPushButton("↕ Time")
+        self._session_sort_btn.setFixedHeight(28)
+        self._session_sort_btn.setFixedWidth(56)
+        self._session_sort_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {_tc['elevated']};
+                border: 1px solid {_tc['border']};
                 border-radius: 6px;
-                line-height: 1.4;
-            }
+                font-size: 9px;
+                color: #8B949E;
+                padding: 0 4px;
+            }}
+            QPushButton:hover {{ border-color: rgba(88,166,255,0.35); color: #E6EDF3; }}
         """)
-        sidebar_layout.addWidget(mode_info)
+        def _cycle_sort():
+            self._session_sort_idx = (self._session_sort_idx + 1) % len(self._session_sort_modes)
+            icons = ["↕", "↑", "↓"]
+            lbl = self._session_sort_modes[self._session_sort_idx]
+            self._session_sort_btn.setText(f"{icons[self._session_sort_idx]} {lbl}")
+            self.refresh_session_list()
+        self._session_sort_btn.clicked.connect(_cycle_sort)
+        search_sort_row.addWidget(self._session_sort_btn)
 
-        # ═══════════════════════════════════════════════════════════
-        # SESSION HISTORY SECTION
-        # ═══════════════════════════════════════════════════════════
+        sidebar_layout.addLayout(search_sort_row)
 
-        # Header
-        session_header = QLabel("📁 Session History")
-        session_header.setStyleSheet("font-size: 12px; font-weight: 600; color: #9AA0A6; padding: 8px 4px; margin-top: 12px;")
-        sidebar_layout.addWidget(session_header)
-
-        # New Session Button
-        new_session_btn = QPushButton("➕ New Session")
+        # New session button — accent, full width
+        new_session_btn = QPushButton("➕  New Session")
+        new_session_btn.setFixedHeight(32)
         new_session_btn.setStyleSheet("""
             QPushButton {
-                background-color: #1A73E8;
-                border: none;
-                border-radius: 6px;
-                padding: 8px;
+                background-color: rgba(88,166,255,0.10);
+                border: 1px solid rgba(88,166,255,0.22);
+                border-radius: 7px;
                 font-size: 11px;
-                color: white;
                 font-weight: 500;
+                color: #58A6FF;
+                margin: 0 16px;
+                padding: 0;
             }
             QPushButton:hover {
-                background-color: #1557B0;
+                background-color: rgba(88,166,255,0.18);
+                border-color: rgba(88,166,255,0.4);
             }
         """)
         new_session_btn.clicked.connect(lambda: self.controller.create_new_session())
         new_session_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         sidebar_layout.addWidget(new_session_btn)
 
-        # Session list container (scrollable)
+        # Session count label (updated by refresh)
+        self._session_count_lbl = QLabel("")
+        self._session_count_lbl.setStyleSheet("color: #30363D; font-size: 9px; background: transparent; padding: 2px 16px 0;")
+        sidebar_layout.addWidget(self._session_count_lbl)
+
+        # Session list container
+        self._session_list_body = QWidget()
+        self._session_list_body.setStyleSheet("background: transparent;")
+        slb_layout = QVBoxLayout(self._session_list_body)
+        slb_layout.setContentsMargins(0, 0, 0, 0)
+        slb_layout.setSpacing(0)
+
         session_list_container = QWidget()
-        session_list_container.setStyleSheet("background-color: transparent;")
+        session_list_container.setStyleSheet("background: transparent;")
         self.session_list_layout = QVBoxLayout(session_list_container)
         self.session_list_layout.setContentsMargins(0, 0, 0, 0)
-        self.session_list_layout.setSpacing(2)
-        sidebar_layout.addWidget(session_list_container)
+        self.session_list_layout.setSpacing(0)
+        slb_layout.addWidget(session_list_container)
+        sidebar_layout.addWidget(self._session_list_body)
 
-        # Load initial sessions
+        # Show more / Show all / Collapse buttons (hidden until needed)
+        session_footer = QWidget()
+        session_footer.setStyleSheet("background: transparent;")
+        sf_lay = QHBoxLayout(session_footer)
+        sf_lay.setContentsMargins(16, 2, 16, 6)
+        sf_lay.setSpacing(8)
+
+        _footer_btn_ss = """
+            QPushButton { background: transparent; border: none;
+                color: #555; font-size: 10px; padding: 0; }
+            QPushButton:hover { color: #8B949E; }
+        """
+        self._show_more_btn = QPushButton("Show more")
+        self._show_more_btn.setStyleSheet(_footer_btn_ss)
+        self._show_more_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._show_more_btn.clicked.connect(self._session_show_more)
+
+        self._show_all_btn = QPushButton("Show all")
+        self._show_all_btn.setStyleSheet(_footer_btn_ss)
+        self._show_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._show_all_btn.clicked.connect(self._session_show_all)
+
+        self._collapse_list_btn = QPushButton("Collapse")
+        self._collapse_list_btn.setStyleSheet(_footer_btn_ss)
+        self._collapse_list_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._collapse_list_btn.clicked.connect(self._session_collapse)
+
+        sep_dot = QLabel("·")
+        sep_dot.setStyleSheet("color: #333; background: transparent; font-size: 10px;")
+        sf_lay.addWidget(self._show_more_btn)
+        sf_lay.addWidget(sep_dot)
+        sf_lay.addWidget(self._show_all_btn)
+        sf_lay.addStretch()
+        sf_lay.addWidget(self._collapse_list_btn)
+
+        session_footer.hide()
+        self._session_footer = session_footer
+        sidebar_layout.addWidget(session_footer)
+
+        # State for pagination
+        self._session_visible_count = 10
+        self._session_list_expanded = True
+        self._session_list_auto_collapsed = False
+
         QTimer.singleShot(100, self.refresh_session_list)
 
-        # At the end of sidebar content, add stretch
         sidebar_layout.addStretch()
-
-        # Set the content widget to the scroll area
         self.sidebar_scroll.setWidget(sidebar_content)
-
-        # Add scroll area to main sidebar layout
-        sidebar_main_layout.addWidget(self.sidebar_scroll)
+        sidebar_scroll_vbox_layout.addWidget(self.sidebar_scroll)
 
         # NOTE: sidebar is NOT added to main_layout — it is an overlay.
 
@@ -1342,14 +1863,15 @@ class ChatWindow(QWidget):
 
         # Header bar
         header_bar = QFrame()
+        self.header_bar = header_bar          # stored for glass background toggle
         header_bar.setFixedHeight(50)
         header_bar.mousePressEvent = self.header_mouse_press
         header_bar.mouseMoveEvent = self.header_mouse_move
         header_bar.mouseReleaseEvent = self.header_mouse_release
         header_bar.setStyleSheet("""
             QFrame {
-                background-color: #212121;
-                border-bottom: 1px solid #2A2A2A;
+                background-color: #161B22;
+                border-bottom: 1px solid #21262D;
             }
         """)
 
@@ -1369,7 +1891,7 @@ class ChatWindow(QWidget):
                 color: #9AA0A6;
             }
             QPushButton:hover {
-                background: #2A2A2A;
+                background: #21262D;
                 color: #E8EAED;
             }
         """)
@@ -1389,6 +1911,7 @@ class ChatWindow(QWidget):
                 font-weight: 600;
                 color: #E8EAED;
                 margin-left: 8px;
+                background: transparent;
             }
         """)
         header_layout.addWidget(title)
@@ -1406,6 +1929,9 @@ class ChatWindow(QWidget):
                 """)
         header_layout.addWidget(self.voice_status_label)
 
+        # Skills are now integrated in the sidebar — no header button needed.
+        self.skills_panel = None   # kept as attribute for any legacy references
+
         # ==========Window control buttons==========
 
         # Minimize button
@@ -1420,7 +1946,7 @@ class ChatWindow(QWidget):
                 color: #9AA0A6;
             }
             QPushButton:hover {
-                background: #2A2A2A;
+                background: #21262D;
                 color: #E8EAED;
             }
         """)
@@ -1454,7 +1980,7 @@ class ChatWindow(QWidget):
         scroll_area.setStyleSheet("""
                     QScrollArea {
                         border: none;
-                        background-color: #212121;
+                        background-color: #161B22;
                     }
                     QScrollBar:vertical {
                         background: transparent;
@@ -1485,7 +2011,7 @@ class ChatWindow(QWidget):
         self.chat_widget = QWidget()
         self.chat_widget.setStyleSheet("""
             QWidget {
-                background-color: #212121;
+                background-color: #161B22;
             }
         """)
         self.chat_widget.setAcceptDrops(True)
@@ -1500,15 +2026,17 @@ class ChatWindow(QWidget):
 
         # Install event filter on the viewport for smooth inertia scrolling (main chat)
         scroll_area.viewport().installEventFilter(self)
-
-        # Status label
+        # Status label (thinking indicator)
         self.status_label = QLabel("")
+        self.status_label.setObjectName("statusLabel")
         self.status_label.setStyleSheet("""
-            QLabel {
+            QLabel#statusLabel {
                 color: #9AA0A6;
                 font-style: italic;
                 font-size: 11px;
-                padding: 6px 16px;
+                padding: 5px 14px;
+                background-color: #0D1117;
+                border-top: 1px solid #21262D;
             }
         """)
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1516,187 +2044,209 @@ class ChatWindow(QWidget):
 
         # Input area
         input_container = QFrame()
+        input_container.setObjectName("inputContainer")
         input_container.setStyleSheet("""
-            QFrame {
-                background-color: #1F1F1F;
-                border-top: 1px solid #2A2A2A;
-                padding: 12px 16px;
+            QFrame#inputContainer {
+                background-color: transparent;
+                border-top: none;
             }
         """)
 
         input_layout = QVBoxLayout(input_container)
-        input_layout.setContentsMargins(0, 0, 0, 0)
-        input_layout.setSpacing(8)
+        input_layout.setContentsMargins(14, 8, 14, 12)
+        input_layout.setSpacing(0)
 
-        # Mode selector and input combined
+        # ── Pill-shaped input card ────────────────────────────────────────────
         combined_container = QFrame()
+        combined_container.setObjectName("inputCard")
         combined_container.setStyleSheet("""
-            QFrame {
-                background-color: #1F1F1F;
-                border: 1px solid #3C3C3C;
-                border-radius: 12px;
+            QFrame#inputCard {
+                background-color: #1C2128;
+                border: 1px solid #2D333B;
+                border-radius: 18px;
             }
         """)
 
-        combined_layout = QHBoxLayout(combined_container)
-        combined_layout.setContentsMargins(12, 4, 12, 4)
-        combined_layout.setSpacing(8)
-        combined_layout.setSizeConstraint(QHBoxLayout.SizeConstraint.SetMinimumSize)
+        combined_layout = QVBoxLayout(combined_container)
+        combined_layout.setContentsMargins(0, 0, 0, 0)
+        combined_layout.setSpacing(0)
+        combined_layout.setSizeConstraint(QVBoxLayout.SizeConstraint.SetMinimumSize)
 
-        # File browse button
-        browse_btn = QPushButton("📁")
-        browse_btn.setFixedSize(32, 32)
-        browse_btn.setStyleSheet("""
-                QPushButton {
-                    background: transparent;
-                    border: 2px solid #5F5F5F;
-                    border-radius: 16px;
-                    font-size: 14px;
-                }
-                QPushButton:hover {
-                    background: #2A2A2A;
-                    border-color: #7F7F7F;
-                }
-            """)
-        browse_btn.clicked.connect(self.browse_for_file)
-        browse_btn.setToolTip("Browse for files")
-        combined_layout.addWidget(browse_btn)
+        # ── Text input area ───────────────────────────────────────────────────
+        text_row = QWidget()
+        text_row.setObjectName("inputTextRow")
+        text_row.setStyleSheet("QWidget#inputTextRow { background: transparent; }")
+        text_row_layout = QHBoxLayout(text_row)
+        text_row_layout.setContentsMargins(16, 10, 16, 4)
+        text_row_layout.setSpacing(0)
+        text_row_layout.setSizeConstraint(QHBoxLayout.SizeConstraint.SetMinimumSize)
 
-        # Mode dropdown (ChatGPT-style)
-        self.mode_dropdown = QPushButton("💬")
-        self.mode_dropdown.setFixedSize(32, 32)
-        self.mode_dropdown.setStyleSheet("""
-            QPushButton {
-                background-color: transparent;
-                border: none;
-                border-radius: 6px;
-                font-size: 16px;
-            }
-            QPushButton:hover {
-                background-color: #3C3C3C;
-            }
-        """)
-        self.mode_dropdown.clicked.connect(self.show_mode_menu)
-        combined_layout.addWidget(self.mode_dropdown)
-
-        # Text input
         self.input_field = ResizableInput()
         self.input_field.text_input.setStyleSheet("""
             QTextEdit {
-                background-color: #1F1F1F;
+                background-color: transparent;
                 border: none;
                 color: #E8EAED;
                 font-size: 13px;
-                font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-                padding: 8px 4px;
+                font-family: 'Segoe UI', -apple-system, system-ui, sans-serif;
+                padding: 2px 0;
                 line-height: 1.6;
             }
-            QTextEdit:focus {
-                background-color: #1F1F1F;
+            QTextEdit:focus { background-color: transparent; }
+        """)
+        self.input_field.resize_handle.setStyleSheet("""
+            QLabel {
+                background-color: transparent;
+                color: #30363D;
+                font-size: 6px;
+                letter-spacing: 2px;
+            }
+            QLabel:hover {
+                color: #8B949E;
+                background-color: rgba(255,255,255,0.05);
+                border-radius: 2px;
             }
         """)
         self.input_field.enterPressed.connect(self.send_message)
-        combined_layout.addWidget(self.input_field, 1)
+        text_row_layout.addWidget(self.input_field, 1)
+        combined_layout.addWidget(text_row)
 
         # Install inertia scroll on the input field's viewport
         self.input_field.text_input.viewport().installEventFilter(self)
 
-        # NEW: Voice button inside message box
-        self.voice_btn_inline = QPushButton("🎤")
-        self.voice_btn_inline.setFixedSize(32, 32)
-        self.voice_btn_inline.setCheckable(True)
-        self.voice_btn_inline.setStyleSheet("""
+        # ── Bottom action row: [attach][mode]  ·····  [voice][interrupt][send] ──
+        bottom_row = QWidget()
+        bottom_row.setObjectName("inputBottomRow")
+        bottom_row.setStyleSheet("QWidget#inputBottomRow { background: transparent; }")
+        bottom_row_layout = QHBoxLayout(bottom_row)
+        bottom_row_layout.setContentsMargins(10, 0, 10, 8)
+        bottom_row_layout.setSpacing(4)
+
+        # ── LEFT: attach + mode ───────────────────────────────────────────────
+        browse_btn = QPushButton("📎")
+        browse_btn.setFixedSize(30, 30)
+        browse_btn.setToolTip("Attach file")
+        browse_btn.setStyleSheet("""
             QPushButton {
-                background: transparent;
-                border: 2px solid #5F5F5F;
-                border-radius: 16px;
-                font-size: 16px;
-                color: #9AA0A6;
+                background: rgba(255,255,255,0.04);
+                border: 1px solid rgba(255,255,255,0.08);
+                border-radius: 8px;
+                font-size: 13px;
+                color: #6E7280;
             }
             QPushButton:hover {
-                background: #2A2A2A;
-                border-color: #7F7F7F;
-                color: #E8EAED;
+                background: rgba(255,255,255,0.1);
+                border-color: rgba(255,255,255,0.2);
+                color: #9AA0A6;
+            }
+        """)
+        browse_btn.clicked.connect(self.browse_for_file)
+        bottom_row_layout.addWidget(browse_btn)
+
+        self.mode_dropdown = QPushButton("💬")
+        self.mode_dropdown.setFixedSize(30, 30)
+        self.mode_dropdown.setToolTip("Set execution mode")
+        self.mode_dropdown.setStyleSheet("""
+            QPushButton {
+                background: rgba(255,255,255,0.04);
+                border: 1px solid rgba(255,255,255,0.08);
+                border-radius: 8px;
+                font-size: 13px;
+                color: #6E7280;
+            }
+            QPushButton:hover {
+                background: rgba(255,255,255,0.1);
+                border-color: rgba(255,255,255,0.2);
+                color: #9AA0A6;
+            }
+        """)
+        self.mode_dropdown.clicked.connect(self.show_mode_menu)
+        bottom_row_layout.addWidget(self.mode_dropdown)
+
+        bottom_row_layout.addStretch()
+
+        # ── RIGHT: voice + interrupt + send ──────────────────────────────────
+        self.voice_btn_inline = QPushButton("🎤")
+        self.voice_btn_inline.setFixedSize(30, 30)
+        self.voice_btn_inline.setCheckable(True)
+        self.voice_btn_inline.setToolTip("Toggle voice mode")
+        self.voice_btn_inline.setStyleSheet("""
+            QPushButton {
+                background: rgba(255,255,255,0.04);
+                border: 1px solid rgba(255,255,255,0.08);
+                border-radius: 8px;
+                font-size: 13px;
+                color: #6E7280;
+            }
+            QPushButton:hover {
+                background: rgba(255,255,255,0.1);
+                border-color: rgba(255,255,255,0.2);
+                color: #9AA0A6;
             }
             QPushButton:checked {
-                background: #34A853;
-                border-color: #34A853;
-                color: white;
+                background: rgba(52,168,83,0.22);
+                border-color: rgba(52,168,83,0.5);
+                color: #4CAF50;
             }
         """)
         self.voice_btn_inline.clicked.connect(self.toggle_voice)
-        combined_layout.addWidget(self.voice_btn_inline)
+        bottom_row_layout.addWidget(self.voice_btn_inline)
 
-        # NEW: Voice interrupt button (only shown during TTS in manual mode)
         self.voice_interrupt_btn = QPushButton("🔇")
-        self.voice_interrupt_btn.setFixedSize(32, 32)
+        self.voice_interrupt_btn.setFixedSize(30, 30)
         self.voice_interrupt_btn.setStyleSheet("""
             QPushButton {
-                background: #EA4335;
-                border: none;
-                border-radius: 16px;
-                font-size: 16px;
-                color: white;
+                background: rgba(234,67,53,0.18);
+                border: 1px solid rgba(234,67,53,0.45);
+                border-radius: 8px;
+                font-size: 13px;
+                color: #F07070;
             }
-            QPushButton:hover {
-                background: #C5372C;
-            }
+            QPushButton:hover { background: rgba(234,67,53,0.3); }
         """)
         self.voice_interrupt_btn.clicked.connect(self.interrupt_voice)
-        self.voice_interrupt_btn.hide()  # Hidden by default
-        combined_layout.addWidget(self.voice_interrupt_btn)
+        self.voice_interrupt_btn.hide()
+        bottom_row_layout.addWidget(self.voice_interrupt_btn)
 
-        # Interrupt response button
         self.interrupt_btn = QPushButton("⏹")
-        self.interrupt_btn.setFixedSize(32, 32)
+        self.interrupt_btn.setFixedSize(30, 30)
         self.interrupt_btn.setStyleSheet("""
             QPushButton {
-                background-color: #EA4335;
-                border: none;
-                border-radius: 16px;
-                font-size: 16px;
-                color: white;
+                background: rgba(234,67,53,0.18);
+                border: 1px solid rgba(234,67,53,0.45);
+                border-radius: 8px;
+                font-size: 14px;
+                color: #F07070;
                 font-weight: bold;
             }
-            QPushButton:hover {
-                background-color: #C5372C;
-            }
-            QPushButton:pressed {
-                background-color: #A62C23;
-            }
+            QPushButton:hover { background: rgba(234,67,53,0.3); }
         """)
         self.interrupt_btn.clicked.connect(self.interrupt_response)
-        self.interrupt_btn.hide()  # Hidden by default
-        combined_layout.addWidget(self.interrupt_btn)
+        self.interrupt_btn.hide()
+        bottom_row_layout.addWidget(self.interrupt_btn)
 
-        # Send button
         self.send_btn = QPushButton("↑")
-        self.send_btn.setFixedSize(32, 32)
+        self.send_btn.setFixedSize(30, 30)
         self.send_btn.setStyleSheet("""
             QPushButton {
-                background-color: #1A73E8;
+                background-color: #58A6FF;
                 border: none;
-                border-radius: 16px;
+                border-radius: 8px;
                 font-size: 16px;
                 color: white;
                 font-weight: bold;
             }
-            QPushButton:hover {
-                background-color: #1557B0;
-            }
-            QPushButton:pressed {
-                background-color: #103F7C;
-            }
-            QPushButton:disabled {
-                background-color: #3C3C3C;
-                color: #5F5F5F;
-            }
+            QPushButton:hover { background-color: #388BFD; }
+            QPushButton:pressed { background-color: #1F6FEB; }
+            QPushButton:disabled { background-color: #2D333B; color: #5F5F5F; }
         """)
         self.send_btn.clicked.connect(self.send_message)
-        combined_layout.addWidget(self.send_btn)
+        bottom_row_layout.addWidget(self.send_btn)
 
+        combined_layout.addWidget(bottom_row)
         input_layout.addWidget(combined_container)
 
+        self.input_container = input_container  # stored for glass background toggle
         chat_layout.addWidget(input_container)
 
         main_layout.addWidget(chat_container)
@@ -1707,15 +2257,18 @@ class ChatWindow(QWidget):
         # Load personalization
         self.load_personalization()
 
-        # Notify if admin priveleges are available
-        self.check_admin_mode()
+        # Apply glass background from saved settings (deferred so widgets are ready)
+        QTimer.singleShot(200, self._apply_glass_from_settings)
 
-        # Welcome message
-        self.add_system_message(
+        # Notify if admin privileges are available — deferred past theme init
+        QTimer.singleShot(210, self.check_admin_mode)
+
+        # Welcome message — deferred past theme init so _current_theme_key is set
+        QTimer.singleShot(220, lambda: self.add_system_message(
             "👋 **Welcome to Systema Auxilium!**\n\n"
             "I can execute Python code and control your system. "
             "Click the 💬 icon to enforce tool usage."
-        )
+        ))
 
     # ═══════════════════════════════════════════════════════════
     # ANIMATION METHODS
@@ -1737,6 +2290,44 @@ class ChatWindow(QWidget):
         self.sidebar_visible = not self.sidebar_visible
         self._animate_sidebar(self.sidebar_visible)
 
+    # ── Sidebar right-edge resize ──────────────────────────────────────────────
+    # These are distinct from the code-block handles (handle_vertical_press etc.)
+
+    def _sidebar_resize_press(self, event):
+        """Start sidebar width drag."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._sidebar_resize_active = True
+            self._sidebar_resize_start_x = event.globalPosition().toPoint().x()
+            self._sidebar_resize_start_w = self._sidebar_w
+            event.accept()
+
+    def _sidebar_resize_move(self, event):
+        """Update sidebar width while dragging."""
+        if not self._sidebar_resize_active:
+            return
+        dx = event.globalPosition().toPoint().x() - self._sidebar_resize_start_x
+        new_w = max(SIDEBAR_MIN_W, min(SIDEBAR_MAX_W, self._sidebar_resize_start_w + dx))
+        if new_w != self._sidebar_w:
+            self._sidebar_w = new_w
+            container_h = self.container.height()
+            self.sidebar.setFixedWidth(new_w)
+            self.sidebar.setGeometry(0, 0, new_w, container_h)
+        event.accept()
+
+    def _sidebar_resize_release(self, event):
+        """Finish sidebar width drag."""
+        self._sidebar_resize_active = False
+        event.accept()
+
+    def resizeEvent(self, event):
+        """Keep sidebar height in sync with container on window resize."""
+        super().resizeEvent(event)
+        # sidebar height tracks container
+        if self.sidebar_visible and self.sidebar.isVisible():
+            container_h = self.container.height()
+            self.sidebar.setGeometry(0, 0, self._sidebar_w, container_h)
+
+
     def _animate_sidebar(self, show: bool):
         """Slide the sidebar in (show=True) or out (show=False)."""
         if self._sidebar_anim is not None:
@@ -1744,9 +2335,10 @@ class ChatWindow(QWidget):
                 self._sidebar_anim.stop()
 
         container_h = self.container.height()
-        sidebar_w = 240
+        sidebar_w = self._sidebar_w
 
         if show:
+            self.sidebar.setFixedWidth(sidebar_w)
             self.sidebar.setGeometry(-sidebar_w, 0, sidebar_w, container_h)
             self.sidebar.show()
             self.sidebar.raise_()
@@ -1863,124 +2455,301 @@ class ChatWindow(QWidget):
         group.start()
 
     def open_instructions_window(self):
-        """Open custom instructions configuration window"""
-        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QTextEdit, QLabel
+        """Open custom instructions window with personality presets and persona block tools."""
+        import json as _json
+        from pathlib import Path as _Path
+        from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
+                                     QTextEdit, QLabel, QScrollArea, QWidget, QFrame,
+                                     QInputDialog, QMessageBox, QSplitter)
+
+        PRESETS_FILE = _Path(_APP_ROOT) / "data" / "instruction_presets.json"
+        PRESETS_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+        _tc = self._t()
+
+        # ── Shared styles ─────────────────────────────────────────────────────
+        _DLG_SS = f"""
+            QDialog {{ background-color: {_tc['base']}; color: #E6EDF3;
+                       font-family: 'Segoe UI', system-ui, sans-serif; }}
+            QLabel {{ background: transparent; color: #E6EDF3; }}
+            QScrollArea {{ background: transparent; border: none; }}
+            QScrollBar:vertical {{ background: transparent; width: 6px; border: none; }}
+            QScrollBar::handle:vertical {{ background: {_tc['elevated']}; border-radius: 3px; min-height: 20px; }}
+            QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
+        """
+        def _chip(text, accent=False):
+            btn = QPushButton(text)
+            if accent:
+                btn.setStyleSheet(f"""
+                    QPushButton {{ background: rgba(88,166,255,0.14); border: 1px solid rgba(88,166,255,0.4);
+                        border-radius: 5px; padding: 4px 10px; font-size: 10px; color: #58A6FF; }}
+                    QPushButton:hover {{ background: rgba(88,166,255,0.24); border-color: #58A6FF; }}
+                """)
+            else:
+                btn.setStyleSheet(f"""
+                    QPushButton {{ background: {_tc['elevated']}; border: 1px solid {_tc['border']};
+                        border-radius: 5px; padding: 4px 10px; font-size: 10px; color: #8B949E; }}
+                    QPushButton:hover {{ background: rgba(88,166,255,0.08); border-color: rgba(88,166,255,0.35); color: #E6EDF3; }}
+                """)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            return btn
 
         dialog = QDialog(self)
-        dialog.setWindowTitle("Custom Assistant Instructions")
+        dialog.setWindowTitle("Custom Instructions")
         dialog.setModal(True)
-        dialog.setMinimumSize(500, 400)
-        dialog.setStyleSheet("""
-            QDialog {
-                background-color: #212121;
-            }
-        """)
+        dialog.setMinimumSize(680, 560)
+        dialog.resize(780, 640)
+        dialog.setStyleSheet(_DLG_SS)
 
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(12)
+        root = QVBoxLayout(dialog)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # Title
-        title = QLabel("Custom Instructions")
-        title.setStyleSheet("""
-            QLabel {
-                color: #E8EAED;
-                font-size: 16px;
-                font-weight: 600;
-                margin-bottom: 8px;
-            }
-        """)
-        layout.addWidget(title)
+        # Header
+        hdr = QFrame()
+        hdr.setFixedHeight(50)
+        hdr.setStyleSheet(f"QFrame {{ background: {_tc['surface']}; border-bottom: 1px solid {_tc['border']}; }}")
+        hdr_l = QHBoxLayout(hdr)
+        hdr_l.setContentsMargins(20, 0, 20, 0)
+        t_lbl = QLabel("Custom Instructions")
+        t_lbl.setStyleSheet("font-size: 14px; font-weight: 600; color: #E6EDF3;")
+        hdr_l.addWidget(t_lbl)
+        hdr_l.addStretch()
+        root.addWidget(hdr)
 
-        # Description
-        desc = QLabel("Customize how the assistant responds to you:")
-        desc.setStyleSheet("color: #9AA0A6; font-size: 11px; margin-bottom: 8px;")
-        layout.addWidget(desc)
+        # Main split: left = tools panel, right = editor
+        body = QSplitter(Qt.Orientation.Horizontal)
+        body.setStyleSheet("QSplitter { background: transparent; } QSplitter::handle { background: transparent; }")
 
-        # Text area
+        # ── LEFT PANEL: presets + inserts ────────────────────────────────────
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setFixedWidth(230)
+        left_scroll.setStyleSheet(f"QScrollArea {{ background: {_tc['base']}; border: none; border-right: 1px solid {_tc['border']}; }}")
+        left_w = QWidget()
+        left_w.setStyleSheet(f"QWidget {{ background: {_tc['base']}; }}")
+        left_lay = QVBoxLayout(left_w)
+        left_lay.setContentsMargins(12, 14, 12, 14)
+        left_lay.setSpacing(14)
+
+        def _section_hdr(txt):
+            l = QLabel(txt)
+            l.setStyleSheet("color: #8B949E; font-size: 9px; font-weight: 700; letter-spacing: 1px; background: transparent;")
+            return l
+
+        # Personality presets
+        left_lay.addWidget(_section_hdr("PERSONALITY PRESETS"))
+        PERSONALITY_PRESETS = [
+            ("🥰 Cute & bubbly",
+             "Be cute, enthusiastic, and bubbly! Use emojis frequently 🌟✨ Use lots of exclamation marks! "
+             "Be warm, encouraging, and playful. Express genuine excitement about helping!"),
+            ("💅 Girly & sassy",
+             "Be confident, witty, and a little sassy. Use casual, fun language. Don't be afraid to add "
+             "personality and light humor. Think of yourself as a smart, stylish best friend."),
+            ("💼 Male professional",
+             "Be precise, professional, and direct. Favor concise answers over lengthy explanations. "
+             "Use formal language. Prioritize efficiency and clarity in every response."),
+            ("🧑‍🎓 Patient teacher",
+             "Explain everything step-by-step as if teaching a beginner. Never assume prior knowledge. "
+             "Use analogies and simple language. Encourage questions and be endlessly patient."),
+            ("🔬 Technical expert",
+             "Be highly technical and detailed. Assume strong technical background. Use precise terminology. "
+             "Don't over-simplify. Provide depth, nuance, and cite edge-cases when relevant."),
+            ("😂 Witty & humorous",
+             "Be funny and keep things light. Add clever humor and witty observations naturally. "
+             "Don't force jokes, but don't miss a good opportunity either. Still be helpful — just fun about it."),
+            ("🧘 Calm & thoughtful",
+             "Be calm, measured, and thoughtful in all responses. Never rush. Take a reflective tone. "
+             "Acknowledge complexity, be empathetic, and never be dismissive."),
+            ("⚡ Speed mode",
+             "Ultra-concise. No fluff, no filler, no pleasantries. Answer in the fewest possible words. "
+             "Bullet points only when needed. Prioritize speed and density of information."),
+        ]
+        for label, text in PERSONALITY_PRESETS:
+            btn = _chip(label)
+            btn.setToolTip("Click to insert into editor")
+            btn.clicked.connect(lambda _, t=text: _insert(t))
+            left_lay.addWidget(btn)
+
+        # Persona block insert
+        left_lay.addSpacing(6)
+        left_lay.addWidget(_section_hdr("PERSONA TEMPLATE"))
+        persona_btn = _chip("📝 Insert Persona Block", accent=True)
+        PERSONA_BLOCK = (
+            "## Assistant Persona\n"
+            "Personality: [Describe personality traits]\n"
+            "Speaking style: [How does the assistant talk?]\n"
+            "Tone: [Formal / Casual / Playful / Professional]\n"
+            "Special behaviors: [Any quirks, habits, rules]\n"
+            "Background: [Optional backstory or context]\n"
+            "\n## Boundaries\n"
+            "- Always [rule 1]\n"
+            "- Never [rule 2]\n"
+        )
+        persona_btn.clicked.connect(lambda: _insert(PERSONA_BLOCK))
+        left_lay.addWidget(persona_btn)
+
+        # Custom saved presets
+        left_lay.addSpacing(6)
+        left_lay.addWidget(_section_hdr("SAVED PRESETS"))
+
+        saved_presets_container = QWidget()
+        saved_presets_container.setStyleSheet("background: transparent;")
+        self._saved_presets_layout = QVBoxLayout(saved_presets_container)
+        self._saved_presets_layout.setContentsMargins(0, 0, 0, 0)
+        self._saved_presets_layout.setSpacing(4)
+
+        def _load_saved_presets():
+            # Clear
+            while self._saved_presets_layout.count():
+                item = self._saved_presets_layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            try:
+                if PRESETS_FILE.exists():
+                    presets = _json.loads(PRESETS_FILE.read_text(encoding='utf-8'))
+                else:
+                    presets = {}
+            except Exception:
+                presets = {}
+
+            for name, content in presets.items():
+                row = QWidget()
+                row.setStyleSheet("background: transparent;")
+                row_l = QHBoxLayout(row)
+                row_l.setContentsMargins(0, 0, 0, 0)
+                row_l.setSpacing(4)
+                load_btn = _chip(f"📂 {name}")
+                load_btn.clicked.connect(lambda _, c=content: _insert(c))
+                row_l.addWidget(load_btn, stretch=1)
+                del_btn = QPushButton("✕")
+                del_btn.setFixedSize(22, 22)
+                del_btn.setStyleSheet(f"""
+                    QPushButton {{ background: transparent; border: none; color: #8B949E; font-size: 11px; border-radius: 4px; }}
+                    QPushButton:hover {{ background: rgba(242,139,130,0.15); color: #F28B82; }}
+                """)
+                del_btn.clicked.connect(lambda _, n=name: _delete_preset(n))
+                row_l.addWidget(del_btn)
+                self._saved_presets_layout.addWidget(row)
+
+            if not presets:
+                empty = QLabel("No saved presets yet")
+                empty.setStyleSheet("color: #30363D; font-size: 10px; background: transparent;")
+                self._saved_presets_layout.addWidget(empty)
+
+        def _delete_preset(name):
+            try:
+                presets = _json.loads(PRESETS_FILE.read_text(encoding='utf-8')) if PRESETS_FILE.exists() else {}
+                presets.pop(name, None)
+                PRESETS_FILE.write_text(_json.dumps(presets, indent=2, ensure_ascii=False), encoding='utf-8')
+                _load_saved_presets()
+            except Exception as e:
+                print(f"[instructions] delete preset error: {e}")
+
+        def _save_preset():
+            text = text_edit.toPlainText().strip()
+            if not text:
+                return
+            name, ok = QInputDialog.getText(dialog, "Save Preset", "Preset name:")
+            if ok and name.strip():
+                try:
+                    presets = _json.loads(PRESETS_FILE.read_text(encoding='utf-8')) if PRESETS_FILE.exists() else {}
+                    presets[name.strip()] = text
+                    PRESETS_FILE.write_text(_json.dumps(presets, indent=2, ensure_ascii=False), encoding='utf-8')
+                    _load_saved_presets()
+                except Exception as e:
+                    print(f"[instructions] save preset error: {e}")
+
+        left_lay.addWidget(saved_presets_container)
+        save_preset_btn = _chip("💾 Save current as preset", accent=True)
+        save_preset_btn.clicked.connect(_save_preset)
+        left_lay.addWidget(save_preset_btn)
+        left_lay.addStretch()
+        left_scroll.setWidget(left_w)
+        body.addWidget(left_scroll)
+
+        # ── RIGHT PANEL: editor ───────────────────────────────────────────────
+        right_w = QWidget()
+        right_w.setStyleSheet(f"QWidget {{ background: {_tc['base']}; }}")
+        right_lay = QVBoxLayout(right_w)
+        right_lay.setContentsMargins(16, 14, 16, 14)
+        right_lay.setSpacing(8)
+
+        desc = QLabel("These instructions shape how the assistant behaves for you. Click a preset on the left to insert text.")
+        desc.setWordWrap(True)
+        desc.setStyleSheet("color: #8B949E; font-size: 10px; background: transparent;")
+        right_lay.addWidget(desc)
+
         text_edit = QTextEdit()
         text_edit.setPlaceholderText(
             "Example:\n"
             "- Always be enthusiastic and encouraging\n"
             "- Use emojis when appropriate\n"
-            "- Explain technical concepts simply\n"
-            "- Be concise in your responses"
+            "- Explain technical concepts simply"
         )
-        text_edit.setStyleSheet("""
-            QTextEdit {
-                background-color: #1A1A1A;
-                border: 1px solid #3C3C3C;
+        text_edit.setStyleSheet(f"""
+            QTextEdit {{
+                background-color: {_tc['elevated']};
+                border: 1px solid {_tc['border']};
                 border-radius: 8px;
                 padding: 12px;
                 font-size: 13px;
                 font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-                color: #E8EAED;
+                color: #E6EDF3;
                 line-height: 1.6;
-            }
-            QTextEdit:focus {
-                border: 1px solid #1A73E8;
-                background-color: #151515;
-            }
+            }}
+            QTextEdit:focus {{ border-color: #58A6FF; }}
         """)
+        current = self.controller.get_custom_instructions()
+        if current:
+            text_edit.setPlainText(current)
+        right_lay.addWidget(text_edit, 1)
+        body.addWidget(right_w)
+        body.setSizes([230, 520])
+        root.addWidget(body)
 
-        # Load existing instructions
-        current_instructions = self.controller.get_custom_instructions()
-        if current_instructions:
-            text_edit.setPlainText(current_instructions)
+        # ── Insert helper ─────────────────────────────────────────────────────
+        def _insert(text):
+            cursor = text_edit.textCursor()
+            if cursor.hasSelection():
+                cursor.removeSelectedText()
+            if text_edit.toPlainText() and not text_edit.toPlainText().endswith('\n'):
+                text_edit.insertPlainText('\n')
+            text_edit.insertPlainText(text)
+            text_edit.setFocus()
 
-        layout.addWidget(text_edit, 1)  # Stretch to fill space
+        # Footer buttons
+        footer = QFrame()
+        footer.setFixedHeight(54)
+        footer.setStyleSheet(f"QFrame {{ background: {_tc['surface']}; border-top: 1px solid {_tc['border']}; }}")
+        foot_l = QHBoxLayout(footer)
+        foot_l.setContentsMargins(16, 0, 16, 0)
+        foot_l.setSpacing(8)
 
-        # Buttons
-        button_layout = QHBoxLayout()
-        button_layout.setSpacing(8)
+        clear_btn = _chip("🗑 Clear")
+        clear_btn.clicked.connect(text_edit.clear)
+        foot_l.addWidget(clear_btn)
+        foot_l.addStretch()
 
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.setStyleSheet("""
-            QPushButton {
-                background-color: transparent;
-                border: 1px solid #3C3C3C;
-                border-radius: 6px;
-                padding: 10px 24px;
-                font-size: 12px;
-                color: #9AA0A6;
-            }
-            QPushButton:hover {
-                background-color: #2A2A2A;
-                color: #E8EAED;
-            }
-        """)
+        cancel_btn = _chip("Cancel")
         cancel_btn.clicked.connect(dialog.reject)
+        foot_l.addWidget(cancel_btn)
 
         save_btn = QPushButton("Save")
-        save_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #1A73E8;
-                border: none;
-                border-radius: 6px;
-                padding: 10px 24px;
-                font-size: 12px;
-                color: white;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background-color: #1557B0;
-            }
+        save_btn.setStyleSheet(f"""
+            QPushButton {{ background: rgba(88,166,255,0.14); border: 1px solid rgba(88,166,255,0.4);
+                border-radius: 6px; padding: 8px 24px; font-size: 12px; color: #58A6FF; font-weight: 600; }}
+            QPushButton:hover {{ background: rgba(88,166,255,0.24); border-color: #58A6FF; color: #79BBFF; }}
         """)
-
-        def save_and_close():
-            instructions = text_edit.toPlainText().strip()
-            self.controller.set_custom_instructions(instructions)
-            self.add_system_message("✓ **Custom Instructions Saved**")
+        save_btn.clicked.connect(lambda: (
+            self.controller.set_custom_instructions(text_edit.toPlainText().strip()),
+            self.add_system_message("✓ **Custom instructions saved**"),
             dialog.accept()
+        ))
+        foot_l.addWidget(save_btn)
+        root.addWidget(footer)
 
-        save_btn.clicked.connect(save_and_close)
-
-        button_layout.addStretch()
-        button_layout.addWidget(cancel_btn)
-        button_layout.addWidget(save_btn)
-
-        layout.addLayout(button_layout)
-
+        _load_saved_presets()
         dialog.exec()
 
     def show_mode_menu(self):
@@ -1988,8 +2757,8 @@ class ChatWindow(QWidget):
         menu = QMenu(self)
         menu.setStyleSheet("""
             QMenu {
-                background-color: #2A2A2A;
-                border: 1px solid #3C3C3C;
+                background-color: #21262D;
+                border: 1px solid #30363D;
                 border-radius: 8px;
                 padding: 4px;
                 color: #E8EAED;
@@ -1999,11 +2768,11 @@ class ChatWindow(QWidget):
                 border-radius: 4px;
             }
             QMenu::item:selected {
-                background-color: #3C3C3C;
+                background-color: #2D333B;
             }
             QMenu::separator {
                 height: 1px;
-                background: #3C3C3C;
+                background: #2D333B;
                 margin: 4px 0;
             }
         """)
@@ -2077,8 +2846,18 @@ class ChatWindow(QWidget):
     def load_personalization(self):
         """Load personalization settings"""
         user_name = self.controller.get_user_name()
-        if user_name:
+        if user_name and hasattr(self, 'user_name_input'):
             self.user_name_input.setText(user_name)
+        assistant_name = self.controller.get_assistant_name()
+        if assistant_name and hasattr(self, 'assistant_name_input'):
+            self.assistant_name_input.setText(assistant_name)
+        # Always refresh hero labels — they exist in the new sidebar
+        self._refresh_hero_labels()
+
+    def _on_assistant_name_changed(self, text):
+        """Called when assistant name input changes"""
+        self.controller.set_assistant_name(text.strip())
+        self._refresh_hero_labels()
 
     def update_voice_status(self, status):
         """Update voice status indicator"""
@@ -2109,75 +2888,262 @@ class ChatWindow(QWidget):
         """Called when user name input changes"""
         user_name = text.strip()
         self.controller.set_user_name(user_name)
+        self._refresh_hero_labels()
+
+    def _show_avatar_picker(self, emojis, on_select, title="Pick Avatar"):
+        """Shared grid-based avatar picker popup."""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QGridLayout, QWidget
+        _tc = self._t()
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.setModal(True)
+        dlg.setStyleSheet(f"""
+            QDialog {{
+                background-color: {_tc['base']};
+            }}
+        """)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(14, 14, 14, 14)
+        lay.setSpacing(10)
+
+        hdr = QLabel(title)
+        hdr.setStyleSheet(f"color: #E6EDF3; font-size: 13px; font-weight: 600; background: transparent;")
+        lay.addWidget(hdr)
+
+        grid_widget = QWidget()
+        grid_widget.setStyleSheet("background: transparent;")
+        grid = QGridLayout(grid_widget)
+        grid.setSpacing(6)
+        cols = 8
+        for i, emoji in enumerate(emojis):
+            btn = QPushButton(emoji)
+            btn.setFixedSize(40, 40)
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    font-size: 20px; padding: 0;
+                    background: {_tc['elevated']};
+                    border: 1px solid {_tc['border']};
+                    border-radius: 6px;
+                }}
+                QPushButton:hover {{
+                    background: rgba(88,166,255,0.15);
+                    border-color: #58A6FF;
+                }}
+            """)
+            btn.clicked.connect(lambda _, e=emoji: (on_select(e), dlg.accept()))
+            grid.addWidget(btn, i // cols, i % cols)
+        lay.addWidget(grid_widget)
+        dlg.exec()
 
     def change_bot_avatar(self):
-        """Change bot avatar"""
-        menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu {
-                background-color: #2A2A2A;
-                border: 1px solid #3C3C3C;
-                border-radius: 8px;
-                padding: 6px;
-                color: #E8EAED;
-            }
-            QMenu::item {
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-size: 18px;
-            }
-            QMenu::item:selected {
-                background-color: #3C3C3C;
-            }
-        """)
-
-        emojis = ['🤖', '🦾', '🧠', '👾', '🤵', '🦊', '🐺', '🦁', '🐼', '🐨']
-        for emoji in emojis:
-            action = QAction(emoji, self)
-            action.triggered.connect(lambda checked, e=emoji: self.set_bot_avatar(e))
-            menu.addAction(action)
-
-        menu.exec(QCursor.pos())
+        """Change bot avatar — grid picker"""
+        emojis = [
+            '🤖','🦾','🧠','👾','🤵','🦊','🐺','🦁',
+            '🐼','🐨','🦝','🦔','🦉','🐉','👽','🌟',
+            '⚡','🔮','🎭','🎪','🦸','🧙','🥷','👻',
+            '🌈','🔥','💎','🪄','🛸','🧬','⚙️','🎯',
+            '🌙','☀️','🌊','🍀','🦋','🌸','🎵','🏆',
+        ]
+        self._show_avatar_picker(emojis, self.set_bot_avatar, "Assistant Avatar")
 
     def change_user_avatar(self):
-        """Change user avatar"""
-        menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu {
-                background-color: #2A2A2A;
-                border: 1px solid #3C3C3C;
-                border-radius: 8px;
-                padding: 6px;
-                color: #E8EAED;
-            }
-            QMenu::item {
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-size: 18px;
-            }
-            QMenu::item:selected {
-                background-color: #3C3C3C;
-            }
-        """)
-
-        emojis = ['👤', '👨', '👩', '🧑', '😊', '😎', '🤓', '🧙', '🦸', '🥷']
-        for emoji in emojis:
-            action = QAction(emoji, self)
-            action.triggered.connect(lambda checked, e=emoji: self.set_user_avatar(e))
-            menu.addAction(action)
-
-        menu.exec(QCursor.pos())
+        """Change user avatar — grid picker"""
+        emojis = [
+            '👤','👨','👩','🧑','😊','😎','🤓','🧙',
+            '🦸','🥷','👸','🤴','🧝','🧜','🧚','🧞',
+            '🕵️','👨‍💻','👩‍💻','🧑‍🚀','🧑‍🎨','🧑‍🎤','🧑‍🍳','🧑‍🔬',
+            '😄','😏','🥳','🤩','😈','👿','🤠','🥸',
+            '🐱','🐶','🦊','🐸','🐯','🦊','🐧','🦄',
+        ]
+        self._show_avatar_picker(emojis, self.set_user_avatar, "User Avatar")
 
     def set_bot_avatar(self, emoji):
-        """Set bot avatar"""
+        """Set bot avatar to emoji, clearing any saved picture."""
         self.bot_avatar = emoji
+        self._bot_avatar_pixmap = None
+        self._bot_avatar_image_path = ''
+        self.bot_avatar_display.setStyleSheet("""
+            QLabel {
+                font-size: 24px;
+                background-color: #1a2a3a;
+                border-radius: 24px;
+                border: 2px solid transparent;
+            }
+        """)
         self.bot_avatar_display.setText(emoji)
         self.save_config()
 
     def set_user_avatar(self, emoji):
-        """Set user avatar"""
+        """Set user avatar to emoji, clearing any saved picture."""
         self.user_avatar = emoji
+        self._user_avatar_pixmap = None
+        self._user_avatar_image_path = ''
+        _base = self._t()['base']
+        self.user_avatar_display.setStyleSheet(f"""
+            QLabel {{
+                font-size: 12px;
+                background-color: #1a2a1a;
+                border-radius: 13px;
+                border: 2px solid {_base};
+            }}
+        """)
         self.user_avatar_display.setText(emoji)
+        self.save_config()
+
+    def _upload_avatar(self, target: str):
+        """Open file picker then show a crop/position editor for avatar pictures."""
+        from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
+                                     QLabel, QSlider, QFileDialog)
+        from PyQt6.QtGui import QPixmap, QPainter, QPainterPath
+        from PyQt6.QtCore import Qt, QRectF
+
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Avatar Picture", "",
+            "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)"
+        )
+        if not path:
+            return
+
+        pixmap = QPixmap(path)
+        if pixmap.isNull():
+            self.add_system_message("⚠️ Could not load that image file.")
+            return
+
+        # ── Picture editor dialog ─────────────────────────────────────────────
+        _tc = self._t()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Adjust Avatar Picture")
+        dlg.setModal(True)
+        dlg.setFixedSize(340, 420)
+        dlg.setStyleSheet(f"QDialog {{ background: {_tc['base']}; color: #E6EDF3; font-family: 'Segoe UI', system-ui; }}")
+
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(20, 20, 20, 20)
+        lay.setSpacing(12)
+
+        # Live preview label (96×96 circle)
+        PREVIEW_SIZE = 96
+        preview = QLabel()
+        preview.setFixedSize(PREVIEW_SIZE, PREVIEW_SIZE)
+        preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(preview, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        # State
+        state = {'zoom': 1.0, 'ox': 0.5, 'oy': 0.5}   # ox/oy = centre as fraction 0-1
+
+        def _render():
+            """Re-render the circular preview from current state."""
+            z = state['zoom']
+            src_w = int(pixmap.width() / z)
+            src_h = int(pixmap.height() / z)
+            src_x = int((pixmap.width()  - src_w) * state['ox'])
+            src_y = int((pixmap.height() - src_h) * state['oy'])
+            src_x = max(0, min(src_x, pixmap.width()  - src_w))
+            src_y = max(0, min(src_y, pixmap.height() - src_h))
+            crop = pixmap.copy(src_x, src_y, src_w, src_h)
+            scaled = crop.scaled(PREVIEW_SIZE, PREVIEW_SIZE,
+                                 Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                 Qt.TransformationMode.SmoothTransformation)
+            # Crop to square centred
+            cx = (scaled.width()  - PREVIEW_SIZE) // 2
+            cy = (scaled.height() - PREVIEW_SIZE) // 2
+            sq = scaled.copy(cx, cy, PREVIEW_SIZE, PREVIEW_SIZE)
+            # Circular mask
+            out = QPixmap(PREVIEW_SIZE, PREVIEW_SIZE)
+            out.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(out)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            path = QPainterPath()
+            path.addEllipse(QRectF(0, 0, PREVIEW_SIZE, PREVIEW_SIZE))
+            painter.setClipPath(path)
+            painter.drawPixmap(0, 0, sq)
+            painter.end()
+            preview.setPixmap(out)
+            return out
+
+        _render()
+
+        def _make_slider_row(label_text, min_v, max_v, init, on_change):
+            row = QHBoxLayout()
+            lbl = QLabel(label_text)
+            lbl.setStyleSheet("color: #8B949E; font-size: 11px; background: transparent; min-width: 60px;")
+            row.addWidget(lbl)
+            sl = QSlider(Qt.Orientation.Horizontal)
+            sl.setRange(min_v, max_v)
+            sl.setValue(init)
+            sl.setStyleSheet(f"""
+                QSlider::groove:horizontal {{ height: 4px; background: {_tc['elevated']}; border-radius: 2px; }}
+                QSlider::handle:horizontal {{ background: #58A6FF; width: 14px; height: 14px; margin: -5px 0; border-radius: 7px; }}
+                QSlider::sub-page:horizontal {{ background: rgba(88,166,255,0.4); border-radius: 2px; }}
+            """)
+            sl.valueChanged.connect(on_change)
+            row.addWidget(sl)
+            return row
+
+        def _on_zoom(v):
+            state['zoom'] = 1.0 + v / 100.0
+            _render()
+
+        def _on_x(v):
+            state['ox'] = v / 100.0
+            _render()
+
+        def _on_y(v):
+            state['oy'] = v / 100.0
+            _render()
+
+        lay.addLayout(_make_slider_row("Zoom",     0, 300, 0,  _on_zoom))
+        lay.addLayout(_make_slider_row("Horizontal", 0, 100, 50, _on_x))
+        lay.addLayout(_make_slider_row("Vertical",   0, 100, 50, _on_y))
+
+        note = QLabel("Adjust zoom and position, then click Apply.")
+        note.setStyleSheet("color: #555; font-size: 10px; background: transparent;")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        lay.addStretch()
+
+        foot = QHBoxLayout()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setStyleSheet(f"QPushButton {{ background: transparent; border: 1px solid {_tc['border']}; border-radius:6px; padding:8px 18px; color:#8B949E; }} QPushButton:hover {{ color:#E6EDF3; }}")
+        cancel_btn.clicked.connect(dlg.reject)
+        foot.addWidget(cancel_btn)
+        foot.addStretch()
+
+        apply_btn = QPushButton("Apply")
+        apply_btn.setStyleSheet("QPushButton { background: rgba(88,166,255,0.14); border: 1px solid rgba(88,166,255,0.4); border-radius:6px; padding:8px 24px; color:#58A6FF; font-weight:600; } QPushButton:hover { background: rgba(88,166,255,0.24); }")
+        foot.addWidget(apply_btn)
+        lay.addLayout(foot)
+
+        result_pixmap = [None]
+
+        def _apply():
+            result_pixmap[0] = _render()
+            dlg.accept()
+
+        apply_btn.clicked.connect(_apply)
+        dlg.exec()
+
+        if result_pixmap[0] is None:
+            return
+
+        final = result_pixmap[0]
+
+        if target == 'bot':
+            self.bot_avatar = ''
+            self._bot_avatar_pixmap = final
+            self._bot_avatar_image_path = path
+            display = self.bot_avatar_display
+            display.setPixmap(final.scaled(48, 48, Qt.AspectRatioMode.KeepAspectRatio,
+                                           Qt.TransformationMode.SmoothTransformation))
+            display.setText('')
+        else:
+            self.user_avatar = ''
+            self._user_avatar_pixmap = final
+            self._user_avatar_image_path = path
+            display = self.user_avatar_display
+            display.setPixmap(final.scaled(26, 26, Qt.AspectRatioMode.KeepAspectRatio,
+                                           Qt.TransformationMode.SmoothTransformation))
+            display.setText('')
         self.save_config()
 
     def _latex_to_base64_img(self, latex_expr, display=True):
@@ -2209,7 +3175,7 @@ class ChatWindow(QWidget):
 
             source_html = (
                 f'<span style="font-family:monospace;font-size:9px;'
-                f'color:#4A4A4A;user-select:text;">{latex_expr}</span>'
+                f'color:#8B949E;user-select:text;">{latex_expr}</span>'
             )
 
             if display:
@@ -2335,8 +3301,312 @@ class ChatWindow(QWidget):
         cleaned = re.sub(r'\n\s*\n\s*\n+', '\n\n', cleaned)
         return cleaned.strip()
 
+    def _open_names_dialog(self):
+        """Quick inline dialog to edit user + assistant names."""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel
+        _tc = self._t()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Edit Names")
+        dlg.setModal(True)
+        dlg.setFixedWidth(320)
+        dlg.setStyleSheet(f"QDialog {{ background: {_tc['base']}; color: #E6EDF3; font-family: 'Segoe UI', system-ui; }}")
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(20, 20, 20, 20)
+        lay.setSpacing(12)
+
+        _ss_lbl = "color: #8B949E; font-size: 10px; background: transparent;"
+        _ss_inp = f"""
+            QLineEdit {{ background: {_tc['elevated']}; border: 1px solid {_tc['border']};
+                border-radius: 6px; padding: 7px 10px; font-size: 12px; color: #E6EDF3; }}
+            QLineEdit:focus {{ border-color: rgba(88,166,255,0.55); }}
+        """
+
+        lbl_u = QLabel("Your name")
+        lbl_u.setStyleSheet(_ss_lbl)
+        lay.addWidget(lbl_u)
+        inp_u = QLineEdit()
+        inp_u.setPlaceholderText("Enter your name…")
+        inp_u.setStyleSheet(_ss_inp)
+        inp_u.setText(self.controller.get_user_name())
+        lay.addWidget(inp_u)
+
+        lbl_a = QLabel("Assistant name (leave blank for default)")
+        lbl_a.setStyleSheet(_ss_lbl)
+        lay.addWidget(lbl_a)
+        inp_a = QLineEdit()
+        inp_a.setPlaceholderText("e.g. Kim, Nova, Aria…")
+        inp_a.setStyleSheet(_ss_inp)
+        inp_a.setText(self.controller.get_assistant_name())
+        lay.addWidget(inp_a)
+
+        btns = QHBoxLayout()
+        cancel = QPushButton("Cancel")
+        cancel.setStyleSheet(f"QPushButton {{ background: transparent; border: 1px solid {_tc['border']}; border-radius:6px; padding:7px 18px; color:#8B949E; }} QPushButton:hover {{ color:#E6EDF3; }}")
+        cancel.clicked.connect(dlg.reject)
+        save = QPushButton("Save")
+        save.setStyleSheet("QPushButton { background: rgba(88,166,255,0.14); border:1px solid rgba(88,166,255,0.4); border-radius:6px; padding:7px 24px; color:#58A6FF; font-weight:600; } QPushButton:hover { background:rgba(88,166,255,0.24); }")
+
+        def _save():
+            self.controller.set_user_name(inp_u.text().strip())
+            self.controller.set_assistant_name(inp_a.text().strip())
+            self._refresh_hero_labels()
+            dlg.accept()
+
+        save.clicked.connect(_save)
+        btns.addWidget(cancel)
+        btns.addStretch()
+        btns.addWidget(save)
+        lay.addLayout(btns)
+        dlg.exec()
+
+    def _open_avatars_dialog(self):
+        """Combined avatar editor for both bot and user."""
+        from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
+                                     QLabel, QTabWidget, QWidget)
+        _tc = self._t()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Edit Avatars")
+        dlg.setModal(True)
+        dlg.setFixedWidth(380)
+        dlg.setStyleSheet(f"QDialog {{ background: {_tc['base']}; color: #E6EDF3; font-family: 'Segoe UI', system-ui; }}")
+
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        tabs = QTabWidget()
+        tabs.setStyleSheet(f"""
+            QTabWidget::pane {{ border: none; background: {_tc['base']}; }}
+            QTabBar::tab {{ background: {_tc['elevated']}; color: #8B949E; border: none;
+                padding: 8px 20px; font-size: 11px; }}
+            QTabBar::tab:selected {{ background: {_tc['surface']}; color: #E6EDF3; font-weight: 600; }}
+            QTabBar::tab:hover {{ color: #E6EDF3; }}
+        """)
+
+        def _make_avatar_tab(target, current_emoji, display_label, emojis):
+            w = QWidget()
+            w.setStyleSheet(f"background: {_tc['base']};")
+            wl = QVBoxLayout(w)
+            wl.setContentsMargins(16, 16, 16, 16)
+            wl.setSpacing(12)
+
+            # Current preview
+            preview_row = QHBoxLayout()
+            av_preview = QLabel()
+            av_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            av_preview.setFixedSize(56, 56)
+            bg_color = "#1a2a3a" if target == 'bot' else "#1a2a1a"
+            av_preview.setStyleSheet(f"font-size: 28px; background: {bg_color}; border-radius: 28px;")
+
+            # Show current pixmap or emoji
+            existing_pm = getattr(self, '_bot_avatar_pixmap' if target == 'bot' else '_user_avatar_pixmap', None)
+            if existing_pm and not existing_pm.isNull():
+                av_preview.setPixmap(existing_pm.scaled(56, 56,
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation))
+            else:
+                av_preview.setText(current_emoji or ('🤖' if target == 'bot' else '👤'))
+
+            preview_row.addWidget(av_preview)
+            preview_row.addSpacing(12)
+            info_col = QVBoxLayout()
+            info_col.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+            lbl1 = QLabel(display_label)
+            lbl1.setStyleSheet("font-size: 12px; font-weight: 600; color: #E6EDF3; background: transparent;")
+            lbl2 = QLabel("Pick an emoji or upload a picture")
+            lbl2.setStyleSheet("font-size: 10px; color: #555; background: transparent;")
+            info_col.addWidget(lbl1)
+            info_col.addWidget(lbl2)
+            preview_row.addLayout(info_col)
+            preview_row.addStretch()
+            wl.addLayout(preview_row)
+
+            # Emoji grid
+            from PyQt6.QtWidgets import QGridLayout
+            grid_w = QWidget()
+            grid_w.setStyleSheet("background: transparent;")
+            grid = QGridLayout(grid_w)
+            grid.setSpacing(5)
+            cols = 8
+            for i, em in enumerate(emojis):
+                btn = QPushButton(em)
+                btn.setFixedSize(36, 36)
+                btn.setStyleSheet(f"""
+                    QPushButton {{ font-size: 18px; padding: 0; background: {_tc['elevated']};
+                        border: 1px solid {_tc['border']}; border-radius: 6px; }}
+                    QPushButton:hover {{ background: rgba(88,166,255,0.15); border-color: #58A6FF; }}
+                """)
+                def _pick(checked=False, e=em, p=av_preview, t=target):
+                    bg = '#1a2a3a' if t == 'bot' else '#1a2a1a'
+                    p.setStyleSheet(f"font-size: 28px; background: {bg}; border-radius: 28px;")
+                    p.setText(e)
+                    if t == 'bot':
+                        self.set_bot_avatar(e)
+                    else:
+                        self.set_user_avatar(e)
+                btn.clicked.connect(_pick)
+                grid.addWidget(btn, i // cols, i % cols)
+            wl.addWidget(grid_w)
+
+            # Upload picture button
+            upload_btn = QPushButton("🖼  Upload custom picture…")
+            upload_btn.setStyleSheet(f"""
+                QPushButton {{ background: transparent; border: 1px solid {_tc['border']};
+                    border-radius: 7px; padding: 9px; font-size: 11px; color: #8B949E; }}
+                QPushButton:hover {{ border-color: rgba(88,166,255,0.4); color: #58A6FF; }}
+            """)
+            def _do_upload(t=target, p=av_preview):
+                self._upload_avatar(t)
+                pm2 = getattr(self, '_bot_avatar_pixmap' if t == 'bot' else '_user_avatar_pixmap', None)
+                if pm2 and not pm2.isNull():
+                    p.setPixmap(pm2.scaled(56, 56,
+                        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                        Qt.TransformationMode.SmoothTransformation))
+                    p.setText('')
+                    size_row.setVisible(True)
+            upload_btn.clicked.connect(lambda: _do_upload())
+
+            # Size slider — visible only when a picture is active
+            size_row = QWidget()
+            size_row.setStyleSheet("background: transparent;")
+            from PyQt6.QtWidgets import QHBoxLayout as _HBL, QSlider as _SL
+            sr_lay = _HBL(size_row)
+            sr_lay.setContentsMargins(0, 0, 0, 0)
+            sr_lay.setSpacing(8)
+
+            size_lbl = QLabel("Picture size")
+            size_lbl.setStyleSheet("color: #8B949E; font-size: 10px; background: transparent; min-width: 70px;")
+            sr_lay.addWidget(size_lbl)
+
+            _current_size = getattr(self, f'_{"bot" if target == "bot" else "user"}_avatar_size', 32)
+            size_slider = _SL(Qt.Orientation.Horizontal)
+            size_slider.setRange(20, 72)
+            size_slider.setValue(_current_size)
+            size_slider.setStyleSheet(f"""
+                QSlider::groove:horizontal {{ height: 4px; background: {_tc['elevated']}; border-radius: 2px; }}
+                QSlider::handle:horizontal {{ background: #58A6FF; width: 14px; height: 14px; margin: -5px 0; border-radius: 7px; border: none; }}
+                QSlider::sub-page:horizontal {{ background: rgba(88,166,255,0.4); border-radius: 2px; }}
+            """)
+            sr_lay.addWidget(size_slider, stretch=1)
+
+            size_val_lbl = QLabel(f"{_current_size}px")
+            size_val_lbl.setStyleSheet("color: #8B949E; font-size: 10px; background: transparent; min-width: 30px;")
+            sr_lay.addWidget(size_val_lbl)
+
+            def _on_size(v, t=target, svl=size_val_lbl):
+                svl.setText(f"{v}px")
+                if t == 'bot':
+                    self._bot_avatar_size = v
+                else:
+                    self._user_avatar_size = v
+                # Sync the other slider if uniform is checked
+                if _uniform_state[0]:
+                    other = _all_sliders[1] if t == 'bot' else _all_sliders[0]
+                    if other and other.value() != v:
+                        other.blockSignals(True)
+                        other.setValue(v)
+                        other.blockSignals(False)
+                        if t == 'bot':
+                            self._user_avatar_size = v
+                        else:
+                            self._bot_avatar_size = v
+                self.save_config()
+            size_slider.valueChanged.connect(_on_size)
+            _all_sliders.append(size_slider)
+
+            # Only show if picture is already active
+            has_picture = existing_pm and not existing_pm.isNull()
+            size_row.setVisible(has_picture)
+
+            wl.addWidget(upload_btn)
+            wl.addWidget(size_row)
+            return w
+
+        _all_sliders = []      # [bot_slider, user_slider] — filled as tabs are built
+        _uniform_state = [getattr(self, '_avatar_size_uniform', False)]
+
+        bot_emojis = [
+            '🤖','🦾','🧠','👾','🤵','🦊','🐺','🦁',
+            '🐼','🐨','🦝','🦔','🦉','🐉','👽','🌟',
+            '⚡','🔮','🎭','🎪','🦸','🧙','🥷','👻',
+            '🌈','🔥','💎','🪄','🛸','🧬','⚙️','🎯',
+        ]
+        user_emojis = [
+            '👤','👨','👩','🧑','😊','😎','🤓','🧙',
+            '🦸','🥷','👸','🤴','🧝','🧜','🧚','🧞',
+            '🕵️','👨‍💻','👩‍💻','🧑‍🚀','🧑‍🎨','🧑‍🎤','🧑‍🍳','🧑‍🔬',
+            '😄','😏','🥳','🤩','😈','🤠','🥸','🦄',
+        ]
+
+        tabs.addTab(_make_avatar_tab('bot',  self.bot_avatar,  "Assistant avatar", bot_emojis),  "🤖  Assistant")
+        tabs.addTab(_make_avatar_tab('user', self.user_avatar, "Your avatar",       user_emojis), "👤  You")
+        lay.addWidget(tabs)
+
+        # Uniform size checkbox
+        from PyQt6.QtWidgets import QCheckBox
+        uniform_row = QWidget()
+        uniform_row.setStyleSheet(f"background: {_tc['surface']}; border-top: 1px solid {_tc['border']};")
+        ur_lay = QHBoxLayout(uniform_row)
+        ur_lay.setContentsMargins(16, 10, 16, 10)
+        uniform_cb = QCheckBox("Uniform size — keep both avatars the same size")
+        uniform_cb.setChecked(_uniform_state[0])
+        uniform_cb.setStyleSheet(f"""
+            QCheckBox {{ color: #8B949E; font-size: 10px; background: transparent; spacing: 8px; }}
+            QCheckBox::indicator {{ width: 14px; height: 14px; border-radius: 3px;
+                border: 1px solid {_tc['border']}; background: {_tc['elevated']}; }}
+            QCheckBox::indicator:checked {{ background: #58A6FF; border-color: #58A6FF; }}
+        """)
+        def _on_uniform(state):
+            checked = bool(state)
+            _uniform_state[0] = checked
+            self._avatar_size_uniform = checked
+            self.save_config()
+            # Immediately sync user size to bot size when turned on
+            if checked and _all_sliders:
+                bot_val = _all_sliders[0].value() if _all_sliders else self._bot_avatar_size
+                if len(_all_sliders) > 1:
+                    _all_sliders[1].setValue(bot_val)
+        uniform_cb.stateChanged.connect(_on_uniform)
+        ur_lay.addWidget(uniform_cb)
+        lay.addWidget(uniform_row)
+
+        close_btn = QPushButton("Done")
+        close_btn.setStyleSheet(f"""
+            QPushButton {{ background: rgba(88,166,255,0.14); border: 1px solid rgba(88,166,255,0.4);
+                margin: 12px 16px; border-radius: 7px; padding: 9px; font-size: 12px;
+                color: #58A6FF; font-weight: 600; }}
+            QPushButton:hover {{ background: rgba(88,166,255,0.24); }}
+        """)
+        close_btn.clicked.connect(dlg.accept)
+        lay.addWidget(close_btn)
+        dlg.exec()
+
+    def _refresh_hero_labels(self):
+        """Update the hero name labels after identity changes."""
+        if hasattr(self, '_hero_bot_name'):
+            name = self.controller.get_assistant_name() or "Systema Auxilium"
+            self._hero_bot_name.setText(name)
+        if hasattr(self, '_hero_user_name'):
+            user = self.controller.get_user_name() or "You"
+            self._hero_user_name.setText(user)
+
+    def _session_show_more(self):
+        self._session_visible_count += 10
+        self.refresh_session_list()
+
+    def _session_show_all(self):
+        self._session_visible_count = 99999
+        self.refresh_session_list()
+
+    def _session_collapse(self):
+        self._session_visible_count = 10
+        self.refresh_session_list()
+
+    def _toggle_session_list(self):
+        pass
+
     def refresh_session_list(self):
-        """Refresh the session list in sidebar"""
+        """Refresh the session list with search, sort and show-more pagination."""
         if not hasattr(self, 'session_list_layout'):
             return
 
@@ -2347,29 +3617,69 @@ class ChatWindow(QWidget):
 
         sessions = self.controller.get_session_list()
 
-        for session in sessions:
+        # ── Search filter ──────────────────────────────────────────────────
+        query = ""
+        if hasattr(self, '_session_search'):
+            query = self._session_search.text().strip().lower()
+        if query:
+            sessions = [s for s in sessions if query in s['name'].lower()]
+
+        # ── Sort ──────────────────────────────────────────────────────────
+        sort_idx = getattr(self, '_session_sort_idx', 0)
+        if sort_idx == 1:
+            sessions = sorted(sessions, key=lambda s: s['name'].lower())
+        elif sort_idx == 2:
+            sessions = sorted(sessions, key=lambda s: s['name'].lower(), reverse=True)
+
+        total = len(sessions)
+        visible_count = getattr(self, '_session_visible_count', 10)
+
+        if hasattr(self, '_session_count_lbl'):
+            if query:
+                self._session_count_lbl.setText(f"{total} result{'s' if total != 1 else ''}")
+            else:
+                self._session_count_lbl.setText(f"{total} session{'s' if total != 1 else ''}")
+
+        shown = sessions[:visible_count]
+        remaining = total - len(shown)
+
+        for session in shown:
             session_item = self._create_session_item(
-                session['id'],
-                session['name'],
-                session['date'],
+                session['id'], session['name'], session['date'],
                 is_active=(session['id'] == self.controller.current_session_id)
             )
             self.session_list_layout.addWidget(session_item)
 
-        self.session_list_layout.addStretch()
+        # Footer: show more / show all / collapse
+        if hasattr(self, '_session_footer'):
+            show_footer = total > 10
+            self._session_footer.setVisible(show_footer)
+            if show_footer:
+                # "Show more" only visible if there are hidden items
+                self._show_more_btn.setVisible(remaining > 0)
+                self._show_more_btn.setText(f"Show {min(remaining, 10)} more")
+                # "Show all" only if not already showing all
+                self._show_all_btn.setVisible(remaining > 0)
+                self._show_all_btn.setText(f"Show all ({total})")
+                # "Collapse" only if showing more than 10
+                self._collapse_list_btn.setVisible(visible_count > 10 or remaining == 0)
+                # Also reset visible count on new search
+                if query and self._session_visible_count > total:
+                    self._session_visible_count = 10
+
 
     def _create_session_item(self, session_id, session_name, creation_date, is_active=False):
         """Create a session list item widget"""
         item_widget = QFrame()
         item_widget.setStyleSheet(f"""
             QFrame {{
-                background-color: {"#2A2A2A" if is_active else "transparent"};
+                background-color: {"#21262D" if is_active else "transparent"};
                 border-radius: 6px;
                 padding: 8px;
                 margin: 2px 0px;
             }}
             QFrame:hover {{
-                background-color: {"#2A2A2A" if is_active else "#252525"};
+                background-color: {"#21262D" if is_active else "#1E2228"};
             }}
         """)
 
@@ -2441,6 +3751,54 @@ class ChatWindow(QWidget):
         else:
             self.controller.delete_session(session_id)
 
+    def _make_chat_avatar(self, target: str, size: int = 32) -> QLabel:
+        """Create a 32px circular avatar label using pixmap if set, else emoji."""
+        av = QLabel()
+        av.setFixedSize(size, size)
+        av.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        is_bot = (target == 'bot')
+        pixmap = getattr(self, '_bot_avatar_pixmap' if is_bot else '_user_avatar_pixmap', None)
+
+        if pixmap and not pixmap.isNull():
+            # Scale the circular pixmap to the requested size
+            from PyQt6.QtGui import QPainter, QPainterPath
+            from PyQt6.QtCore import QRectF
+            out = QPixmap(size, size)
+            out.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(out)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p = QPainterPath()
+            p.addEllipse(QRectF(0, 0, size, size))
+            painter.setClipPath(p)
+            painter.drawPixmap(0, 0, pixmap.scaled(
+                size, size,
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation))
+            painter.end()
+            av.setPixmap(out)
+            av.setStyleSheet(f"""
+                QLabel {{
+                    border-radius: {size//2}px;
+                    min-width: {size}px; min-height: {size}px;
+                    max-width: {size}px; max-height: {size}px;
+                }}
+            """)
+        else:
+            emoji = (self.bot_avatar or '🤖') if is_bot else (self.user_avatar or '👤')
+            bg = "#58A6FF" if is_bot else "#34A853"
+            av.setText(emoji)
+            av.setStyleSheet(f"""
+                QLabel {{
+                    background-color: {bg};
+                    border-radius: {size//2}px;
+                    font-size: {size//2 - 2}px;
+                    min-width: {size}px; min-height: {size}px;
+                    max-width: {size}px; max-height: {size}px;
+                }}
+            """)
+        return av
+
     def add_user_message(self, message):
         """Add user message with three-dot menu"""
         message_widget = QFrame()
@@ -2458,43 +3816,46 @@ class ChatWindow(QWidget):
         message_layout.addStretch()
 
         main_container_widget = QWidget()
-        main_container_widget.setMaximumWidth(600)
+        main_container_widget.setMaximumWidth(int(600 * self.chat_zoom))
+        main_container_widget.setStyleSheet("background: transparent;")
         main_container = QVBoxLayout(main_container_widget)
         main_container.setSpacing(4)
         main_container.setContentsMargins(0, 0, 0, 0)
 
         name_label = QLabel("<b>You</b>")
         name_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-        name_label.setStyleSheet("color: #E8EAED; font-size: 12px;")
+        name_label.setStyleSheet("color: #E8EAED; font-size: 12px; background: transparent;")
         main_container.addWidget(name_label)
 
         content_wrapper = QFrame()
-        content_wrapper.setStyleSheet("""
-            QFrame {
-                background-color: #252525;
-                border: 1px solid #3C3C3C;
+        _tc = self._t()
+        content_wrapper.setStyleSheet(f"""
+            QFrame {{
+                background-color: {_tc['surface']};
+                border: 1px solid {_tc['border']};
                 border-radius: 12px;
-            }
+            }}
         """)
 
         content_wrapper_layout = QVBoxLayout(content_wrapper)
         content_wrapper_layout.setContentsMargins(12, 12, 12, 8)
         content_wrapper_layout.setSpacing(8)
 
+        fsize = self._get_msg_font_size()
         text_label = QLabel()
         text_label.setTextFormat(Qt.TextFormat.RichText)
         text_label.setText(self.render_markdown(message))
         text_label.setWordWrap(True)
         text_label.setOpenExternalLinks(True)
-        text_label.setStyleSheet("""
-                    QLabel {
-                        color: #E8EAED;
-                        font-size: 13px;
-                        line-height: 1.5;
-                        background: transparent;
-                        border: none;
-                    }
-                """)
+        text_label.setStyleSheet(f"""
+            QLabel {{
+                color: #E8EAED;
+                font-size: {fsize}px;
+                line-height: 1.5;
+                background: transparent;
+                border: none;
+            }}
+        """)
         text_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse |
             Qt.TextInteractionFlag.LinksAccessibleByMouse
@@ -2555,19 +3916,7 @@ class ChatWindow(QWidget):
         message_layout.addWidget(main_container_widget)
 
         # Avatar (RIGHT side for user)
-        avatar = QLabel(self.user_avatar)
-        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        avatar.setStyleSheet("""
-            QLabel {
-                background-color: #34A853;
-                border-radius: 16px;
-                font-size: 20px;
-                min-width: 32px;
-                min-height: 32px;
-                max-width: 32px;
-                max-height: 32px;
-            }
-        """)
+        avatar = self._make_chat_avatar('user', getattr(self, '_user_avatar_size', 32))
         message_layout.addWidget(avatar, alignment=Qt.AlignmentFlag.AlignTop)
 
         self.last_user_message_widget = message_widget
@@ -2578,7 +3927,10 @@ class ChatWindow(QWidget):
             'role': 'user',
             'content': message,
             'index': message_index,
-            'text_label': text_label
+            'text_label': text_label,
+            'text_labels': [text_label],
+            'content_wrapper': content_wrapper,
+            'main_container_widget': main_container_widget,
         }
         self.message_widgets.append(message_data)
 
@@ -2613,37 +3965,28 @@ class ChatWindow(QWidget):
         message_layout.setSpacing(12)
 
         # Avatar (LEFT side for AI)
-        avatar = QLabel(self.bot_avatar)
-        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        avatar.setStyleSheet("""
-            QLabel {
-                background-color: #1A73E8;
-                border-radius: 16px;
-                font-size: 20px;
-                min-width: 32px;
-                min-height: 32px;
-                max-width: 32px;
-                max-height: 32px;
-            }
-        """)
+        avatar = self._make_chat_avatar('bot', getattr(self, '_bot_avatar_size', 32))
         message_layout.addWidget(avatar, alignment=Qt.AlignmentFlag.AlignTop)
 
         main_container_widget = QWidget()
+        main_container_widget.setStyleSheet("background: transparent;")
         main_container = QVBoxLayout(main_container_widget)
         main_container.setSpacing(4)
         main_container.setContentsMargins(0, 0, 0, 0)
 
-        name_label = QLabel("<b>Systema Auxilium</b>")
-        name_label.setStyleSheet("color: #E8EAED; font-size: 12px;")
+        _display_name = self.controller.get_assistant_name() or "Systema Auxilium"
+        name_label = QLabel(f"<b>{_display_name}</b>")
+        name_label.setStyleSheet("color: #E8EAED; font-size: 12px; background: transparent;")
         main_container.addWidget(name_label)
 
         content_wrapper = QFrame()
-        content_wrapper.setStyleSheet("""
-            QFrame {
-                background-color: #2A2A2A;
-                border: 1px solid #3C3C3C;
+        _tc = self._t()
+        content_wrapper.setStyleSheet(f"""
+            QFrame {{
+                background-color: {_tc['elevated']};
+                border: 1px solid {_tc['border']};
                 border-radius: 12px;
-            }
+            }}
         """)
 
         content_wrapper_layout = QVBoxLayout(content_wrapper)
@@ -2652,6 +3995,8 @@ class ChatWindow(QWidget):
 
         parts = self.render_markdown_with_code_blocks(display_message)
         first_text_label = None
+        all_text_labels = []
+        fsize = self._get_msg_font_size()
 
         if isinstance(parts, list):
             for part in parts:
@@ -2661,20 +4006,21 @@ class ChatWindow(QWidget):
                     text_label.setText(self.render_markdown(part[1]))
                     text_label.setWordWrap(True)
                     text_label.setOpenExternalLinks(True)
-                    text_label.setStyleSheet("""
-                        QLabel {
+                    text_label.setStyleSheet(f"""
+                        QLabel {{
                             color: #BDC1C6;
-                            font-size: 13px;
+                            font-size: {fsize}px;
                             line-height: 1.5;
                             background: transparent;
                             border: none;
-                        }
+                        }}
                     """)
                     text_label.setTextInteractionFlags(
                         Qt.TextInteractionFlag.TextSelectableByMouse |
                         Qt.TextInteractionFlag.LinksAccessibleByMouse
                     )
                     content_wrapper_layout.addWidget(text_label)
+                    all_text_labels.append(text_label)
                     if not first_text_label:
                         first_text_label = text_label
                 elif part[0] == 'code':
@@ -2686,14 +4032,14 @@ class ChatWindow(QWidget):
             text_label.setText(parts)
             text_label.setWordWrap(True)
             text_label.setOpenExternalLinks(True)
-            text_label.setStyleSheet("""
-                QLabel {
+            text_label.setStyleSheet(f"""
+                QLabel {{
                     color: #BDC1C6;
-                    font-size: 13px;
+                    font-size: {fsize}px;
                     line-height: 1.5;
                     background: transparent;
                     border: none;
-                }
+                }}
             """)
             text_label.setTextInteractionFlags(
                 Qt.TextInteractionFlag.TextSelectableByMouse |
@@ -2701,6 +4047,7 @@ class ChatWindow(QWidget):
             )
             content_wrapper_layout.addWidget(text_label)
             first_text_label = text_label
+            all_text_labels.append(text_label)
 
         copy_btn_container = QHBoxLayout()
         copy_btn = QPushButton("📋")
@@ -2762,6 +4109,9 @@ class ChatWindow(QWidget):
             'display_content': display_message,
             'index': message_index,
             'text_label': first_text_label,
+            'text_labels': all_text_labels,
+            'content_wrapper': content_wrapper,
+            'main_container_widget': main_container_widget,
             'content_wrapper_layout': content_wrapper_layout
         }
         self.message_widgets.append(message_data)
@@ -2802,22 +4152,241 @@ class ChatWindow(QWidget):
             Qt.TextInteractionFlag.LinksAccessibleByMouse
         )
         text_label.setText(self.render_markdown(message))
-        text_label.setStyleSheet("""
-            QLabel {
-                background-color: rgba(42, 42, 42, 0.5);
-                border: 1px solid #3C3C3C;
+        _tc = self._t()
+        text_label.setStyleSheet(f"""
+            QLabel {{
+                background-color: {_tc['elevated']};
+                border: 1px solid {_tc['border']};
                 border-radius: 8px;
                 padding: 10px 16px;
                 color: #9AA0A6;
                 font-size: 11px;
                 line-height: 1.4;
-            }
+            }}
         """)
         message_layout.addWidget(text_label)
+
+        # Track so apply_theme can restyle retroactively
+        self.message_widgets.append({
+            'widget': message_widget,
+            'role': 'system',
+            'content_wrapper': text_label,  # text_label IS the styled surface here
+        })
 
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
         self._animate_message_in(message_widget,
                                  on_settled=lambda: self.scroll_to_widget(message_widget))
+
+    def add_skill_card_message(self, skill_name: str, loaded: bool):
+        """
+        Add a skill-status entity card to the chat message list.
+        Shows the skill name, a loaded/unloaded badge, and an Unload/Load button
+        for manual user control.
+        """
+        from PyQt6.QtWidgets import QSizePolicy
+
+        # Determine styling based on state
+        if loaded:
+            badge_text = "● Loaded"
+            badge_color = "#4CAF50"
+            badge_bg = "#1A2B1A"
+            action_text = "Unload"
+            action_color = "#C0392B"
+            action_bg = "#3C1A1A"
+            action_hover = "#4A2020"
+            icon = "⚡"
+        else:
+            badge_text = "○ Unloaded"
+            badge_color = "#9AA0A6"
+            badge_bg = "#21262D"
+            action_text = "Load"
+            action_color = "#4CAF50"
+            action_bg = "#1A2B1A"
+            action_hover = "#223322"
+            icon = "⚡"
+
+        card = QFrame()
+        _tc = self._t()
+        card.setStyleSheet(f"""
+            QFrame {{
+                background-color: {_tc['elevated']};
+                border: 1px solid {_tc['border']};
+                border-radius: 8px;
+                margin: 2px 40px;
+            }}
+        """)
+        card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        card_layout = QHBoxLayout(card)
+        card_layout.setContentsMargins(12, 8, 12, 8)
+        card_layout.setSpacing(10)
+
+        # Icon
+        icon_lbl = QLabel(icon)
+        icon_lbl.setStyleSheet("color: #7C7CFF; font-size: 14px; background: transparent;")
+        icon_lbl.setFixedWidth(18)
+        card_layout.addWidget(icon_lbl)
+
+        # Skill name
+        name_lbl = QLabel(f"<b>{skill_name}</b>")
+        name_lbl.setStyleSheet(f"color: #C8CAFF; font-size: 12px; background: transparent;")
+        card_layout.addWidget(name_lbl, stretch=1)
+
+        # Badge
+        badge_lbl = QLabel(badge_text)
+        badge_lbl.setStyleSheet(f"""
+            QLabel {{
+                background-color: {badge_bg};
+                color: {badge_color};
+                border-radius: 4px;
+                font-size: 10px;
+                padding: 2px 8px;
+            }}
+        """)
+        card_layout.addWidget(badge_lbl)
+
+        # Action button
+        action_btn = QPushButton(action_text)
+        action_btn.setFixedHeight(24)
+        action_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {action_bg};
+                color: {action_color};
+                border: 1px solid {action_color};
+                border-radius: 4px;
+                font-size: 10px;
+                padding: 0 10px;
+            }}
+            QPushButton:hover {{
+                background-color: {action_hover};
+            }}
+        """)
+
+        # Capture current state in closure
+        _loaded = loaded
+        _name = skill_name
+
+        def _on_action():
+            skill_mgr = None
+            if hasattr(self, 'controller') and self.controller:
+                skill_mgr = getattr(self.controller.ai, 'skill_manager', None)
+            if skill_mgr is None:
+                return
+            if _loaded:
+                ok, msg = skill_mgr.unload_skill(_name)
+            else:
+                ok, msg = skill_mgr.load_skill(_name)
+            if ok:
+                # Update badge and button to reflect new state
+                new_loaded = not _loaded
+                if new_loaded:
+                    badge_lbl.setText("● Loaded")
+                    badge_lbl.setStyleSheet(f"""
+                        QLabel {{
+                            background-color: #1A2B1A; color: #4CAF50;
+                            border-radius: 4px; font-size: 10px; padding: 2px 8px;
+                        }}
+                    """)
+                    action_btn.setText("Unload")
+                    action_btn.setStyleSheet(f"""
+                        QPushButton {{
+                            background-color: #3C1A1A; color: #C0392B;
+                            border: 1px solid #C0392B; border-radius: 4px;
+                            font-size: 10px; padding: 0 10px;
+                        }}
+                        QPushButton:hover {{ background-color: #4A2020; }}
+                    """)
+                else:
+                    badge_lbl.setText("○ Unloaded")
+                    badge_lbl.setStyleSheet(f"""
+                        QLabel {{
+                            background-color: #21262D; color: #9AA0A6;
+                            border-radius: 4px; font-size: 10px; padding: 2px 8px;
+                        }}
+                    """)
+                    action_btn.setText("Load")
+                    action_btn.setStyleSheet(f"""
+                        QPushButton {{
+                            background-color: #1A2B1A; color: #4CAF50;
+                            border: 1px solid #4CAF50; border-radius: 4px;
+                            font-size: 10px; padding: 0 10px;
+                        }}
+                        QPushButton:hover {{ background-color: #223322; }}
+                    """)
+                # Rewire button with new state
+                action_btn.clicked.disconnect()
+                _new_loaded_ref = [new_loaded]
+
+                def _on_action_updated(loaded_ref=_new_loaded_ref):
+                    smgr = None
+                    if hasattr(self, 'controller') and self.controller:
+                        smgr = getattr(self.controller.ai, 'skill_manager', None)
+                    if smgr is None:
+                        return
+                    if loaded_ref[0]:
+                        ok2, _ = smgr.unload_skill(_name)
+                        if ok2:
+                            loaded_ref[0] = False
+                            badge_lbl.setText("○ Unloaded")
+                            badge_lbl.setStyleSheet("""
+                                QLabel {
+                                    background-color: #21262D; color: #9AA0A6;
+                                    border-radius: 4px; font-size: 10px; padding: 2px 8px;
+                                }
+                            """)
+                            action_btn.setText("Load")
+                            action_btn.setStyleSheet("""
+                                QPushButton {
+                                    background-color: #1A2B1A; color: #4CAF50;
+                                    border: 1px solid #4CAF50; border-radius: 4px;
+                                    font-size: 10px; padding: 0 10px;
+                                }
+                                QPushButton:hover { background-color: #223322; }
+                            """)
+                    else:
+                        ok2, _ = smgr.load_skill(_name)
+                        if ok2:
+                            loaded_ref[0] = True
+                            badge_lbl.setText("● Loaded")
+                            badge_lbl.setStyleSheet("""
+                                QLabel {
+                                    background-color: #1A2B1A; color: #4CAF50;
+                                    border-radius: 4px; font-size: 10px; padding: 2px 8px;
+                                }
+                            """)
+                            action_btn.setText("Unload")
+                            action_btn.setStyleSheet("""
+                                QPushButton {
+                                    background-color: #3C1A1A; color: #C0392B;
+                                    border: 1px solid #C0392B; border-radius: 4px;
+                                    font-size: 10px; padding: 0 10px;
+                                }
+                                QPushButton:hover { background-color: #4A2020; }
+                            """)
+
+                action_btn.clicked.connect(_on_action_updated)
+            else:
+                # Show brief error feedback on badge
+                badge_lbl.setText(f"⚠ {msg[:30]}")
+                badge_lbl.setStyleSheet("""
+                    QLabel {
+                        background-color: #3C2A00; color: #FFC107;
+                        border-radius: 4px; font-size: 10px; padding: 2px 8px;
+                    }
+                """)
+
+        action_btn.clicked.connect(_on_action)
+        card_layout.addWidget(action_btn)
+
+        # Outer wrapper for spacing
+        outer = QWidget()
+        outer.setStyleSheet("background: transparent;")
+        outer_layout = QHBoxLayout(outer)
+        outer_layout.setContentsMargins(0, 2, 0, 2)
+        outer_layout.addWidget(card)
+
+        self.chat_layout.insertWidget(self.chat_layout.count() - 1, outer)
+        self._animate_message_in(outer, on_settled=lambda: self.scroll_to_widget(outer))
 
     def copy_to_clipboard(self, text):
         """Copy text to clipboard"""
@@ -2825,6 +4394,34 @@ class ChatWindow(QWidget):
         clipboard.setText(text)
         self.status_label.setText("✓ Copied to clipboard")
         QTimer.singleShot(ANIM_STATUS_CLEAR_MS, lambda: self.status_label.setText(""))
+
+    def warn_loaded_skills_if_any(self):
+        """
+        If any skills are currently loaded, emit a light system warning message
+        in the chat so the user knows context window is being used.
+        Called on startup and on new-session creation.
+        """
+        skill_manager = None
+        if hasattr(self, 'controller') and self.controller:
+            skill_manager = getattr(self.controller.ai, 'skill_manager', None)
+        if not skill_manager:
+            return
+        loaded = skill_manager.get_loaded_skills()
+        if not loaded:
+            return
+        names = list(loaded.keys())
+        if len(names) == 1:
+            label = f"**{names[0]}**"
+        else:
+            label = ", ".join(f"**{n}**" for n in names)
+        msg = (
+            f"⚡ Skill{'s' if len(names) > 1 else ''} {label} "
+            f"{'are' if len(names) > 1 else 'is'} still loaded from a previous session. "
+            f"This uses extra LLM context window space on every message. "
+            f"Unload in the sidebar under ⚡ Skills, or tell Systema Auxilium to unload "
+            f"{'them' if len(names) > 1 else 'it'}."
+        )
+        self.add_system_message(msg)
 
     def scroll_to_bottom(self):
         """Legacy helper — scrolls to absolute bottom (used by voice/thinking flows)."""
@@ -3011,8 +4608,8 @@ class ChatWindow(QWidget):
         menu = QMenu(self)
         menu.setStyleSheet("""
             QMenu {
-                background-color: #2A2A2A;
-                border: 1px solid #3C3C3C;
+                background-color: #21262D;
+                border: 1px solid #30363D;
                 border-radius: 8px;
                 padding: 4px;
                 color: #E8EAED;
@@ -3022,7 +4619,7 @@ class ChatWindow(QWidget):
                 border-radius: 4px;
             }
             QMenu::item:selected {
-                background-color: #3C3C3C;
+                background-color: #2D333B;
             }
         """)
 
@@ -3056,7 +4653,7 @@ class ChatWindow(QWidget):
         dialog.setMinimumWidth(500)
         dialog.setStyleSheet("""
             QDialog {
-                background-color: #212121;
+                background-color: #161B22;
             }
             QLabel {
                 color: #E8EAED;
@@ -3073,8 +4670,8 @@ class ChatWindow(QWidget):
         text_edit.setPlainText(message_data['content'])
         text_edit.setStyleSheet("""
             QTextEdit {
-                background-color: #2A2A2A;
-                border: 1px solid #3C3C3C;
+                background-color: #21262D;
+                border: 1px solid #30363D;
                 border-radius: 6px;
                 padding: 8px;
                 color: #E8EAED;
@@ -3091,14 +4688,14 @@ class ChatWindow(QWidget):
         cancel_btn = QPushButton("Cancel")
         cancel_btn.setStyleSheet("""
             QPushButton {
-                background-color: #2A2A2A;
-                border: 1px solid #3C3C3C;
+                background-color: #21262D;
+                border: 1px solid #30363D;
                 border-radius: 6px;
                 padding: 8px 16px;
                 color: #E8EAED;
             }
             QPushButton:hover {
-                background-color: #3C3C3C;
+                background-color: #2D333B;
             }
         """)
         cancel_btn.clicked.connect(dialog.reject)
@@ -3108,7 +4705,7 @@ class ChatWindow(QWidget):
         save_btn = QPushButton(save_text)
         save_btn.setStyleSheet("""
             QPushButton {
-                background-color: #1A73E8;
+                background-color: #58A6FF;
                 border: none;
                 border-radius: 6px;
                 padding: 8px 16px;
@@ -3116,7 +4713,7 @@ class ChatWindow(QWidget):
                 font-weight: 500;
             }
             QPushButton:hover {
-                background-color: #1557B0;
+                background-color: #388BFD;
             }
         """)
         save_btn.clicked.connect(lambda: self._save_edited_message(message_data, text_edit.toPlainText(), dialog))
@@ -3627,6 +5224,15 @@ class ChatWindow(QWidget):
         # ── Smooth inertia scroll — MAIN CHAT viewport ────────────────────
         if hasattr(self, 'chat_scroll_area') and obj is self.chat_scroll_area.viewport():
             if event.type() == QEvent.Type.Wheel:
+                # Ctrl+Scroll → zoom in / out
+                if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                    delta = event.angleDelta().y()
+                    if delta > 0:
+                        self.zoom_in()
+                    else:
+                        self.zoom_out()
+                    return True
+
                 if self._scroll_anim is not None:
                     try:
                         if self._scroll_anim.state() == QPropertyAnimation.State.Running:
@@ -3737,7 +5343,24 @@ class ChatWindow(QWidget):
         return not any(path.lower().endswith(ext) for ext in image_extensions)
 
     def keyPressEvent(self, event):
-        """Handle paste of file paths"""
+        """Handle paste of file paths and zoom shortcuts"""
+        # Ctrl++ / Ctrl+= → zoom in
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            if event.key() in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+                self.zoom_in()
+                event.accept()
+                return
+            if event.key() == Qt.Key.Key_Minus:
+                self.zoom_out()
+                event.accept()
+                return
+            if event.key() == Qt.Key.Key_0:
+                self.chat_zoom = 1.0
+                self._apply_zoom_all()
+                self.save_config()
+                event.accept()
+                return
+
         if event.key() == Qt.Key.Key_V and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
             clipboard = QApplication.clipboard()
             text = clipboard.text().strip()
@@ -3763,6 +5386,459 @@ class ChatWindow(QWidget):
                 return
 
         super().keyPressEvent(event)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ZOOM METHODS
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _get_msg_font_size(self) -> int:
+        """Return the current message text font size, scaled by chat_zoom."""
+        return max(9, int(13 * getattr(self, 'chat_zoom', 1.0)))
+
+    def zoom_in(self):
+        """Increase message font size one step and persist."""
+        if getattr(self, 'chat_zoom', 1.0) < 1.8:
+            self.chat_zoom = round(self.chat_zoom + 0.1, 1)
+            self._apply_zoom_all()
+            self.save_config()
+
+    def zoom_out(self):
+        """Decrease message font size one step and persist."""
+        if getattr(self, 'chat_zoom', 1.0) > 0.6:
+            self.chat_zoom = round(self.chat_zoom - 0.1, 1)
+            self._apply_zoom_all()
+            self.save_config()
+
+    def _apply_zoom_all(self):
+        """Apply the current zoom level to all existing message text labels."""
+        fsize = self._get_msg_font_size()
+        for md in self.message_widgets:
+            role = md.get('role', '')
+            text_color = '#E8EAED' if role == 'user' else '#BDC1C6'
+            style = (
+                f"QLabel {{ color: {text_color}; font-size: {fsize}px; "
+                f"line-height: 1.5; background: transparent; border: none; }}"
+            )
+            for lbl in md.get('text_labels', []):
+                try:
+                    lbl.setStyleSheet(style)
+                except RuntimeError:
+                    pass
+            # Also update main_container_widget max width for user bubbles
+            if role == 'user':
+                mcw = md.get('main_container_widget')
+                if mcw:
+                    try:
+                        mcw.setMaximumWidth(int(600 * self.chat_zoom))
+                    except RuntimeError:
+                        pass
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # GLASS BUBBLE HELPER
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _apply_glass_to_bubbles(self, enabled: bool):
+        """Update all existing message bubble backgrounds for glass / solid mode."""
+        for md in self.message_widgets:
+            cw = md.get('content_wrapper')
+            if cw is None:
+                continue
+            role = md.get('role', '')
+            try:
+                if enabled:
+                    bg = 'rgba(37, 37, 37, 0.55)' if role == 'user' else 'rgba(42, 42, 42, 0.55)'
+                    cw.setStyleSheet(f"""
+                        QFrame {{
+                            background-color: {bg};
+                            border: 1px solid rgba(60, 60, 60, 0.4);
+                            border-radius: 12px;
+                        }}
+                    """)
+                else:
+                    bg = '#1E2228' if role == 'user' else '#21262D'
+                    cw.setStyleSheet(f"""
+                        QFrame {{
+                            background-color: {bg};
+                            border: 1px solid #30363D;
+                            border-radius: 12px;
+                        }}
+                    """)
+            except RuntimeError:
+                pass
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # THEME APPLICATION
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    _THEMES = {
+        'obsidian_blue': {
+            'base':    '#0D1117', 'surface': '#161B22', 'elevated': '#21262D',
+            'border':  '#30363D', 'accent':  '#58A6FF', 'deep': '#0D1117',
+            'input_card': '#1C2128', 'input_card_border': '#2D333B',
+        },
+        'onyx': {
+            'base':    '#18181B', 'surface': '#1C1C1F', 'elevated': '#27272A',
+            'border':  '#3F3F46', 'accent':  '#6366F1', 'deep': '#101013',
+            'input_card': '#1C1C20', 'input_card_border': '#3A3A40',
+        },
+        'carbon': {
+            'base':    '#111214', 'surface': '#1E1F22', 'elevated': '#2B2D31',
+            'border':  '#3B3D43', 'accent':  '#5865F2', 'deep': '#0B0C0E',
+            'input_card': '#1A1B1E', 'input_card_border': '#35373D',
+        },
+        'midnight_rose': {
+            'base':    '#120F1A', 'surface': '#1D1825', 'elevated': '#2A2436',
+            'border':  '#3E3556', 'accent':  '#A78BFA', 'deep': '#0C0910',
+            'input_card': '#1A1625', 'input_card_border': '#382E50',
+        },
+        'emerald': {
+            'base':    '#0D1210', 'surface': '#131A15', 'elevated': '#1C2B1F',
+            'border':  '#274D30', 'accent':  '#3FB950', 'deep': '#090E0B',
+            'input_card': '#162019', 'input_card_border': '#243D28',
+        },
+        'copper': {
+            'base':    '#110D09', 'surface': '#1A1310', 'elevated': '#261D17',
+            'border':  '#4A3020', 'accent':  '#E8834A', 'deep': '#0D0A07',
+            'input_card': '#201812', 'input_card_border': '#3D2818',
+        },
+        'crimson': {
+            'base':    '#120A0A', 'surface': '#1C1010', 'elevated': '#2A1515',
+            'border':  '#4D1F1F', 'accent':  '#FF4C4C', 'deep': '#0D0707',
+            'input_card': '#201212', 'input_card_border': '#3D1A1A',
+        },
+        'arctic': {
+            'base':    '#0A0E12', 'surface': '#111620', 'elevated': '#192030',
+            'border':  '#243348', 'accent':  '#67E8F9', 'deep': '#070B0F',
+            'input_card': '#141D2C', 'input_card_border': '#1F2E42',
+        },
+        'golden': {
+            'base':    '#0F0D08', 'surface': '#19160A', 'elevated': '#252010',
+            'border':  '#473D18', 'accent':  '#F5C518', 'deep': '#0A0905',
+            'input_card': '#1E1A0D', 'input_card_border': '#3A3214',
+        },
+        'slate': {
+            'base':    '#0C0E12', 'surface': '#141820', 'elevated': '#1E2330',
+            'border':  '#2C3444', 'accent':  '#94A3B8', 'deep': '#090B0F',
+            'input_card': '#181D28', 'input_card_border': '#252D3E',
+        },
+        # ── Monochrome dark series ────────────────────────────────────────────
+        'void': {
+            'base':    '#000000', 'surface': '#090909', 'elevated': '#111111',
+            'border':  '#1c1c1c', 'accent':  '#555555', 'deep': '#000000',
+            'input_card': '#0d0d0d', 'input_card_border': '#1c1c1c',
+        },
+        'mono_obsidian': {
+            'base':    '#0a0a0a', 'surface': '#101010', 'elevated': '#171717',
+            'border':  '#222222', 'accent':  '#666666', 'deep': '#060606',
+            'input_card': '#131313', 'input_card_border': '#222222',
+        },
+        'mono_charcoal': {
+            'base':    '#0e0e10', 'surface': '#141416', 'elevated': '#1c1c1f',
+            'border':  '#252528', 'accent':  '#606063', 'deep': '#0b0b0d',
+            'input_card': '#181819', 'input_card_border': '#252528',
+        },
+        'ember': {
+            'base':    '#0f0d0b', 'surface': '#161310', 'elevated': '#1e1a16',
+            'border':  '#2a2520', 'accent':  '#6e665c', 'deep': '#0c0a08',
+            'input_card': '#1a1714', 'input_card_border': '#2a2520',
+        },
+    }
+
+    def _t(self) -> dict:
+        """Return the current live theme dict — always in sync with the last apply_theme call."""
+        key = getattr(self, '_current_theme_key', 'obsidian_blue')
+        return self._THEMES.get(key, self._THEMES['obsidian_blue'])
+
+    def apply_theme(self, theme_key: str):
+        """Apply a named colour theme to all major structural surfaces."""
+        t = self._THEMES.get(theme_key, self._THEMES['obsidian_blue'])
+        self._current_theme_key = theme_key   # remember for apply_glass_background
+        try:
+            # Container
+            self.container.setStyleSheet(f"""
+                QWidget#container {{
+                    background-color: {t['surface']};
+                    border-radius: 12px;
+                }}
+                QWidget {{
+                    color: #E8EAED;
+                    font-family: 'Segoe UI', -apple-system, system-ui, sans-serif;
+                }}
+            """)
+            # Chat body
+            self.chat_widget.setStyleSheet(
+                f"QWidget {{ background-color: {t['surface']}; }}"
+            )
+            # Scroll area
+            self.chat_scroll_area.setStyleSheet(f"""
+                QScrollArea {{ border: none; background-color: {t['surface']}; }}
+                QScrollBar:vertical {{
+                    background: transparent; width: 12px; margin: 0;
+                }}
+                QScrollBar::handle:vertical {{
+                    background: rgba(168,199,250,0.3); border-radius:6px; min-height:30px; margin:2px;
+                }}
+                QScrollBar::handle:vertical:hover  {{ background: rgba(168,199,250,0.5); }}
+                QScrollBar::handle:vertical:pressed {{ background: rgba(168,199,250,0.7); }}
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+                QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
+            """)
+            # Header
+            self.header_bar.setStyleSheet(f"""
+                QFrame {{
+                    background-color: {t['surface']};
+                    border-bottom: 1px solid {t['border']};
+                }}
+                QLabel {{ background-color: transparent; }}
+            """)
+            # Status label
+            self.status_label.setStyleSheet(f"""
+                QLabel#statusLabel {{
+                    color: #9AA0A6; font-style: italic; font-size: 11px;
+                    padding: 5px 14px;
+                    background-color: {t['deep']};
+                    border-top: 1px solid {t['border']};
+                }}
+            """)
+            # Input container
+            self.input_container.setStyleSheet(f"""
+                QFrame#inputContainer {{
+                    background-color: {t['deep']};
+                    border-top: 1px solid {t['border']};
+                }}
+            """)
+            # Sidebar
+            if hasattr(self, 'sidebar'):
+                self.sidebar.setStyleSheet(f"""
+                    QFrame#sidebar {{
+                        background-color: {t['base']};
+                        border-right: 1px solid {t['border']};
+                        border-top-left-radius: 12px;
+                        border-bottom-left-radius: 12px;
+                    }}
+                """)
+                from PyQt6.QtWidgets import QWidget as _QW, QFrame as _QF2, QLineEdit as _QLE
+                for w in self.sidebar.findChildren(_QW):
+                    if w.objectName() == "sidebarContent":
+                        w.setStyleSheet(f"QWidget#sidebarContent {{ background-color: {t['base']}; }}")
+                    elif w.objectName() == "sidebarHero":
+                        w.setStyleSheet(f"QFrame#sidebarHero {{ background-color: {t['base']}; border-bottom: 1px solid {t['border']}; }}")
+                for inp in self.sidebar.findChildren(_QLE):
+                    try:
+                        inp.setStyleSheet(f"""
+                            QLineEdit {{ background: {t['elevated']}; border: 1px solid {t['border']};
+                                border-radius: 6px; padding: 0 8px; font-size: 10px; color: #8B949E; }}
+                            QLineEdit:focus {{ border-color: rgba(88,166,255,0.45); color: #E6EDF3; }}
+                        """)
+                    except RuntimeError:
+                        pass
+            # Input card — use stored reference first, then fallback search
+            from PyQt6.QtWidgets import QFrame as _QF
+            _ic = getattr(self, '_input_card_ref', None)
+            if _ic is None:
+                for child in self.container.findChildren(_QF):
+                    if child.objectName() == "inputCard":
+                        self._input_card_ref = child
+                        _ic = child
+                        break
+            if _ic:
+                try:
+                    _ic.setStyleSheet(f"""
+                        QFrame#inputCard {{
+                            background-color: {t['input_card']};
+                            border: 1px solid {t['input_card_border']};
+                            border-radius: 18px;
+                        }}
+                    """)
+                except RuntimeError:
+                    self._input_card_ref = None
+
+            # Message bubbles
+            for md in self.message_widgets:
+                role = md.get('role', '')
+                cw = md.get('content_wrapper')
+                if cw:
+                    try:
+                        if role == 'system':
+                            # system messages use a QLabel as the styled surface
+                            cw.setStyleSheet(f"""
+                                QLabel {{
+                                    background-color: {t['elevated']};
+                                    border: 1px solid {t['border']};
+                                    border-radius: 8px;
+                                    padding: 10px 16px;
+                                    color: #9AA0A6;
+                                    font-size: 11px;
+                                    line-height: 1.4;
+                                }}
+                            """)
+                        else:
+                            bg = t['elevated'] if role != 'user' else t['surface']
+                            cw.setStyleSheet(f"""
+                                QFrame {{
+                                    background-color: {bg};
+                                    border: 1px solid {t['border']};
+                                    border-radius: 12px;
+                                }}
+                            """)
+                    except RuntimeError:
+                        pass
+        except Exception as e:
+            print(f"[ChatWindow.apply_theme] Error: {e}")
+
+    def apply_glass_background(self, enabled: bool, opacity: float = 0.75):
+        """Apply or remove the glass (frosted-translucent) theme.
+
+        Glass mode zones:
+          • Main container       — fully transparent (desktop shows through)
+          • Chat messages area   — semi-transparent dark backdrop (opacity from slider)
+          • Scroll area          — transparent with a visible scrollbar track
+          • Header bar           — matches chat body opacity (uniform look)
+          • Status/thinking bar  — semi-opaque dark grey so text always readable
+          • Input container      — semi-opaque dark grey frosted panel (VISIBLE, not removed)
+          • inputCard pill        — solid dark, unchanged
+          • Message bubbles       — semi-transparent to blend with glass body
+          • Sidebar              — UNTOUCHED, always solid
+
+        Dark (non-glass) mode restores every zone to its solid colour.
+        All colours are neutral dark greys — no tints.
+        """
+        try:
+            op = max(0.15, min(0.95, float(opacity)))
+            # backdrop for messages area — darker as opacity goes up
+            base = int(op * 28)
+            bg_rgba = f"rgba({base},{base},{base},{op:.2f})"
+
+            # Track state so new bubbles created while glass is active use the right style
+            self._glass_enabled = enabled
+            self._glass_opacity = opacity
+
+            # Scrollbar: visible track in glass mode, solid in dark mode
+            _scrollbar_glass = """
+                QScrollBar:vertical {
+                    background: rgba(255,255,255,0.06);
+                    width: 12px; margin: 0; border-radius: 6px;
+                }
+                QScrollBar::handle:vertical {
+                    background: rgba(168,199,250,0.35);
+                    border-radius: 6px; min-height: 30px; margin: 2px;
+                }
+                QScrollBar::handle:vertical:hover  { background: rgba(168,199,250,0.55); }
+                QScrollBar::handle:vertical:pressed { background: rgba(168,199,250,0.75); }
+                QScrollBar::add-line:vertical,
+                QScrollBar::sub-line:vertical { height: 0px; }
+                QScrollBar::add-page:vertical,
+                QScrollBar::sub-page:vertical { background: transparent; }
+            """
+            _scrollbar_solid = """
+                QScrollBar:vertical {
+                    background: transparent; width: 12px; margin: 0;
+                }
+                QScrollBar::handle:vertical {
+                    background: rgba(168,199,250,0.3);
+                    border-radius: 6px; min-height: 30px; margin: 2px;
+                }
+                QScrollBar::handle:vertical:hover  { background: rgba(168,199,250,0.5); }
+                QScrollBar::handle:vertical:pressed { background: rgba(168,199,250,0.7); }
+                QScrollBar::add-line:vertical,
+                QScrollBar::sub-line:vertical { height: 0px; }
+                QScrollBar::add-page:vertical,
+                QScrollBar::sub-page:vertical { background: transparent; }
+            """
+
+            if enabled:
+                # ── outer container: fully transparent ────────────────────────
+                self.container.setStyleSheet("""
+                    QWidget#container {
+                        background-color: transparent;
+                        border-radius: 12px;
+                    }
+                    QWidget {
+                        color: #E8EAED;
+                        font-family: 'Segoe UI', -apple-system, system-ui, sans-serif;
+                    }
+                """)
+
+                # ── chat messages backdrop ─────────────────────────────────────
+                self.chat_widget.setStyleSheet(
+                    f"QWidget {{ background-color: {bg_rgba}; }}"
+                )
+                self.chat_scroll_area.setStyleSheet(
+                    "QScrollArea { border: none; background-color: transparent; }"
+                    + _scrollbar_glass
+                )
+
+                # ── header: uniform with chat body (same bg_rgba) ─────────────
+                self.header_bar.setStyleSheet(f"""
+                    QFrame {{
+                        background-color: {bg_rgba};
+                        border-bottom: 1px solid rgba(50, 50, 50, 0.5);
+                    }}
+                    QLabel {{
+                        background-color: transparent;
+                    }}
+                """)
+
+                # ── status / thinking bar: frosted so text is always readable ─
+                self.status_label.setStyleSheet(f"""
+                    QLabel#statusLabel {{
+                        color: #9AA0A6;
+                        font-style: italic;
+                        font-size: 11px;
+                        padding: 5px 14px;
+                        background-color: {bg_rgba};
+                        border-top: 1px solid rgba(50, 50, 50, 0.5);
+                    }}
+                """)
+
+                # ── input container: frosted opaque panel — stays visible ─────
+                self.input_container.setStyleSheet("""
+                    QFrame#inputContainer {
+                        background-color: rgba(18, 18, 18, 0.85);
+                        border-top: 1px solid rgba(50, 50, 50, 0.6);
+                        border-bottom-left-radius: 12px;
+                        border-bottom-right-radius: 12px;
+                    }
+                """)
+
+                # ── message bubbles stay solid — no change needed ─────────────
+
+            else:
+                # ── restore solid theme surfaces ─────────────────────────────
+                # Delegate to apply_theme so the chosen palette is used,
+                # not hardcoded Obsidian Blue colours.
+                theme_key = getattr(self, '_current_theme_key', 'obsidian_blue')
+                self.apply_theme(theme_key)
+
+        except Exception as e:
+            print(f"[ChatWindow.apply_glass_background] Error: {e}")
+
+    def _apply_glass_from_settings(self):
+        """Read glass and theme settings from controller and apply on startup."""
+        try:
+            settings = self.controller.settings
+            # Apply theme first so _current_theme_key is set
+            theme_key = settings.get('chat_theme', 'obsidian_blue')
+            self.apply_theme(theme_key)
+            # Then apply glass on top if enabled
+            enabled = settings.get('glass_background_enabled', False)
+            opacity = float(settings.get('glass_background_opacity', 0.75))
+            if enabled:
+                self.apply_glass_background(enabled, opacity)
+        except Exception as e:
+            print(f"[ChatWindow._apply_glass_from_settings] Error: {e}")
+
+    def _open_memory_window(self):
+        """Open the memory management window."""
+        try:
+            from ui.memory_window import MemoryWindow
+            if not hasattr(self, '_memory_window') or self._memory_window is None:
+                self._memory_window = MemoryWindow(self.controller)
+            self._memory_window.show()
+            self._memory_window.raise_()
+            self._memory_window.activateWindow()
+        except Exception as e:
+            self.add_system_message(f"⚠️ Could not open Memory window: {e}")
 
     def check_admin_mode(self):
         """Check if running as admin and notify user"""

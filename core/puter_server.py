@@ -31,6 +31,7 @@ plog = _make_logger("PuterServer") if _verbose else _NoOpLogger()
 # Set to True to show the Puter Account Management section in Settings
 # (email, password, Setup New Account, Reset Quota). For debugging only.
 # Keep False in production/public builds.
+# NOTE: As of march 13, 2026 this is dead, unreliable code, i have this in my clean up list. i will remove it soon.
 DEBUG_MODE = False
 # ─────────────────────────────────────────────────────────────────────────────
 

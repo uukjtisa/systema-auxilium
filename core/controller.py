@@ -9,6 +9,7 @@ from core.ai_engine import AIEngine
 from core.puter_server import PuterServer
 from core.system_info import get_system_info, format_system_info_for_prompt
 from core.voice_handler import VoiceHandler
+from core.skill_manager import SkillManager
 from ui.floating_window import FloatingWindow
 from core.ai_worker import AIWorker
 from core.session_manager import SessionManager
@@ -108,6 +109,13 @@ class AssistantController(QObject):
         self.voice_handler.on_state_change = self.handle_voice_state_change
         log.debug("[AssistantController.__init__] Voice callbacks wired")
 
+        # Initialize SkillManager
+        log.debug("[AssistantController.__init__] Creating SkillManager...")
+        _skills_dir = _APP_ROOT / "skills"
+        self.skill_manager = SkillManager(_skills_dir)
+        self.skill_manager.start_watching()
+        log.info(f"[AssistantController.__init__] SkillManager started | dir='{_skills_dir}'")
+
         # Initialize AI engine
         log.debug("[AssistantController.__init__] Creating AIEngine...")
         self.ai = AIEngine(
@@ -118,7 +126,8 @@ class AssistantController(QObject):
             system_info=system_info_text,
             voice_mode=False,  # Start with voice off
             elevenlabs_enabled=self.settings.get('elevenlabs_enabled', False),
-            settings_callback=lambda: self.settings  # Pass settings getter
+            settings_callback=lambda: self.settings,  # Pass settings getter
+            skill_manager=self.skill_manager
         )
         log.info("[AssistantController.__init__] AIEngine created")
 
@@ -165,6 +174,26 @@ class AssistantController(QObject):
         # Create initial session
         self._create_new_session()
         log.debug(f"[AssistantController.__init__] Initial session created: '{self.current_session_id}'")
+
+        # PATH SYNCER - Start background environment sync tick
+        log.debug("[AssistantController.__init__] Starting PathSyncer background tick...")
+        try:
+            from core.path_syncer import get_syncer
+            get_syncer().start()
+            log.info("[AssistantController.__init__] ✓ PathSyncer started (initial merge + 20s tick)")
+        except Exception as e:
+            log.warning(f"[AssistantController.__init__] PathSyncer start failed (non-fatal): {e}")
+
+        # MEMORY MANAGER - Persistent RAG memory
+        log.debug("[AssistantController.__init__] Initializing MemoryManager...")
+        try:
+            from core.memory_manager import get_memory_manager
+            self.memory_manager = get_memory_manager()
+            log.info(f"[AssistantController.__init__] ✓ MemoryManager ready | "
+                     f"count={self.memory_manager.count()} | is_ready={self.memory_manager.is_ready}")
+        except Exception as e:
+            log.error(f"[AssistantController.__init__] ✗ MemoryManager failed: {type(e).__name__}: {e}")
+            self.memory_manager = None
 
         self.log("System AI Assistant initialized", "SUCCESS")
         log.info(f"[AssistantController.__init__] ✓ AssistantController ready | "
@@ -309,6 +338,11 @@ class AssistantController(QObject):
             'vad_aggressiveness': 3,
             'vad_silero_threshold': 0.5,
             'supervised_execution': True,  # Default ON for safety
+            'memory_enabled': True,
+            'memory_threshold': 0.4,  # float 0.0–1.0
+            'memory_max_results': 5,
+            'glass_background_enabled': False,
+            'glass_background_opacity': 0.75,
         }
 
     def save_settings(self):
@@ -517,6 +551,18 @@ class AssistantController(QObject):
         self._update_system_prompt()
         self.log(f"User name set to: {name}", "SUCCESS")
 
+    def get_assistant_name(self):
+        """Get custom assistant name (empty = use default 'Systema Auxilium')"""
+        return self.settings.get('assistant_name', '')
+
+    def set_assistant_name(self, name):
+        """Set custom assistant name"""
+        log.info(f"[AssistantController.set_assistant_name] name='{name}'")
+        self.settings['assistant_name'] = name.strip()
+        self.save_settings()
+        self._update_system_prompt()
+        self.log(f"Assistant name set to: {name or '(default)'}", "SUCCESS")
+
     def get_custom_instructions(self):
         """Get custom instructions"""
         return self.settings.get('custom_instructions', '')
@@ -537,6 +583,28 @@ class AssistantController(QObject):
 
         system_info_dict = get_system_info()
         system_info_text = format_system_info_for_prompt(system_info_dict)
+
+        # Add assistant name if set
+        assistant_name = self.get_assistant_name()
+        if assistant_name:
+            log.debug(f"[AssistantController._update_system_prompt] Injecting assistant_name='{assistant_name}'")
+            system_info_text += f"""
+
+**CUSTOM ASSISTANT IDENTITY:**
+Your name is **{assistant_name}**. This is the name given to you by the user and it is your primary identity.
+- Always introduce yourself as {assistant_name}, never as "Systema Auxilium" unprompted.
+- If asked who you are, say you are {assistant_name}.
+- If the user asks whether you are Systema Auxilium, clarify: Systema Auxilium is the underlying agent platform you run on, but your identity as their personalized assistant is {assistant_name}.
+- Never forget or deny your base architecture (Systema Auxilium), but your active name and personality is {assistant_name}.
+- Example: "I'm {assistant_name}, your system assistant. (Systema Auxilium is the platform powering me.)"
+"""
+        else:
+            system_info_text += """
+
+**ASSISTANT IDENTITY:**
+You are Systema Auxilium. If the user asks about your name, tell them it is Systema Auxilium — both your name and the platform you run on.
+Let the user know they can give you a custom name from the sidebar (top-left ☰ menu → custom assistant name field).
+"""
 
         # Add user name if set
         user_name = self.get_user_name()
@@ -1036,6 +1104,17 @@ class AssistantController(QObject):
                       f"'{result['session_name']}'")
             self.set_session_name(result['session_name'])
 
+        # Show skill loaded/unloaded card in chat
+        if result.get('skill_loaded'):
+            skill_name = result['skill_loaded']
+            if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
+                self.ui.chat_window.add_skill_card_message(skill_name, loaded=True)
+
+        if result.get('skill_unloaded'):
+            skill_name = result['skill_unloaded']
+            if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
+                self.ui.chat_window.add_skill_card_message(skill_name, loaded=False)
+
         # Check if AI just exited tool mode
         if result.get('exited_work_mode'):
             log.info("[AssistantController.handle_ai_response] AI exited work mode — "
@@ -1354,6 +1433,7 @@ class AssistantController(QObject):
         if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
             self.ui.chat_window.refresh_session_list()
             self.ui.chat_window.add_system_message("🆕 **New Session Created**")
+            self.ui.chat_window.warn_loaded_skills_if_any()
         log.info(f"[AssistantController.create_new_session] ✓ New session ready: '{self.current_session_id}'")
 
     def load_session(self, session_id):
@@ -2513,4 +2593,3 @@ class AssistantController(QObject):
                 'description': '✅ FREE: 30 RPM, 14,400/day - Smallest, ultra-fast'
             },
         ]
-
