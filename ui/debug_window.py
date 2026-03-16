@@ -2,11 +2,12 @@
 Debug Window - Shows AI tool usage conversations
 """
 
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QScrollArea,
                              QTextEdit, QPushButton, QLabel, QCheckBox, QFrame)
 from PyQt6.QtCore import Qt, QPoint, QTimer, QRect
 from PyQt6.QtGui import QFont, QRegion
 from datetime import datetime
+from core.hot_reload import reload_module
 import sys
 import ctypes
 
@@ -268,8 +269,352 @@ class DebugWindow(QWidget):
 
         layout.addWidget(content_widget)
 
+        # Hot Reload panel
+        self._build_hot_reload_panel(layout)
+
         # Welcome message
         self.add_message("system", "╔══ DEBUG MODE ACTIVE ══╗\nAll AI/Tool exchanges will appear here in full detail")
+
+    # ── HOT RELOAD ────────────────────────────────────────────────────────────
+
+    def _reload_registry(self):
+        """
+        Registry of hot-reloadable modules.
+        To add a new file: append one tuple here.
+          (display_label, module_path, post_hook_method_name)
+
+        post_hook is called after a successful reload and receives (self, controller).
+        Use '_post_noop' if nothing special is needed after reload.
+        Modules marked '⚠ restart' are listed but disabled — too risky to live-reload.
+        """
+        return [
+            ("global_instructions.py", "core.global_instructions",      "_post_global_instructions"),
+            ("chat_window.py",         "ui.chat_window",                 "_post_chat_window"),
+            ("settings_window.py",     "ui.settings_window",             "_post_settings_window"),
+            ("debug_window.py",        "ui.debug_window",                "_post_debug_window"),
+            ("tool_manager.py",        "core.tool_manager",              "_post_noop"),
+            ("memory_manager.py",      "core.memory_manager",            "_post_noop"),
+            ("skill_manager.py",       "core.skill_manager",             "_post_noop"),
+            ("ai_engine.py",           "core.ai_engine",                 None),   # None = disabled
+            ("controller.py",          "core.controller",                None),   # None = disabled
+        ]
+
+    # ── Post-hooks ────────────────────────────────────────────────────────────
+
+    def _post_noop(self, controller):
+        """No special wiring needed — reload was enough."""
+        pass
+
+    def _post_global_instructions(self, controller):
+        """
+        Patch ai_engine's module-level names with the freshly reloaded versions,
+        then rebuild the live system prompt via the existing controller path.
+        """
+        try:
+            import core.global_instructions as gi
+            import core.ai_engine as ae
+            # Patch the names that ai_engine captured with `from X import Y`
+            ae.get_system_prompt          = gi.get_system_prompt
+            ae.get_gemini_system_prompt   = gi.get_gemini_system_prompt
+            ae.POST_EXIT_PROMPT           = gi.POST_EXIT_PROMPT
+            ae.POST_EXIT_PROMPT_VOICE     = gi.POST_EXIT_PROMPT_VOICE
+            # Rebuild the live prompt
+            controller._update_system_prompt()
+        except Exception as e:
+            self.add_message("system", f"[hot_reload] global_instructions post-hook error: {e}")
+
+    def _post_chat_window(self, controller):
+        """
+        After reload:
+        1. Patch floating_window's stale `ChatWindow` name so future open_chat()
+           uses the new class.
+        2. If a window was live, destroy it and re-open with the new class.
+        """
+        import ui.chat_window as cw_mod
+        import ui.floating_window as fw_mod
+
+        # Patch the name captured by `from ui.chat_window import ChatWindow`
+        fw_mod.ChatWindow = cw_mod.ChatWindow
+
+        ui = controller.ui
+        was_visible = False
+        if hasattr(ui, 'chat_window') and ui.chat_window is not None:
+            try:
+                was_visible = ui.chat_window.isVisible()
+                ui.chat_window.hide()
+                ui.chat_window.deleteLater()
+            except RuntimeError:
+                pass
+            ui.chat_window = None
+
+        if was_visible:
+            def _reopen():
+                new_win = cw_mod.ChatWindow(controller)
+                ui.chat_window = new_win
+                new_win.show()
+                new_win.raise_()
+                new_win.activateWindow()
+                # Restore theme
+                if hasattr(new_win, 'apply_theme'):
+                    theme = controller.settings.get('chat_theme', 'obsidian_blue')
+                    new_win.apply_theme(theme)
+                    new_win.apply_initial_settings()
+            QTimer.singleShot(100, _reopen)
+
+    def _post_settings_window(self, controller):
+        """Patch floating_window's stale SettingsWindow ref, drop cached instance."""
+        import ui.settings_window as sw_mod
+        import ui.floating_window as fw_mod
+        fw_mod.SettingsWindow = sw_mod.SettingsWindow
+
+        ui = controller.ui
+        if hasattr(ui, 'settings_window') and ui.settings_window is not None:
+            try:
+                ui.settings_window.hide()
+                ui.settings_window.deleteLater()
+            except RuntimeError:
+                pass
+            ui.settings_window = None
+
+    def _post_debug_window(self, controller):
+        """
+        The debug window can't really reload itself while it's running,
+        but at least close and re-open so next open uses the new class.
+        """
+        ui = controller.ui
+        if hasattr(ui, 'debug_window') and ui.debug_window is not None:
+            try:
+                ui.debug_window.hide()
+                ui.debug_window.deleteLater()
+            except RuntimeError:
+                pass
+            ui.debug_window = None
+            # Re-open with the new class
+            QTimer.singleShot(150, ui.open_debug_window)
+
+    # ── UI builder ────────────────────────────────────────────────────────────
+
+    def _build_hot_reload_panel(self, parent_layout):
+        """Build the collapsible Hot Reload panel and append it to parent_layout."""
+        self._hr_status = {}   # module_path -> (success: bool, message: str) | None
+        self._hr_expanded = {}  # module_path -> bool (traceback visible)
+
+        # ── Collapsible header ────────────────────────────────────────────────
+        header = QFrame()
+        header.setStyleSheet("""
+            QFrame {
+                background-color: #0f0f0f;
+                border-top: 1px solid #00ff00;
+                border-bottom: 1px solid #1a1a1a;
+            }
+        """)
+        header.setFixedHeight(36)
+        header.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        h_lay = QHBoxLayout(header)
+        h_lay.setContentsMargins(14, 0, 14, 0)
+
+        self._hr_toggle_label = QLabel("▶  ⚡ Hot Reload")
+        self._hr_toggle_label.setStyleSheet("color: #00ff00; font-size: 11px; font-weight: bold;")
+        h_lay.addWidget(self._hr_toggle_label)
+        h_lay.addStretch()
+
+        hint = QLabel("click to expand")
+        hint.setStyleSheet("color: #333; font-size: 9px;")
+        h_lay.addWidget(hint)
+
+        # ── Body (hidden by default) ──────────────────────────────────────────
+        self._hr_body = QFrame()
+        self._hr_body.setStyleSheet("QFrame { background-color: #0a0a0a; border-top: none; }")
+        self._hr_body.hide()
+
+        body_layout = QVBoxLayout(self._hr_body)
+        body_layout.setContentsMargins(12, 10, 12, 12)
+        body_layout.setSpacing(4)
+
+        registry = self._reload_registry()
+        self._hr_rows = {}  # module_path -> dict of widgets
+
+        for label, module_path, hook_name in registry:
+            disabled = hook_name is None
+            row_widgets = self._build_reload_row(
+                body_layout, label, module_path, hook_name, disabled
+            )
+            self._hr_rows[module_path] = row_widgets
+
+        # ── Wire collapse toggle ──────────────────────────────────────────────
+        self._hr_panel_open = False
+        def _toggle_panel(event):
+            self._hr_panel_open = not self._hr_panel_open
+            self._hr_body.setVisible(self._hr_panel_open)
+            self._hr_toggle_label.setText(
+                ("▼" if self._hr_panel_open else "▶") + "  ⚡ Hot Reload"
+            )
+        header.mousePressEvent = _toggle_panel
+
+        parent_layout.addWidget(header)
+        parent_layout.addWidget(self._hr_body)
+
+    def _build_reload_row(self, parent_layout, label, module_path, hook_name, disabled):
+        """Build one row for the hot reload panel. Returns dict of row widgets."""
+        _G = "#00ff00"
+        _R = "#ff4444"
+        _M = "#333333"
+
+        row_frame = QFrame()
+        row_frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {'#111' if not disabled else '#0d0d0d'};
+                border: 1px solid {'#1e1e1e' if not disabled else '#161616'};
+                border-radius: 4px;
+            }}
+        """)
+
+        row_lay = QHBoxLayout(row_frame)
+        row_lay.setContentsMargins(10, 6, 10, 6)
+        row_lay.setSpacing(8)
+
+        # File label
+        name_lbl = QLabel(label)
+        name_lbl.setStyleSheet(
+            f"color: {'#888' if disabled else '#c8c8c8'}; font-size: 11px; "
+            f"font-family: 'Courier New'; min-width: 180px;"
+        )
+        row_lay.addWidget(name_lbl)
+
+        # Module path (dim)
+        path_lbl = QLabel(module_path)
+        path_lbl.setStyleSheet("color: #2a2a2a; font-size: 9px; font-family: 'Courier New';")
+        row_lay.addWidget(path_lbl, stretch=1)
+
+        # Status label
+        status_lbl = QLabel("—")
+        status_lbl.setStyleSheet(f"color: {_M}; font-size: 10px; font-family: 'Courier New'; min-width: 120px;")
+        status_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        row_lay.addWidget(status_lbl)
+
+        # Reload button
+        btn = QPushButton("Reload" if not disabled else "restart required")
+        btn.setFixedHeight(24)
+        btn.setEnabled(not disabled)
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {'transparent' if disabled else '#161616'};
+                border: 1px solid {'#1a1a1a' if disabled else '#2a2a2a'};
+                border-radius: 4px;
+                color: {'#2a2a2a' if disabled else '#00cc00'};
+                font-size: 10px;
+                padding: 0 10px;
+            }}
+            QPushButton:hover:enabled {{
+                background: #1a2a1a;
+                border-color: #00ff00;
+                color: #00ff00;
+            }}
+            QPushButton:pressed:enabled {{
+                background: #0a1a0a;
+            }}
+        """)
+
+        # Traceback expander (hidden until there's an error)
+        tb_frame = QFrame()
+        tb_frame.setStyleSheet("QFrame { background: transparent; }")
+        tb_frame.hide()
+        tb_lay = QVBoxLayout(tb_frame)
+        tb_lay.setContentsMargins(0, 4, 0, 0)
+        tb_lay.setSpacing(0)
+
+        tb_text = QTextEdit()
+        tb_text.setReadOnly(True)
+        tb_text.setFixedHeight(120)
+        tb_text.setStyleSheet("""
+            QTextEdit {
+                background: #0d0000;
+                border: 1px solid #3a0000;
+                border-radius: 3px;
+                color: #ff6666;
+                font-size: 9px;
+                font-family: 'Courier New';
+                padding: 4px;
+            }
+        """)
+        tb_lay.addWidget(tb_text)
+
+        # Build the outer container (row + traceback stacked)
+        outer = QFrame()
+        outer.setStyleSheet("QFrame { background: transparent; border: none; }")
+        outer_lay = QVBoxLayout(outer)
+        outer_lay.setContentsMargins(0, 0, 0, 0)
+        outer_lay.setSpacing(0)
+        outer_lay.addWidget(row_frame)
+        outer_lay.addWidget(tb_frame)
+        parent_layout.addWidget(outer)
+
+        widgets = {
+            'status_lbl': status_lbl,
+            'btn': btn,
+            'tb_frame': tb_frame,
+            'tb_text': tb_text,
+            'row_frame': row_frame,
+        }
+
+        if not disabled:
+            def _do_reload(checked=False, mp=module_path, hn=hook_name, w=widgets):
+                self._run_reload(mp, hn, w)
+            btn.clicked.connect(_do_reload)
+
+            # Clicking the row when it shows a red status expands/collapses traceback
+            def _toggle_tb(event, mp=module_path, w=widgets):
+                st = self._hr_status.get(mp)
+                if st and not st[0]:  # only when failed
+                    visible = w['tb_frame'].isVisible()
+                    w['tb_frame'].setVisible(not visible)
+            row_frame.mousePressEvent = _toggle_tb
+            row_frame.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        row_lay.addWidget(btn)
+        return widgets
+
+    def _run_reload(self, module_path, hook_name, widgets):
+        """Execute a reload and update the row's status widgets."""
+        _G = "#00ff00"
+        _R = "#ff4444"
+
+        widgets['btn'].setEnabled(False)
+        widgets['status_lbl'].setText("reloading…")
+        widgets['status_lbl'].setStyleSheet("color: #888; font-size: 10px; font-family: 'Courier New'; min-width: 120px;")
+
+        success, message = reload_module(module_path)
+        self._hr_status[module_path] = (success, message)
+
+        if success:
+            widgets['row_frame'].setStyleSheet("""
+                QFrame { background-color: #0a140a; border: 1px solid #1a3a1a; border-radius: 4px; }
+            """)
+            widgets['status_lbl'].setText(message)
+            widgets['status_lbl'].setStyleSheet(f"color: {_G}; font-size: 10px; font-family: 'Courier New'; min-width: 120px;")
+            widgets['tb_frame'].hide()
+            self.add_message("system", f"[hot_reload] ✓ {module_path}")
+
+            # Run post-hook
+            if hook_name and hasattr(self, hook_name):
+                try:
+                    getattr(self, hook_name)(self.controller)
+                except Exception as e:
+                    import traceback as _tb
+                    self.add_message("system", f"[hot_reload] post-hook error:\n{_tb.format_exc()}")
+        else:
+            widgets['row_frame'].setStyleSheet("""
+                QFrame { background-color: #140a0a; border: 1px solid #3a1a1a; border-radius: 4px; }
+            """)
+            short = message.split('\n')[0]
+            widgets['status_lbl'].setText(short)
+            widgets['status_lbl'].setStyleSheet(f"color: {_R}; font-size: 10px; font-family: 'Courier New'; min-width: 120px;")
+            widgets['tb_text'].setPlainText(message)
+            widgets['tb_frame'].show()
+            self.add_message("system", f"[hot_reload] ✕ {module_path}\n{message}")
+
+        widgets['btn'].setEnabled(True)
 
     def update_filter(self, filter_type, enabled):
         """NEW: Update filter state"""

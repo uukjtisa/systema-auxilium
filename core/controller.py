@@ -551,6 +551,18 @@ class AssistantController(QObject):
         self._update_system_prompt()
         self.log(f"User name set to: {name}", "SUCCESS")
 
+    def get_assistant_name(self):
+        """Get custom assistant name (empty = use default 'Systema Auxilium')"""
+        return self.settings.get('assistant_name', '')
+
+    def set_assistant_name(self, name):
+        """Set custom assistant name"""
+        log.info(f"[AssistantController.set_assistant_name] name='{name}'")
+        self.settings['assistant_name'] = name.strip()
+        self.save_settings()
+        self._update_system_prompt()
+        self.log(f"Assistant name set to: {name or '(default)'}", "SUCCESS")
+
     def get_custom_instructions(self):
         """Get custom instructions"""
         return self.settings.get('custom_instructions', '')
@@ -571,6 +583,28 @@ class AssistantController(QObject):
 
         system_info_dict = get_system_info()
         system_info_text = format_system_info_for_prompt(system_info_dict)
+
+        # Add assistant name if set
+        assistant_name = self.get_assistant_name()
+        if assistant_name:
+            log.debug(f"[AssistantController._update_system_prompt] Injecting assistant_name='{assistant_name}'")
+            system_info_text += f"""
+
+**CUSTOM ASSISTANT IDENTITY:**
+Your name is **{assistant_name}**. This is the name given to you by the user and it is your primary identity.
+- Always introduce yourself as {assistant_name}, never as "Systema Auxilium" unprompted.
+- If asked who you are, say you are {assistant_name}.
+- If the user asks whether you are Systema Auxilium, clarify: Systema Auxilium is the underlying agent platform you run on, but your identity as their personalized assistant is {assistant_name}.
+- Never forget or deny your base architecture (Systema Auxilium), but your active name and personality is {assistant_name}.
+- Example: "I'm {assistant_name}, your system assistant. (Systema Auxilium is the platform powering me.)"
+"""
+        else:
+            system_info_text += """
+
+**ASSISTANT IDENTITY:**
+You are Systema Auxilium. If the user asks about your name, tell them it is Systema Auxilium — both your name and the platform you run on.
+Let the user know they can give you a custom name from the sidebar (top-left ☰ menu → custom assistant name field).
+"""
 
         # Add user name if set
         user_name = self.get_user_name()
