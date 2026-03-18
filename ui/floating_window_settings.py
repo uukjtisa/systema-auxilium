@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
 from PyQt6.QtCore import Qt, QTimer, QPoint, QRect, QRectF, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen, QFont, QRegion, QImage, QPolygonF, QBrush, QLinearGradient
 import math
+from ui.base_window import BaseWindow
 
 # ── ColorPicker2D (unchanged) ────────────────────────────────────────────────
 
@@ -474,8 +475,10 @@ class BackgroundPreview(QWidget):
 
 # ── Main settings window ─────────────────────────────────────────────────────
 
-class AppearanceSettingsWindow(QWidget):
+class AppearanceSettingsWindow(BaseWindow):
     """Window for configuring floating window appearance - Frameless grey style"""
+
+    _header_height: int = 44  # shorter header than default 50
 
     EMOJI_OPTIONS = ['🤖', '💬', '✨', '🎯', '🚀', '💡', '🔮', '🌟',
                      '⚡', '🎨', '🔥', '💎', '🎭', '🦾', '👁️', '🧠',
@@ -486,13 +489,8 @@ class AppearanceSettingsWindow(QWidget):
         self.floating_window = floating_window
         self.settings = floating_window.settings.copy()
 
-        self.dragging = False
-        self.drag_position = QPoint()
-        self.resizing = False
-        self.resize_edge = None
-        self.resize_start_geometry = None
-        self.resize_timer = QTimer()
-        self.resize_timer.setSingleShot(True)
+        # Window chrome state
+        self._init_chrome_state()
 
         self.setMouseTracking(True)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover)
@@ -1420,126 +1418,3 @@ class AppearanceSettingsWindow(QWidget):
 
         self.update_letter_color_preview()
         self.update_bg_color_preview()
-
-    # ── window chrome helpers (unchanged logic) ─────────────────────────
-
-    def apply_rounded_mask(self):
-        from PyQt6.QtGui import QPainterPath
-        from PyQt6.QtCore import QRectF
-        path = QPainterPath()
-        path.addRoundedRect(QRectF(self.rect()), 12, 12)
-        region = QRegion(path.toFillPolygon().toPolygon())
-        self.setMask(region)
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self.apply_rounded_mask()
-        if hasattr(self, 'resize_handles'):
-            self.position_resize_handles()
-
-    def header_mouse_press(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.dragging = True
-            self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            event.accept()
-
-    def header_mouse_move(self, event):
-        if self.dragging:
-            self.move(event.globalPosition().toPoint() - self.drag_position)
-            event.accept()
-
-    def header_mouse_release(self, event):
-        self.dragging = False
-        event.accept()
-
-    def create_resize_handles(self):
-        handle_size = 8
-        corner_size = 16
-
-        self.resize_handles = {}
-
-        edges = {
-            'top': (0, 0, 0, handle_size, Qt.CursorShape.SizeVerCursor),
-            'bottom': (0, 0, 0, handle_size, Qt.CursorShape.SizeVerCursor),
-            'left': (0, 0, handle_size, 0, Qt.CursorShape.SizeHorCursor),
-            'right': (0, 0, handle_size, 0, Qt.CursorShape.SizeHorCursor),
-        }
-
-        for edge_name, (l, t, w, h, cursor) in edges.items():
-            handle = QFrame(self)
-            handle.setStyleSheet("background-color: transparent;")
-            handle.setCursor(cursor)
-            handle.edge_type = edge_name
-            handle.installEventFilter(self)
-            self.resize_handles[edge_name] = handle
-            handle.raise_()
-
-        corners = {
-            'top-left': (0, 0, corner_size, corner_size, Qt.CursorShape.SizeFDiagCursor),
-            'top-right': (0, 0, corner_size, corner_size, Qt.CursorShape.SizeBDiagCursor),
-            'bottom-left': (0, 0, corner_size, corner_size, Qt.CursorShape.SizeBDiagCursor),
-            'bottom-right': (0, 0, corner_size, corner_size, Qt.CursorShape.SizeFDiagCursor),
-        }
-
-        for corner_name, (l, t, w, h, cursor) in corners.items():
-            handle = QFrame(self)
-            handle.setStyleSheet("background-color: transparent;")
-            handle.setCursor(cursor)
-            handle.edge_type = corner_name
-            handle.installEventFilter(self)
-            self.resize_handles[corner_name] = handle
-            handle.raise_()
-
-        self.position_resize_handles()
-
-    def position_resize_handles(self):
-        w = self.width()
-        h = self.height()
-        handle_size = 8
-        corner_size = 16
-        header_height = 44  # matches the new header height
-
-        self.resize_handles['top'].setGeometry(corner_size, header_height, w - 2 * corner_size, handle_size)
-        self.resize_handles['bottom'].setGeometry(corner_size, h - handle_size, w - 2 * corner_size, handle_size)
-        self.resize_handles['left'].setGeometry(0, corner_size, handle_size, h - 2 * corner_size)
-        self.resize_handles['right'].setGeometry(w - handle_size, corner_size, handle_size, h - 2 * corner_size)
-
-        self.resize_handles['top-left'].setGeometry(0, header_height, corner_size, corner_size)
-        self.resize_handles['top-right'].setGeometry(w - corner_size, header_height, corner_size, corner_size)
-        self.resize_handles['bottom-left'].setGeometry(0, h - corner_size, corner_size, corner_size)
-        self.resize_handles['bottom-right'].setGeometry(w - corner_size, h - corner_size, corner_size, corner_size)
-
-    def eventFilter(self, obj, event):
-        if hasattr(obj, 'edge_type'):
-            if event.type() == event.Type.MouseButtonPress:
-                if event.button() == Qt.MouseButton.LeftButton:
-                    self.resizing = True
-                    self.resize_edge = obj.edge_type
-                    self.resize_start_geometry = self.geometry()
-                    self.resize_start_pos = event.globalPosition().toPoint()
-                    return True
-
-            elif event.type() == event.Type.MouseButtonRelease:
-                if self.resizing:
-                    self.resizing = False
-                    self.resize_edge = None
-                    return True
-
-            elif event.type() == event.Type.MouseMove and self.resizing:
-                delta = event.globalPosition().toPoint() - self.resize_start_pos
-                new_geo = QRect(self.resize_start_geometry)
-
-                if 'left' in self.resize_edge:
-                    new_geo.setLeft(self.resize_start_geometry.left() + delta.x())
-                if 'right' in self.resize_edge:
-                    new_geo.setRight(self.resize_start_geometry.right() + delta.x())
-                if 'top' in self.resize_edge:
-                    new_geo.setTop(self.resize_start_geometry.top() + delta.y())
-                if 'bottom' in self.resize_edge:
-                    new_geo.setBottom(self.resize_start_geometry.bottom() + delta.y())
-
-                if new_geo.width() >= self.minimumWidth() and new_geo.height() >= self.minimumHeight():
-                    self.setGeometry(new_geo)
-                return True
-
-        return super().eventFilter(obj, event)

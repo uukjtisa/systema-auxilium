@@ -279,20 +279,87 @@ class SkillManager(QObject):
         return snapshot
 
     def _parse_frontmatter(self, path: Path) -> dict:
-        """Parse YAML-ish frontmatter from a SKILL.md file."""
+        """
+        Parse YAML-ish frontmatter from a SKILL.md file.
+
+        Handles all common description styles:
+          description: single line value
+          description: "quoted single line"
+          description: 'quoted single line'
+          description: >
+            folded block scalar (YAML '>') — newlines become spaces
+          description: |
+            literal block scalar (YAML '|') — newlines preserved
+          description: >-
+            strip trailing newline variant
+        """
         try:
             text = path.read_text(encoding='utf-8')
         except OSError:
             return {'name': path.parent.name, 'description': ''}
 
-        match = re.match(r'^---\n(.*?)\n---', text, re.DOTALL)
+        match = re.match(r'^---\r?\n(.*?)\r?\n---', text, re.DOTALL)
         if not match:
             return {'name': path.parent.name, 'description': ''}
 
         raw = match.group(1)
+
+        # ── name (always a simple single-line value) ───────────────────────────
         name_m = re.search(r'^name:\s*(.+)$', raw, re.MULTILINE)
-        desc_m = re.search(r'^description:\s*["\']?(.*?)["\']?\s*$', raw, re.MULTILINE | re.DOTALL)
-        return {
-            'name': name_m.group(1).strip() if name_m else path.parent.name,
-            'description': desc_m.group(1).strip() if desc_m else '',
-        }
+        name = name_m.group(1).strip().strip('"\'') if name_m else path.parent.name
+
+        # ── description ────────────────────────────────────────────────────────
+        # Find where description: starts (line index inside `raw`)
+        lines = raw.splitlines()
+        desc_line_idx = None
+        for i, line in enumerate(lines):
+            if re.match(r'^description\s*:', line):
+                desc_line_idx = i
+                break
+
+        description = ''
+        if desc_line_idx is not None:
+            header_line = lines[desc_line_idx]
+            # Strip "description:" prefix and optional whitespace
+            inline_value = re.sub(r'^description\s*:\s*', '', header_line).strip()
+
+            if inline_value in ('>', '|', '>-', '|-', '>+', '|+'):
+                # Block scalar — collect subsequent indented lines
+                block_lines = []
+                for j in range(desc_line_idx + 1, len(lines)):
+                    bl = lines[j]
+                    # Stop at the next non-indented key (e.g. "name:", or end of block)
+                    if bl and not bl[0].isspace():
+                        break
+                    block_lines.append(bl.strip())
+                # Drop leading/trailing blank lines
+                while block_lines and not block_lines[0]:
+                    block_lines.pop(0)
+                while block_lines and not block_lines[-1]:
+                    block_lines.pop()
+                if inline_value.startswith('>'):
+                    # Folded: join with space, but blank lines become newlines
+                    result_parts = []
+                    for bl in block_lines:
+                        if bl:
+                            result_parts.append(bl)
+                        else:
+                            result_parts.append('\n')
+                    description = ' '.join(result_parts).replace(' \n ', '\n').strip()
+                else:
+                    # Literal: preserve newlines
+                    description = '\n'.join(block_lines)
+            else:
+                # Inline value — strip surrounding quotes if present
+                if (inline_value.startswith('"') and inline_value.endswith('"')) or \
+                   (inline_value.startswith("'") and inline_value.endswith("'")):
+                    inline_value = inline_value[1:-1]
+                description = inline_value.strip()
+
+        return {'name': name, 'description': description}
+
+    @staticmethod
+    def strip_frontmatter(content: str) -> str:
+        """Return SKILL.md content with the YAML frontmatter block removed."""
+        stripped = re.sub(r'^---\r?\n.*?\r?\n---\r?\n?', '', content, count=1, flags=re.DOTALL)
+        return stripped.strip()
