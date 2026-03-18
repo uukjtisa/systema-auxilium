@@ -16,6 +16,7 @@ from PyQt6.QtCore import Qt, QTimer, QPoint, pyqtSignal, QRect, QPropertyAnimati
 from PyQt6.QtGui import QAction, QCursor, QRegion, QPixmap
 from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QFont
 from core.skill_manager import SkillManager as _SkillManagerType
+from ui.base_window import BaseWindow
 
 
 _SK_SURFACE  = "#161B22"
@@ -1156,7 +1157,7 @@ class CodeBlockWidget(QWidget):
             }}
         """)
 
-class ChatWindow(QWidget):
+class ChatWindow(BaseWindow):
     """Modern chat window with AI conversation"""
 
     voice_playback_signal = pyqtSignal()  # Signal for thread-safe UI updates
@@ -1222,15 +1223,8 @@ class ChatWindow(QWidget):
         # MESSAGE CONTROL: Track all messages for edit/delete/rewind
         self.message_widgets = []  # List of {widget, role, content, history_index}
 
-        # Window dragging state
-        self.dragging = False
-        self.drag_position = QPoint()
-        self.resizing = False
-        self.resize_edge = None
-        self.resize_start_geometry = None
-        self.resize_timer = QTimer()
-        self.resize_timer.setSingleShot(True)
-        self.resize_timer.timeout.connect(self.save_window_geometry)
+        # Window chrome state
+        self._init_chrome_state()
 
         # Avatar settings
         self.config_file = _APP_ROOT / "chat_config.json"
@@ -4639,7 +4633,7 @@ class ChatWindow(QWidget):
         menu.addAction(delete_action)
 
         rewind_action = QAction("⏪ Rewind to Here", self)
-        rewind_action.triggered.connect(lambda: self._rewind_to_message(message_data))
+        rewind_action.triggered.connect(lambda: self._rewind_to_here(message_data))
         menu.addAction(rewind_action)
 
         menu.exec(QCursor.pos())
@@ -4728,21 +4722,45 @@ class ChatWindow(QWidget):
         if not new_content.strip():
             return
 
-        message_data['content'] = new_content
-
-        history_index = self._get_history_index(message_data)
-        if history_index >= 0:
-            self.controller.ai.conversation_history[history_index]['content'] = new_content
-
-        if message_data.get('text_label'):
-            message_data['text_label'].setText(self.render_markdown(new_content))
-
         if message_data['role'] == 'user':
-            self._rewind_to_message(message_data, keep_message=True)
+            # Capture old content BEFORE mutating so history search still works
+            old_content = message_data['content']
+
+            # Find where this user turn sits in conversation_history
+            history_index = self._find_history_index_by_role_content('user', old_content)
+
+            # Remove this widget and everything after it
+            target_index = message_data['index']
+            widgets_to_remove = [md['widget'] for md in self.message_widgets[target_index:]]
+            self.message_widgets = self.message_widgets[:target_index]
+
+            # Truncate history UP TO (not including) this user message so
+            # send_message → generate_response can append it fresh (no duplicate)
+            if history_index >= 0:
+                self.controller.ai.conversation_history = \
+                    self.controller.ai.conversation_history[:history_index]
+
+            # Animate out the stale widgets
+            for widget in widgets_to_remove:
+                def _destroy(w=widget):
+                    self.chat_layout.removeWidget(w)
+                    w.deleteLater()
+                self._animate_message_out(widget, _destroy)
+
+            # Re-render the user bubble with updated text, then fire AI
+            self.add_user_message(new_content)
             self.controller.send_message(new_content)
 
-        self.controller._auto_save_session()
+        else:
+            # Assistant / system edit: update in-place
+            history_index = self._get_history_index(message_data)
+            message_data['content'] = new_content
+            if history_index >= 0:
+                self.controller.ai.conversation_history[history_index]['content'] = new_content
+            if message_data.get('text_label'):
+                message_data['text_label'].setText(self.render_markdown(new_content))
 
+        self.controller._auto_save_session()
         dialog.accept()
 
     def _delete_message(self, message_data):
@@ -4791,8 +4809,46 @@ class ChatWindow(QWidget):
             self._animate_message_out(widget, _destroy)
 
 
+    def _rewind_to_here(self, message_data):
+        """'Rewind to Here' from the context menu.
+        Always keeps the target message itself; discards everything after it.
+        - Assistant bubble: just truncates, no new request.
+        - User bubble: truncates history before this turn so send_message can
+          re-append it cleanly, then fires a fresh AI response."""
+        target_index = message_data['index']
+        role = message_data['role']
+
+        # Widgets: keep up to and including the target
+        widgets_to_remove = [md['widget'] for md in self.message_widgets[target_index + 1:]]
+        self.message_widgets = self.message_widgets[:target_index + 1]
+
+        # History: find real position by content+role
+        history_index = self._get_history_index(message_data)
+        if history_index >= 0:
+            if role == 'user':
+                # Truncate BEFORE this entry — send_message will re-append it
+                self.controller.ai.conversation_history = \
+                    self.controller.ai.conversation_history[:history_index]
+            else:
+                # Truncate AFTER this entry — keep the assistant message
+                self.controller.ai.conversation_history = \
+                    self.controller.ai.conversation_history[:history_index + 1]
+
+        self.controller._auto_save_session()
+
+        for widget in widgets_to_remove:
+            def _destroy(w=widget):
+                self.chat_layout.removeWidget(w)
+                w.deleteLater()
+            self._animate_message_out(widget, _destroy)
+
+        # For user messages: fire a new AI response (bubble stays visible)
+        if role == 'user':
+            self.controller.send_message(message_data['content'])
+
     def _regenerate_response(self, message_data):
-        """Regenerate AI response"""
+        """Regenerate AI response — rewinds before the user message, re-renders the user
+        bubble, then fires a fresh send so the AI responds again."""
         target_index = message_data['index']
 
         user_msg = None
@@ -4804,17 +4860,37 @@ class ChatWindow(QWidget):
         if not user_msg:
             return
 
-        self._rewind_to_message(user_msg, keep_message=True)
-
         user_message = user_msg['content']
+
+        # Rewind to just BEFORE the user message — removes it and everything after
+        self._rewind_to_message(user_msg, keep_message=False)
+
+        # Re-render the user bubble so it stays visible in chat
+        self.add_user_message(user_message)
+
+        # Fire AI (generate_response will append user turn to history once)
         self.controller.send_message(user_message)
 
     def _get_history_index(self, message_data):
-        """Get the index of a message in conversation_history."""
-        idx = message_data.get('index', -1)
-        if idx < 0 or idx >= len(self.controller.ai.conversation_history):
-            return -1
-        return idx
+        """Find the real index of a message in conversation_history by matching role+content.
+        Searches from the end so the most-recent occurrence is found first."""
+        role = message_data.get('role')
+        content = message_data.get('content', '')
+        history = self.controller.ai.conversation_history
+        for i in range(len(history) - 1, -1, -1):
+            entry = history[i]
+            if entry.get('role') == role and entry.get('content') == content:
+                return i
+        return -1
+
+    def _find_history_index_by_role_content(self, role, content):
+        """Like _get_history_index but takes role+content directly (used before message_data is mutated)."""
+        history = self.controller.ai.conversation_history
+        for i in range(len(history) - 1, -1, -1):
+            entry = history[i]
+            if entry.get('role') == role and entry.get('content') == content:
+                return i
+        return -1
 
     def send_message(self):
         """Send message"""
@@ -5028,20 +5104,10 @@ class ChatWindow(QWidget):
         self.interrupt_btn.hide()
         self.send_btn.show()
 
-    def apply_rounded_mask(self):
-        """Apply rounded corners mask"""
-        from PyQt6.QtGui import QPainterPath
-        from PyQt6.QtCore import QRectF
-
-        path = QPainterPath()
-        path.addRoundedRect(QRectF(self.rect()), 12, 12)
-        region = QRegion(path.toFillPolygon().toPolygon())
-        self.setMask(region)
-
     def resizeEvent(self, event):
         """Handle window resize."""
-        super().resizeEvent(event)
-        self.apply_rounded_mask()
+        super().resizeEvent(event)  # handles mask, resize handles, save timer
+
         if hasattr(self, 'chat_widget'):
             self.chat_widget.updateGeometry()
 
@@ -5054,13 +5120,6 @@ class ChatWindow(QWidget):
 
         if hasattr(self, 'toggle_sidebar_btn'):
             self.toggle_sidebar_btn.raise_()
-
-        if hasattr(self, 'resize_handles'):
-            self.position_resize_handles()
-
-        if hasattr(self, 'resize_timer'):
-            self.resize_timer.stop()
-            self.resize_timer.start(1000)
 
     def save_window_geometry(self):
         """Save window size and position to config"""
@@ -5098,83 +5157,6 @@ class ChatWindow(QWidget):
                         )
         except Exception as e:
             print(f"Error loading window geometry: {e}")
-
-    def header_mouse_press(self, event):
-        """Handle mouse press on header for dragging"""
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.dragging = True
-            self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            event.accept()
-
-    def header_mouse_move(self, event):
-        """Handle mouse move on header for dragging"""
-        if self.dragging:
-            self.move(event.globalPosition().toPoint() - self.drag_position)
-            event.accept()
-
-    def header_mouse_release(self, event):
-        """Handle mouse release"""
-        self.dragging = False
-        event.accept()
-
-    def create_resize_handles(self):
-        """Create invisible resize handles around window edges"""
-        handle_size = 8
-        corner_size = 16
-
-        self.resize_handles = {}
-
-        edges = {
-            'top': (0, 0, 0, handle_size, Qt.CursorShape.SizeVerCursor),
-            'bottom': (0, 0, 0, handle_size, Qt.CursorShape.SizeVerCursor),
-            'left': (0, 0, handle_size, 0, Qt.CursorShape.SizeHorCursor),
-            'right': (0, 0, handle_size, 0, Qt.CursorShape.SizeHorCursor),
-        }
-
-        for edge_name, (l, t, w, h, cursor) in edges.items():
-            handle = QFrame(self)
-            handle.setStyleSheet("background-color: transparent;")
-            handle.setCursor(cursor)
-            handle.edge_type = edge_name
-            handle.installEventFilter(self)
-            self.resize_handles[edge_name] = handle
-            handle.raise_()
-
-        corners = {
-            'top-left': (0, 0, corner_size, corner_size, Qt.CursorShape.SizeFDiagCursor),
-            'top-right': (0, 0, corner_size, corner_size, Qt.CursorShape.SizeBDiagCursor),
-            'bottom-left': (0, 0, corner_size, corner_size, Qt.CursorShape.SizeBDiagCursor),
-            'bottom-right': (0, 0, corner_size, corner_size, Qt.CursorShape.SizeFDiagCursor),
-        }
-
-        for corner_name, (l, t, w, h, cursor) in corners.items():
-            handle = QFrame(self)
-            handle.setStyleSheet("background-color: transparent;")
-            handle.setCursor(cursor)
-            handle.edge_type = corner_name
-            handle.installEventFilter(self)
-            self.resize_handles[corner_name] = handle
-            handle.raise_()
-
-        self.position_resize_handles()
-
-    def position_resize_handles(self):
-        """Position resize handles based on window size"""
-        w = self.width()
-        h = self.height()
-        handle_size = 8
-        corner_size = 16
-        header_height = 50
-
-        self.resize_handles['top'].setGeometry(corner_size, header_height, w - 2 * corner_size, handle_size)
-        self.resize_handles['bottom'].setGeometry(corner_size, h - handle_size, w - 2 * corner_size, handle_size)
-        self.resize_handles['left'].setGeometry(0, corner_size, handle_size, h - 2 * corner_size)
-        self.resize_handles['right'].setGeometry(w - handle_size, corner_size, handle_size, h - 2 * corner_size)
-
-        self.resize_handles['top-left'].setGeometry(0, header_height, corner_size, corner_size)
-        self.resize_handles['top-right'].setGeometry(w - corner_size, header_height, corner_size, corner_size)
-        self.resize_handles['bottom-left'].setGeometry(0, h - corner_size, corner_size, corner_size)
-        self.resize_handles['bottom-right'].setGeometry(w - corner_size, h - corner_size, corner_size, corner_size)
 
     def eventFilter(self, obj, event):
         """Handle resize handle events and smooth scroll viewport events."""
@@ -5258,39 +5240,6 @@ class ChatWindow(QWidget):
                             self._scroll_anim.stop()
                     except RuntimeError:
                         pass
-
-        # ── Window resize handle events ────────────────────────────────────
-        if hasattr(obj, 'edge_type'):
-            if event.type() == event.Type.MouseButtonPress:
-                if event.button() == Qt.MouseButton.LeftButton:
-                    self.resizing = True
-                    self.resize_edge = obj.edge_type
-                    self.resize_start_geometry = self.geometry()
-                    self.resize_start_pos = event.globalPosition().toPoint()
-                    return True
-
-            elif event.type() == event.Type.MouseButtonRelease:
-                if self.resizing:
-                    self.resizing = False
-                    self.resize_edge = None
-                    return True
-
-            elif event.type() == event.Type.MouseMove and self.resizing:
-                delta = event.globalPosition().toPoint() - self.resize_start_pos
-                new_geo = QRect(self.resize_start_geometry)
-
-                if 'left' in self.resize_edge:
-                    new_geo.setLeft(self.resize_start_geometry.left() + delta.x())
-                if 'right' in self.resize_edge:
-                    new_geo.setRight(self.resize_start_geometry.right() + delta.x())
-                if 'top' in self.resize_edge:
-                    new_geo.setTop(self.resize_start_geometry.top() + delta.y())
-                if 'bottom' in self.resize_edge:
-                    new_geo.setBottom(self.resize_start_geometry.bottom() + delta.y())
-
-                if new_geo.width() >= self.minimumWidth() and new_geo.height() >= self.minimumHeight():
-                    self.setGeometry(new_geo)
-                return True
 
         return super().eventFilter(obj, event)
 
