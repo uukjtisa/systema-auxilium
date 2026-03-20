@@ -733,8 +733,10 @@ class AppearanceSettingsWindow(BaseWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.viewport().setStyleSheet("background-color: #161B22;")
 
         container = QWidget()
+        container.setStyleSheet("background-color: #161B22; color: #E6EDF3;")
         content_layout = QVBoxLayout(container)
         content_layout.setSpacing(15)
         content_layout.setContentsMargins(15, 15, 15, 15)
