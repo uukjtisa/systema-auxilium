@@ -1,46 +1,21 @@
-Systema Auxilium Community License v2.0
+MIT License
 
 Copyright (c) 2026 Nic2007 (https://github.com/uukjtisa)
 
-OWNERSHIP AND AUTHORSHIP
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-The original architecture, tool design, code flow, and core concepts of Systema Auxilium
-were conceived and developed by Nic2007. This software is the original intellectual work
-of its author.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-PERMITTED USE
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this
-software and associated documentation files (the "Software"), to use, copy, and modify
-the Software for personal, non-commercial purposes, subject to the following conditions:
-
-  1. Redistribution of modified versions of the Software, in whole or in part, as an
-     original or independent work is not permitted without prior written agreement from
-     the original author.
-
-  2. The above copyright notice and this permission notice shall be included in all
-     copies or substantial portions of the Software.
-
-CONTRIBUTIONS AND COLLABORATION
-
-Contributions to this project — including bug reports, feature suggestions, and pull
-requests — are welcome and encouraged. Accepted contributions will be credited in the
-project's commit history, release notes, or documentation as appropriate. Submission of
-a contribution does not transfer ownership or licensing rights of the Software.
-
-DISCLAIMER
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
-INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
-PURPOSE, AND NONINFRINGEMENT. SYSTEMA AUXILIUM PROVIDES AI-ASSISTED SYSTEM-LEVEL
-OPERATIONS VIA PYTHON. IMPROPER USE, UNSAFE PROMPTS, OR MISCONFIGURATION MAY RESULT IN
-DATA LOSS OR SYSTEM INSTABILITY. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY CLAIM,
-DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE,
-ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
-
-LICENSE VERSIONING
-
-The author reserves the right to publish updated versions of this license at any time.
-Any newly published version automatically supersedes this license for all future use
-of the Software.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
