@@ -8,6 +8,23 @@
 
 ---
 
+## Things to take into consideration.
+
+This is a **hobby project** built and maintained by a single person.
+
+**Bugs are expected.** Some features have not been deeply tested, and certain functions may behave unexpectedly depending on your setup. And tool calls may leak if the LLM misses proper usage. If something breaks, please try to replicate it and open an issue. It would help a lot if.
+
+## **Lighter models may struggle to follow the system prompt tool format reliably.**
+- **Model compatibility is limited.** This project was developed and tested almost exclusively using the **GPT-5.2** model via the free [Puter.js](https://puter.com) API. Other models, both lighter open-source ones and stronger alternatives, have **not** been tested. 
+- When the LLM fails to follow the format in tool usage, unintentional results may occur, like tool usage leaking into chat.
+- I'm open to suggestions for suggestions in Revamping the tool system. If you're experienced in agentic stuff, please consider mentoring me! **:)**
+
+Development happens in whatever time I can spare. Updates may be slow, inconsistent, or temporarily halted during academic periods. I have no prior experience maintaining a codebase of this scale, so there may be structural ambiguity in places. I appreciate your patience.
+
+**Co-authors are welcome.** If you find this project interesting and want to help build it, you are more than welcome. No experience bar. No formality. Just reach out or open a PR.
+
+---
+
 ## 🎬 See It In Action
 
 [▶ Watch the Demo on Google Drive](https://drive.google.com/file/d/1RmdZhXz-lvwBVq2JGpx3q7bip8Jtmynm/view?usp=sharing)
