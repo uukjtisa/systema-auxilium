@@ -18,6 +18,7 @@ import os
 import json
 import random
 import socket
+import threading
 from core.logger import _make_logger, _NoOpLogger
 
 
@@ -39,6 +40,10 @@ class AssistantController(QObject):
 
     # NEW SIGNALS FOR VOICE
     voice_message_signal = pyqtSignal(str)
+
+    # Manual provider — fires on the main thread to show the response popup
+    # Only carries display data; result_holder + done_event live on self
+    manual_response_signal = pyqtSignal(str, bool, str)
 
     def __init__(self):
         super().__init__()
@@ -149,6 +154,7 @@ class AssistantController(QObject):
         self.ai.set_puter_tts_model(self.settings.get('puter_tts_model', 'tts-1'))
         self.ai.set_puter_tts_voice(self.settings.get('puter_tts_voice'))
         self.ai.set_puter_timeout(self.settings.get('puter_timeout', 30))
+        self.ai.set_custom_script_path(self.settings.get('custom_script_path', ''))
         log.debug("[AssistantController.__init__] All AI settings applied")
 
         # Auto-start Puter if selected
@@ -173,6 +179,11 @@ class AssistantController(QObject):
         # Connect voice message signal to handler (main thread safe)
         self.voice_message_signal.connect(self._handle_voice_message_on_main_thread)
         log.debug("[AssistantController.__init__] voice_message_signal connected to main thread handler")
+
+        # Connect manual response signal — shows popup on main thread
+        self.manual_response_signal.connect(self._show_manual_response_window)
+        self.ai.manual_response_fn = self._request_manual_response
+        log.debug("[AssistantController.__init__] manual_response_signal connected")
 
         # SESSION MANAGEMENT - Initialize session manager
         log.debug("[AssistantController.__init__] Initializing SessionManager...")
@@ -376,6 +387,7 @@ class AssistantController(QObject):
             'memory_max_results': 5,
             'glass_background_enabled': False,
             'glass_background_opacity': 0.75,
+            'custom_script_path': '',
         }
 
     def save_settings(self):
@@ -518,6 +530,31 @@ class AssistantController(QObject):
         except Exception as e:
             log.error(f"[AssistantController.disable_voice_mode] ✗ Exception: {type(e).__name__}: {e}")
             self.log(f"Error disabling voice: {e}", "ERROR")
+
+    def _request_manual_response(self, context: str, work_mode: bool, work_output: str):
+        """Called from the AIWorker thread — stores result_holder + done_event on
+        self (so they stay as real references), then signals the main thread to
+        show the popup and blocks until the user submits or cancels."""
+        self._manual_result_holder = []
+        self._manual_done_event = threading.Event()
+        # Emit only display data — the window will read result_holder from self
+        self.manual_response_signal.emit(context, work_mode, work_output)
+        # Block the worker thread until the window is dismissed
+        self._manual_done_event.wait()
+        result = self._manual_result_holder[0] if self._manual_result_holder else None
+        return result
+
+    def _show_manual_response_window(self, context, work_mode, work_output):
+        """Slot — always runs on the main thread.  Creates and shows the popup."""
+        from ui.manual_response_window import ManualResponseWindow
+        win = ManualResponseWindow(context, work_mode, work_output,
+                                   self._manual_result_holder,
+                                   self._manual_done_event)
+        # Keep a reference so it isn't garbage-collected before the user responds
+        self._manual_response_win = win
+        win.show()
+        win.raise_()
+        win.activateWindow()
 
     def handle_voice_transcription(self, text):
         """Handle transcribed voice input - SIGNAL VERSION"""
@@ -854,6 +891,18 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         self.ai.set_gemini_api_key(api_key)
         self.save_settings()
         self.log("Gemini API key updated", "SUCCESS")
+
+    def get_custom_script_path(self):
+        """Get custom script provider path"""
+        return self.settings.get('custom_script_path', '')
+
+    def set_custom_script_path(self, path):
+        """Set custom script provider path"""
+        log.info(f"[AssistantController.set_custom_script_path] path='{path}'")
+        self.settings['custom_script_path'] = path
+        self.ai.set_custom_script_path(path)
+        self.save_settings()
+        self.log(f"Custom script path set to: {path}", "SUCCESS")
 
     def get_ai_provider(self):
         """Get current AI provider"""

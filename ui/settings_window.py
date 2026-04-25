@@ -5,7 +5,8 @@ FIXED: Voice settings now actually work - VAD and TTS voice selection are functi
 
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QLineEdit, QPushButton, QTextEdit, QComboBox, QGroupBox,
-                             QCheckBox, QScrollArea, QFrame, QSlider, QSpinBox, QDoubleSpinBox)
+                             QCheckBox, QScrollArea, QFrame, QSlider, QSpinBox, QDoubleSpinBox,
+                             QPlainTextEdit, QFileDialog)
 from PyQt6.QtCore import Qt, QPoint, QTimer, QRect
 from PyQt6.QtGui import QRegion
 from core.puter_server import DEBUG_MODE
@@ -295,7 +296,7 @@ class SettingsWindow(BaseWindow):
         pg_lay = QVBoxLayout(provider_group)
         pg_lay.addWidget(_label("Select AI Provider:"))
         self.provider_combo = QComboBox()
-        self.provider_combo.addItems(["anthropic", "gemini", "puter"])
+        self.provider_combo.addItems(["anthropic", "gemini", "puter", "manual", "custom_script"])
         self.provider_combo.currentTextChanged.connect(self.on_provider_changed)
         self.provider_combo.setStyleSheet(_COMBO)
         pg_lay.addWidget(self.provider_combo)
@@ -603,6 +604,108 @@ class SettingsWindow(BaseWindow):
         )
         rec_lay.addWidget(_info_box(rec_text))
         ai_lay.addWidget(self.recommended_group)
+
+        # Manual provider group
+        self.manual_group = QGroupBox("Manual Provider")
+        self.manual_group.setStyleSheet(_GROUP)
+        mn_lay = QVBoxLayout(self.manual_group)
+        mn_lay.addWidget(_info_box(
+            "Manual mode — responses are entered by hand in the manual response window."
+        ))
+        copy_sys_btn = QPushButton("📋 Copy Current System Prompt")
+        copy_sys_btn.setStyleSheet(_BTN)
+        copy_sys_btn.setToolTip("Copy the full effective system prompt (base + loaded skills) to clipboard")
+        def _copy_system_prompt():
+            from PyQt6.QtWidgets import QApplication
+            try:
+                prompt = self.controller.ai._get_effective_system_prompt()
+            except Exception as e:
+                prompt = f"[Error retrieving system prompt: {e}]"
+            QApplication.clipboard().setText(prompt)
+            copy_sys_btn.setText("✅ Copied!")
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(2000, lambda: copy_sys_btn.setText("📋 Copy Current System Prompt"))
+        copy_sys_btn.clicked.connect(_copy_system_prompt)
+        mn_lay.addWidget(copy_sys_btn)
+        ai_lay.addWidget(self.manual_group)
+
+        # ── Custom Script provider group ──────────────────────────────────────
+        self.custom_script_group = QGroupBox("Custom Script Provider")
+        self.custom_script_group.setStyleSheet(_GROUP)
+        cs_lay = QVBoxLayout(self.custom_script_group)
+
+        cs_lay.addWidget(_info_box(
+            "Runs your own Python script as the AI provider. "
+            "The script is reimported on every request so live edits take effect immediately."
+        ))
+
+        # Contract display — always visible when this provider is selected
+        _CONTRACT_TEXT = (
+            "Required function signature:\n"
+            "\n"
+            "  def chat(system_prompt: str, messages: list[dict]) -> str:\n"
+            "\n"
+            "Parameters:\n"
+            "  system_prompt  — full effective system prompt string (may be empty, never None)\n"
+            "  messages       — list of {\"role\": ..., \"content\": ...} dicts\n"
+            "                   roles are only \"user\" or \"assistant\", alternating\n"
+            "                   the latest user message is always the last entry\n"
+            "\n"
+            "Return:\n"
+            "  A non-empty string. Returning None or \"\" is treated as an error.\n"
+            "  Any exception raised will surface as an error in the chat window."
+        )
+        contract_box = QPlainTextEdit()
+        contract_box.setPlainText(_CONTRACT_TEXT)
+        contract_box.setReadOnly(True)
+        contract_box.setFixedHeight(200)
+        contract_box.setStyleSheet(f"""
+                    QPlainTextEdit {{
+                        background: #0d0d0d;
+                        color: #a0c8a0;
+                        border: 1px solid #333;
+                        border-radius: 6px;
+                        padding: 8px;
+                        font-family: monospace;
+                        font-size: 11px;
+                    }}
+                """)
+        cs_lay.addWidget(contract_box)
+
+        cs_lay.addWidget(_label("Script path:", top_margin=6))
+        self.custom_script_path_input = QLineEdit()
+        self.custom_script_path_input.setReadOnly(True)
+        self.custom_script_path_input.setPlaceholderText("No script selected")
+        self.custom_script_path_input.setStyleSheet(_INPUT)
+        cs_lay.addWidget(self.custom_script_path_input)
+
+        _cs_btn_row = QHBoxLayout()
+        browse_btn = QPushButton("📂 Browse…")
+        browse_btn.setStyleSheet(_BTN)
+
+        def _browse_script():
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Select Python Script", "", "Python Files (*.py)"
+            )
+            if path:
+                self.custom_script_path_input.setText(path)
+                self.controller.set_custom_script_path(path)
+
+        browse_btn.clicked.connect(_browse_script)
+        _cs_btn_row.addWidget(browse_btn)
+
+        clear_btn = QPushButton("✖ Clear")
+        clear_btn.setStyleSheet(_BTN)
+
+        def _clear_script():
+            self.custom_script_path_input.clear()
+            self.controller.set_custom_script_path("")
+
+        clear_btn.clicked.connect(_clear_script)
+        _cs_btn_row.addWidget(clear_btn)
+
+        cs_lay.addLayout(_cs_btn_row)
+        ai_lay.addWidget(self.custom_script_group)
 
         ai_lay.addStretch()
         tabs.addTab(ai_scroll, "🤖  AI")
@@ -1066,7 +1169,9 @@ class SettingsWindow(BaseWindow):
         # Hide all provider-specific groups first
         self.anthropic_group.hide()
         self.gemini_group.hide()
+        self.manual_group.hide()
         self.puter_group.hide()
+        self.custom_script_group.hide()
 
         # CRITICAL: Always hide Puter-specific sections first
         if DEBUG_MODE:
@@ -1083,6 +1188,12 @@ class SettingsWindow(BaseWindow):
             self.update_tts_provider_options(show_puter=True)
         elif provider == 'gemini':
             self.gemini_group.show()
+            self.update_tts_provider_options(show_puter=False)
+        elif provider == 'manual':
+            self.manual_group.show()
+            self.update_tts_provider_options(show_puter=False)
+        elif provider == 'custom_script':
+            self.custom_script_group.show()
             self.update_tts_provider_options(show_puter=False)
         else:  # anthropic
             self.anthropic_group.show()
@@ -1294,6 +1405,10 @@ class SettingsWindow(BaseWindow):
         self.provider_combo.setCurrentText(provider)
         # CRITICAL: Trigger visibility update on load
         self.on_provider_changed(provider)
+
+        saved_script_path = self.controller.get_custom_script_path()
+        if saved_script_path:
+            self.custom_script_path_input.setText(saved_script_path)
 
         # Load API key
         api_key = self.controller.get_api_key()
