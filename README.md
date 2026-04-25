@@ -12,6 +12,8 @@
 
 This is a **hobby project** built and maintained by a single person.
 
+**I only have access to a Windows 11 machine, so that's the only platform I can personally test on. Linux and macOS setup scripts are included but unverified by me; use them at your own discretion.**
+
 **Bugs are expected.** Some features have not been deeply tested, and certain functions may behave unexpectedly depending on your setup. And tool calls may leak if the LLM misses proper usage. If something breaks, please try to replicate it and open an issue. Any details you can provide will help a lot. And if you happen to know your way around Python, taking a look at the bug yourself would be even more appreciated! :)
 
 - **Lighter models may struggle to follow the system prompt tool format reliably.**
@@ -102,20 +104,29 @@ It is **strongly recommended** to run this project using **Python 3.10.11**, the
 **Official Python 3.10.11 release:** https://www.python.org/downloads/release/python-31011/
 
 ---
-
 ## How to Install
 
+### Windows
 Run `create_env.bat` — this will install all dependencies and generate a `run.bat` for you.
 
 Tested on **Windows 11** and **Windows 10**.
 
-Alternatively, set up manually:
+### Linux (Debian-based) & macOS
+Run `create_env.sh` (Linux) or `create_env_mac.sh` (macOS) — these will set up your virtual environment and generate the equivalent helper scripts.
+
+```bash
+bash create_env.sh       # Linux
+bash create_env_mac.sh   # macOS
+```
+
+> I only have access to a Windows 11 machine, so that's the only platform I can personally test on. The Linux and macOS setup scripts are included but unverified by me — use them at your own discretion.
+
+### Manual Setup (any platform)
 
 1. Ensure Python 3.10.11 is installed
 2. Install dependencies: `pip install -r requirements.txt`
-3. Configure your AI provider in Settings (Puter.js works out of the box — no key needed)
-4. Run the application: Double click `run.bat` (works with or without Admin privileges)
-
+3. Configure your AI provider in Settings (Puter.js needs an account to be created first; a pop-up will appear in the browser that will be opened automatically.)
+4. Run the application: `python main.py`
 ---
 
 ## Safety Warnings
