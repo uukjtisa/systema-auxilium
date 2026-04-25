@@ -3509,7 +3509,7 @@ class ChatWindow(BaseWindow):
             _all_sliders.append(size_slider)
 
             # Only show if picture is already active
-            has_picture = existing_pm and not existing_pm.isNull()
+            has_picture = bool(existing_pm and not existing_pm.isNull())
             size_row.setVisible(has_picture)
 
             wl.addWidget(upload_btn)

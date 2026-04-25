@@ -105,6 +105,14 @@ class AIEngine:
         self.puter_tts_voice = None
         self.puter_timeout = 30
 
+        # Manual provider — set by controller to a callable that blocks until
+        # the user types a response.  Signature:
+        #   fn(context: str, work_mode: bool, work_output: str) -> str | None
+        self.manual_response_fn = None
+
+        # Custom script provider — path to user's .py file
+        self.custom_script_path = ""
+
         log.info(f"[AIEngine.__init__] ── Initialization complete | provider='{self.ai_provider}' | "
                  f"anthropic_model='{self.anthropic_model}' | "
                  f"puter_model='{self.puter_model}' | gemini_model='{self.gemini_model}' | "
@@ -211,6 +219,11 @@ class AIEngine:
         log.info(f"[AIEngine.set_provider] AI provider changing: '{self.ai_provider}' → '{provider}'")
         self.ai_provider = provider
         self.log(f"AI provider set to: {provider}")
+
+    def set_custom_script_path(self, path):
+        log.info(f"[AIEngine.set_custom_script_path] path → '{path}'")
+        self.custom_script_path = path
+        self.log(f"Custom script path set to: {path}")
 
     def set_puter_model(self, model):
         log.info(f"[AIEngine.set_puter_model] Puter model: '{self.puter_model}' → '{model}'")
@@ -507,6 +520,91 @@ class AIEngine:
     # UNIFIED PROVIDER DISPATCHER
     # ═══════════════════════════════════════════════════════════════════════════
 
+    def _http_manual(self) -> str | None:
+        """Manual provider — blocks the worker thread until the user submits a response.
+
+        Shows the side panel whenever the most-recently appended history entry has
+        role='system' (covers work-mode output, post-exit prompt, and any other
+        system injection).  The panel displays the FULL system message so the user
+        can see exactly what the real model would have received.
+        """
+        if not self.manual_response_fn:
+            log.error("[AIEngine._http_manual] manual_response_fn not set")
+            return None
+
+        # Walk back through history to find what was just injected
+        has_system_msg = False
+        system_content = ""
+        context = ""
+
+        for entry in reversed(self.conversation_history):
+            role = entry.get('role', '')
+            content = entry.get('content', '')
+            if role == 'system' and not has_system_msg:
+                # First system entry from the end — this is what the AI would see
+                has_system_msg = True
+                system_content = content
+            elif role == 'user' and not context:
+                context = content
+            if has_system_msg and context:
+                break
+
+        log.info(f"[AIEngine._http_manual] Requesting manual response | "
+                 f"has_system_msg={has_system_msg} | context_len={len(context)}")
+        result = self.manual_response_fn(context, has_system_msg, system_content)
+        if result is None:
+            log.warning("[AIEngine._http_manual] User cancelled manual response")
+            return None
+        log.info(f"[AIEngine._http_manual] Got manual response | length={len(result)}")
+        return result
+
+    def _http_custom_script(self, messages) -> str | None:
+        """Custom script provider — reimports the user's .py file on every call
+        and invokes its chat(system_prompt, messages) function."""
+        import importlib.util, traceback
+
+        if not self.custom_script_path:
+            log.error("[AIEngine._http_custom_script] ✗ No custom script path set")
+            self.log("Custom script path is not set", "ERROR")
+            return None
+
+        import os
+        if not os.path.isfile(self.custom_script_path):
+            log.error(f"[AIEngine._http_custom_script] ✗ File not found: '{self.custom_script_path}'")
+            self.log(f"Custom script not found: {self.custom_script_path}", "ERROR")
+            return None
+
+        try:
+            spec = importlib.util.spec_from_file_location("custom_provider", self.custom_script_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        except Exception as e:
+            log.error(f"[AIEngine._http_custom_script] ✗ Failed to load script: {e}\n{traceback.format_exc()}")
+            self.log(f"Custom script load error: {e}", "ERROR")
+            return None
+
+        if not hasattr(module, 'chat') or not callable(module.chat):
+            log.error("[AIEngine._http_custom_script] ✗ Script has no callable chat() function")
+            self.log("Custom script must define a chat(system_prompt, messages) function", "ERROR")
+            return None
+
+        system_prompt, convo = self._extract_system_and_convo(messages)
+
+        try:
+            result = module.chat(system_prompt or "", convo)
+        except Exception as e:
+            log.error(f"[AIEngine._http_custom_script] ✗ chat() raised: {e}\n{traceback.format_exc()}")
+            self.log(f"Custom script error: {e}", "ERROR")
+            return None
+
+        if not result or not isinstance(result, str):
+            log.error("[AIEngine._http_custom_script] ✗ chat() returned empty or non-string value")
+            self.log("Custom script chat() must return a non-empty string", "ERROR")
+            return None
+
+        log.info(f"[AIEngine._http_custom_script] ✓ Response | length={len(result)} chars")
+        return result
+
     def _call_provider(self, image=None) -> str | None:
         """Build the unified message list, dispatch to the active provider.
         Returns raw AI text, or None on failure."""
@@ -518,6 +616,10 @@ class AIEngine:
             return self._http_gemini(messages)
         elif self.ai_provider == 'puter':
             return self._http_puter(messages, image=image)
+        elif self.ai_provider == 'manual':
+            return self._http_manual()
+        elif self.ai_provider == 'custom_script':
+            return self._http_custom_script(messages)
         else:
             log.error(f"[AIEngine._call_provider] Unknown provider: '{self.ai_provider}'")
             return None
@@ -633,6 +735,8 @@ class AIEngine:
                 result = self._http_gemini(single_turn)
             elif self.ai_provider == 'puter':
                 result = self._http_puter(single_turn)
+            elif self.ai_provider == 'custom_script':
+                result = self._http_custom_script(single_turn)
             else:
                 log.error(f"[AIEngine._get_ai_response_internal] Unknown provider: '{self.ai_provider}'")
                 return f"Error: Unknown provider '{self.ai_provider}'"
