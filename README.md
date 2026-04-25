@@ -1,6 +1,7 @@
 # Systema Auxilium
 
 **License:** MIT
+
 **Author / Architect:** Nic2007 ([@uukjtisa](https://github.com/uukjtisa))
 
 > ⚠️ **Work in Progress** — This project is actively developed. Not all features are fully polished or tested. Contributions and patience are genuinely appreciated.
@@ -17,13 +18,13 @@
 
 **Systema Auxilium** (Latin for *"System Helper"*) is an AI-powered desktop assistant that lets you control your computer through plain natural language. Instead of writing scripts or memorizing commands, you simply describe what you want done — and the assistant figures out the Python code to make it happen.
 
-It bridges the gap between human language and system-level automation, making powerful OS operations accessible to anyone.
+It serves as a personalized companion that helps with general automation, making powerful OS operations accessible to anyone.
 
 ---
 
 ## What Can It Do?
 
-Systema Auxilium uses Python as its "hands" — meaning anything Python can do on your computer, Systema Auxilium can do too.
+Systema Auxilium uses Python to do active work on you computer. So it can do almost anything the Python Interpreter can do on your computer.
 
 **File & Folder Management**
 Read, write, create, move, rename, or delete files and directories. Analyse folders, count file types, calculate sizes, list contents — all from a single sentence.
@@ -32,7 +33,7 @@ Read, write, create, move, rename, or delete files and directories. Analyse fold
 Open, launch, or close applications. Show popups, dialogs, or custom GUI windows. Interact with your desktop environment programmatically.
 
 **System Information & Monitoring**
-Check CPU usage, memory, disk space, running processes, system specs, and more — then get a clear human-readable summary.
+Check CPU usage, memory, disk space, running processes, system specs, and more.
 
 **Calculations & Data Processing**
 Perform complex calculations, process datasets, read and parse files (text, CSV, etc.), and return structured results.
@@ -51,33 +52,25 @@ Switch between AI backends with ease:
 **Session Naming**
 The assistant automatically names each conversation session so you can easily navigate back to previous tasks.
 
-**Guided Execution Mode** *(In Development)*
+**Guided Execution Mode** *(Implemented as of now but not perfect. Any suggestions would be welcomed.)*
 A safety-first mode that shows you the generated Python code *before* it runs, so you can review, approve, or reject every action.
 
 ---
 
-## Custom Script Provider — Bring Your Own AI
+## Custom Script Provider — Bring Your Own Provider
 
-One of the more unique features: you can connect *any* AI provider to Systema Auxilium without touching the main codebase at all. Just write a Python script that implements:
+You can connect *any* AI provider to Systema Auxilium without touching the main codebase at all. Just write a Python script that implements:
 
 ```python
 def chat(system_prompt: str, messages: list[dict]) -> str:
     ...
 ```
 
-Point the app at it in Settings → AI → Custom Script Provider. The script is reloaded on every request, so live edits take effect immediately. A full template and instructions are included in `custom_provider_template.py` at the repo root — including a ready-made prompt you can give to any AI to generate a working provider script for you.
+Point the app at it in Settings → AI → Custom Script Provider. The script is reloaded on every request, so live edits take effect immediately. A full template and instructions are included in `custom_provider_template.py` at the repo root, including a ready-made prompt you can give to any AI to generate a working provider script for you.
 
 ---
 
 ## About AI System Control
-
-### Is this "bad practice"?
-
-**Short answer: No, when implemented responsibly.**
-
-Systema Auxilium represents a new paradigm in human-computer interaction, where AI serves as an intelligent intermediary between natural language and system operations. The same concerns raised about AI-controlled system access apply equally to scripting languages, task automation tools, remote administration software, and package managers — all of which execute system-level code based on user intent.
-
-The key difference is that Systema Auxilium makes this accessible through natural language. The underlying mechanism — executing vetted code — remains the same as traditional scripting.
 
 ### User Responsibility
 
@@ -104,7 +97,7 @@ Alternatively, set up manually:
 1. Ensure Python 3.10.11 is installed
 2. Install dependencies: `pip install -r requirements.txt`
 3. Configure your AI provider in Settings (Puter.js works out of the box — no key needed)
-4. Run the application: `python main.py`
+4. Run the application: Double click `run.bat` (works with or without Admin privileges)
 
 ---
 
@@ -123,7 +116,7 @@ Alternatively, set up manually:
 
 ## Contributing
 
-This project is maintained by one person and has grown to over 22,000 lines. Contributions of any kind are genuinely welcome — bug reports, feature ideas, pull requests, and general feedback all help.
+This project is maintained by one person only as of April 25, 2026, and has grown to over 22,000 lines. Contributions of any kind are genuinely welcome — bug reports, feature ideas, pull requests, and general feedback all help.
 
 If you'd like to get involved, please see [CONTRIBUTING.md](CONTRIBUTING.md) or reach out directly.
 
@@ -135,4 +128,4 @@ For authorship, AI tooling disclosure, and legal information, see the [NOTICE](N
 
 ---
 
-**Systema Auxilium** — Bridging natural language and system automation through responsible AI integration.
+**Systema Auxilium** — Nic2007
