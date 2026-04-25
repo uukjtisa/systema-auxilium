@@ -12,7 +12,7 @@
 
 This is a **hobby project** built and maintained by a single person.
 
-**Bugs are expected.** Some features have not been deeply tested, and certain functions may behave unexpectedly depending on your setup. And tool calls may leak if the LLM misses proper usage. If something breaks, please try to replicate it and open an issue. It would help a lot if.
+**Bugs are expected.** Some features have not been deeply tested, and certain functions may behave unexpectedly depending on your setup. And tool calls may leak if the LLM misses proper usage. If something breaks, please try to replicate it and open an issue. It would help a lot. If something breaks, please try to replicate it and open an issue. Any details you can provide will help a lot. And if you happen to know your way around Python, taking a look at the bug yourself would be even more appreciated! :)
 
 ## **Lighter models may struggle to follow the system prompt tool format reliably.**
 - **Model compatibility is limited.** This project was developed and tested almost exclusively using the **GPT-5.2** model via the free [Puter.js](https://puter.com) API. Other models, both lighter open-source ones and stronger alternatives, have **not** been tested. 
