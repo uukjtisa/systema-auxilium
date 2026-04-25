@@ -12,12 +12,12 @@
 
 This is a **hobby project** built and maintained by a single person.
 
-**Bugs are expected.** Some features have not been deeply tested, and certain functions may behave unexpectedly depending on your setup. And tool calls may leak if the LLM misses proper usage. If something breaks, please try to replicate it and open an issue. It would help a lot. If something breaks, please try to replicate it and open an issue. Any details you can provide will help a lot. And if you happen to know your way around Python, taking a look at the bug yourself would be even more appreciated! :)
+**Bugs are expected.** Some features have not been deeply tested, and certain functions may behave unexpectedly depending on your setup. And tool calls may leak if the LLM misses proper usage. If something breaks, please try to replicate it and open an issue. Any details you can provide will help a lot. And if you happen to know your way around Python, taking a look at the bug yourself would be even more appreciated! :)
 
-## **Lighter models may struggle to follow the system prompt tool format reliably.**
-- **Model compatibility is limited.** This project was developed and tested almost exclusively using the **GPT-5.2** model via the free [Puter.js](https://puter.com) API. Other models, both lighter open-source ones and stronger alternatives, have **not** been tested. 
+- **Lighter models may struggle to follow the system prompt tool format reliably.**
+- **Model compatibility is limited.** This project was developed and tested almost exclusively using the **GPT-5.2** model via the API Provider [Puter.js](https://puter.com) with **limited free rates.** Other models, both lighter open-source ones and stronger alternatives, have **not** been tested. 
 - When the LLM fails to follow the format in tool usage, unintentional results may occur, like tool usage leaking into chat.
-- I'm open to suggestions for suggestions in Revamping the tool system. If you're experienced in agentic stuff, please consider mentoring me! **:)**
+- I'm open to suggestions for revamping the tool system. If you're experienced in agentic stuff, please consider mentoring me! **:)**
 
 Development happens in whatever time I can spare. Updates may be slow, inconsistent, or temporarily halted during academic periods. I have no prior experience maintaining a codebase of this scale, so there may be structural ambiguity in places. I appreciate your patience.
 
@@ -41,7 +41,7 @@ It serves as a personalized companion that helps with general automation, making
 
 ## What Can It Do?
 
-Systema Auxilium uses Python to do active work on you computer. So it can do almost anything the Python Interpreter can do on your computer.
+Systema Auxilium uses Python to do active work on your computer. So it can do almost anything the Python Interpreter can do on your computer.
 
 **File & Folder Management**
 Read, write, create, move, rename, or delete files and directories. Analyse folders, count file types, calculate sizes, list contents — all from a single sentence.
