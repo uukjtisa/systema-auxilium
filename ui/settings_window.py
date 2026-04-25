@@ -4,28 +4,24 @@ FIXED: Voice settings now actually work - VAD and TTS voice selection are functi
 """
 
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-                             QLineEdit, QPushButton, QTextEdit, QComboBox, QGroupBox, QCheckBox, QScrollArea, QFrame)
+                             QLineEdit, QPushButton, QTextEdit, QComboBox, QGroupBox,
+                             QCheckBox, QScrollArea, QFrame, QSlider, QSpinBox, QDoubleSpinBox,
+                             QPlainTextEdit, QFileDialog)
 from PyQt6.QtCore import Qt, QPoint, QTimer, QRect
 from PyQt6.QtGui import QRegion
 from core.puter_server import DEBUG_MODE
+from ui.base_window import BaseWindow
 
 
-class SettingsWindow(QWidget):
+class SettingsWindow(BaseWindow):
     """Settings window for configuring the AI assistant"""
 
     def __init__(self, controller):
         super().__init__()
         self.controller = controller
 
-        # Window dragging and resizing state
-        self.dragging = False
-        self.drag_position = QPoint()
-        self.resizing = False
-        self.resize_edge = None
-        self.resize_start_geometry = None
-        self.resize_timer = QTimer()
-        self.resize_timer.setSingleShot(True)
-        self.resize_timer.timeout.connect(self.save_window_geometry)
+        # Window chrome state
+        self._init_chrome_state()
 
         self.setMouseTracking(True)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover)
@@ -300,7 +296,7 @@ class SettingsWindow(QWidget):
         pg_lay = QVBoxLayout(provider_group)
         pg_lay.addWidget(_label("Select AI Provider:"))
         self.provider_combo = QComboBox()
-        self.provider_combo.addItems(["anthropic", "gemini", "puter"])
+        self.provider_combo.addItems(["anthropic", "gemini", "puter", "manual", "custom_script"])
         self.provider_combo.currentTextChanged.connect(self.on_provider_changed)
         self.provider_combo.setStyleSheet(_COMBO)
         pg_lay.addWidget(self.provider_combo)
@@ -327,7 +323,58 @@ class SettingsWindow(QWidget):
         _show_row.addWidget(self.show_key_btn)
         _show_row.addStretch()
         an_lay.addLayout(_show_row)
-        an_lay.addWidget(_label("Get your key: https://console.anthropic.com", muted=True))
+        # Model
+        an_lay.addWidget(_label("Model:", top_margin=6))
+        self.anthropic_model_combo = QComboBox()
+        self.anthropic_model_combo.setStyleSheet(_COMBO)
+        for model in self.controller.get_anthropic_models():
+            self.anthropic_model_combo.addItem(model["name"], model["id"])
+        an_lay.addWidget(self.anthropic_model_combo)
+        self.anthropic_model_desc = QLabel()
+        self.anthropic_model_desc.setWordWrap(True)
+        self.anthropic_model_desc.setStyleSheet(f"color:{_MUTED}; font-size:9pt; font-style:italic;")
+        self.anthropic_model_combo.currentIndexChanged.connect(self.update_anthropic_model_description)
+        an_lay.addWidget(self.anthropic_model_desc)
+        # Temperature
+        an_lay.addWidget(_label("Temperature  (0 = precise/deterministic · 1 = creative):", top_margin=6))
+        _an_temp_row = QHBoxLayout()
+        self.anthropic_temp_slider = QSlider(Qt.Orientation.Horizontal)
+        self.anthropic_temp_slider.setRange(0, 100)
+        self.anthropic_temp_slider.setValue(100)
+        self.anthropic_temp_slider.setTickInterval(10)
+        self.anthropic_temp_label = QLabel("1.00")
+        self.anthropic_temp_label.setFixedWidth(38)
+        self.anthropic_temp_label.setStyleSheet(f"color:{_ACCENT}; font-weight:bold;")
+        self.anthropic_temp_slider.valueChanged.connect(
+            lambda v: self.anthropic_temp_label.setText(f"{v/100:.2f}"))
+        _an_temp_row.addWidget(self.anthropic_temp_slider)
+        _an_temp_row.addWidget(self.anthropic_temp_label)
+        an_lay.addLayout(_an_temp_row)
+        # Auto tokens
+        self.anthropic_auto_tokens_cb = QCheckBox(
+            "🤖  Auto response length  (AI figures out a smart limit — recommended)")
+        self.anthropic_auto_tokens_cb.setChecked(True)
+        self.anthropic_auto_tokens_cb.setStyleSheet(f"color:{_TEXT}; font-size:10pt;")
+        an_lay.addWidget(self.anthropic_auto_tokens_cb)
+        # Manual max tokens (shown/hidden based on checkbox)
+        _an_tok_row = QHBoxLayout()
+        _an_tok_row.addWidget(_label("Max response tokens:"))
+        self.anthropic_max_tokens_spin = QSpinBox()
+        self.anthropic_max_tokens_spin.setRange(256, 64000)
+        self.anthropic_max_tokens_spin.setValue(8192)
+        self.anthropic_max_tokens_spin.setSingleStep(512)
+        self.anthropic_max_tokens_spin.setStyleSheet(_INPUT)
+        self.anthropic_max_tokens_spin.setFixedWidth(110)
+        _an_tok_row.addWidget(self.anthropic_max_tokens_spin)
+        _an_tok_row.addStretch()
+        self.anthropic_max_tokens_widget = QWidget()
+        self.anthropic_max_tokens_widget.setLayout(_an_tok_row)
+        self.anthropic_max_tokens_widget.setVisible(False)
+        an_lay.addWidget(self.anthropic_max_tokens_widget)
+        self.anthropic_auto_tokens_cb.toggled.connect(
+            lambda checked: self.anthropic_max_tokens_widget.setVisible(not checked))
+        an_lay.addWidget(_label(
+            "Get your key: console.anthropic.com", muted=True, top_margin=6))
         ai_lay.addWidget(self.anthropic_group)
 
         # Gemini
@@ -351,17 +398,112 @@ class SettingsWindow(QWidget):
         _gshow_row.addWidget(self.show_gemini_key_btn)
         _gshow_row.addStretch()
         gm_lay.addLayout(_gshow_row)
-        gm_lay.addWidget(_label("Model:"))
+        # Model
+        gm_lay.addWidget(_label("Model:", top_margin=6))
         self.gemini_model_combo = QComboBox()
         self.gemini_model_combo.setStyleSheet(_COMBO)
         for model in self.controller.get_gemini_models():
-            self.gemini_model_combo.addItem(model['name'], model['id'])
+            self.gemini_model_combo.addItem(model["name"], model["id"])
         gm_lay.addWidget(self.gemini_model_combo)
         self.gemini_model_desc = QLabel()
         self.gemini_model_desc.setWordWrap(True)
         self.gemini_model_desc.setStyleSheet(f"color:{_MUTED}; font-size:9pt; font-style:italic;")
         self.gemini_model_combo.currentIndexChanged.connect(self.update_gemini_model_description)
         gm_lay.addWidget(self.gemini_model_desc)
+        # Temperature (Gemini supports 0–2)
+        gm_lay.addWidget(_label("Temperature  (0 = precise · 2 = very creative):", top_margin=6))
+        _gm_temp_row = QHBoxLayout()
+        self.gemini_temp_slider = QSlider(Qt.Orientation.Horizontal)
+        self.gemini_temp_slider.setRange(0, 200)
+        self.gemini_temp_slider.setValue(100)
+        self.gemini_temp_slider.setTickInterval(20)
+        self.gemini_temp_label = QLabel("1.00")
+        self.gemini_temp_label.setFixedWidth(38)
+        self.gemini_temp_label.setStyleSheet(f"color:{_ACCENT}; font-weight:bold;")
+        self.gemini_temp_slider.valueChanged.connect(
+            lambda v: self.gemini_temp_label.setText(f"{v/100:.2f}"))
+        _gm_temp_row.addWidget(self.gemini_temp_slider)
+        _gm_temp_row.addWidget(self.gemini_temp_label)
+        gm_lay.addLayout(_gm_temp_row)
+        # Auto tokens
+        self.gemini_auto_tokens_cb = QCheckBox(
+            "🤖  Auto response length  (AI figures out a smart limit — recommended)")
+        self.gemini_auto_tokens_cb.setChecked(True)
+        self.gemini_auto_tokens_cb.setStyleSheet(f"color:{_TEXT}; font-size:10pt;")
+        gm_lay.addWidget(self.gemini_auto_tokens_cb)
+        # Manual max tokens
+        _gm_tok_row = QHBoxLayout()
+        _gm_tok_row.addWidget(_label("Max response tokens:"))
+        self.gemini_max_tokens_spin = QSpinBox()
+        self.gemini_max_tokens_spin.setRange(256, 65536)
+        self.gemini_max_tokens_spin.setValue(8192)
+        self.gemini_max_tokens_spin.setSingleStep(512)
+        self.gemini_max_tokens_spin.setStyleSheet(_INPUT)
+        self.gemini_max_tokens_spin.setFixedWidth(110)
+        _gm_tok_row.addWidget(self.gemini_max_tokens_spin)
+        _gm_tok_row.addStretch()
+        self.gemini_max_tokens_widget = QWidget()
+        self.gemini_max_tokens_widget.setLayout(_gm_tok_row)
+        self.gemini_max_tokens_widget.setVisible(False)
+        gm_lay.addWidget(self.gemini_max_tokens_widget)
+        self.gemini_auto_tokens_cb.toggled.connect(
+            lambda checked: self.gemini_max_tokens_widget.setVisible(not checked))
+        # Advanced: top_p / top_k (Gemini-exclusive)
+        _gm_adv_header = QHBoxLayout()
+        self.gemini_adv_toggle_btn = QPushButton("▸  Advanced sampling (top_p / top_k)")
+        self.gemini_adv_toggle_btn.setCheckable(True)
+        self.gemini_adv_toggle_btn.setStyleSheet(
+            f"QPushButton{{background:transparent; border:none; color:{_MUTED}; "
+            f"font-size:9pt; text-align:left; padding:0;}}"
+            f"QPushButton:hover{{color:{_TEXT};}}")
+        _gm_adv_header.addWidget(self.gemini_adv_toggle_btn)
+        _gm_adv_header.addStretch()
+        gm_lay.addLayout(_gm_adv_header)
+        self.gemini_adv_widget = QWidget()
+        _gm_adv_lay = QVBoxLayout(self.gemini_adv_widget)
+        _gm_adv_lay.setContentsMargins(0, 0, 0, 0)
+        _gm_adv_lay.addWidget(_label(
+            "top_p  (nucleus sampling — 0 to 1, lower = more focused, None = API default):", muted=True))
+        _gm_top_p_row = QHBoxLayout()
+        self.gemini_top_p_enable = QCheckBox("Enable")
+        self.gemini_top_p_enable.setStyleSheet(f"color:{_TEXT};")
+        self.gemini_top_p_spin = QDoubleSpinBox()
+        self.gemini_top_p_spin.setRange(0.0, 1.0)
+        self.gemini_top_p_spin.setSingleStep(0.05)
+        self.gemini_top_p_spin.setValue(0.95)
+        self.gemini_top_p_spin.setDecimals(2)
+        self.gemini_top_p_spin.setStyleSheet(_INPUT)
+        self.gemini_top_p_spin.setFixedWidth(80)
+        self.gemini_top_p_spin.setEnabled(False)
+        self.gemini_top_p_enable.toggled.connect(self.gemini_top_p_spin.setEnabled)
+        _gm_top_p_row.addWidget(self.gemini_top_p_enable)
+        _gm_top_p_row.addWidget(self.gemini_top_p_spin)
+        _gm_top_p_row.addStretch()
+        _gm_adv_lay.addLayout(_gm_top_p_row)
+        _gm_adv_lay.addWidget(_label(
+            "top_k  (vocabulary sampling — integer, lower = stricter, None = API default):", muted=True))
+        _gm_top_k_row = QHBoxLayout()
+        self.gemini_top_k_enable = QCheckBox("Enable")
+        self.gemini_top_k_enable.setStyleSheet(f"color:{_TEXT};")
+        self.gemini_top_k_spin = QSpinBox()
+        self.gemini_top_k_spin.setRange(1, 200)
+        self.gemini_top_k_spin.setValue(40)
+        self.gemini_top_k_spin.setStyleSheet(_INPUT)
+        self.gemini_top_k_spin.setFixedWidth(80)
+        self.gemini_top_k_spin.setEnabled(False)
+        self.gemini_top_k_enable.toggled.connect(self.gemini_top_k_spin.setEnabled)
+        _gm_top_k_row.addWidget(self.gemini_top_k_enable)
+        _gm_top_k_row.addWidget(self.gemini_top_k_spin)
+        _gm_top_k_row.addStretch()
+        _gm_adv_lay.addLayout(_gm_top_k_row)
+        self.gemini_adv_widget.setVisible(False)
+        gm_lay.addWidget(self.gemini_adv_widget)
+        self.gemini_adv_toggle_btn.toggled.connect(lambda checked: (
+            self.gemini_adv_widget.setVisible(checked),
+            self.gemini_adv_toggle_btn.setText(
+                ("▾  Advanced sampling (top_p / top_k)" if checked
+                 else "▸  Advanced sampling (top_p / top_k)"))
+        ))
         lnk = QLabel(f'<a href="https://aistudio.google.com/apikey" style="color:{_ACCENT};">Get key: aistudio.google.com</a>')
         lnk.setOpenExternalLinks(True)
         gm_lay.addWidget(lnk)
@@ -462,6 +604,108 @@ class SettingsWindow(QWidget):
         )
         rec_lay.addWidget(_info_box(rec_text))
         ai_lay.addWidget(self.recommended_group)
+
+        # Manual provider group
+        self.manual_group = QGroupBox("Manual Provider")
+        self.manual_group.setStyleSheet(_GROUP)
+        mn_lay = QVBoxLayout(self.manual_group)
+        mn_lay.addWidget(_info_box(
+            "Manual mode — responses are entered by hand in the manual response window."
+        ))
+        copy_sys_btn = QPushButton("📋 Copy Current System Prompt")
+        copy_sys_btn.setStyleSheet(_BTN)
+        copy_sys_btn.setToolTip("Copy the full effective system prompt (base + loaded skills) to clipboard")
+        def _copy_system_prompt():
+            from PyQt6.QtWidgets import QApplication
+            try:
+                prompt = self.controller.ai._get_effective_system_prompt()
+            except Exception as e:
+                prompt = f"[Error retrieving system prompt: {e}]"
+            QApplication.clipboard().setText(prompt)
+            copy_sys_btn.setText("✅ Copied!")
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(2000, lambda: copy_sys_btn.setText("📋 Copy Current System Prompt"))
+        copy_sys_btn.clicked.connect(_copy_system_prompt)
+        mn_lay.addWidget(copy_sys_btn)
+        ai_lay.addWidget(self.manual_group)
+
+        # ── Custom Script provider group ──────────────────────────────────────
+        self.custom_script_group = QGroupBox("Custom Script Provider")
+        self.custom_script_group.setStyleSheet(_GROUP)
+        cs_lay = QVBoxLayout(self.custom_script_group)
+
+        cs_lay.addWidget(_info_box(
+            "Runs your own Python script as the AI provider. "
+            "The script is reimported on every request so live edits take effect immediately."
+        ))
+
+        # Contract display — always visible when this provider is selected
+        _CONTRACT_TEXT = (
+            "Required function signature:\n"
+            "\n"
+            "  def chat(system_prompt: str, messages: list[dict]) -> str:\n"
+            "\n"
+            "Parameters:\n"
+            "  system_prompt  — full effective system prompt string (may be empty, never None)\n"
+            "  messages       — list of {\"role\": ..., \"content\": ...} dicts\n"
+            "                   roles are only \"user\" or \"assistant\", alternating\n"
+            "                   the latest user message is always the last entry\n"
+            "\n"
+            "Return:\n"
+            "  A non-empty string. Returning None or \"\" is treated as an error.\n"
+            "  Any exception raised will surface as an error in the chat window."
+        )
+        contract_box = QPlainTextEdit()
+        contract_box.setPlainText(_CONTRACT_TEXT)
+        contract_box.setReadOnly(True)
+        contract_box.setFixedHeight(200)
+        contract_box.setStyleSheet(f"""
+                    QPlainTextEdit {{
+                        background: #0d0d0d;
+                        color: #a0c8a0;
+                        border: 1px solid #333;
+                        border-radius: 6px;
+                        padding: 8px;
+                        font-family: monospace;
+                        font-size: 11px;
+                    }}
+                """)
+        cs_lay.addWidget(contract_box)
+
+        cs_lay.addWidget(_label("Script path:", top_margin=6))
+        self.custom_script_path_input = QLineEdit()
+        self.custom_script_path_input.setReadOnly(True)
+        self.custom_script_path_input.setPlaceholderText("No script selected")
+        self.custom_script_path_input.setStyleSheet(_INPUT)
+        cs_lay.addWidget(self.custom_script_path_input)
+
+        _cs_btn_row = QHBoxLayout()
+        browse_btn = QPushButton("📂 Browse…")
+        browse_btn.setStyleSheet(_BTN)
+
+        def _browse_script():
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Select Python Script", "", "Python Files (*.py)"
+            )
+            if path:
+                self.custom_script_path_input.setText(path)
+                self.controller.set_custom_script_path(path)
+
+        browse_btn.clicked.connect(_browse_script)
+        _cs_btn_row.addWidget(browse_btn)
+
+        clear_btn = QPushButton("✖ Clear")
+        clear_btn.setStyleSheet(_BTN)
+
+        def _clear_script():
+            self.custom_script_path_input.clear()
+            self.controller.set_custom_script_path("")
+
+        clear_btn.clicked.connect(_clear_script)
+        _cs_btn_row.addWidget(clear_btn)
+
+        cs_lay.addLayout(_cs_btn_row)
+        ai_lay.addWidget(self.custom_script_group)
 
         ai_lay.addStretch()
         tabs.addTab(ai_scroll, "🤖  AI")
@@ -925,7 +1169,9 @@ class SettingsWindow(QWidget):
         # Hide all provider-specific groups first
         self.anthropic_group.hide()
         self.gemini_group.hide()
+        self.manual_group.hide()
         self.puter_group.hide()
+        self.custom_script_group.hide()
 
         # CRITICAL: Always hide Puter-specific sections first
         if DEBUG_MODE:
@@ -942,6 +1188,12 @@ class SettingsWindow(QWidget):
             self.update_tts_provider_options(show_puter=True)
         elif provider == 'gemini':
             self.gemini_group.show()
+            self.update_tts_provider_options(show_puter=False)
+        elif provider == 'manual':
+            self.manual_group.show()
+            self.update_tts_provider_options(show_puter=False)
+        elif provider == 'custom_script':
+            self.custom_script_group.show()
             self.update_tts_provider_options(show_puter=False)
         else:  # anthropic
             self.anthropic_group.show()
@@ -966,6 +1218,18 @@ class SettingsWindow(QWidget):
             self.elevenlabs_settings.show()
         else:
             self.elevenlabs_settings.hide()
+
+    def update_anthropic_model_description(self):
+        """Update Anthropic model description"""
+        try:
+            models = self.controller.get_anthropic_models()
+            selected_id = self.anthropic_model_combo.currentData()
+            for model in models:
+                if model['id'] == selected_id:
+                    self.anthropic_model_desc.setText(f"ℹ️ {model['description']}")
+                    break
+        except Exception as e:
+            print(f"Error updating Anthropic description: {e}")
 
     def update_model_description(self):
         """Update Puter model description"""
@@ -1142,10 +1406,27 @@ class SettingsWindow(QWidget):
         # CRITICAL: Trigger visibility update on load
         self.on_provider_changed(provider)
 
+        saved_script_path = self.controller.get_custom_script_path()
+        if saved_script_path:
+            self.custom_script_path_input.setText(saved_script_path)
+
         # Load API key
         api_key = self.controller.get_api_key()
         if api_key:
             self.api_key_input.setText(api_key)
+
+        # Load Anthropic model + generation params
+        anthropic_model = self.controller.get_anthropic_model()
+        index = self.anthropic_model_combo.findData(anthropic_model)
+        if index >= 0:
+            self.anthropic_model_combo.setCurrentIndex(index)
+        self.update_anthropic_model_description()
+        an_temp = self.controller.get_anthropic_temperature()
+        self.anthropic_temp_slider.setValue(int(round(an_temp * 100)))
+        an_auto = self.controller.get_anthropic_auto_tokens()
+        self.anthropic_auto_tokens_cb.setChecked(an_auto)
+        self.anthropic_max_tokens_widget.setVisible(not an_auto)
+        self.anthropic_max_tokens_spin.setValue(self.controller.get_anthropic_max_tokens())
 
         # Load Gemini API key
         gemini_key = self.controller.get_gemini_api_key()
@@ -1158,11 +1439,25 @@ class SettingsWindow(QWidget):
         if index >= 0:
             self.puter_model_combo.setCurrentIndex(index)
 
-        # Load Gemini model
+        # Load Gemini model + generation params
         gemini_model = self.controller.get_gemini_model()
         index = self.gemini_model_combo.findData(gemini_model)
         if index >= 0:
             self.gemini_model_combo.setCurrentIndex(index)
+        gm_temp = self.controller.get_gemini_temperature()
+        self.gemini_temp_slider.setValue(int(round(gm_temp * 100)))
+        gm_auto = self.controller.get_gemini_auto_tokens()
+        self.gemini_auto_tokens_cb.setChecked(gm_auto)
+        self.gemini_max_tokens_widget.setVisible(not gm_auto)
+        self.gemini_max_tokens_spin.setValue(self.controller.get_gemini_max_tokens())
+        gm_top_p = self.controller.get_gemini_top_p()
+        if gm_top_p is not None:
+            self.gemini_top_p_enable.setChecked(True)
+            self.gemini_top_p_spin.setValue(gm_top_p)
+        gm_top_k = self.controller.get_gemini_top_k()
+        if gm_top_k is not None:
+            self.gemini_top_k_enable.setChecked(True)
+            self.gemini_top_k_spin.setValue(gm_top_k)
 
         # Load debug mode
         debug_mode = self.controller.get_debug_mode()
@@ -1325,6 +1620,14 @@ class SettingsWindow(QWidget):
         api_key = self.api_key_input.text().strip()
         self.controller.set_api_key(api_key)
 
+        # Save Anthropic model + generation params
+        anthropic_model = self.anthropic_model_combo.currentData()
+        if anthropic_model:
+            self.controller.set_anthropic_model(anthropic_model)
+        self.controller.set_anthropic_temperature(self.anthropic_temp_slider.value() / 100.0)
+        self.controller.set_anthropic_auto_tokens(self.anthropic_auto_tokens_cb.isChecked())
+        self.controller.set_anthropic_max_tokens(self.anthropic_max_tokens_spin.value())
+
         # Save Gemini API key
         gemini_key = self.gemini_key_input.text().strip()
         self.controller.set_gemini_api_key(gemini_key)
@@ -1333,9 +1636,17 @@ class SettingsWindow(QWidget):
         puter_model = self.puter_model_combo.currentData()
         self.controller.set_puter_model(puter_model)
 
-        # Save Gemini model
+        # Save Gemini model + generation params
         gemini_model = self.gemini_model_combo.currentData()
         self.controller.set_gemini_model(gemini_model)
+        self.controller.set_gemini_temperature(self.gemini_temp_slider.value() / 100.0)
+        self.controller.set_gemini_auto_tokens(self.gemini_auto_tokens_cb.isChecked())
+        self.controller.set_gemini_max_tokens(self.gemini_max_tokens_spin.value())
+        # top_p / top_k: only save if enabled
+        top_p = self.gemini_top_p_spin.value() if self.gemini_top_p_enable.isChecked() else None
+        self.controller.set_gemini_top_p(top_p)
+        top_k = self.gemini_top_k_spin.value() if self.gemini_top_k_enable.isChecked() else None
+        self.controller.set_gemini_top_k(top_k)
 
         # Save debug mode
         debug_mode = self.debug_checkbox.isChecked()
@@ -1511,130 +1822,3 @@ class SettingsWindow(QWidget):
                 """)
         except Exception:
             pass
-
-    def resizeEvent(self, event):
-        """Handle window resize"""
-        super().resizeEvent(event)
-        self.apply_rounded_mask()
-        if hasattr(self, 'resize_handles'):
-            self.position_resize_handles()
-        if hasattr(self, 'resize_timer'):
-            self.resize_timer.stop()
-            self.resize_timer.start(1000)
-
-    def save_window_geometry(self):
-        """Save window geometry - placeholder for future implementation"""
-        pass
-
-    def header_mouse_press(self, event):
-        """Handle mouse press on header for dragging"""
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.dragging = True
-            self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            event.accept()
-
-    def header_mouse_move(self, event):
-        """Handle mouse move on header for dragging"""
-        if self.dragging:
-            self.move(event.globalPosition().toPoint() - self.drag_position)
-            event.accept()
-
-    def header_mouse_release(self, event):
-        """Handle mouse release"""
-        self.dragging = False
-        event.accept()
-
-    def create_resize_handles(self):
-        """Create invisible resize handles around window edges"""
-        handle_size = 8
-        corner_size = 16
-
-        self.resize_handles = {}
-
-        edges = {
-            'top': (0, 0, 0, handle_size, Qt.CursorShape.SizeVerCursor),
-            'bottom': (0, 0, 0, handle_size, Qt.CursorShape.SizeVerCursor),
-            'left': (0, 0, handle_size, 0, Qt.CursorShape.SizeHorCursor),
-            'right': (0, 0, handle_size, 0, Qt.CursorShape.SizeHorCursor),
-        }
-
-        for edge_name, (l, t, w, h, cursor) in edges.items():
-            handle = QFrame(self)
-            handle.setStyleSheet("background-color: transparent;")
-            handle.setCursor(cursor)
-            handle.edge_type = edge_name
-            handle.installEventFilter(self)
-            self.resize_handles[edge_name] = handle
-            handle.raise_()
-
-        corners = {
-            'top-left': (0, 0, corner_size, corner_size, Qt.CursorShape.SizeFDiagCursor),
-            'top-right': (0, 0, corner_size, corner_size, Qt.CursorShape.SizeBDiagCursor),
-            'bottom-left': (0, 0, corner_size, corner_size, Qt.CursorShape.SizeBDiagCursor),
-            'bottom-right': (0, 0, corner_size, corner_size, Qt.CursorShape.SizeFDiagCursor),
-        }
-
-        for corner_name, (l, t, w, h, cursor) in corners.items():
-            handle = QFrame(self)
-            handle.setStyleSheet("background-color: transparent;")
-            handle.setCursor(cursor)
-            handle.edge_type = corner_name
-            handle.installEventFilter(self)
-            self.resize_handles[corner_name] = handle
-            handle.raise_()
-
-        self.position_resize_handles()
-
-    def position_resize_handles(self):
-        """Position resize handles based on window size"""
-        w = self.width()
-        h = self.height()
-        handle_size = 8
-        corner_size = 16
-        header_height = 50
-
-        self.resize_handles['top'].setGeometry(corner_size, header_height, w - 2 * corner_size, handle_size)
-        self.resize_handles['bottom'].setGeometry(corner_size, h - handle_size, w - 2 * corner_size, handle_size)
-        self.resize_handles['left'].setGeometry(0, corner_size, handle_size, h - 2 * corner_size)
-        self.resize_handles['right'].setGeometry(w - handle_size, corner_size, handle_size, h - 2 * corner_size)
-
-        self.resize_handles['top-left'].setGeometry(0, header_height, corner_size, corner_size)
-        self.resize_handles['top-right'].setGeometry(w - corner_size, header_height, corner_size, corner_size)
-        self.resize_handles['bottom-left'].setGeometry(0, h - corner_size, corner_size, corner_size)
-        self.resize_handles['bottom-right'].setGeometry(w - corner_size, h - corner_size, corner_size, corner_size)
-
-    def eventFilter(self, obj, event):
-        """Handle resize handle events"""
-        if hasattr(obj, 'edge_type'):
-            if event.type() == event.Type.MouseButtonPress:
-                if event.button() == Qt.MouseButton.LeftButton:
-                    self.resizing = True
-                    self.resize_edge = obj.edge_type
-                    self.resize_start_geometry = self.geometry()
-                    self.resize_start_pos = event.globalPosition().toPoint()
-                    return True
-
-            elif event.type() == event.Type.MouseButtonRelease:
-                if self.resizing:
-                    self.resizing = False
-                    self.resize_edge = None
-                    return True
-
-            elif event.type() == event.Type.MouseMove and self.resizing:
-                delta = event.globalPosition().toPoint() - self.resize_start_pos
-                new_geo = QRect(self.resize_start_geometry)
-
-                if 'left' in self.resize_edge:
-                    new_geo.setLeft(self.resize_start_geometry.left() + delta.x())
-                if 'right' in self.resize_edge:
-                    new_geo.setRight(self.resize_start_geometry.right() + delta.x())
-                if 'top' in self.resize_edge:
-                    new_geo.setTop(self.resize_start_geometry.top() + delta.y())
-                if 'bottom' in self.resize_edge:
-                    new_geo.setBottom(self.resize_start_geometry.bottom() + delta.y())
-
-                if new_geo.width() >= self.minimumWidth() and new_geo.height() >= self.minimumHeight():
-                    self.setGeometry(new_geo)
-                return True
-
-        return super().eventFilter(obj, event)

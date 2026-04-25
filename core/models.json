@@ -1,0 +1,3080 @@
+[
+  {
+    "id": "claude-opus-4-6",
+    "name": "Claude Opus 4.6 \ud83c\udd95 (Latest)",
+    "description": "Most capable \u2014 deep reasoning, 1M context, agent teams. Feb 2026.",
+    "provider": "anthropic",
+    "max_output_tokens": 32000,
+    "context_window": 1000000,
+    "tier": "opus"
+  },
+  {
+    "id": "claude-sonnet-4-6-20250217",
+    "name": "Claude Sonnet 4.6 \ud83c\udd95",
+    "description": "Frontier intelligence at scale \u2014 coding, agents, enterprise. Feb 2026.",
+    "provider": "anthropic",
+    "max_output_tokens": 64000,
+    "context_window": 200000,
+    "tier": "sonnet"
+  },
+  {
+    "id": "claude-opus-4-5-20251101",
+    "name": "Claude Opus 4.5",
+    "description": "Maximum capability, 67% cheaper than Opus 4. Best for deep tasks.",
+    "provider": "anthropic",
+    "max_output_tokens": 32000,
+    "context_window": 200000,
+    "tier": "opus"
+  },
+  {
+    "id": "claude-sonnet-4-5-20250929",
+    "name": "Claude Sonnet 4.5 \u2b50 (Recommended)",
+    "description": "Best for coding and agents. Frontier coding model. Sep 2025.",
+    "provider": "anthropic",
+    "max_output_tokens": 64000,
+    "context_window": 200000,
+    "tier": "sonnet"
+  },
+  {
+    "id": "claude-haiku-4-5-20251001",
+    "name": "Claude Haiku 4.5 \u26a1",
+    "description": "Fastest Claude. Near-frontier speed, great for everyday tasks.",
+    "provider": "anthropic",
+    "max_output_tokens": 16000,
+    "context_window": 200000,
+    "tier": "haiku"
+  },
+  {
+    "id": "claude-opus-4-1-20250805",
+    "name": "Claude Opus 4.1",
+    "description": "Enhanced Opus 4 \u2014 deep code review, complex reasoning. Aug 2025.",
+    "provider": "anthropic",
+    "max_output_tokens": 32000,
+    "context_window": 200000,
+    "tier": "opus"
+  },
+  {
+    "id": "claude-sonnet-4-20250514",
+    "name": "Claude Sonnet 4",
+    "description": "Solid all-rounder. Stable production model. May 2025.",
+    "provider": "anthropic",
+    "max_output_tokens": 16000,
+    "context_window": 200000,
+    "tier": "sonnet"
+  },
+  {
+    "id": "claude-opus-4-20250514",
+    "name": "Claude Opus 4",
+    "description": "Strong coding & agentic search. Stable since May 2025.",
+    "provider": "anthropic",
+    "max_output_tokens": 32000,
+    "context_window": 200000,
+    "tier": "opus"
+  },
+  {
+    "id": "gemini-3-pro-preview",
+    "name": "Gemini 3 Pro Preview \ud83c\udd95",
+    "description": "Newest Gemini flagship \u2014 cutting edge multimodal capability.",
+    "provider": "gemini",
+    "max_output_tokens": 8192,
+    "context_window": 1000000,
+    "tier": "pro"
+  },
+  {
+    "id": "gemini-3-flash-preview",
+    "name": "Gemini 3 Flash Preview \ud83c\udd95",
+    "description": "Newest fast Gemini model \u2014 latest generation speed.",
+    "provider": "gemini",
+    "max_output_tokens": 8192,
+    "context_window": 1000000,
+    "tier": "flash"
+  },
+  {
+    "id": "gemini-2.5-pro",
+    "name": "Gemini 2.5 Pro \ud83d\udd25",
+    "description": "Most intelligent Gemini \u2014 complex tasks, long context (1M tokens).",
+    "provider": "gemini",
+    "max_output_tokens": 65536,
+    "context_window": 1000000,
+    "tier": "pro"
+  },
+  {
+    "id": "gemini-2.5-flash",
+    "name": "Gemini 2.5 Flash \u2b50 (Recommended)",
+    "description": "Best balance of speed and intelligence. FREE tier: 15 RPM.",
+    "provider": "gemini",
+    "max_output_tokens": 65536,
+    "context_window": 1000000,
+    "tier": "flash"
+  },
+  {
+    "id": "gemini-2.5-flash-lite",
+    "name": "Gemini 2.5 Flash Lite \u26a1",
+    "description": "Ultra-fast and efficient. FREE tier: 30 RPM, great for most tasks.",
+    "provider": "gemini",
+    "max_output_tokens": 16384,
+    "context_window": 1000000,
+    "tier": "flash"
+  },
+  {
+    "id": "gemini-2.0-flash",
+    "name": "Gemini 2.0 Flash",
+    "description": "Stable fast model. FREE tier: 15 RPM, 1500/day.",
+    "provider": "gemini",
+    "max_output_tokens": 8192,
+    "context_window": 1000000,
+    "tier": "flash"
+  },
+  {
+    "id": "gemini-2.0-flash-lite",
+    "name": "Gemini 2.0 Flash Lite",
+    "description": "Most economical Gemini. FREE tier: 30 RPM, 1500/day.",
+    "provider": "gemini",
+    "max_output_tokens": 8192,
+    "context_window": 1000000,
+    "tier": "flash"
+  },
+  {
+    "id": "gemma-3-27b-it",
+    "name": "Gemma 3 27B Instruct \ud83c\udd93",
+    "description": "Open-source, FREE: 30 RPM / 14,400/day \u2014 highest free limits!",
+    "provider": "gemini",
+    "max_output_tokens": 8192,
+    "context_window": 128000,
+    "tier": "gemma"
+  },
+  {
+    "id": "gemma-3-12b-it",
+    "name": "Gemma 3 12B Instruct \ud83c\udd93",
+    "description": "Open-source, FREE: 30 RPM / 14,400/day \u2014 fast and capable.",
+    "provider": "gemini",
+    "max_output_tokens": 8192,
+    "context_window": 128000,
+    "tier": "gemma"
+  },
+  {
+    "id": "gemma-3-4b-it",
+    "name": "Gemma 3 4B Instruct \ud83c\udd93",
+    "description": "Open-source, FREE: 30 RPM / 14,400/day \u2014 ultra-fast lightweight.",
+    "provider": "gemini",
+    "max_output_tokens": 8192,
+    "context_window": 128000,
+    "tier": "gemma"
+  },
+  {
+    "id": "gpt-5.2-chat",
+    "name": "GPT-5.2 Chat (Recommended)",
+    "description": "Latest flagship chat model",
+    "provider": "puter"
+  },
+  {
+    "id": "gpt-5.2-pro",
+    "name": "GPT-5.2 Pro",
+    "description": "Highest capability GPT-5.2",
+    "provider": "puter"
+  },
+  {
+    "id": "gpt-5.2",
+    "name": "GPT-5.2",
+    "description": "Base GPT-5.2 model",
+    "provider": "puter"
+  },
+  {
+    "id": "gpt-5.1-chat-latest",
+    "name": "GPT-5.1 Chat",
+    "description": "Stable GPT-5.1 chat model",
+    "provider": "puter"
+  },
+  {
+    "id": "gpt-5.1",
+    "name": "GPT-5.1",
+    "description": "Base GPT-5.1 model",
+    "provider": "puter"
+  },
+  {
+    "id": "gpt-5-chat-latest",
+    "name": "GPT-5 Chat",
+    "description": "Original GPT-5 chat model",
+    "provider": "puter"
+  },
+  {
+    "id": "gpt-5",
+    "name": "GPT-5",
+    "description": "Base GPT-5 model",
+    "provider": "puter"
+  },
+  {
+    "id": "gpt-5-mini",
+    "name": "GPT-5 Mini",
+    "description": "Fast and efficient GPT-5",
+    "provider": "puter"
+  },
+  {
+    "id": "gpt-5-nano",
+    "name": "GPT-5 Nano",
+    "description": "Ultra-light, ultra-fast GPT-5",
+    "provider": "puter"
+  },
+  {
+    "id": "gpt-4.5-preview",
+    "name": "GPT-4.5 Preview",
+    "description": "Preview build of GPT-4.5",
+    "provider": "puter"
+  },
+  {
+    "id": "gpt-4.1",
+    "name": "GPT-4.1",
+    "description": "Enhanced GPT-4",
+    "provider": "puter"
+  },
+  {
+    "id": "gpt-4.1-mini",
+    "name": "GPT-4.1 Mini",
+    "description": "Fast GPT-4.1",
+    "provider": "puter"
+  },
+  {
+    "id": "gpt-4.1-nano",
+    "name": "GPT-4.1 Nano",
+    "description": "Lightweight GPT-4.1",
+    "provider": "puter"
+  },
+  {
+    "id": "gpt-4o",
+    "name": "GPT-4o",
+    "description": "Omni-modal GPT-4",
+    "provider": "puter"
+  },
+  {
+    "id": "gpt-4o-mini",
+    "name": "GPT-4o Mini",
+    "description": "Efficient omni-modal model",
+    "provider": "puter"
+  },
+  {
+    "id": "o4-mini",
+    "name": "o4 Mini",
+    "description": "Latest compact reasoning model",
+    "provider": "puter"
+  },
+  {
+    "id": "o3",
+    "name": "o3",
+    "description": "Advanced reasoning",
+    "provider": "puter"
+  },
+  {
+    "id": "o3-mini",
+    "name": "o3 Mini",
+    "description": "Compact reasoning",
+    "provider": "puter"
+  },
+  {
+    "id": "o1-pro",
+    "name": "o1 Pro",
+    "description": "High-tier reasoning",
+    "provider": "puter"
+  },
+  {
+    "id": "o1",
+    "name": "o1",
+    "description": "Reasoning model",
+    "provider": "puter"
+  },
+  {
+    "id": "o1-mini",
+    "name": "o1 Mini",
+    "description": "Lightweight reasoning",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-oss-120b",
+    "name": "GPT-OSS 120B",
+    "description": "Open-source 120B model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-oss-120b:exacto",
+    "name": "GPT-OSS 120B Exacto",
+    "description": "Deterministic 120B variant",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-oss-20b",
+    "name": "GPT-OSS 20B",
+    "description": "Open-source 20B model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-oss-20b:free",
+    "name": "GPT-OSS 20B Free",
+    "description": "Free tier 20B model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-oss-safeguard-20b",
+    "name": "GPT-OSS Safeguard 20B",
+    "description": "Safety-focused OSS model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/codex-mini",
+    "name": "Codex Mini",
+    "description": "Fast lightweight coding model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-5-codex",
+    "name": "GPT-5 Codex",
+    "description": "Advanced GPT-5 coding",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-5.1-codex",
+    "name": "GPT-5.1 Codex",
+    "description": "Stable GPT-5.1 coding",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-5.1-codex-max",
+    "name": "GPT-5.1 Codex Max",
+    "description": "Maximum-power coding model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-5.1-codex-mini",
+    "name": "GPT-5.1 Codex Mini",
+    "description": "Efficient coding model",
+    "provider": "puter"
+  },
+  {
+    "id": "deepseek/deepseek-chat",
+    "name": "DeepSeek Chat",
+    "description": "DeepSeek general chat model",
+    "provider": "puter"
+  },
+  {
+    "id": "deepseek/deepseek-chat-v3-0324",
+    "name": "DeepSeek Chat v3 (03-24)",
+    "description": "DeepSeek Chat v3 March 2024",
+    "provider": "puter"
+  },
+  {
+    "id": "deepseek/deepseek-chat-v3.1",
+    "name": "DeepSeek Chat v3.1",
+    "description": "DeepSeek Chat v3.1",
+    "provider": "puter"
+  },
+  {
+    "id": "deepseek/deepseek-r1",
+    "name": "DeepSeek R1",
+    "description": "DeepSeek reasoning model",
+    "provider": "puter"
+  },
+  {
+    "id": "deepseek/deepseek-r1-0528",
+    "name": "DeepSeek R1 (05-28)",
+    "description": "DeepSeek R1 May 2028 update",
+    "provider": "puter"
+  },
+  {
+    "id": "deepseek/deepseek-r1-0528:free",
+    "name": "DeepSeek R1 (05-28) Free",
+    "description": "Free tier R1 May update",
+    "provider": "puter"
+  },
+  {
+    "id": "deepseek/deepseek-r1-distill-llama-70b",
+    "name": "DeepSeek R1 Distill LLaMA 70B",
+    "description": "R1 distilled into LLaMA 70B",
+    "provider": "puter"
+  },
+  {
+    "id": "deepseek/deepseek-r1-distill-qwen-32b",
+    "name": "DeepSeek R1 Distill Qwen 32B",
+    "description": "R1 distilled into Qwen 32B",
+    "provider": "puter"
+  },
+  {
+    "id": "deepseek/deepseek-reasoner",
+    "name": "DeepSeek Reasoner",
+    "description": "DeepSeek dedicated reasoning model",
+    "provider": "puter"
+  },
+  {
+    "id": "deepseek/deepseek-v3.1-terminus",
+    "name": "DeepSeek V3.1 Terminus",
+    "description": "DeepSeek V3.1 Terminus variant",
+    "provider": "puter"
+  },
+  {
+    "id": "deepseek/deepseek-v3.1-terminus:exacto",
+    "name": "DeepSeek V3.1 Terminus Exacto",
+    "description": "Deterministic Terminus variant",
+    "provider": "puter"
+  },
+  {
+    "id": "deepseek/deepseek-v3.2",
+    "name": "DeepSeek V3.2",
+    "description": "DeepSeek V3.2",
+    "provider": "puter"
+  },
+  {
+    "id": "deepseek/deepseek-v3.2-exp",
+    "name": "DeepSeek V3.2 Experimental",
+    "description": "Experimental DeepSeek V3.2",
+    "provider": "puter"
+  },
+  {
+    "id": "deepseek/deepseek-v3.2-speciale",
+    "name": "DeepSeek V3.2 Speciale",
+    "description": "Special edition DeepSeek V3.2",
+    "provider": "puter"
+  },
+  {
+    "id": "gemini-2.0-flash-exp:free",
+    "name": "Gemini 2.0 Flash Exp (Free)",
+    "description": "Experimental Gemini 2.0 Flash - free",
+    "provider": "puter"
+  },
+  {
+    "id": "x-ai/grok-vision-beta",
+    "name": "Grok Vision Beta",
+    "description": "Grok with vision capabilities",
+    "provider": "puter"
+  },
+  {
+    "id": "x-ai/grok-code-fast-1",
+    "name": "Grok Code Fast 1",
+    "description": "Grok fast coding model",
+    "provider": "puter"
+  },
+  {
+    "id": "x-ai/grok-beta",
+    "name": "Grok Beta",
+    "description": "Grok beta model",
+    "provider": "puter"
+  },
+  {
+    "id": "x-ai/grok-4.1-fast",
+    "name": "Grok 4.1 Fast",
+    "description": "Fast Grok 4.1",
+    "provider": "puter"
+  },
+  {
+    "id": "x-ai/grok-4-fast",
+    "name": "Grok 4 Fast",
+    "description": "Fast Grok 4",
+    "provider": "puter"
+  },
+  {
+    "id": "x-ai/grok-4",
+    "name": "Grok 4",
+    "description": "xAI Grok 4 flagship",
+    "provider": "puter"
+  },
+  {
+    "id": "x-ai/grok-3-mini-fast",
+    "name": "Grok 3 Mini Fast",
+    "description": "Fast Grok 3 Mini",
+    "provider": "puter"
+  },
+  {
+    "id": "x-ai/grok-3-mini-beta",
+    "name": "Grok 3 Mini Beta",
+    "description": "Grok 3 Mini Beta",
+    "provider": "puter"
+  },
+  {
+    "id": "x-ai/grok-3-mini",
+    "name": "Grok 3 Mini",
+    "description": "Compact Grok 3",
+    "provider": "puter"
+  },
+  {
+    "id": "x-ai/grok-3-fast",
+    "name": "Grok 3 Fast",
+    "description": "Fast Grok 3",
+    "provider": "puter"
+  },
+  {
+    "id": "x-ai/grok-3-beta",
+    "name": "Grok 3 Beta",
+    "description": "Grok 3 Beta",
+    "provider": "puter"
+  },
+  {
+    "id": "x-ai/grok-3",
+    "name": "Grok 3",
+    "description": "xAI Grok 3",
+    "provider": "puter"
+  },
+  {
+    "id": "x-ai/grok-2-vision",
+    "name": "Grok 2 Vision",
+    "description": "Grok 2 with vision",
+    "provider": "puter"
+  },
+  {
+    "id": "x-ai/grok-2",
+    "name": "Grok 2",
+    "description": "xAI Grok 2",
+    "provider": "puter"
+  },
+  {
+    "id": "moonshotai/kimi-k2",
+    "name": "Kimi K2",
+    "description": "Moonshot Kimi K2",
+    "provider": "puter"
+  },
+  {
+    "id": "moonshotai/kimi-k2-0905",
+    "name": "Kimi K2 (09-05)",
+    "description": "Kimi K2 September update",
+    "provider": "puter"
+  },
+  {
+    "id": "moonshotai/kimi-k2-thinking",
+    "name": "Kimi K2 Thinking",
+    "description": "Kimi K2 with reasoning mode",
+    "provider": "puter"
+  },
+  {
+    "id": "moonshotai/kimi-k2.5",
+    "name": "Kimi K2.5",
+    "description": "Moonshot Kimi K2.5",
+    "provider": "puter"
+  },
+  {
+    "id": "tngtech/tng-r1t-chimera",
+    "name": "TNG R1T Chimera",
+    "description": "TNG R1T Chimera model",
+    "provider": "puter"
+  },
+  {
+    "id": "tngtech/tng-r1t-chimera:free",
+    "name": "TNG R1T Chimera (Free)",
+    "description": "TNG R1T Chimera - free tier",
+    "provider": "puter"
+  },
+  {
+    "id": "tngtech/deepseek-r1t-chimera",
+    "name": "DeepSeek R1T Chimera",
+    "description": "TNG DeepSeek R1T Chimera",
+    "provider": "puter"
+  },
+  {
+    "id": "tngtech/deepseek-r1t-chimera:free",
+    "name": "DeepSeek R1T Chimera (Free)",
+    "description": "TNG DeepSeek R1T Chimera - free",
+    "provider": "puter"
+  },
+  {
+    "id": "tngtech/deepseek-r1t2-chimera",
+    "name": "DeepSeek R1T2 Chimera",
+    "description": "TNG DeepSeek R1T2 Chimera",
+    "provider": "puter"
+  },
+  {
+    "id": "tngtech/deepseek-r1t2-chimera:free",
+    "name": "DeepSeek R1T2 Chimera (Free)",
+    "description": "TNG DeepSeek R1T2 Chimera - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:agentica-org/deepcoder-14b-preview",
+    "name": "DeepCoder 14B Preview",
+    "description": "Agentica DeepCoder 14B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:agentica-org/deepcoder-14b-preview:free",
+    "name": "DeepCoder 14B Preview (Free)",
+    "description": "Agentica DeepCoder 14B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:ai21/jamba-large-1.7",
+    "name": "Jamba Large 1.7",
+    "description": "AI21 Jamba Large 1.7",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:aion-labs/aion-1.0",
+    "name": "Aion 1.0",
+    "description": "Aion Labs Aion 1.0",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:aion-labs/aion-1.0-mini",
+    "name": "Aion 1.0 Mini",
+    "description": "Aion Labs compact model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:aion-labs/aion-rp-llama-3.1-8b",
+    "name": "Aion RP LLaMA 3.1 8B",
+    "description": "Aion roleplay LLaMA 3.1 8B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:alfredpros/codellama-7b-instruct-solidity",
+    "name": "CodeLLaMA 7B Solidity",
+    "description": "Solidity-tuned CodeLLaMA 7B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:alibaba/tongyi-deepresearch-30b-a3b",
+    "name": "Tongyi DeepResearch 30B",
+    "description": "Alibaba Tongyi research model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:allenai/olmo-3-32b-thinking",
+    "name": "OLMo 3 32B Thinking",
+    "description": "AllenAI OLMo 3 32B with thinking",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:allenai/olmo-3-7b-instruct",
+    "name": "OLMo 3 7B Instruct",
+    "description": "AllenAI OLMo 3 7B instruction-tuned",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:allenai/olmo-3-7b-think",
+    "name": "OLMo 3 7B Think",
+    "description": "AllenAI OLMo 3 7B with reasoning",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:allenai/olmo-3.1-32b-think:free",
+    "name": "OLMo 3.1 32B Think (Free)",
+    "description": "AllenAI OLMo 3.1 32B thinking - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:alpindale/goliath-120b",
+    "name": "Goliath 120B",
+    "description": "Alpindale Goliath 120B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:amazon/nova-2-lite-v1",
+    "name": "Amazon Nova 2 Lite",
+    "description": "Amazon Nova 2 Lite v1",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:amazon/nova-lite-v1",
+    "name": "Amazon Nova Lite",
+    "description": "Amazon Nova Lite v1",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:amazon/nova-micro-v1",
+    "name": "Amazon Nova Micro",
+    "description": "Amazon Nova Micro v1",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:amazon/nova-premier-v1",
+    "name": "Amazon Nova Premier",
+    "description": "Amazon Nova Premier v1",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:amazon/nova-pro-v1",
+    "name": "Amazon Nova Pro",
+    "description": "Amazon Nova Pro v1",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:anthracite-org/magnum-v2-72b",
+    "name": "Magnum v2 72B",
+    "description": "Anthracite Magnum v2 72B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:anthracite-org/magnum-v4-72b",
+    "name": "Magnum v4 72B",
+    "description": "Anthracite Magnum v4 72B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:anthropic/claude-3-haiku",
+    "name": "Claude 3 Haiku (OR)",
+    "description": "Claude 3 Haiku via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:anthropic/claude-3-opus",
+    "name": "Claude 3 Opus (OR)",
+    "description": "Claude 3 Opus via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:anthropic/claude-3.5-haiku",
+    "name": "Claude 3.5 Haiku (OR)",
+    "description": "Claude 3.5 Haiku via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:anthropic/claude-3.5-haiku-20241022",
+    "name": "Claude 3.5 Haiku 2024-10-22 (OR)",
+    "description": "Claude 3.5 Haiku Oct 2024 via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:anthropic/claude-3.5-sonnet",
+    "name": "Claude 3.5 Sonnet (OR)",
+    "description": "Claude 3.5 Sonnet via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:anthropic/claude-3.5-sonnet-20240620",
+    "name": "Claude 3.5 Sonnet 2024-06-20 (OR)",
+    "description": "Claude 3.5 Sonnet Jun 2024 via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:anthropic/claude-3.7-sonnet",
+    "name": "Claude 3.7 Sonnet (OR)",
+    "description": "Claude 3.7 Sonnet via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:anthropic/claude-3.7-sonnet:thinking",
+    "name": "Claude 3.7 Sonnet Thinking (OR)",
+    "description": "Claude 3.7 Sonnet with extended thinking",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:anthropic/claude-haiku-4.5",
+    "name": "Claude Haiku 4.5 (OR)",
+    "description": "Claude Haiku 4.5 via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:anthropic/claude-opus-4",
+    "name": "Claude Opus 4 (OR)",
+    "description": "Claude Opus 4 via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:anthropic/claude-opus-4.1",
+    "name": "Claude Opus 4.1 (OR)",
+    "description": "Claude Opus 4.1 via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:anthropic/claude-opus-4.5",
+    "name": "Claude Opus 4.5 (OR)",
+    "description": "Claude Opus 4.5 via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:anthropic/claude-opus-4.6",
+    "name": "Claude Opus 4.6 (OR)",
+    "description": "Claude Opus 4.6 via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:anthropic/claude-sonnet-4",
+    "name": "Claude Sonnet 4 (OR)",
+    "description": "Claude Sonnet 4 via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:anthropic/claude-sonnet-4.5",
+    "name": "Claude Sonnet 4.5 (OR)",
+    "description": "Claude Sonnet 4.5 via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:arcee-ai/coder-large",
+    "name": "Arcee Coder Large",
+    "description": "Arcee AI large coding model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:arcee-ai/maestro-reasoning",
+    "name": "Arcee Maestro Reasoning",
+    "description": "Arcee AI reasoning model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:arcee-ai/spotlight",
+    "name": "Arcee Spotlight",
+    "description": "Arcee AI Spotlight model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:arcee-ai/virtuoso-large",
+    "name": "Arcee Virtuoso Large",
+    "description": "Arcee AI large general model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:arliai/qwq-32b-arliai-rpr-v1",
+    "name": "QwQ 32B ArliAI RPR v1",
+    "description": "ArliAI roleplay QwQ 32B v1",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:arliai/qwq-32b-arliai-rpr-v1:free",
+    "name": "QwQ 32B ArliAI RPR v1 (Free)",
+    "description": "ArliAI roleplay QwQ 32B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:baidu/ernie-4.5-21b-a3b",
+    "name": "ERNIE 4.5 21B",
+    "description": "Baidu ERNIE 4.5 21B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:baidu/ernie-4.5-21b-a3b-thinking",
+    "name": "ERNIE 4.5 21B Thinking",
+    "description": "Baidu ERNIE 4.5 21B with thinking",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:baidu/ernie-4.5-300b-a47b",
+    "name": "ERNIE 4.5 300B",
+    "description": "Baidu ERNIE 4.5 300B flagship",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:baidu/ernie-4.5-vl-28b-a3b",
+    "name": "ERNIE 4.5 VL 28B",
+    "description": "Baidu ERNIE 4.5 vision-language 28B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:baidu/ernie-4.5-vl-424b-a47b",
+    "name": "ERNIE 4.5 VL 424B",
+    "description": "Baidu ERNIE 4.5 vision-language 424B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:bytedance-seed/seed-1.6",
+    "name": "Seed 1.6",
+    "description": "ByteDance Seed 1.6",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:bytedance-seed/seed-1.6-flash",
+    "name": "Seed 1.6 Flash",
+    "description": "ByteDance Seed 1.6 Flash",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:bytedance-seed/seedream-4.5",
+    "name": "Seedream 4.5",
+    "description": "ByteDance Seedream 4.5",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:bytedance/seed-oss-36b-instruct",
+    "name": "Seed OSS 36B Instruct",
+    "description": "ByteDance open-source 36B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:bytedance/ui-tars-1.5-7b",
+    "name": "UI-TARS 1.5 7B",
+    "description": "ByteDance UI agent model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
+    "name": "Dolphin Mistral 24B Venice (Free)",
+    "description": "Dolphin Mistral 24B Venice - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:cognitivecomputations/dolphin-mixtral-8x22b",
+    "name": "Dolphin Mixtral 8x22B",
+    "description": "Dolphin Mixtral 8x22B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:cognitivecomputations/dolphin3.0-mistral-24b",
+    "name": "Dolphin 3.0 Mistral 24B",
+    "description": "Dolphin 3.0 on Mistral 24B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:cognitivecomputations/dolphin3.0-mistral-24b:free",
+    "name": "Dolphin 3.0 Mistral 24B (Free)",
+    "description": "Dolphin 3.0 Mistral 24B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:cognitivecomputations/dolphin3.0-r1-mistral-24b",
+    "name": "Dolphin 3.0 R1 Mistral 24B",
+    "description": "Dolphin 3.0 R1 reasoning on Mistral 24B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:cognitivecomputations/dolphin3.0-r1-mistral-24b:free",
+    "name": "Dolphin 3.0 R1 Mistral 24B (Free)",
+    "description": "Dolphin 3.0 R1 Mistral 24B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:cohere/command",
+    "name": "Command",
+    "description": "Cohere Command",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:cohere/command-a",
+    "name": "Command A",
+    "description": "Cohere Command A",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:cohere/command-r",
+    "name": "Command R",
+    "description": "Cohere Command R",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:cohere/command-r-03-2024",
+    "name": "Command R (Mar 2024)",
+    "description": "Cohere Command R March 2024",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:cohere/command-r-08-2024",
+    "name": "Command R (Aug 2024)",
+    "description": "Cohere Command R August 2024",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:cohere/command-r-plus",
+    "name": "Command R+",
+    "description": "Cohere Command R Plus",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:cohere/command-r-plus-04-2024",
+    "name": "Command R+ (Apr 2024)",
+    "description": "Cohere Command R+ April 2024",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:cohere/command-r-plus-08-2024",
+    "name": "Command R+ (Aug 2024)",
+    "description": "Cohere Command R+ August 2024",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:cohere/command-r7b-12-2024",
+    "name": "Command R7B (Dec 2024)",
+    "description": "Cohere Command R7B December 2024",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:deepcogito/cogito-v2-preview-deepseek-671b",
+    "name": "Cogito v2 DeepSeek 671B",
+    "description": "DeepCogito Cogito v2 on DeepSeek 671B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:deepseek/deepseek-chat",
+    "name": "DeepSeek Chat (OR)",
+    "description": "DeepSeek Chat via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:deepseek/deepseek-chat-v3-0324",
+    "name": "DeepSeek Chat v3 (03-24) (OR)",
+    "description": "DeepSeek Chat v3 March 2024 via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:deepseek/deepseek-chat-v3-0324:free",
+    "name": "DeepSeek Chat v3 (03-24) Free",
+    "description": "DeepSeek Chat v3 March 2024 - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:deepseek/deepseek-chat-v3.1",
+    "name": "DeepSeek Chat v3.1 (OR)",
+    "description": "DeepSeek Chat v3.1 via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:deepseek/deepseek-chat-v3.1:free",
+    "name": "DeepSeek Chat v3.1 (Free)",
+    "description": "DeepSeek Chat v3.1 - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:deepseek/deepseek-prover-v2",
+    "name": "DeepSeek Prover v2",
+    "description": "DeepSeek math/proof reasoning model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:deepseek/deepseek-r1",
+    "name": "DeepSeek R1 (OR)",
+    "description": "DeepSeek R1 via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:deepseek/deepseek-r1-0528",
+    "name": "DeepSeek R1 (05-28) (OR)",
+    "description": "DeepSeek R1 May 2028 via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:deepseek/deepseek-r1-0528-qwen3-8b",
+    "name": "DeepSeek R1 0528 Qwen3 8B",
+    "description": "R1 0528 distilled into Qwen3 8B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:deepseek/deepseek-r1-0528-qwen3-8b:free",
+    "name": "DeepSeek R1 0528 Qwen3 8B (Free)",
+    "description": "R1 0528 Qwen3 8B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:deepseek/deepseek-r1-0528:free",
+    "name": "DeepSeek R1 (05-28) Free",
+    "description": "DeepSeek R1 May 2028 - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:deepseek/deepseek-r1-distill-llama-70b",
+    "name": "DeepSeek R1 Distill LLaMA 70B (OR)",
+    "description": "R1 distilled LLaMA 70B via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:deepseek/deepseek-r1-distill-llama-70b:free",
+    "name": "DeepSeek R1 Distill LLaMA 70B (Free)",
+    "description": "R1 distilled LLaMA 70B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:deepseek/deepseek-r1-distill-llama-8b",
+    "name": "DeepSeek R1 Distill LLaMA 8B",
+    "description": "R1 distilled into LLaMA 8B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:deepseek/deepseek-r1-distill-qwen-14b",
+    "name": "DeepSeek R1 Distill Qwen 14B",
+    "description": "R1 distilled into Qwen 14B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:deepseek/deepseek-r1-distill-qwen-14b:free",
+    "name": "DeepSeek R1 Distill Qwen 14B (Free)",
+    "description": "R1 distilled Qwen 14B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:deepseek/deepseek-r1-distill-qwen-32b",
+    "name": "DeepSeek R1 Distill Qwen 32B (OR)",
+    "description": "R1 distilled Qwen 32B via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:deepseek/deepseek-r1:free",
+    "name": "DeepSeek R1 (Free)",
+    "description": "DeepSeek R1 - free tier",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:deepseek/deepseek-v3.1-base",
+    "name": "DeepSeek V3.1 Base",
+    "description": "DeepSeek V3.1 base model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:deepseek/deepseek-v3.1-terminus",
+    "name": "DeepSeek V3.1 Terminus (OR)",
+    "description": "DeepSeek V3.1 Terminus via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:deepseek/deepseek-v3.2",
+    "name": "DeepSeek V3.2 (OR)",
+    "description": "DeepSeek V3.2 via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:deepseek/deepseek-v3.2-exp",
+    "name": "DeepSeek V3.2 Experimental (OR)",
+    "description": "Experimental DeepSeek V3.2 via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:deepseek/deepseek-v3.2-speciale",
+    "name": "DeepSeek V3.2 Speciale (OR)",
+    "description": "Special edition DeepSeek V3.2 via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:eleutherai/llemma_7b",
+    "name": "LLemma 7B",
+    "description": "EleutherAI math LLM 7B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemini-2.0-flash-001",
+    "name": "Gemini 2.0 Flash 001 (OR)",
+    "description": "Gemini 2.0 Flash stable via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemini-2.0-flash-exp:free",
+    "name": "Gemini 2.0 Flash Exp (Free)",
+    "description": "Experimental Gemini 2.0 Flash - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemini-2.0-flash-lite-001",
+    "name": "Gemini 2.0 Flash Lite 001 (OR)",
+    "description": "Gemini 2.0 Flash Lite stable via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemini-2.5-flash",
+    "name": "Gemini 2.5 Flash (OR)",
+    "description": "Gemini 2.5 Flash via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemini-2.5-flash-image",
+    "name": "Gemini 2.5 Flash Image",
+    "description": "Gemini 2.5 Flash with image generation",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemini-2.5-flash-image-preview",
+    "name": "Gemini 2.5 Flash Image Preview",
+    "description": "Gemini 2.5 Flash image preview",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemini-2.5-flash-image-preview:free",
+    "name": "Gemini 2.5 Flash Image Preview (Free)",
+    "description": "Gemini 2.5 Flash image preview - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemini-2.5-flash-lite",
+    "name": "Gemini 2.5 Flash Lite (OR)",
+    "description": "Gemini 2.5 Flash Lite via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemini-2.5-flash-lite-preview-06-17",
+    "name": "Gemini 2.5 Flash Lite Preview (Jun 17)",
+    "description": "Gemini 2.5 Flash Lite Preview Jun 2025",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemini-2.5-flash-lite-preview-09-2025",
+    "name": "Gemini 2.5 Flash Lite Preview (Sep 2025)",
+    "description": "Gemini 2.5 Flash Lite Sep 2025 Preview via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemini-2.5-flash-preview-09-2025",
+    "name": "Gemini 2.5 Flash Preview (Sep 2025) (OR)",
+    "description": "Gemini 2.5 Flash Sep 2025 Preview via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemini-2.5-pro",
+    "name": "Gemini 2.5 Pro (OR)",
+    "description": "Gemini 2.5 Pro via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemini-2.5-pro-exp-03-25",
+    "name": "Gemini 2.5 Pro Exp (03-25)",
+    "description": "Gemini 2.5 Pro Experimental Mar 2025",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemini-2.5-pro-preview",
+    "name": "Gemini 2.5 Pro Preview (OR)",
+    "description": "Gemini 2.5 Pro Preview via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemini-2.5-pro-preview-05-06",
+    "name": "Gemini 2.5 Pro Preview (05-06) (OR)",
+    "description": "Gemini 2.5 Pro Preview May 2025 via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemini-3-flash-preview",
+    "name": "Gemini 3 Flash Preview (OR)",
+    "description": "Gemini 3 Flash Preview via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemini-embedding-001",
+    "name": "Gemini Embedding 001",
+    "description": "Google Gemini embedding model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemini-flash-1.5",
+    "name": "Gemini Flash 1.5",
+    "description": "Google Gemini Flash 1.5",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemini-flash-1.5-8b",
+    "name": "Gemini Flash 1.5 8B",
+    "description": "Gemini Flash 1.5 8B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemini-pro-1.5",
+    "name": "Gemini Pro 1.5",
+    "description": "Google Gemini Pro 1.5",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemma-2-27b-it",
+    "name": "Gemma 2 27B Instruct",
+    "description": "Google Gemma 2 27B instruction-tuned",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemma-2-9b-it",
+    "name": "Gemma 2 9B Instruct",
+    "description": "Google Gemma 2 9B instruction-tuned",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemma-2-9b-it:free",
+    "name": "Gemma 2 9B Instruct (Free)",
+    "description": "Gemma 2 9B instruction-tuned - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemma-3-12b-it",
+    "name": "Gemma 3 12B Instruct",
+    "description": "Google Gemma 3 12B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemma-3-12b-it:free",
+    "name": "Gemma 3 12B Instruct (Free)",
+    "description": "Gemma 3 12B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemma-3-27b-it",
+    "name": "Gemma 3 27B Instruct",
+    "description": "Google Gemma 3 27B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemma-3-27b-it:free",
+    "name": "Gemma 3 27B Instruct (Free)",
+    "description": "Gemma 3 27B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemma-3-4b-it",
+    "name": "Gemma 3 4B Instruct",
+    "description": "Google Gemma 3 4B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemma-3-4b-it:free",
+    "name": "Gemma 3 4B Instruct (Free)",
+    "description": "Gemma 3 4B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemma-3n-e2b-it:free",
+    "name": "Gemma 3n E2B Instruct (Free)",
+    "description": "Gemma 3n E2B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemma-3n-e4b-it",
+    "name": "Gemma 3n E4B Instruct",
+    "description": "Google Gemma 3n E4B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:google/gemma-3n-e4b-it:free",
+    "name": "Gemma 3n E4B Instruct (Free)",
+    "description": "Gemma 3n E4B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:gryphe/mythomax-l2-13b",
+    "name": "MythoMax L2 13B",
+    "description": "Gryphe MythoMax LLaMA 2 13B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:ibm-granite/granite-4.0-h-micro",
+    "name": "Granite 4.0 H Micro",
+    "description": "IBM Granite 4.0 H Micro",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:inception/mercury",
+    "name": "Mercury",
+    "description": "Inception Mercury model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:inception/mercury-coder",
+    "name": "Mercury Coder",
+    "description": "Inception Mercury coding model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:inclusionai/ling-1t",
+    "name": "Ling 1T",
+    "description": "InclusionAI Ling 1 Trillion",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:inclusionai/ring-1t",
+    "name": "Ring 1T",
+    "description": "InclusionAI Ring 1 Trillion",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:infermatic/mn-inferor-12b",
+    "name": "MN Inferor 12B",
+    "description": "Infermatic MN Inferor 12B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:inflection/inflection-3-pi",
+    "name": "Inflection 3 Pi",
+    "description": "Inflection Pi model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:inflection/inflection-3-productivity",
+    "name": "Inflection 3 Productivity",
+    "description": "Inflection productivity model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:intfloat/e5-base-v2",
+    "name": "E5 Base v2",
+    "description": "intfloat E5 base embedding model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:intfloat/e5-large-v2",
+    "name": "E5 Large v2",
+    "description": "intfloat E5 large embedding model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:intfloat/multilingual-e5-large",
+    "name": "Multilingual E5 Large",
+    "description": "Multilingual E5 large embedding",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:kwaipilot/kat-coder-pro:free",
+    "name": "KAT Coder Pro (Free)",
+    "description": "KwaiPilot KAT Coder Pro - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:liquid/lfm-2.2-6b",
+    "name": "LFM 2.2 6B",
+    "description": "Liquid LFM 2.2 6B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:liquid/lfm-3b",
+    "name": "LFM 3B",
+    "description": "Liquid LFM 3B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:liquid/lfm-7b",
+    "name": "LFM 7B",
+    "description": "Liquid LFM 7B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:liquid/lfm2-8b-a1b",
+    "name": "LFM2 8B A1B",
+    "description": "Liquid LFM2 8B A1B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mancer/weaver",
+    "name": "Weaver",
+    "description": "Mancer Weaver creative model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:meituan/longcat-flash-chat",
+    "name": "LongCat Flash Chat",
+    "description": "Meituan LongCat Flash Chat",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:meta-llama/llama-3-70b-instruct",
+    "name": "LLaMA 3 70B Instruct",
+    "description": "Meta LLaMA 3 70B instruction-tuned",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:meta-llama/llama-3-8b-instruct",
+    "name": "LLaMA 3 8B Instruct",
+    "description": "Meta LLaMA 3 8B instruction-tuned",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:meta-llama/llama-3.1-405b",
+    "name": "LLaMA 3.1 405B",
+    "description": "Meta LLaMA 3.1 405B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:meta-llama/llama-3.1-405b-instruct",
+    "name": "LLaMA 3.1 405B Instruct",
+    "description": "Meta LLaMA 3.1 405B instruction-tuned",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:meta-llama/llama-3.1-405b-instruct:free",
+    "name": "LLaMA 3.1 405B Instruct (Free)",
+    "description": "LLaMA 3.1 405B Instruct - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:meta-llama/llama-3.1-70b-instruct",
+    "name": "LLaMA 3.1 70B Instruct",
+    "description": "Meta LLaMA 3.1 70B instruction-tuned",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:meta-llama/llama-3.1-8b-instruct",
+    "name": "LLaMA 3.1 8B Instruct",
+    "description": "Meta LLaMA 3.1 8B instruction-tuned",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:meta-llama/llama-3.2-11b-vision-instruct",
+    "name": "LLaMA 3.2 11B Vision",
+    "description": "Meta LLaMA 3.2 11B vision model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:meta-llama/llama-3.2-1b-instruct",
+    "name": "LLaMA 3.2 1B Instruct",
+    "description": "Meta LLaMA 3.2 1B instruction-tuned",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:meta-llama/llama-3.2-3b-instruct",
+    "name": "LLaMA 3.2 3B Instruct",
+    "description": "Meta LLaMA 3.2 3B instruction-tuned",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:meta-llama/llama-3.2-3b-instruct:free",
+    "name": "LLaMA 3.2 3B Instruct (Free)",
+    "description": "LLaMA 3.2 3B Instruct - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:meta-llama/llama-3.2-90b-vision-instruct",
+    "name": "LLaMA 3.2 90B Vision",
+    "description": "Meta LLaMA 3.2 90B vision model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:meta-llama/llama-3.3-70b-instruct",
+    "name": "LLaMA 3.3 70B Instruct",
+    "description": "Meta LLaMA 3.3 70B instruction-tuned",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:meta-llama/llama-3.3-70b-instruct:free",
+    "name": "LLaMA 3.3 70B Instruct (Free)",
+    "description": "LLaMA 3.3 70B Instruct - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:meta-llama/llama-3.3-8b-instruct:free",
+    "name": "LLaMA 3.3 8B Instruct (Free)",
+    "description": "LLaMA 3.3 8B Instruct - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:meta-llama/llama-4-maverick",
+    "name": "LLaMA 4 Maverick",
+    "description": "Meta LLaMA 4 Maverick",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:meta-llama/llama-4-maverick:free",
+    "name": "LLaMA 4 Maverick (Free)",
+    "description": "LLaMA 4 Maverick - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:meta-llama/llama-4-scout",
+    "name": "LLaMA 4 Scout",
+    "description": "Meta LLaMA 4 Scout",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:meta-llama/llama-4-scout:free",
+    "name": "LLaMA 4 Scout (Free)",
+    "description": "LLaMA 4 Scout - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:meta-llama/llama-guard-2-8b",
+    "name": "LLaMA Guard 2 8B",
+    "description": "Meta content safety model v2",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:meta-llama/llama-guard-3-8b",
+    "name": "LLaMA Guard 3 8B",
+    "description": "Meta content safety model v3",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:meta-llama/llama-guard-4-12b",
+    "name": "LLaMA Guard 4 12B",
+    "description": "Meta content safety model v4",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:microsoft/mai-ds-r1",
+    "name": "MAI-DS R1",
+    "description": "Microsoft MAI Data Science R1",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:microsoft/mai-ds-r1:free",
+    "name": "MAI-DS R1 (Free)",
+    "description": "Microsoft MAI-DS R1 - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:microsoft/phi-3-medium-128k-instruct",
+    "name": "Phi-3 Medium 128K",
+    "description": "Microsoft Phi-3 Medium 128K context",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:microsoft/phi-3-mini-128k-instruct",
+    "name": "Phi-3 Mini 128K",
+    "description": "Microsoft Phi-3 Mini 128K context",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:microsoft/phi-3.5-mini-128k-instruct",
+    "name": "Phi-3.5 Mini 128K",
+    "description": "Microsoft Phi-3.5 Mini 128K context",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:microsoft/phi-4",
+    "name": "Phi-4",
+    "description": "Microsoft Phi-4",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:microsoft/phi-4-multimodal-instruct",
+    "name": "Phi-4 Multimodal",
+    "description": "Microsoft Phi-4 multimodal instruction",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:microsoft/phi-4-reasoning-plus",
+    "name": "Phi-4 Reasoning+",
+    "description": "Microsoft Phi-4 enhanced reasoning",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:microsoft/wizardlm-2-8x22b",
+    "name": "WizardLM 2 8x22B",
+    "description": "Microsoft WizardLM 2 MoE 8x22B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:minimax/minimax-01",
+    "name": "MiniMax 01",
+    "description": "MiniMax 01",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:minimax/minimax-m1",
+    "name": "MiniMax M1",
+    "description": "MiniMax M1",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:minimax/minimax-m2",
+    "name": "MiniMax M2",
+    "description": "MiniMax M2",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:minimax/minimax-m2.1",
+    "name": "MiniMax M2.1",
+    "description": "MiniMax M2.1",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:minimax/minimax-m2:free",
+    "name": "MiniMax M2 (Free)",
+    "description": "MiniMax M2 - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/codestral-2501",
+    "name": "Codestral 2501",
+    "description": "Mistral Codestral Jan 2025",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/codestral-2508",
+    "name": "Codestral 2508",
+    "description": "Mistral Codestral Aug 2025",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/codestral-embed-2505",
+    "name": "Codestral Embed 2505",
+    "description": "Mistral Codestral embedding May 2025",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/devstral-2512",
+    "name": "Devstral 2512",
+    "description": "Mistral Devstral Dec 2025",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/devstral-2512:free",
+    "name": "Devstral 2512 (Free)",
+    "description": "Devstral Dec 2025 - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/devstral-medium",
+    "name": "Devstral Medium",
+    "description": "Mistral Devstral Medium",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/devstral-small",
+    "name": "Devstral Small",
+    "description": "Mistral Devstral Small",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/devstral-small-2505",
+    "name": "Devstral Small 2505",
+    "description": "Mistral Devstral Small May 2025",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/devstral-small-2505:free",
+    "name": "Devstral Small 2505 (Free)",
+    "description": "Devstral Small May 2025 - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/magistral-medium-2506",
+    "name": "Magistral Medium 2506",
+    "description": "Mistral Magistral Medium Jun 2025",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/magistral-medium-2506:thinking",
+    "name": "Magistral Medium 2506 Thinking",
+    "description": "Magistral Medium with thinking mode",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/magistral-small-2506",
+    "name": "Magistral Small 2506",
+    "description": "Mistral Magistral Small Jun 2025",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/ministral-14b-2512",
+    "name": "Ministral 14B 2512",
+    "description": "Mistral Ministral 14B Dec 2025",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/ministral-3b",
+    "name": "Ministral 3B",
+    "description": "Mistral Ministral 3B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/ministral-3b-2512",
+    "name": "Ministral 3B 2512",
+    "description": "Mistral Ministral 3B Dec 2025",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/ministral-8b",
+    "name": "Ministral 8B",
+    "description": "Mistral Ministral 8B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/ministral-8b-2512",
+    "name": "Ministral 8B 2512",
+    "description": "Mistral Ministral 8B Dec 2025",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/mistral-7b-instruct",
+    "name": "Mistral 7B Instruct",
+    "description": "Mistral 7B instruction-tuned",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/mistral-7b-instruct-v0.1",
+    "name": "Mistral 7B Instruct v0.1",
+    "description": "Mistral 7B Instruct v0.1",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/mistral-7b-instruct-v0.3",
+    "name": "Mistral 7B Instruct v0.3",
+    "description": "Mistral 7B Instruct v0.3",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/mistral-7b-instruct:free",
+    "name": "Mistral 7B Instruct (Free)",
+    "description": "Mistral 7B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/mistral-embed-2312",
+    "name": "Mistral Embed 2312",
+    "description": "Mistral embedding model Dec 2023",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/mistral-large",
+    "name": "Mistral Large",
+    "description": "Mistral Large",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/mistral-large-2407",
+    "name": "Mistral Large (Jul 2024)",
+    "description": "Mistral Large July 2024",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/mistral-large-2411",
+    "name": "Mistral Large (Nov 2024)",
+    "description": "Mistral Large November 2024",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/mistral-large-2512",
+    "name": "Mistral Large (Dec 2025)",
+    "description": "Mistral Large December 2025",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/mistral-medium-3",
+    "name": "Mistral Medium 3",
+    "description": "Mistral Medium 3",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/mistral-medium-3.1",
+    "name": "Mistral Medium 3.1",
+    "description": "Mistral Medium 3.1",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/mistral-nemo",
+    "name": "Mistral Nemo",
+    "description": "Mistral Nemo",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/mistral-nemo:free",
+    "name": "Mistral Nemo (Free)",
+    "description": "Mistral Nemo - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/mistral-saba",
+    "name": "Mistral Saba",
+    "description": "Mistral Saba Middle East/South Asia optimized",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/mistral-small",
+    "name": "Mistral Small",
+    "description": "Mistral Small",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/mistral-small-24b-instruct-2501",
+    "name": "Mistral Small 24B (Jan 2025)",
+    "description": "Mistral Small 24B Jan 2025",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/mistral-small-24b-instruct-2501:free",
+    "name": "Mistral Small 24B (Jan 2025) Free",
+    "description": "Mistral Small 24B Jan 2025 - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/mistral-small-3.1-24b-instruct",
+    "name": "Mistral Small 3.1 24B",
+    "description": "Mistral Small 3.1 24B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/mistral-small-3.1-24b-instruct:free",
+    "name": "Mistral Small 3.1 24B (Free)",
+    "description": "Mistral Small 3.1 24B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/mistral-small-3.2-24b-instruct",
+    "name": "Mistral Small 3.2 24B",
+    "description": "Mistral Small 3.2 24B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/mistral-small-3.2-24b-instruct:free",
+    "name": "Mistral Small 3.2 24B (Free)",
+    "description": "Mistral Small 3.2 24B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/mistral-small-creative",
+    "name": "Mistral Small Creative",
+    "description": "Mistral Small tuned for creative tasks",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/mixtral-8x22b-instruct",
+    "name": "Mixtral 8x22B Instruct",
+    "description": "Mistral Mixtral MoE 8x22B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/mixtral-8x7b-instruct",
+    "name": "Mixtral 8x7B Instruct",
+    "description": "Mistral Mixtral MoE 8x7B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/pixtral-12b",
+    "name": "Pixtral 12B",
+    "description": "Mistral Pixtral multimodal 12B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:mistralai/pixtral-large-2411",
+    "name": "Pixtral Large (Nov 2024)",
+    "description": "Mistral Pixtral Large November 2024",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:moonshotai/kimi-k2",
+    "name": "Kimi K2 (OR)",
+    "description": "Kimi K2 via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:moonshotai/kimi-k2-0905",
+    "name": "Kimi K2 (09-05) (OR)",
+    "description": "Kimi K2 Sep update via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:moonshotai/kimi-k2-thinking",
+    "name": "Kimi K2 Thinking (OR)",
+    "description": "Kimi K2 with reasoning via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:moonshotai/kimi-k2:free",
+    "name": "Kimi K2 (Free)",
+    "description": "Kimi K2 - free tier",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:moonshotai/kimi-linear-48b-a3b-instruct",
+    "name": "Kimi Linear 48B Instruct",
+    "description": "Moonshot Kimi Linear 48B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:moonshotai/kimi-vl-a3b-thinking",
+    "name": "Kimi VL A3B Thinking",
+    "description": "Kimi vision-language thinking model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:moonshotai/kimi-vl-a3b-thinking:free",
+    "name": "Kimi VL A3B Thinking (Free)",
+    "description": "Kimi VL thinking - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:morph/morph-v3-fast",
+    "name": "Morph v3 Fast",
+    "description": "Morph v3 fast model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:morph/morph-v3-large",
+    "name": "Morph v3 Large",
+    "description": "Morph v3 large model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:neversleep/llama-3-lumimaid-70b",
+    "name": "Lumimaid LLaMA 3 70B",
+    "description": "NeverSleep Lumimaid LLaMA 3 70B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:neversleep/llama-3.1-lumimaid-8b",
+    "name": "Lumimaid LLaMA 3.1 8B",
+    "description": "NeverSleep Lumimaid LLaMA 3.1 8B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:neversleep/noromaid-20b",
+    "name": "Noromaid 20B",
+    "description": "NeverSleep Noromaid 20B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:nex-agi/deepseek-v3.1-nex-n1:free",
+    "name": "DeepSeek V3.1 Nex N1 (Free)",
+    "description": "Nex-AGI DeepSeek V3.1 - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:nousresearch/deephermes-3-llama-3-8b-preview:free",
+    "name": "DeepHermes 3 LLaMA 3 8B (Free)",
+    "description": "NousResearch DeepHermes 3 8B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:nousresearch/deephermes-3-mistral-24b-preview",
+    "name": "DeepHermes 3 Mistral 24B",
+    "description": "NousResearch DeepHermes 3 on Mistral 24B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:nousresearch/hermes-2-pro-llama-3-8b",
+    "name": "Hermes 2 Pro LLaMA 3 8B",
+    "description": "NousResearch Hermes 2 Pro on LLaMA 3 8B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:nousresearch/hermes-3-llama-3.1-405b",
+    "name": "Hermes 3 LLaMA 3.1 405B",
+    "description": "NousResearch Hermes 3 405B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:nousresearch/hermes-3-llama-3.1-70b",
+    "name": "Hermes 3 LLaMA 3.1 70B",
+    "description": "NousResearch Hermes 3 70B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:nousresearch/hermes-4-405b",
+    "name": "Hermes 4 405B",
+    "description": "NousResearch Hermes 4 405B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:nousresearch/hermes-4-70b",
+    "name": "Hermes 4 70B",
+    "description": "NousResearch Hermes 4 70B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:nousresearch/nous-hermes-2-mixtral-8x7b-dpo",
+    "name": "Nous Hermes 2 Mixtral 8x7B DPO",
+    "description": "NousResearch Hermes 2 on Mixtral 8x7B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:nvidia/llama-3.1-nemotron-70b-instruct",
+    "name": "Nemotron 70B Instruct",
+    "description": "NVIDIA Nemotron LLaMA 3.1 70B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:nvidia/llama-3.1-nemotron-ultra-253b-v1",
+    "name": "Nemotron Ultra 253B",
+    "description": "NVIDIA Nemotron Ultra 253B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:nvidia/llama-3.1-nemotron-ultra-253b-v1:free",
+    "name": "Nemotron Ultra 253B (Free)",
+    "description": "NVIDIA Nemotron Ultra 253B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:nvidia/llama-3.3-nemotron-super-49b-v1",
+    "name": "Nemotron Super 49B v1",
+    "description": "NVIDIA Nemotron Super 49B v1",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:nvidia/llama-3.3-nemotron-super-49b-v1.5",
+    "name": "Nemotron Super 49B v1.5",
+    "description": "NVIDIA Nemotron Super 49B v1.5",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:nvidia/nemotron-3-nano-30b-a3b",
+    "name": "Nemotron 3 Nano 30B",
+    "description": "NVIDIA Nemotron 3 Nano 30B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:nvidia/nemotron-3-nano-30b-a3b:free",
+    "name": "Nemotron 3 Nano 30B (Free)",
+    "description": "NVIDIA Nemotron 3 Nano 30B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:nvidia/nemotron-nano-12b-v2-vl",
+    "name": "Nemotron Nano 12B v2 VL",
+    "description": "NVIDIA Nemotron Nano 12B vision-language",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:nvidia/nemotron-nano-12b-v2-vl:free",
+    "name": "Nemotron Nano 12B v2 VL (Free)",
+    "description": "NVIDIA Nemotron Nano 12B VL - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:nvidia/nemotron-nano-9b-v2",
+    "name": "Nemotron Nano 9B v2",
+    "description": "NVIDIA Nemotron Nano 9B v2",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:nvidia/nemotron-nano-9b-v2:free",
+    "name": "Nemotron Nano 9B v2 (Free)",
+    "description": "NVIDIA Nemotron Nano 9B v2 - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/chatgpt-4o-latest",
+    "name": "ChatGPT-4o Latest",
+    "description": "Latest ChatGPT-4o via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-3.5-turbo",
+    "name": "GPT-3.5 Turbo",
+    "description": "OpenAI GPT-3.5 Turbo",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-3.5-turbo-0613",
+    "name": "GPT-3.5 Turbo (Jun 2023)",
+    "description": "GPT-3.5 Turbo June 2023",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-3.5-turbo-16k",
+    "name": "GPT-3.5 Turbo 16K",
+    "description": "GPT-3.5 Turbo extended context",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-3.5-turbo-instruct",
+    "name": "GPT-3.5 Turbo Instruct",
+    "description": "GPT-3.5 Turbo instruction-tuned",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-4",
+    "name": "GPT-4",
+    "description": "OpenAI GPT-4",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-4-0314",
+    "name": "GPT-4 (Mar 2023)",
+    "description": "GPT-4 March 2023",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-4-1106-preview",
+    "name": "GPT-4 Turbo Preview (Nov 2023)",
+    "description": "GPT-4 November 2023 preview",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-4-turbo",
+    "name": "GPT-4 Turbo",
+    "description": "OpenAI GPT-4 Turbo",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-4-turbo-preview",
+    "name": "GPT-4 Turbo Preview",
+    "description": "OpenAI GPT-4 Turbo Preview",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-4.1",
+    "name": "GPT-4.1 (OR)",
+    "description": "GPT-4.1 via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-4.1-mini",
+    "name": "GPT-4.1 Mini (OR)",
+    "description": "GPT-4.1 Mini via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-4.1-nano",
+    "name": "GPT-4.1 Nano (OR)",
+    "description": "GPT-4.1 Nano via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-4o",
+    "name": "GPT-4o (OR)",
+    "description": "GPT-4o via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-4o-2024-05-13",
+    "name": "GPT-4o (May 2024)",
+    "description": "GPT-4o May 2024",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-4o-2024-08-06",
+    "name": "GPT-4o (Aug 2024)",
+    "description": "GPT-4o August 2024",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-4o-2024-11-20",
+    "name": "GPT-4o (Nov 2024)",
+    "description": "GPT-4o November 2024",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-4o-audio-preview",
+    "name": "GPT-4o Audio Preview",
+    "description": "GPT-4o with audio capabilities",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-4o-mini",
+    "name": "GPT-4o Mini (OR)",
+    "description": "GPT-4o Mini via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-4o-mini-2024-07-18",
+    "name": "GPT-4o Mini (Jul 2024)",
+    "description": "GPT-4o Mini July 2024",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-4o-mini-search-preview",
+    "name": "GPT-4o Mini Search Preview",
+    "description": "GPT-4o Mini with search",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-4o-search-preview",
+    "name": "GPT-4o Search Preview",
+    "description": "GPT-4o with search",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-4o:extended",
+    "name": "GPT-4o Extended",
+    "description": "GPT-4o extended context",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-5",
+    "name": "GPT-5 (OR)",
+    "description": "GPT-5 via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-5-chat",
+    "name": "GPT-5 Chat (OR)",
+    "description": "GPT-5 Chat via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-5-image",
+    "name": "GPT-5 Image",
+    "description": "GPT-5 with image generation",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-5-image-mini",
+    "name": "GPT-5 Image Mini",
+    "description": "Compact GPT-5 image model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-5-mini",
+    "name": "GPT-5 Mini (OR)",
+    "description": "GPT-5 Mini via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-5-nano",
+    "name": "GPT-5 Nano (OR)",
+    "description": "GPT-5 Nano via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-5-pro",
+    "name": "GPT-5 Pro (OR)",
+    "description": "GPT-5 Pro via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-5.1",
+    "name": "GPT-5.1 (OR)",
+    "description": "GPT-5.1 via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-5.1-chat",
+    "name": "GPT-5.1 Chat (OR)",
+    "description": "GPT-5.1 Chat via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-5.2",
+    "name": "GPT-5.2 (OR)",
+    "description": "GPT-5.2 via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-5.2-chat",
+    "name": "GPT-5.2 Chat (OR)",
+    "description": "GPT-5.2 Chat via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/gpt-5.2-pro",
+    "name": "GPT-5.2 Pro (OR)",
+    "description": "GPT-5.2 Pro via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/o1",
+    "name": "o1 (OR)",
+    "description": "o1 reasoning via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/o1-mini",
+    "name": "o1 Mini (OR)",
+    "description": "o1 Mini via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/o1-mini-2024-09-12",
+    "name": "o1 Mini (Sep 2024)",
+    "description": "o1 Mini September 2024",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/o1-pro",
+    "name": "o1 Pro (OR)",
+    "description": "o1 Pro via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/o3",
+    "name": "o3 (OR)",
+    "description": "o3 via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/o3-deep-research",
+    "name": "o3 Deep Research",
+    "description": "o3 with deep research capability",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/o3-mini",
+    "name": "o3 Mini (OR)",
+    "description": "o3 Mini via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/o3-mini-high",
+    "name": "o3 Mini High",
+    "description": "o3 Mini high reasoning effort",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/o3-pro",
+    "name": "o3 Pro",
+    "description": "o3 Pro via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/o4-mini",
+    "name": "o4 Mini (OR)",
+    "description": "o4 Mini via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/o4-mini-deep-research",
+    "name": "o4 Mini Deep Research",
+    "description": "o4 Mini with deep research",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/o4-mini-high",
+    "name": "o4 Mini High",
+    "description": "o4 Mini high effort",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/text-embedding-3-large",
+    "name": "Text Embedding 3 Large",
+    "description": "OpenAI text embedding large",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/text-embedding-3-small",
+    "name": "Text Embedding 3 Small",
+    "description": "OpenAI text embedding small",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openai/text-embedding-ada-002",
+    "name": "Text Embedding Ada 002",
+    "description": "OpenAI Ada embedding model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:opengvlab/internvl3-14b",
+    "name": "InternVL3 14B",
+    "description": "OpenGVLab InternVL3 14B vision-language",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openrouter/auto",
+    "name": "OpenRouter Auto",
+    "description": "Automatic model routing",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openrouter/bert-nebulon-alpha",
+    "name": "BERT Nebulon Alpha",
+    "description": "OpenRouter BERT Nebulon Alpha",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:openrouter/polaris-alpha",
+    "name": "Polaris Alpha",
+    "description": "OpenRouter Polaris Alpha",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:perplexity/sonar",
+    "name": "Sonar",
+    "description": "Perplexity Sonar",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:perplexity/sonar-pro",
+    "name": "Sonar Pro",
+    "description": "Perplexity Sonar Pro",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:perplexity/sonar-pro-search",
+    "name": "Sonar Pro Search",
+    "description": "Perplexity Sonar Pro with live search",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:perplexity/sonar-deep-research",
+    "name": "Sonar Deep Research",
+    "description": "Perplexity deep research model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:perplexity/sonar-reasoning-pro",
+    "name": "Sonar Reasoning Pro",
+    "description": "Perplexity Sonar with advanced reasoning",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:prime-intellect/intellect-3",
+    "name": "Intellect 3",
+    "description": "Prime Intellect 3",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:pygmalionai/mythalion-13b",
+    "name": "Mythalion 13B",
+    "description": "PygmalionAI Mythalion 13B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen-2.5-72b-instruct",
+    "name": "Qwen 2.5 72B Instruct",
+    "description": "Alibaba Qwen 2.5 72B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen-2.5-72b-instruct:free",
+    "name": "Qwen 2.5 72B Instruct (Free)",
+    "description": "Qwen 2.5 72B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen-2.5-7b-instruct",
+    "name": "Qwen 2.5 7B Instruct",
+    "description": "Alibaba Qwen 2.5 7B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen-2.5-coder-32b-instruct",
+    "name": "Qwen 2.5 Coder 32B",
+    "description": "Qwen 2.5 coding specialist 32B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen-2.5-coder-32b-instruct:free",
+    "name": "Qwen 2.5 Coder 32B (Free)",
+    "description": "Qwen 2.5 Coder 32B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen-2.5-vl-7b-instruct",
+    "name": "Qwen 2.5 VL 7B",
+    "description": "Qwen 2.5 vision-language 7B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen-max",
+    "name": "Qwen Max",
+    "description": "Alibaba Qwen Max",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen-plus",
+    "name": "Qwen Plus",
+    "description": "Alibaba Qwen Plus",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen-plus-2025-07-28",
+    "name": "Qwen Plus (Jul 2025)",
+    "description": "Qwen Plus July 2025",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen-plus-2025-07-28:thinking",
+    "name": "Qwen Plus (Jul 2025) Thinking",
+    "description": "Qwen Plus July 2025 with thinking",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen-turbo",
+    "name": "Qwen Turbo",
+    "description": "Alibaba Qwen Turbo",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen-vl-max",
+    "name": "Qwen VL Max",
+    "description": "Qwen vision-language Max",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen-vl-plus",
+    "name": "Qwen VL Plus",
+    "description": "Qwen vision-language Plus",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen2.5-vl-32b-instruct",
+    "name": "Qwen 2.5 VL 32B",
+    "description": "Qwen 2.5 vision-language 32B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen2.5-vl-32b-instruct:free",
+    "name": "Qwen 2.5 VL 32B (Free)",
+    "description": "Qwen 2.5 VL 32B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen2.5-vl-72b-instruct",
+    "name": "Qwen 2.5 VL 72B",
+    "description": "Qwen 2.5 vision-language 72B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen2.5-vl-72b-instruct:free",
+    "name": "Qwen 2.5 VL 72B (Free)",
+    "description": "Qwen 2.5 VL 72B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-14b",
+    "name": "Qwen3 14B",
+    "description": "Alibaba Qwen3 14B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-14b:free",
+    "name": "Qwen3 14B (Free)",
+    "description": "Qwen3 14B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-235b-a22b",
+    "name": "Qwen3 235B A22B",
+    "description": "Qwen3 MoE 235B active 22B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-235b-a22b-2507",
+    "name": "Qwen3 235B A22B (Jul 2025)",
+    "description": "Qwen3 235B Jul 2025",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-235b-a22b-thinking-2507",
+    "name": "Qwen3 235B A22B Thinking (Jul 2025)",
+    "description": "Qwen3 235B with thinking Jul 2025",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-235b-a22b:free",
+    "name": "Qwen3 235B A22B (Free)",
+    "description": "Qwen3 235B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-30b-a3b",
+    "name": "Qwen3 30B A3B",
+    "description": "Qwen3 MoE 30B active 3B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-30b-a3b-instruct-2507",
+    "name": "Qwen3 30B A3B Instruct (Jul 2025)",
+    "description": "Qwen3 30B Instruct Jul 2025",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-30b-a3b-thinking-2507",
+    "name": "Qwen3 30B A3B Thinking (Jul 2025)",
+    "description": "Qwen3 30B Thinking Jul 2025",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-30b-a3b:free",
+    "name": "Qwen3 30B A3B (Free)",
+    "description": "Qwen3 30B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-32b",
+    "name": "Qwen3 32B",
+    "description": "Alibaba Qwen3 32B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-4b:free",
+    "name": "Qwen3 4B (Free)",
+    "description": "Qwen3 4B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-8b",
+    "name": "Qwen3 8B",
+    "description": "Alibaba Qwen3 8B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-8b:free",
+    "name": "Qwen3 8B (Free)",
+    "description": "Qwen3 8B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-coder",
+    "name": "Qwen3 Coder",
+    "description": "Qwen3 coding specialist",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-coder-30b-a3b-instruct",
+    "name": "Qwen3 Coder 30B Instruct",
+    "description": "Qwen3 Coder 30B instruction-tuned",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-coder-flash",
+    "name": "Qwen3 Coder Flash",
+    "description": "Fast Qwen3 coding model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-coder-plus",
+    "name": "Qwen3 Coder Plus",
+    "description": "Enhanced Qwen3 coding model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-coder:free",
+    "name": "Qwen3 Coder (Free)",
+    "description": "Qwen3 Coder - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-embedding-0.6b",
+    "name": "Qwen3 Embedding 0.6B",
+    "description": "Qwen3 compact embedding model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-embedding-4b",
+    "name": "Qwen3 Embedding 4B",
+    "description": "Qwen3 medium embedding model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-embedding-8b",
+    "name": "Qwen3 Embedding 8B",
+    "description": "Qwen3 large embedding model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-max",
+    "name": "Qwen3 Max",
+    "description": "Qwen3 Max flagship",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-next-80b-a3b-instruct",
+    "name": "Qwen3 Next 80B Instruct",
+    "description": "Qwen3 Next 80B instruction-tuned",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-next-80b-a3b-thinking",
+    "name": "Qwen3 Next 80B Thinking",
+    "description": "Qwen3 Next 80B with thinking",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-vl-30b-a3b-instruct",
+    "name": "Qwen3 VL 30B Instruct",
+    "description": "Qwen3 vision-language 30B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-vl-30b-a3b-thinking",
+    "name": "Qwen3 VL 30B Thinking",
+    "description": "Qwen3 VL 30B with thinking",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-vl-8b-instruct",
+    "name": "Qwen3 VL 8B Instruct",
+    "description": "Qwen3 vision-language 8B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwen3-vl-8b-thinking",
+    "name": "Qwen3 VL 8B Thinking",
+    "description": "Qwen3 VL 8B with thinking",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwq-32b",
+    "name": "QwQ 32B",
+    "description": "Qwen QwQ 32B reasoning model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwq-32b-preview",
+    "name": "QwQ 32B Preview",
+    "description": "Qwen QwQ 32B preview",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:qwen/qwq-32b:free",
+    "name": "QwQ 32B (Free)",
+    "description": "QwQ 32B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:raifle/sorcererlm-8x22b",
+    "name": "SorcererLM 8x22B",
+    "description": "Raifle SorcererLM MoE 8x22B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:rekaai/reka-flash-3:free",
+    "name": "Reka Flash 3 (Free)",
+    "description": "RekaAI Reka Flash 3 - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:relace/relace-apply-3",
+    "name": "Relace Apply 3",
+    "description": "Relace Apply 3 model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:sao10k/l3-euryale-70b",
+    "name": "L3 Euryale 70B",
+    "description": "SAO10K LLaMA 3 Euryale 70B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:sao10k/l3-lunaris-8b",
+    "name": "L3 Lunaris 8B",
+    "description": "SAO10K LLaMA 3 Lunaris 8B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:sao10k/l3.1-euryale-70b",
+    "name": "L3.1 Euryale 70B",
+    "description": "SAO10K LLaMA 3.1 Euryale 70B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:sao10k/l3.3-euryale-70b",
+    "name": "L3.3 Euryale 70B",
+    "description": "SAO10K LLaMA 3.3 Euryale 70B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:sarvamai/sarvam-m:free",
+    "name": "Sarvam M (Free)",
+    "description": "SarvamAI Sarvam M - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:scb10x/llama3.1-typhoon2-70b-instruct",
+    "name": "Typhoon2 70B Instruct",
+    "description": "SCB10X Typhoon2 LLaMA 3.1 70B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:shisa-ai/shisa-v2-llama3.3-70b",
+    "name": "Shisa V2 LLaMA 3.3 70B",
+    "description": "Shisa AI v2 on LLaMA 3.3 70B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:shisa-ai/shisa-v2-llama3.3-70b:free",
+    "name": "Shisa V2 LLaMA 3.3 70B (Free)",
+    "description": "Shisa V2 70B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:sophosympatheia/midnight-rose-70b",
+    "name": "Midnight Rose 70B",
+    "description": "Sophosympatheia Midnight Rose 70B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:switchpoint/router",
+    "name": "Switchpoint Router",
+    "description": "Switchpoint intelligent router",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:tencent/hunyuan-a13b-instruct",
+    "name": "HunYuan A13B Instruct",
+    "description": "Tencent HunYuan A13B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:tencent/hunyuan-a13b-instruct:free",
+    "name": "HunYuan A13B Instruct (Free)",
+    "description": "Tencent HunYuan A13B - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:thedrummer/anubis-70b-v1.1",
+    "name": "Anubis 70B v1.1",
+    "description": "TheDrummer Anubis 70B v1.1",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:thedrummer/anubis-pro-105b-v1",
+    "name": "Anubis Pro 105B v1",
+    "description": "TheDrummer Anubis Pro 105B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:thedrummer/cydonia-24b-v4.1",
+    "name": "Cydonia 24B v4.1",
+    "description": "TheDrummer Cydonia 24B v4.1",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:thedrummer/rocinante-12b",
+    "name": "Rocinante 12B",
+    "description": "TheDrummer Rocinante 12B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:thedrummer/skyfall-36b-v2",
+    "name": "Skyfall 36B v2",
+    "description": "TheDrummer Skyfall 36B v2",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:thedrummer/unslopnemo-12b",
+    "name": "UnslopNemo 12B",
+    "description": "TheDrummer UnslopNemo 12B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:thenlper/gte-base",
+    "name": "GTE Base",
+    "description": "GTE base embedding model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:thenlper/gte-large",
+    "name": "GTE Large",
+    "description": "GTE large embedding model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:thudm/glm-4-32b",
+    "name": "GLM-4 32B",
+    "description": "THUDM GLM-4 32B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:thudm/glm-4.1v-9b-thinking",
+    "name": "GLM-4.1V 9B Thinking",
+    "description": "THUDM GLM-4.1V 9B vision thinking",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:thudm/glm-z1-32b",
+    "name": "GLM-Z1 32B",
+    "description": "THUDM GLM-Z1 32B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:tngtech/deepseek-r1t-chimera",
+    "name": "DeepSeek R1T Chimera (OR)",
+    "description": "TNG DeepSeek R1T Chimera via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:tngtech/deepseek-r1t-chimera:free",
+    "name": "DeepSeek R1T Chimera (OR, Free)",
+    "description": "TNG DeepSeek R1T Chimera - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:tngtech/deepseek-r1t2-chimera:free",
+    "name": "DeepSeek R1T2 Chimera (OR, Free)",
+    "description": "TNG DeepSeek R1T2 Chimera via OR - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:tngtech/tng-r1t-chimera",
+    "name": "TNG R1T Chimera (OR)",
+    "description": "TNG R1T Chimera via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:tngtech/tng-r1t-chimera:free",
+    "name": "TNG R1T Chimera (OR, Free)",
+    "description": "TNG R1T Chimera via OR - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:undi95/remm-slerp-l2-13b",
+    "name": "ReMM SLERP L2 13B",
+    "description": "Undi95 ReMM SLERP LLaMA 2 13B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:x-ai/grok-2-1212",
+    "name": "Grok 2 (12-12) (OR)",
+    "description": "Grok 2 December 2024 via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:x-ai/grok-2-vision-1212",
+    "name": "Grok 2 Vision (12-12)",
+    "description": "Grok 2 Vision December 2024",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:x-ai/grok-3",
+    "name": "Grok 3 (OR)",
+    "description": "Grok 3 via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:x-ai/grok-3-beta",
+    "name": "Grok 3 Beta (OR)",
+    "description": "Grok 3 Beta via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:x-ai/grok-3-mini",
+    "name": "Grok 3 Mini (OR)",
+    "description": "Grok 3 Mini via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:x-ai/grok-3-mini-beta",
+    "name": "Grok 3 Mini Beta (OR)",
+    "description": "Grok 3 Mini Beta via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:x-ai/grok-4",
+    "name": "Grok 4 (OR)",
+    "description": "Grok 4 via OpenRouter",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:x-ai/grok-4-fast:free",
+    "name": "Grok 4 Fast (Free)",
+    "description": "Grok 4 Fast - free tier",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:x-ai/grok-4.1-fast:free",
+    "name": "Grok 4.1 Fast (Free)",
+    "description": "Grok 4.1 Fast - free tier",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:x-ai/grok-code-fast-1",
+    "name": "Grok Code Fast 1 (OR)",
+    "description": "Grok coding model via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:x-ai/grok-vision-beta",
+    "name": "Grok Vision Beta (OR)",
+    "description": "Grok Vision Beta via OR",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:xiaomi/mimo-v2-flash:free",
+    "name": "MiMo V2 Flash (Free)",
+    "description": "Xiaomi MiMo V2 Flash - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:z-ai/glm-4-32b",
+    "name": "GLM-4 32B (Z-AI)",
+    "description": "Z-AI GLM-4 32B",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:z-ai/glm-4.5",
+    "name": "GLM-4.5",
+    "description": "Z-AI GLM-4.5",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:z-ai/glm-4.5-air",
+    "name": "GLM-4.5 Air",
+    "description": "Z-AI GLM-4.5 Air",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:z-ai/glm-4.5-air:free",
+    "name": "GLM-4.5 Air (Free)",
+    "description": "Z-AI GLM-4.5 Air - free",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:z-ai/glm-4.5v",
+    "name": "GLM-4.5V",
+    "description": "Z-AI GLM-4.5 vision model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:z-ai/glm-4.6",
+    "name": "GLM-4.6",
+    "description": "Z-AI GLM-4.6",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:z-ai/glm-4.6:exacto",
+    "name": "GLM-4.6 Exacto",
+    "description": "Z-AI GLM-4.6 deterministic variant",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:z-ai/glm-4.6v",
+    "name": "GLM-4.6V",
+    "description": "Z-AI GLM-4.6 vision model",
+    "provider": "puter"
+  },
+  {
+    "id": "openrouter:z-ai/glm-4.7",
+    "name": "GLM-4.7",
+    "description": "Z-AI GLM-4.7",
+    "provider": "puter"
+  }
+]

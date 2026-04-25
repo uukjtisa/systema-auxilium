@@ -6,7 +6,9 @@ Copyright (c) 2026 Nic2007 (https://github.com/uukjtisa)
 ARCHITECTURE & AUTHORSHIP
 
 The tool architecture, system design, code flow, and all core ideas behind
-Systema Auxilium were conceived and structured by Nic2007.
+Systema Auxilium were conceived and structured by Nic2007. This project was
+built solo from the ground up — over 22,000 lines of code — by one person
+while completing senior high school, with no budget and no team.
 
 AI tooling (specifically Claude by Anthropic) was used throughout development
 to accelerate implementation, generate boilerplate, and assist with code —
@@ -28,4 +30,4 @@ Suggestions, feedback, and contributions of any kind are very welcome.
   Email:   trescariasa2007@gmail.com
   Project: https://github.com/uukjtisa/systema-auxilia
 
-This is a personal project. Please be kind. :)
+This is my first time exposing a project to GitHub. Please be kind. :)

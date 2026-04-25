@@ -402,60 +402,14 @@ MUST REMEMBER:
 
 
 def get_gemini_system_prompt(system_info="", voice_mode=False, elevenlabs_enabled=False):
-    """Condensed system prompt optimized for Gemini API"""
-
-    voice_instructions = ""
-    if voice_mode:
-        voice_instructions = "\n**VOICE MODE:** Short responses, no markdown."
-        if elevenlabs_enabled:
-            voice_instructions += " Use [emotion] tags: [happy], [giggles]"
-
-    return f"""You are Systema Auxilium - AI helper for OS tasks.
-{system_info}
-{voice_instructions}
-
-**TOOL FORMAT (unified)**
-
-All tool calls use the same structure:
-```json
-{{
-  "tool": "<tool_name>",
-  "input": "<value>"
-}}
-```
-
-Available tools:
-  work_environment  — run Python, YOU see output
-  execute_code      — run Python, you don't see output (ask user if it worked)
-  set_session_name  — set a short session title (use in "input" field)
-
-**DECISION**
-- Need result? → work_environment (use print() for output!)
-- Just do it?  → execute_code (then ask user if it worked)
-
-**WORK MODE — STAY UNTIL COMPLETE!**
-1. Execute code → enter work mode
-2. Analyse output internally
-3. CHAIN MORE EXECUTIONS until you have ALL info
-4. Don't exit after 1 execution — use 3-10 for complex tasks!
-5. Exit: {{"tool": "work_environment", "input": "exit"}}
-6. Report findings to user
-
-**DO NOT ROLEPLAY!**
-When saying "I'll do it", include the JSON in that SAME response!
-
-**ENSURE STDOUT!**
-Use print() in work_environment code to see results!
-
-**ONE CODE TOOL PER RESPONSE!**
-Only one work_environment OR execute_code call per turn.
-set_session_name is exempt — combine it with a code tool anywhere, no ordering rules.
-
-Stay in work mode until task is complete. Use exact JSON format.
-"""
+    """DEPRECATED — Gemini now uses the unified get_system_prompt().
+    Kept for any external callers; delegates to get_system_prompt."""
+    return get_system_prompt(system_info, voice_mode, elevenlabs_enabled)
 
 
-WORK_MODE_PROMPT = """<SYSTEM_MESSAGE>
+# Shared work-continuation decision block used by WORK_MODE_PROMPT and
+# SKILL_LOADED_WORK_PROMPT to avoid duplication.
+_WORK_CONTINUATION_BLOCK = """\
 This is your internal workspace. The user CANNOT see this.
 
 Previous execution output:
@@ -480,37 +434,18 @@ Options:
 VERY IMPORTANT: Don't rush! Chain executions for complete answers if you feel you are not yet ready!
 CRITICAL: IF YOU ARE SEEING THIS MESSAGE THEN YOU MUST NOT YET TALK! YOU ARE INSIDE YOUR WORK ENVIRONMENT! IF YOU WANNA TALK TO THE USER AND IF YOU ARE READY WITH ALL YOU NEED, THEN EXIT FIRST!
 VERY CRITICAL: WHEN YOU ARE GONNA EXIT, YOU CAN ONLY HAVE AN EXIT TOOL CALL IN YOUR RESPONSE, NO REPORTS, NO CHAT, NO OTHER WORDS! BECAUSE YOU CAN ONLY TALK TO THE USER AFTER EXITING, NOT WHILE EXITING!
-</SYSTEM_MESSAGE>"""
+"""
+
+WORK_MODE_PROMPT = "<SYSTEM_MESSAGE>\n" + _WORK_CONTINUATION_BLOCK + "</SYSTEM_MESSAGE>"
 
 
-SKILL_LOADED_WORK_PROMPT = """<SYSTEM_MESSAGE>
-SKILL '{skill_name}' has been loaded into your system context.
-You now have its full instructions available. Proceed with your task.
-
-This is your internal workspace. The user CANNOT see this.
-
-Previous execution output:
-{work_output}
-
----DECISION TIME---
-1. Do I have ALL information needed?
-2. Could I provide a more complete answer?
-3. Are there follow-up checks needed?
-4. What was the user's original request?
-
-IF YOU NEED MORE INFO → Execute more code!
-IF TASK IS INCOMPLETE → Execute more code!
-IF YOU HAVE EVERYTHING → Exit!
-
-Options:
-- More code:  {{"tool": "work_environment", "input": "..."}}
-- Exit:       {{"tool": "work_environment", "input": "exit"}}
-- Load another skill: {{"tool": "load_skill", "input": "skill_name"}} (only if NOT already loaded!)
-- Unload a skill:     {{"tool": "unload_skill", "input": "skill_name"}} (only if currently loaded!)
-
-CRITICAL: YOU ARE STILL INSIDE YOUR WORK ENVIRONMENT! DO NOT TALK TO THE USER YET! EXIT FIRST!
-VERY CRITICAL: WHEN EXITING, YOUR RESPONSE MUST ONLY CONTAIN THE EXIT TOOL CALL — NO REPORTS, NO CHAT.
-</SYSTEM_MESSAGE>"""
+SKILL_LOADED_WORK_PROMPT = (
+    "<SYSTEM_MESSAGE>\n"
+    "SKILL '{skill_name}' has been loaded into your system context.\n"
+    "You now have its full instructions available. Proceed with your task.\n\n"
+    + _WORK_CONTINUATION_BLOCK
+    + "</SYSTEM_MESSAGE>"
+)
 
 
 SKILL_ALREADY_LOADED_PROMPT = """<SYSTEM_MESSAGE>

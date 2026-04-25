@@ -15,6 +15,10 @@ Flask>=2.3.0
 Flask-CORS>=4.0.0
 flask-socketio>=5.3.0
 
+# AI Provider SDKs
+anthropic>=0.40.0          # Anthropic Claude API (official SDK)
+google-genai>=1.0.0        # Google Gemini API (new unified SDK, replaces google-generativeai)
+
 # Memory Recall (fastembed + numpy — no ChromaDB, no hnswlib, no native crashes)
 fastembed
 numpy>=2.0.0

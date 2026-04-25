@@ -8,10 +8,11 @@ from PyQt6.QtCore import Qt, QPoint, QTimer, QRect
 from PyQt6.QtGui import QFont, QRegion
 from datetime import datetime
 from core.hot_reload import reload_module
+from ui.base_window import BaseWindow
 import sys
 import ctypes
 
-class DebugWindow(QWidget):
+class DebugWindow(BaseWindow):
     """Debug window showing tool conversations"""
 
     def __init__(self, controller):
@@ -30,15 +31,8 @@ class DebugWindow(QWidget):
             'system': True
         }
 
-        # Window dragging state
-        self.dragging = False
-        self.drag_position = QPoint()
-        self.resizing = False
-        self.resize_edge = None
-        self.resize_start_geometry = None
-        self.resize_timer = QTimer()
-        self.resize_timer.setSingleShot(True)
-        self.resize_timer.timeout.connect(self.save_window_geometry)
+        # Window chrome state
+        self._init_chrome_state()
 
         self.setMouseTracking(True)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover)
@@ -247,6 +241,30 @@ class DebugWindow(QWidget):
         filter_layout.addWidget(self.system_checkbox)
 
         filter_layout.addStretch()
+
+        # System Prompt viewer button
+        sys_prompt_btn = QPushButton("📋 View System Prompt")
+        sys_prompt_btn.setStyleSheet("""
+            QPushButton {
+                background: #111;
+                border: 1px solid #00aa00;
+                border-radius: 5px;
+                color: #00cc00;
+                font-size: 9pt;
+                padding: 3px 10px;
+            }
+            QPushButton:hover {
+                background: #1a2a1a;
+                border-color: #00ff00;
+                color: #00ff00;
+            }
+            QPushButton:pressed {
+                background: #0a150a;
+            }
+        """)
+        sys_prompt_btn.setToolTip("Show the full system prompt that will be sent to the API (base + all loaded skills)")
+        sys_prompt_btn.clicked.connect(self.show_system_prompt)
+        filter_layout.addWidget(sys_prompt_btn)
         content_layout.addLayout(filter_layout)
 
         # Debug display
@@ -295,6 +313,7 @@ class DebugWindow(QWidget):
             ("tool_manager.py",        "core.tool_manager",              "_post_noop"),
             ("memory_manager.py",      "core.memory_manager",            "_post_noop"),
             ("skill_manager.py",       "core.skill_manager",             "_post_noop"),
+            ("base_window.py",         "ui.base_window",                 "_post_noop"),
             ("ai_engine.py",           "core.ai_engine",                 None),   # None = disabled
             ("controller.py",          "core.controller",                None),   # None = disabled
         ]
@@ -616,6 +635,108 @@ class DebugWindow(QWidget):
 
         widgets['btn'].setEnabled(True)
 
+    def show_system_prompt(self):
+        """Open a popup showing the full effective system prompt (base + loaded skills)."""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QTextEdit, QPushButton, QLabel
+        from PyQt6.QtGui import QClipboard
+        from PyQt6.QtWidgets import QApplication
+
+        try:
+            prompt = self.controller.ai._get_effective_system_prompt()
+        except Exception as e:
+            prompt = f"[Error retrieving system prompt: {e}]"
+
+        char_count = len(prompt)
+        token_estimate = char_count // 4  # rough estimate
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Full System Prompt")
+        dlg.setMinimumSize(760, 600)
+        dlg.setStyleSheet("""
+            QDialog {
+                background-color: #111;
+            }
+            QLabel {
+                color: #00ff00;
+            }
+        """)
+
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(14, 14, 14, 14)
+        lay.setSpacing(8)
+
+        # Header
+        header = QLabel(
+            f"📋  Full Effective System Prompt  —  "
+            f"{char_count:,} chars  ·  ~{token_estimate:,} tokens est."
+        )
+        header.setStyleSheet("color: #00ff00; font-size: 11pt; font-weight: bold;")
+        lay.addWidget(header)
+
+        sub = QLabel("Base system prompt + all currently loaded skills (frontmatter stripped), exactly as sent to the API.")
+        sub.setStyleSheet("color: #666; font-size: 9pt;")
+        lay.addWidget(sub)
+
+        # Text view
+        txt = QTextEdit()
+        txt.setReadOnly(True)
+        txt.setPlainText(prompt)
+        txt.setStyleSheet("""
+            QTextEdit {
+                background-color: #0a0a0a;
+                border: 1px solid #00ff00;
+                border-radius: 5px;
+                padding: 10px;
+                font-family: 'Courier New', monospace;
+                font-size: 9pt;
+                color: #ccffcc;
+                line-height: 1.4;
+            }
+        """)
+        lay.addWidget(txt)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+
+        copy_btn = QPushButton("📋 Copy to Clipboard")
+        copy_btn.setStyleSheet("""
+            QPushButton {
+                background: #161616;
+                border: 1px solid #2a4a2a;
+                border-radius: 5px;
+                color: #00cc00;
+                font-size: 10pt;
+                padding: 6px 16px;
+            }
+            QPushButton:hover { background: #1a2a1a; border-color: #00ff00; color: #00ff00; }
+        """)
+        def _copy():
+            QApplication.clipboard().setText(prompt)
+            copy_btn.setText("✅ Copied!")
+            QTimer.singleShot(2000, lambda: copy_btn.setText("📋 Copy to Clipboard"))
+        copy_btn.clicked.connect(_copy)
+
+        close_btn = QPushButton("Close")
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: 1px solid #333;
+                border-radius: 5px;
+                color: #888;
+                font-size: 10pt;
+                padding: 6px 16px;
+            }
+            QPushButton:hover { border-color: #888; color: #ccc; }
+        """)
+        close_btn.clicked.connect(dlg.accept)
+
+        btn_row.addWidget(copy_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(close_btn)
+        lay.addLayout(btn_row)
+
+        dlg.exec()
+
     def update_filter(self, filter_type, enabled):
         """NEW: Update filter state"""
         self.filters[filter_type] = enabled
@@ -694,149 +815,3 @@ class DebugWindow(QWidget):
                     self.cmd_toggle_btn.setToolTip("Hide CMD window")
         except Exception as e:
             self.add_message("system", f"Error toggling CMD: {e}")
-
-    def apply_rounded_mask(self):
-        """Apply rounded corners mask"""
-        from PyQt6.QtGui import QPainterPath
-        from PyQt6.QtCore import QRectF
-
-        path = QPainterPath()
-        path.addRoundedRect(QRectF(self.rect()), 12, 12)
-        region = QRegion(path.toFillPolygon().toPolygon())
-        self.setMask(region)
-
-    def resizeEvent(self, event):
-        """Handle window resize"""
-        super().resizeEvent(event)
-        self.apply_rounded_mask()
-        if hasattr(self, 'resize_handles'):
-            self.position_resize_handles()
-        if hasattr(self, 'resize_timer'):
-            self.resize_timer.stop()
-            self.resize_timer.start(1000)
-
-    def save_window_geometry(self):
-        """Save window geometry - placeholder for future implementation"""
-        pass
-
-    def toggle_maximize(self):
-        """Toggle maximize/restore"""
-        if self.isMaximized():
-            self.showNormal()
-            self.maximize_btn.setText("□")
-        else:
-            self.showMaximized()
-            self.maximize_btn.setText("❐")
-
-    def header_mouse_press(self, event):
-        """Handle mouse press on header for dragging"""
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.dragging = True
-            self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            event.accept()
-
-    def header_mouse_move(self, event):
-        """Handle mouse move on header for dragging"""
-        if self.dragging:
-            self.move(event.globalPosition().toPoint() - self.drag_position)
-            event.accept()
-
-    def header_mouse_release(self, event):
-        """Handle mouse release"""
-        self.dragging = False
-        event.accept()
-
-    def create_resize_handles(self):
-        """Create invisible resize handles around window edges"""
-        handle_size = 8
-        corner_size = 16
-
-        self.resize_handles = {}
-
-        edges = {
-            'top': (0, 0, 0, handle_size, Qt.CursorShape.SizeVerCursor),
-            'bottom': (0, 0, 0, handle_size, Qt.CursorShape.SizeVerCursor),
-            'left': (0, 0, handle_size, 0, Qt.CursorShape.SizeHorCursor),
-            'right': (0, 0, handle_size, 0, Qt.CursorShape.SizeHorCursor),
-        }
-
-        for edge_name, (l, t, w, h, cursor) in edges.items():
-            handle = QFrame(self)
-            handle.setStyleSheet("background-color: transparent;")
-            handle.setCursor(cursor)
-            handle.edge_type = edge_name
-            handle.installEventFilter(self)
-            self.resize_handles[edge_name] = handle
-            handle.raise_()
-
-        corners = {
-            'top-left': (0, 0, corner_size, corner_size, Qt.CursorShape.SizeFDiagCursor),
-            'top-right': (0, 0, corner_size, corner_size, Qt.CursorShape.SizeBDiagCursor),
-            'bottom-left': (0, 0, corner_size, corner_size, Qt.CursorShape.SizeBDiagCursor),
-            'bottom-right': (0, 0, corner_size, corner_size, Qt.CursorShape.SizeFDiagCursor),
-        }
-
-        for corner_name, (l, t, w, h, cursor) in corners.items():
-            handle = QFrame(self)
-            handle.setStyleSheet("background-color: transparent;")
-            handle.setCursor(cursor)
-            handle.edge_type = corner_name
-            handle.installEventFilter(self)
-            self.resize_handles[corner_name] = handle
-            handle.raise_()
-
-        self.position_resize_handles()
-
-    def position_resize_handles(self):
-        """Position resize handles based on window size"""
-        w = self.width()
-        h = self.height()
-        handle_size = 8
-        corner_size = 16
-        header_height = 50
-
-        self.resize_handles['top'].setGeometry(corner_size, header_height, w - 2 * corner_size, handle_size)
-        self.resize_handles['bottom'].setGeometry(corner_size, h - handle_size, w - 2 * corner_size, handle_size)
-        self.resize_handles['left'].setGeometry(0, corner_size, handle_size, h - 2 * corner_size)
-        self.resize_handles['right'].setGeometry(w - handle_size, corner_size, handle_size, h - 2 * corner_size)
-
-        self.resize_handles['top-left'].setGeometry(0, header_height, corner_size, corner_size)
-        self.resize_handles['top-right'].setGeometry(w - corner_size, header_height, corner_size, corner_size)
-        self.resize_handles['bottom-left'].setGeometry(0, h - corner_size, corner_size, corner_size)
-        self.resize_handles['bottom-right'].setGeometry(w - corner_size, h - corner_size, corner_size, corner_size)
-
-    def eventFilter(self, obj, event):
-        """Handle resize handle events"""
-        if hasattr(obj, 'edge_type'):
-            if event.type() == event.Type.MouseButtonPress:
-                if event.button() == Qt.MouseButton.LeftButton:
-                    self.resizing = True
-                    self.resize_edge = obj.edge_type
-                    self.resize_start_geometry = self.geometry()
-                    self.resize_start_pos = event.globalPosition().toPoint()
-                    return True
-
-            elif event.type() == event.Type.MouseButtonRelease:
-                if self.resizing:
-                    self.resizing = False
-                    self.resize_edge = None
-                    return True
-
-            elif event.type() == event.Type.MouseMove and self.resizing:
-                delta = event.globalPosition().toPoint() - self.resize_start_pos
-                new_geo = QRect(self.resize_start_geometry)
-
-                if 'left' in self.resize_edge:
-                    new_geo.setLeft(self.resize_start_geometry.left() + delta.x())
-                if 'right' in self.resize_edge:
-                    new_geo.setRight(self.resize_start_geometry.right() + delta.x())
-                if 'top' in self.resize_edge:
-                    new_geo.setTop(self.resize_start_geometry.top() + delta.y())
-                if 'bottom' in self.resize_edge:
-                    new_geo.setBottom(self.resize_start_geometry.bottom() + delta.y())
-
-                if new_geo.width() >= self.minimumWidth() and new_geo.height() >= self.minimumHeight():
-                    self.setGeometry(new_geo)
-                return True
-
-        return super().eventFilter(obj, event)

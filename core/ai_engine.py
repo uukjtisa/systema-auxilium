@@ -1,13 +1,11 @@
 """
 AI Engine - Handles AI interactions
-REFACTORED: Provider-specific generate/continue_work_mode methods merged into
-            unified _call_provider() + thin HTTP helpers (_http_anthropic,
-            _http_gemini, _http_puter).  All callers (generate_response,
-            generate_response_with_image, continue_work_mode,
-            send_post_exit_prompt) now share one code-path.
+UNIFIED: Single _build_messages() for all providers. Each _http_* helper
+         converts the standard message format to its provider's requirements.
+         Anthropic uses the `anthropic` SDK, Gemini uses `google-genai` SDK,
+         Puter uses raw HTTP to the local puter_server.
 """
 
-import requests
 from core.logger import _make_logger, _NoOpLogger
 from core.tool_manager import ToolManager
 from core.memory_manager import get_memory_manager
@@ -15,7 +13,6 @@ from core.global_instructions import (
     get_system_prompt,
     POST_EXIT_PROMPT,
     POST_EXIT_PROMPT_VOICE,
-    get_gemini_system_prompt
 )
 
 
@@ -23,6 +20,12 @@ from core.global_instructions import (
 _verbose = True
 log = _make_logger("AIEngine") if _verbose else _NoOpLogger()
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Priming acknowledgement prepended to every conversation as an assistant turn
+_ASSISTANT_PRIMING = (
+    "I understand. I will use My Work Environment when I need to complete "
+    "complex tasks or need information, and Execute Single commands for quick actions."
+)
 
 
 class AIEngine:
@@ -81,19 +84,37 @@ class AIEngine:
 
         # Provider settings
         self.ai_provider = 'anthropic'
+        self.anthropic_model = 'claude-sonnet-4-5-20250929'
         self.puter_model = 'gpt-4o-mini'
-        self.gemini_model = 'gemini-2.0-flash-exp'
+        self.gemini_model = 'gemini-2.5-flash'
+
+        # Anthropic generation params
+        self.anthropic_temperature = 1.0     # 0.0-1.0 (Anthropic range)
+        self.anthropic_max_tokens  = 8192    # manual value when auto is off
+        self.anthropic_auto_tokens = True    # auto-scale max_tokens
+
+        # Gemini generation params
+        self.gemini_temperature  = 1.0       # 0.0-2.0 (Gemini range)
+        self.gemini_max_tokens   = 8192
+        self.gemini_auto_tokens  = True
+        self.gemini_top_p        = None      # None = use API default
+        self.gemini_top_k        = None      # None = use API default
 
         self.tts_provider = 'edge-tts'
         self.puter_tts_model = 'tts-1'
         self.puter_tts_voice = None
         self.puter_timeout = 30
 
-        # API endpoints
-        self.anthropic_api_url = "https://api.anthropic.com/v1/messages"
-        self.gemini_api_url_template = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        # Manual provider — set by controller to a callable that blocks until
+        # the user types a response.  Signature:
+        #   fn(context: str, work_mode: bool, work_output: str) -> str | None
+        self.manual_response_fn = None
+
+        # Custom script provider — path to user's .py file
+        self.custom_script_path = ""
 
         log.info(f"[AIEngine.__init__] ── Initialization complete | provider='{self.ai_provider}' | "
+                 f"anthropic_model='{self.anthropic_model}' | "
                  f"puter_model='{self.puter_model}' | gemini_model='{self.gemini_model}' | "
                  f"timeout={self.puter_timeout}s ──")
 
@@ -143,10 +164,21 @@ class AIEngine:
                  f"length={len(self.system_prompt)} chars")
 
     def _render_active_skills(self) -> str:
-        """Build the skill injection block appended to the system prompt."""
+        """Build the skill injection block appended to the system prompt.
+
+        Format sent to the API:
+            SKILL: media-converter
+            <instructions — frontmatter stripped>
+
+            SKILL: another-skill
+            <instructions — frontmatter stripped>
+        """
         active = self.skill_manager.get_loaded_skills() if self.skill_manager else {}
         if not active:
             return ""
+
+        from core.skill_manager import SkillManager
+
         lines = [
             "",
             "═══════════════════════════════════════════════════════════",
@@ -154,8 +186,9 @@ class AIEngine:
             "═══════════════════════════════════════════════════════════",
         ]
         for name, content in active.items():
-            lines.append(f"\n── SKILL: {name} ──────────────────────────────────────")
-            lines.append(content.strip())
+            instructions = SkillManager.strip_frontmatter(content)
+            lines.append(f"\nSKILL: {name}")
+            lines.append(instructions)
         lines.append("═══════════════════════════════════════════════════════════")
         return "\n".join(lines)
 
@@ -172,6 +205,11 @@ class AIEngine:
         self.api_key = api_key
         self.log("Anthropic API key updated")
 
+    def set_anthropic_model(self, model):
+        log.info(f"[AIEngine.set_anthropic_model] Anthropic model: '{self.anthropic_model}' → '{model}'")
+        self.anthropic_model = model
+        self.log(f"Anthropic model set to: {model}")
+
     def set_gemini_api_key(self, api_key):
         log.info("[AIEngine.set_gemini_api_key] Gemini API key updated")
         self.gemini_api_key = api_key
@@ -182,6 +220,11 @@ class AIEngine:
         self.ai_provider = provider
         self.log(f"AI provider set to: {provider}")
 
+    def set_custom_script_path(self, path):
+        log.info(f"[AIEngine.set_custom_script_path] path → '{path}'")
+        self.custom_script_path = path
+        self.log(f"Custom script path set to: {path}")
+
     def set_puter_model(self, model):
         log.info(f"[AIEngine.set_puter_model] Puter model: '{self.puter_model}' → '{model}'")
         self.puter_model = model
@@ -191,6 +234,52 @@ class AIEngine:
         log.info(f"[AIEngine.set_gemini_model] Gemini model: '{self.gemini_model}' → '{model}'")
         self.gemini_model = model
         self.log(f"Gemini model set to: {model}")
+
+    # ── Generation-parameter setters ──────────────────────────────────────────
+
+    def set_anthropic_temperature(self, value):
+        self.anthropic_temperature = float(value)
+        log.debug(f"[AIEngine] anthropic_temperature → {self.anthropic_temperature}")
+
+    def set_anthropic_max_tokens(self, value):
+        self.anthropic_max_tokens = int(value)
+        log.debug(f"[AIEngine] anthropic_max_tokens → {self.anthropic_max_tokens}")
+
+    def set_anthropic_auto_tokens(self, enabled):
+        self.anthropic_auto_tokens = bool(enabled)
+        log.debug(f"[AIEngine] anthropic_auto_tokens → {self.anthropic_auto_tokens}")
+
+    def set_gemini_temperature(self, value):
+        self.gemini_temperature = float(value)
+        log.debug(f"[AIEngine] gemini_temperature → {self.gemini_temperature}")
+
+    def set_gemini_max_tokens(self, value):
+        self.gemini_max_tokens = int(value)
+        log.debug(f"[AIEngine] gemini_max_tokens → {self.gemini_max_tokens}")
+
+    def set_gemini_auto_tokens(self, enabled):
+        self.gemini_auto_tokens = bool(enabled)
+        log.debug(f"[AIEngine] gemini_auto_tokens → {self.gemini_auto_tokens}")
+
+    def set_gemini_top_p(self, value):
+        self.gemini_top_p = float(value) if value is not None else None
+        log.debug(f"[AIEngine] gemini_top_p → {self.gemini_top_p}")
+
+    def set_gemini_top_k(self, value):
+        self.gemini_top_k = int(value) if value is not None else None
+        log.debug(f"[AIEngine] gemini_top_k → {self.gemini_top_k}")
+
+    def _calc_auto_max_tokens(self, model_max: int) -> int:
+        """Estimate a smart max_tokens based on current conversation size.
+        Targets leaving enough tokens for a solid reply without hitting limits."""
+        # Rough token count: ~4 chars per token
+        total_chars = sum(len(m.get('content', '')) for m in self.conversation_history)
+        total_chars += len(self._get_effective_system_prompt())
+        used_tokens = total_chars // 4
+        # Leave at least 1024 for a short response, up to model_max
+        headroom = max(model_max - used_tokens - 512, 1024)
+        # But cap at a sensible ceiling so we don't request absurd amounts
+        return min(headroom, model_max)
 
     def set_tts_provider(self, provider):
         log.info(f"[AIEngine.set_tts_provider] TTS provider: '{self.tts_provider}' → '{provider}'")
@@ -223,19 +312,13 @@ class AIEngine:
             self.log_callback(message, level)
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # MESSAGE BUILDERS  (one per provider format)
+    # MESSAGE BUILDER  (unified — OpenAI-compatible format)
+    # Each _http_* helper converts this standard format to its own API shape.
     # ═══════════════════════════════════════════════════════════════════════════
 
-    def _build_messages(self):
-        """Build Anthropic-format message list from conversation history."""
-        log.debug(f"[AIEngine._build_messages] Building Anthropic message list | "
-                  f"history_len={len(self.conversation_history)}")
-        messages = [
-            {'role': 'system', 'content': self._get_effective_system_prompt()},
-            {'role': 'assistant',
-             'content': 'I understand. I will use My Work Environment when I need to complete complex tasks or need information, and Execute Single commands for quick actions.'}
-        ]
-
+    def _get_history_with_memory(self) -> list:
+        """Return conversation_history with pending memory context injected
+        immediately before the most recent user message (if any)."""
         history_copy = list(self.conversation_history)
         if self._pending_memory_context and history_copy:
             insert_at = None
@@ -248,167 +331,165 @@ class AIEngine:
                     'role': 'system',
                     'content': self._pending_memory_context
                 })
+        return history_copy
 
-        messages.extend(history_copy)
+    def _build_messages(self):
+        """Build unified standard message list (OpenAI-compatible format).
+        Structure: [{role: system/assistant/user, content: str}, ...]
+        All three provider http-helpers consume this and convert as needed."""
+        log.debug(f"[AIEngine._build_messages] Building message list | "
+                  f"history_len={len(self.conversation_history)}")
+        messages = [
+            {'role': 'system',    'content': self._get_effective_system_prompt()},
+            {'role': 'assistant', 'content': _ASSISTANT_PRIMING}
+        ]
+        messages.extend(self._get_history_with_memory())
         log.debug(f"[AIEngine._build_messages] Built {len(messages)} total messages")
         return messages
 
-    def _build_gemini_messages(self):
-        """Build Gemini-format message list from conversation history."""
-        log.debug(f"[AIEngine._build_gemini_messages] Building Gemini message list | "
-                  f"history_len={len(self.conversation_history)}")
-        messages = []
-
-        gemini_prompt = get_gemini_system_prompt(self.system_info, self.voice_mode, self.elevenlabs_enabled)
-        active_skills_block = self._render_active_skills()
-        if active_skills_block:
-            gemini_prompt = gemini_prompt + active_skills_block
-
-        messages.append({
-            "parts": [{"text": gemini_prompt}],
-            "role": "system"
-        })
-        messages.append({
-            "parts": [{"text": 'I understand. I will use My Work Environment when I need to complete complex tasks or need information, and Execute Single commands for quick actions.'}],
-            "role": "model"
-        })
-
-        history_copy = list(self.conversation_history)
-        if self._pending_memory_context and history_copy:
-            insert_at = None
-            for i in range(len(history_copy) - 1, -1, -1):
-                if history_copy[i]['role'] == 'user':
-                    insert_at = i
-                    break
-            if insert_at is not None:
-                history_copy.insert(insert_at, {
-                    'role': 'system',
-                    'content': self._pending_memory_context
-                })
-
-        for msg in history_copy:
-            role = "model" if msg['role'] == 'assistant' else "user"
-            messages.append({
-                "parts": [{"text": msg['content']}],
-                "role": role
-            })
-
-        log.debug(f"[AIEngine._build_gemini_messages] Built {len(messages)} total messages")
-        return messages
-
-    def _build_puter_messages(self):
-        """Build Puter.js-format message list from conversation history."""
-        log.debug(f"[AIEngine._build_puter_messages] Building Puter message list | "
-                  f"history_len={len(self.conversation_history)}")
-        messages = [
-            {"role": "system", "content": self._get_effective_system_prompt()},
-            {"role": "assistant",
-             "content": "I understand. I will use My Work Environment when I need to complete complex tasks or need information, and Execute Single commands for quick actions."}
-        ]
-
-        history_copy = list(self.conversation_history)
-        if self._pending_memory_context and history_copy:
-            insert_at = None
-            for i in range(len(history_copy) - 1, -1, -1):
-                if history_copy[i]['role'] == 'user':
-                    insert_at = i
-                    break
-            if insert_at is not None:
-                history_copy.insert(insert_at, {
-                    'role': 'system',
-                    'content': self._pending_memory_context
-                })
-
-        for msg in history_copy:
-            messages.append({"role": msg['role'], "content": msg['content']})
-
-        log.debug(f"[AIEngine._build_puter_messages] Built {len(messages)} total messages")
-        return messages
-
     # ═══════════════════════════════════════════════════════════════════════════
-    # THIN HTTP HELPERS  (one per provider)
+    # THIN HTTP HELPERS  (one per provider — convert unified format as needed)
     # ═══════════════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _extract_system_and_convo(messages):
+        """Split unified message list into (system_prompt, conversation_list).
+        The first 'system' role becomes the system prompt string.
+        Any subsequent 'system' role messages are wrapped as user turns.
+        Consecutive messages of the same role are merged (required by Anthropic)."""
+        system_prompt = None
+        convo = []
+        for msg in messages:
+            role, content = msg['role'], msg['content']
+            if role == 'system':
+                if system_prompt is None:
+                    system_prompt = content
+                else:
+                    # Inject as a user message so the conversation stays valid
+                    convo.append({'role': 'user', 'content': f'[SYSTEM]: {content}'})
+            else:
+                convo.append({'role': role, 'content': content})
+
+        # Merge consecutive same-role turns (Anthropic & Gemini both require alternation)
+        merged = []
+        for msg in convo:
+            if merged and merged[-1]['role'] == msg['role']:
+                merged[-1]['content'] += '\n' + msg['content']
+            else:
+                merged.append(dict(msg))
+
+        return system_prompt, merged
 
     def _http_anthropic(self, messages) -> str | None:
-        """Make an Anthropic API call. Returns raw text or None on failure."""
-        log.debug(f"[AIEngine._http_anthropic] Sending request | messages={len(messages)} | "
-                  f"timeout={self.puter_timeout}s")
+        """Make an Anthropic API call using the official SDK.
+        Respects anthropic_temperature, anthropic_max_tokens, anthropic_auto_tokens."""
+        log.debug(f"[AIEngine._http_anthropic] model='{self.anthropic_model}' | "
+                  f"messages={len(messages)} | temp={self.anthropic_temperature} | "
+                  f"auto_tokens={self.anthropic_auto_tokens}")
         try:
-            headers = {
-                "Content-Type": "application/json",
-                "anthropic-version": "2023-06-01"
-            }
-            if self.api_key:
-                headers["x-api-key"] = self.api_key
-
-            response = requests.post(
-                self.anthropic_api_url,
-                headers=headers,
-                json={"model": "claude-sonnet-4-20250514", "max_tokens": 2000, "messages": messages},
-                timeout=self.puter_timeout
-            )
-            log.debug(f"[AIEngine._http_anthropic] Status: {response.status_code}")
-
-            if response.status_code == 200:
-                text = response.json()['content'][0]['text']
-                log.info(f"[AIEngine._http_anthropic] ✓ Response received | length={len(text)} chars")
-                return text
-            else:
-                log.error(f"[AIEngine._http_anthropic] ✗ HTTP {response.status_code}")
-                self.log(f"API Error: {response.status_code}", "ERROR")
+            if not self.api_key:
+                log.error("[AIEngine._http_anthropic] ✗ No Anthropic API key")
+                self.log("Anthropic API key is not set", "ERROR")
                 return None
+
+            import anthropic
+            client = anthropic.Anthropic(api_key=self.api_key)
+
+            system_prompt, convo = self._extract_system_and_convo(messages)
+
+            # Resolve max_tokens
+            model_max = 64000  # safe ceiling; Anthropic SDK will cap to model limit
+            max_tokens = (self._calc_auto_max_tokens(model_max)
+                          if self.anthropic_auto_tokens
+                          else self.anthropic_max_tokens)
+            max_tokens = max(256, max_tokens)
+
+            log.debug(f"[AIEngine._http_anthropic] max_tokens={max_tokens} | ")
+
+            kwargs = {
+                'model':       self.anthropic_model,
+                'max_tokens':  max_tokens,
+                'messages':    convo,
+                'temperature': self.anthropic_temperature,
+            }
+            if system_prompt:
+                kwargs['system'] = system_prompt
+
+            response = client.messages.create(**kwargs)
+            text = response.content[0].text
+            log.info(f"[AIEngine._http_anthropic] ✓ Response | length={len(text)} chars")
+            return text
 
         except Exception as e:
             log.error(f"[AIEngine._http_anthropic] ✗ {type(e).__name__}: {e}")
-            self.log(f"Error: {e}", "ERROR")
+            self.log(f"Anthropic error: {e}", "ERROR")
             return None
 
     def _http_gemini(self, messages) -> str | None:
-        """Make a Gemini API call. Returns raw text or None on failure."""
-        log.debug(f"[AIEngine._http_gemini] Sending request | model='{self.gemini_model}' | "
-                  f"messages={len(messages)} | timeout={self.puter_timeout}s")
+        """Make a Gemini API call using the google-genai SDK.
+        Respects gemini_temperature, gemini_max_tokens, gemini_auto_tokens, top_p, top_k."""
+        log.debug(f"[AIEngine._http_gemini] model='{self.gemini_model}' | "
+                  f"messages={len(messages)} | temp={self.gemini_temperature} | "
+                  f"auto_tokens={self.gemini_auto_tokens}")
         try:
             if not self.gemini_api_key:
                 log.error("[AIEngine._http_gemini] ✗ No Gemini API key")
+                self.log("Gemini API key is not set", "ERROR")
                 return None
 
-            api_url = self.gemini_api_url_template.format(model=self.gemini_model)
-            headers = {
-                "Content-Type": "application/json",
-                "x-goog-api-key": self.gemini_api_key
+            from google import genai
+            from google.genai import types as genai_types
+
+            client = genai.Client(api_key=self.gemini_api_key)
+            system_prompt, convo = self._extract_system_and_convo(messages)
+
+            # Convert to Gemini contents format: role 'assistant' → 'model'
+            contents = []
+            for msg in convo:
+                gemini_role = 'model' if msg['role'] == 'assistant' else 'user'
+                contents.append({
+                    'role':  gemini_role,
+                    'parts': [{'text': msg['content']}]
+                })
+
+            # Resolve max_output_tokens
+            model_max = 65536
+            max_out = (self._calc_auto_max_tokens(model_max)
+                       if self.gemini_auto_tokens
+                       else self.gemini_max_tokens)
+            max_out = max(256, max_out)
+
+            config_kwargs = {
+                'max_output_tokens': max_out,
+                'temperature':       self.gemini_temperature,
             }
+            if system_prompt:
+                config_kwargs['system_instruction'] = system_prompt
+            if self.gemini_top_p is not None:
+                config_kwargs['top_p'] = self.gemini_top_p
+            if self.gemini_top_k is not None:
+                config_kwargs['top_k'] = self.gemini_top_k
 
-            response = requests.post(
-                api_url,
-                headers=headers,
-                json={"contents": messages},
-                timeout=self.puter_timeout
+            log.debug(f"[AIEngine._http_gemini] config={config_kwargs}")
+
+            response = client.models.generate_content(
+                model=self.gemini_model,
+                contents=contents,
+                config=genai_types.GenerateContentConfig(**config_kwargs),
             )
-            log.debug(f"[AIEngine._http_gemini] Status: {response.status_code}")
-
-            if response.status_code == 200:
-                data = response.json()
-                if 'candidates' in data and len(data['candidates']) > 0:
-                    parts = data['candidates'][0]['content']['parts']
-                    text = ''.join(part.get('text', '') for part in parts)
-                    log.info(f"[AIEngine._http_gemini] ✓ Response received | length={len(text)} chars")
-                    return text
-                log.warning("[AIEngine._http_gemini] ✗ Unexpected response format")
-                return None
-            else:
-                log.error(f"[AIEngine._http_gemini] ✗ HTTP {response.status_code}")
-                self.log(f"Gemini API Error: {response.status_code}", "ERROR")
-                return None
+            text = response.text
+            log.info(f"[AIEngine._http_gemini] ✓ Response | length={len(text)} chars")
+            return text
 
         except Exception as e:
             log.error(f"[AIEngine._http_gemini] ✗ {type(e).__name__}: {e}")
-            self.log(f"Gemini Error: {e}", "ERROR")
+            self.log(f"Gemini error: {e}", "ERROR")
             return None
 
     def _http_puter(self, messages, image=None) -> str | None:
-        """Make a Puter.js API call. Returns raw text or None on failure.
-        The puter_server.send_chat_request handles image upload internally."""
-        log.debug(f"[AIEngine._http_puter] Sending request | model='{self.puter_model}' | "
+        """Make a Puter.js API call via the local puter server.
+        Messages are already in OpenAI-compatible format — no conversion needed."""
+        log.debug(f"[AIEngine._http_puter] model='{self.puter_model}' | "
                   f"messages={len(messages)} | has_image={image is not None} | timeout={self.puter_timeout}s")
         try:
             if not self.puter_server:
@@ -424,12 +505,10 @@ class AIEngine:
                 image=image,
                 timeout=self.puter_timeout
             )
-
             if result:
-                log.info(f"[AIEngine._http_puter] ✓ Response received | length={len(result)} chars")
+                log.info(f"[AIEngine._http_puter] ✓ Response | length={len(result)} chars")
             else:
                 log.error("[AIEngine._http_puter] ✗ No response from Puter server")
-
             return result
 
         except Exception as e:
@@ -441,17 +520,106 @@ class AIEngine:
     # UNIFIED PROVIDER DISPATCHER
     # ═══════════════════════════════════════════════════════════════════════════
 
+    def _http_manual(self) -> str | None:
+        """Manual provider — blocks the worker thread until the user submits a response.
+
+        Shows the side panel whenever the most-recently appended history entry has
+        role='system' (covers work-mode output, post-exit prompt, and any other
+        system injection).  The panel displays the FULL system message so the user
+        can see exactly what the real model would have received.
+        """
+        if not self.manual_response_fn:
+            log.error("[AIEngine._http_manual] manual_response_fn not set")
+            return None
+
+        # Walk back through history to find what was just injected
+        has_system_msg = False
+        system_content = ""
+        context = ""
+
+        for entry in reversed(self.conversation_history):
+            role = entry.get('role', '')
+            content = entry.get('content', '')
+            if role == 'system' and not has_system_msg:
+                # First system entry from the end — this is what the AI would see
+                has_system_msg = True
+                system_content = content
+            elif role == 'user' and not context:
+                context = content
+            if has_system_msg and context:
+                break
+
+        log.info(f"[AIEngine._http_manual] Requesting manual response | "
+                 f"has_system_msg={has_system_msg} | context_len={len(context)}")
+        result = self.manual_response_fn(context, has_system_msg, system_content)
+        if result is None:
+            log.warning("[AIEngine._http_manual] User cancelled manual response")
+            return None
+        log.info(f"[AIEngine._http_manual] Got manual response | length={len(result)}")
+        return result
+
+    def _http_custom_script(self, messages) -> str | None:
+        """Custom script provider — reimports the user's .py file on every call
+        and invokes its chat(system_prompt, messages) function."""
+        import importlib.util, traceback
+
+        if not self.custom_script_path:
+            log.error("[AIEngine._http_custom_script] ✗ No custom script path set")
+            self.log("Custom script path is not set", "ERROR")
+            return None
+
+        import os
+        if not os.path.isfile(self.custom_script_path):
+            log.error(f"[AIEngine._http_custom_script] ✗ File not found: '{self.custom_script_path}'")
+            self.log(f"Custom script not found: {self.custom_script_path}", "ERROR")
+            return None
+
+        try:
+            spec = importlib.util.spec_from_file_location("custom_provider", self.custom_script_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        except Exception as e:
+            log.error(f"[AIEngine._http_custom_script] ✗ Failed to load script: {e}\n{traceback.format_exc()}")
+            self.log(f"Custom script load error: {e}", "ERROR")
+            return None
+
+        if not hasattr(module, 'chat') or not callable(module.chat):
+            log.error("[AIEngine._http_custom_script] ✗ Script has no callable chat() function")
+            self.log("Custom script must define a chat(system_prompt, messages) function", "ERROR")
+            return None
+
+        system_prompt, convo = self._extract_system_and_convo(messages)
+
+        try:
+            result = module.chat(system_prompt or "", convo)
+        except Exception as e:
+            log.error(f"[AIEngine._http_custom_script] ✗ chat() raised: {e}\n{traceback.format_exc()}")
+            self.log(f"Custom script error: {e}", "ERROR")
+            return None
+
+        if not result or not isinstance(result, str):
+            log.error("[AIEngine._http_custom_script] ✗ chat() returned empty or non-string value")
+            self.log("Custom script chat() must return a non-empty string", "ERROR")
+            return None
+
+        log.info(f"[AIEngine._http_custom_script] ✓ Response | length={len(result)} chars")
+        return result
+
     def _call_provider(self, image=None) -> str | None:
-        """Build messages for the active provider and make the API call.
-        Returns raw AI text, or None on failure.
-        This is the single place that knows about provider differences."""
+        """Build the unified message list, dispatch to the active provider.
+        Returns raw AI text, or None on failure."""
         log.debug(f"[AIEngine._call_provider] provider='{self.ai_provider}' | has_image={image is not None}")
+        messages = self._build_messages()
         if self.ai_provider == 'anthropic':
-            return self._http_anthropic(self._build_messages())
+            return self._http_anthropic(messages)
         elif self.ai_provider == 'gemini':
-            return self._http_gemini(self._build_gemini_messages())
+            return self._http_gemini(messages)
         elif self.ai_provider == 'puter':
-            return self._http_puter(self._build_puter_messages(), image=image)
+            return self._http_puter(messages, image=image)
+        elif self.ai_provider == 'manual':
+            return self._http_manual()
+        elif self.ai_provider == 'custom_script':
+            return self._http_custom_script(messages)
         else:
             log.error(f"[AIEngine._call_provider] Unknown provider: '{self.ai_provider}'")
             return None
@@ -560,12 +728,15 @@ class AIEngine:
         log.debug(f"[AIEngine._get_ai_response_internal] provider='{self.ai_provider}' | "
                   f"prompt_len={len(prompt)} chars")
         try:
+            single_turn = [{'role': 'user', 'content': prompt}]
             if self.ai_provider == 'anthropic':
-                result = self._http_anthropic([{'role': 'user', 'content': prompt}])
+                result = self._http_anthropic(single_turn)
             elif self.ai_provider == 'gemini':
-                result = self._http_gemini([{"parts": [{"text": prompt}], "role": "user"}])
+                result = self._http_gemini(single_turn)
             elif self.ai_provider == 'puter':
-                result = self._http_puter([{"role": "user", "content": prompt}])
+                result = self._http_puter(single_turn)
+            elif self.ai_provider == 'custom_script':
+                result = self._http_custom_script(single_turn)
             else:
                 log.error(f"[AIEngine._get_ai_response_internal] Unknown provider: '{self.ai_provider}'")
                 return f"Error: Unknown provider '{self.ai_provider}'"

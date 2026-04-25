@@ -18,6 +18,7 @@ import os
 import json
 import random
 import socket
+import threading
 from core.logger import _make_logger, _NoOpLogger
 
 
@@ -39,6 +40,10 @@ class AssistantController(QObject):
 
     # NEW SIGNALS FOR VOICE
     voice_message_signal = pyqtSignal(str)
+
+    # Manual provider — fires on the main thread to show the response popup
+    # Only carries display data; result_holder + done_event live on self
+    manual_response_signal = pyqtSignal(str, bool, str)
 
     def __init__(self):
         super().__init__()
@@ -134,12 +139,22 @@ class AssistantController(QObject):
         # Apply settings
         log.debug("[AssistantController.__init__] Applying AI provider settings...")
         self.ai.set_provider(self.settings.get('ai_provider', 'anthropic'))
+        self.ai.set_anthropic_model(self.settings.get('anthropic_model', 'claude-sonnet-4-5-20250929'))
+        self.ai.set_anthropic_temperature(self.settings.get('anthropic_temperature', 1.0))
+        self.ai.set_anthropic_max_tokens(self.settings.get('anthropic_max_tokens', 8192))
+        self.ai.set_anthropic_auto_tokens(self.settings.get('anthropic_auto_tokens', True))
         self.ai.set_puter_model(self.settings.get('puter_model', 'gpt-4o-mini'))
-        self.ai.set_gemini_model(self.settings.get('gemini_model', 'gemini-2.0-flash-exp'))
+        self.ai.set_gemini_model(self.settings.get('gemini_model', 'gemini-2.5-flash'))
+        self.ai.set_gemini_temperature(self.settings.get('gemini_temperature', 1.0))
+        self.ai.set_gemini_max_tokens(self.settings.get('gemini_max_tokens', 8192))
+        self.ai.set_gemini_auto_tokens(self.settings.get('gemini_auto_tokens', True))
+        self.ai.set_gemini_top_p(self.settings.get('gemini_top_p', None))
+        self.ai.set_gemini_top_k(self.settings.get('gemini_top_k', None))
         self.ai.set_tts_provider(self.settings.get('tts_provider', 'edge-tts'))
         self.ai.set_puter_tts_model(self.settings.get('puter_tts_model', 'tts-1'))
         self.ai.set_puter_tts_voice(self.settings.get('puter_tts_voice'))
         self.ai.set_puter_timeout(self.settings.get('puter_timeout', 30))
+        self.ai.set_custom_script_path(self.settings.get('custom_script_path', ''))
         log.debug("[AssistantController.__init__] All AI settings applied")
 
         # Auto-start Puter if selected
@@ -164,6 +179,11 @@ class AssistantController(QObject):
         # Connect voice message signal to handler (main thread safe)
         self.voice_message_signal.connect(self._handle_voice_message_on_main_thread)
         log.debug("[AssistantController.__init__] voice_message_signal connected to main thread handler")
+
+        # Connect manual response signal — shows popup on main thread
+        self.manual_response_signal.connect(self._show_manual_response_window)
+        self.ai.manual_response_fn = self._request_manual_response
+        log.debug("[AssistantController.__init__] manual_response_signal connected")
 
         # SESSION MANAGEMENT - Initialize session manager
         log.debug("[AssistantController.__init__] Initializing SessionManager...")
@@ -199,6 +219,21 @@ class AssistantController(QObject):
         log.info(f"[AssistantController.__init__] ✓ AssistantController ready | "
                  f"provider='{self.ai.ai_provider}' | port={self.free_port} | "
                  f"session='{self.current_session_id}' ──")
+
+    # ── Convenience property ───────────────────────────────────────────────────
+
+    @property
+    def _chat(self):
+        """
+        Return the live ChatWindow instance, or None if it doesn't exist yet.
+
+        Replaces the repetitive guard:
+            if self._chat:
+        with the cleaner:
+            if self._chat:
+                self._chat.some_method()
+        """
+        return getattr(getattr(self, 'ui', None), 'chat_window', None) or None
 
     def _parse_ports(self):
         """
@@ -315,8 +350,17 @@ class AssistantController(QObject):
             'api_key': '',
             'gemini_api_key': '',
             'ai_provider': default_provider,
+            'anthropic_model': 'claude-sonnet-4-5-20250929',
+            'anthropic_temperature': 1.0,
+            'anthropic_max_tokens': 8192,
+            'anthropic_auto_tokens': True,
             'puter_model': 'gpt-4o-mini',
-            'gemini_model': 'gemini-2.0-flash-exp',
+            'gemini_model': 'gemini-2.5-flash',
+            'gemini_temperature': 1.0,
+            'gemini_max_tokens': 8192,
+            'gemini_auto_tokens': True,
+            'gemini_top_p': None,
+            'gemini_top_k': None,
             'voice_input_device': None,
             'voice_output_device': None,
             'voice_tts_provider': default_tts,
@@ -343,6 +387,7 @@ class AssistantController(QObject):
             'memory_max_results': 5,
             'glass_background_enabled': False,
             'glass_background_opacity': 0.75,
+            'custom_script_path': '',
         }
 
     def save_settings(self):
@@ -425,8 +470,8 @@ class AssistantController(QObject):
                               f"has_voice_id={bool(voice_id)}")
 
             # Set up playback callback with null check
-            if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
-                self.voice_handler.on_playback_started = self.ui.chat_window.on_voice_playback_started
+            if self._chat:
+                self.voice_handler.on_playback_started = self._chat.on_voice_playback_started
                 self.log("Voice playback callback wired to chat window", "SUCCESS")
                 log.debug("[AssistantController.enable_voice_mode] Playback callback wired to chat window")
             else:
@@ -486,6 +531,31 @@ class AssistantController(QObject):
             log.error(f"[AssistantController.disable_voice_mode] ✗ Exception: {type(e).__name__}: {e}")
             self.log(f"Error disabling voice: {e}", "ERROR")
 
+    def _request_manual_response(self, context: str, work_mode: bool, work_output: str):
+        """Called from the AIWorker thread — stores result_holder + done_event on
+        self (so they stay as real references), then signals the main thread to
+        show the popup and blocks until the user submits or cancels."""
+        self._manual_result_holder = []
+        self._manual_done_event = threading.Event()
+        # Emit only display data — the window will read result_holder from self
+        self.manual_response_signal.emit(context, work_mode, work_output)
+        # Block the worker thread until the window is dismissed
+        self._manual_done_event.wait()
+        result = self._manual_result_holder[0] if self._manual_result_holder else None
+        return result
+
+    def _show_manual_response_window(self, context, work_mode, work_output):
+        """Slot — always runs on the main thread.  Creates and shows the popup."""
+        from ui.manual_response_window import ManualResponseWindow
+        win = ManualResponseWindow(context, work_mode, work_output,
+                                   self._manual_result_holder,
+                                   self._manual_done_event)
+        # Keep a reference so it isn't garbage-collected before the user responds
+        self._manual_response_win = win
+        win.show()
+        win.raise_()
+        win.activateWindow()
+
     def handle_voice_transcription(self, text):
         """Handle transcribed voice input - SIGNAL VERSION"""
         log.info(f"[AssistantController.handle_voice_transcription] Transcribed: '{text[:80]}'")
@@ -506,7 +576,7 @@ class AssistantController(QObject):
             self.log("Chat window created for voice message buffering")
 
         # Always add to chat window (even if hidden)
-        self.ui.chat_window.add_user_message(text)
+        self._chat.add_user_message(text)
 
         # Send to AI (works whether chat is visible or not)
         log.debug("[AssistantController._handle_voice_message_on_main_thread] → send_message()")
@@ -518,8 +588,8 @@ class AssistantController(QObject):
         self.log(f"Voice state: {state}")
 
         # Update UI
-        if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
-            self.ui.chat_window.update_voice_status(state)
+        if self._chat:
+            self._chat.update_voice_status(state)
 
     def wait_for_voice_completion(self):
         """Wait for current voice playback to complete"""
@@ -822,6 +892,18 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         self.save_settings()
         self.log("Gemini API key updated", "SUCCESS")
 
+    def get_custom_script_path(self):
+        """Get custom script provider path"""
+        return self.settings.get('custom_script_path', '')
+
+    def set_custom_script_path(self, path):
+        """Set custom script provider path"""
+        log.info(f"[AssistantController.set_custom_script_path] path='{path}'")
+        self.settings['custom_script_path'] = path
+        self.ai.set_custom_script_path(path)
+        self.save_settings()
+        self.log(f"Custom script path set to: {path}", "SUCCESS")
+
     def get_ai_provider(self):
         """Get current AI provider"""
         return self.settings.get('ai_provider', 'anthropic')
@@ -857,18 +939,6 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         self.ai.set_puter_model(model)
         self.save_settings()
         self.log(f"Puter model set to: {model}", "SUCCESS")
-
-    def get_gemini_model(self):
-        """Get current Gemini model"""
-        return self.settings.get('gemini_model', 'gemini-2.0-flash-exp')
-
-    def set_gemini_model(self, model):
-        """Set Gemini model"""
-        log.info(f"[AssistantController.set_gemini_model] model='{model}'")
-        self.settings['gemini_model'] = model
-        self.ai.set_gemini_model(model)
-        self.save_settings()
-        self.log(f"Gemini model set to: {model}", "SUCCESS")
 
     def get_debug_mode(self):
         """Get debug mode setting"""
@@ -966,8 +1036,8 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             self.ai.tool_manager.in_work_mode = False
             self.ai.tool_manager.last_work_output = None
             # Show system message
-            if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
-                self.ui.chat_window.add_system_message("⚡️ Tool mode canceled by new message")
+            if self._chat:
+                self._chat.add_system_message("⚡️ Tool mode canceled by new message")
 
         # Prevent overlapping requests
         if self.is_processing:
@@ -1107,21 +1177,21 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         # Show skill loaded/unloaded card in chat
         if result.get('skill_loaded'):
             skill_name = result['skill_loaded']
-            if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
-                self.ui.chat_window.add_skill_card_message(skill_name, loaded=True)
+            if self._chat:
+                self._chat.add_skill_card_message(skill_name, loaded=True)
 
         if result.get('skill_unloaded'):
             skill_name = result['skill_unloaded']
-            if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
-                self.ui.chat_window.add_skill_card_message(skill_name, loaded=False)
+            if self._chat:
+                self._chat.add_skill_card_message(skill_name, loaded=False)
 
         # Check if AI just exited tool mode
         if result.get('exited_work_mode'):
             log.info("[AssistantController.handle_ai_response] AI exited work mode — "
                      "scheduling post-exit prompt in 500ms")
             self.log("AI exited work mode - sending post-exit prompt")
-            if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
-                self.ui.chat_window.add_system_message(
+            if self._chat:
+                self._chat.add_system_message(
                     "🔄 **Work Completed** - AI is now preparing its report..."
                 )
             QTimer.singleShot(500, self.send_post_exit_prompt)
@@ -1232,8 +1302,8 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             self.log("AI exited tool mode - sending post-exit prompt")
             self.work_mode_timer.stop()
             # Show system message FIRST
-            if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
-                self.ui.chat_window.add_system_message(
+            if self._chat:
+                self._chat.add_system_message(
                     "🔄 **Work Completed** - AI is now preparing its report..."
                 )
             # Send post-exit prompt with delay
@@ -1309,10 +1379,10 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             self.is_processing = False
 
             # Notify UI
-            if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
-                self.ui.chat_window.add_system_message("⚡️ **Tool operation canceled**")
-                self.ui.chat_window.hide_thinking()
-                self.ui.chat_window.set_input_enabled(True)
+            if self._chat:
+                self._chat.add_system_message("⚡️ **Tool operation canceled**")
+                self._chat.hide_thinking()
+                self._chat.set_input_enabled(True)
 
             return True
         log.debug("[AssistantController.interrupt_work_mode] Not in work mode — nothing to interrupt")
@@ -1409,7 +1479,8 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         )
 
         if success:
-            self.ui.chat_window.refresh_session_list()
+            if self._chat:
+                self._chat.refresh_session_list()
             log.info(f"[AssistantController._auto_save_session] ✓ Session saved: '{self.current_session_id}'")
             self.log(f"Session auto-saved: {self.current_session_id}")
         else:
@@ -1426,14 +1497,14 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         log.debug("[AssistantController.create_new_session] Clearing AI history...")
         self.ai.clear_history()
 
-        if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
-            self.ui.chat_window.clear_chat_silent()
+        if self._chat:
+            self._chat.clear_chat_silent()
 
         # Refresh UI
-        if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
-            self.ui.chat_window.refresh_session_list()
-            self.ui.chat_window.add_system_message("🆕 **New Session Created**")
-            self.ui.chat_window.warn_loaded_skills_if_any()
+        if self._chat:
+            self._chat.refresh_session_list()
+            self._chat.add_system_message("🆕 **New Session Created**")
+            self._chat.warn_loaded_skills_if_any()
         log.info(f"[AssistantController.create_new_session] ✓ New session ready: '{self.current_session_id}'")
 
     def load_session(self, session_id):
@@ -1463,8 +1534,8 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
                   f"name='{session_data.get('session_name')}' | history={history_len} entries")
 
         # Clear chat UI
-        if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
-            self.ui.chat_window.clear_chat_silent()
+        if self._chat:
+            self._chat.clear_chat_silent()
 
         # Clear AI history
         self.ai.clear_history()
@@ -1475,7 +1546,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         log.debug(f"[AssistantController.load_session] {history_len} messages loaded into AI history")
 
         # Render messages in UI — strip tool call JSON from assistant messages
-        if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
+        if self._chat:
             display_history = []
             for msg in session_data['chat_history']:
                 if msg.get('role') == 'assistant':
@@ -1485,7 +1556,8 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
                     display_history.append({**msg, 'content': cleaned_content})
                 else:
                     display_history.append(msg)
-            self.ui.chat_window.render_loaded_messages(display_history)
+            if self._chat:
+                self._chat.render_loaded_messages(display_history)
             log.debug("[AssistantController.load_session] Messages rendered in UI (tool calls stripped)")
 
         # Update current session
@@ -1505,8 +1577,8 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         if session_id == self.current_session_id:
             log.debug("[AssistantController.delete_session] Deleting active session — clearing UI and creating new")
             # Clear chat
-            if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
-                self.ui.chat_window.clear_chat_silent()
+            if self._chat:
+                self._chat.clear_chat_silent()
 
             # Clear AI history
             self.ai.clear_history()
@@ -1518,9 +1590,9 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             self._create_new_session()
 
             # Refresh UI
-            if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
-                self.ui.chat_window.refresh_session_list()
-                self.ui.chat_window.add_system_message("🗑️ **Session Deleted** - New session created")
+            if self._chat:
+                self._chat.refresh_session_list()
+                self._chat.add_system_message("🗑️ **Session Deleted** - New session created")
             log.info(f"[AssistantController.delete_session] ✓ Active session deleted and replaced")
         else:
             log.debug(f"[AssistantController.delete_session] Deleting non-active session '{session_id}'")
@@ -1528,8 +1600,8 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             self.session_manager.delete_session(session_id)
 
             # Refresh UI
-            if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
-                self.ui.chat_window.refresh_session_list()
+            if self._chat:
+                self._chat.refresh_session_list()
             log.info(f"[AssistantController.delete_session] ✓ Session deleted")
 
     def set_session_name(self, name):
@@ -1548,8 +1620,8 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             self.log(f"Session renamed to: {name}")
 
             # Refresh UI session list
-            if hasattr(self.ui, 'chat_window') and self.ui.chat_window:
-                self.ui.chat_window.refresh_session_list()
+            if self._chat:
+                self._chat.refresh_session_list()
         else:
             log.error(f"[AssistantController.set_session_name] ✗ Failed to rename to '{name}'")
             self.log(f"Failed to rename session", "ERROR")
@@ -1569,1027 +1641,126 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         log.info("[AssistantController.reset_python_interpreter] ✓ Reset complete")
         self.log("Python interpreter reset", "SUCCESS")
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # UNIFIED MODEL MANAGEMENT  (all providers read from core/models.json)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _load_all_models(self):
+        """Load and cache all models from core/models.json once."""
+        if not hasattr(self, '_all_models_cache'):
+            import json
+            models_path = _APP_ROOT / 'core' / 'models.json'
+            try:
+                with open(models_path, encoding='utf-8') as f:
+                    self._all_models_cache = json.load(f)
+                log.debug(f"[AssistantController._load_all_models] Loaded "
+                          f"{len(self._all_models_cache)} models from {models_path}")
+            except Exception as exc:
+                log.error(f"[AssistantController._load_all_models] Failed: {exc}")
+                self._all_models_cache = []
+        return self._all_models_cache
+
+    def get_all_models(self):
+        """Return all models (all providers)."""
+        return self._load_all_models()
+
     def get_puter_models(self):
-        """Get available Puter.js models"""
-        return [
-            # ===== GPT-5.x (Latest) =====
-            {'id': 'gpt-5.2-chat', 'name': 'GPT-5.2 Chat (Recommended)', 'description': 'Latest flagship chat model'},
-            {'id': 'gpt-5.2-pro', 'name': 'GPT-5.2 Pro', 'description': 'Highest capability GPT-5.2'},
-            {'id': 'gpt-5.2', 'name': 'GPT-5.2', 'description': 'Base GPT-5.2 model'},
-
-            {'id': 'gpt-5.1-chat-latest', 'name': 'GPT-5.1 Chat', 'description': 'Stable GPT-5.1 chat model'},
-            {'id': 'gpt-5.1', 'name': 'GPT-5.1', 'description': 'Base GPT-5.1 model'},
-
-            {'id': 'gpt-5-chat-latest', 'name': 'GPT-5 Chat', 'description': 'Original GPT-5 chat model'},
-            {'id': 'gpt-5', 'name': 'GPT-5', 'description': 'Base GPT-5 model'},
-            {'id': 'gpt-5-mini', 'name': 'GPT-5 Mini', 'description': 'Fast and efficient GPT-5'},
-            {'id': 'gpt-5-nano', 'name': 'GPT-5 Nano', 'description': 'Ultra-light, ultra-fast GPT-5'},
-
-            # ===== GPT-4.x =====
-            {'id': 'gpt-4.5-preview', 'name': 'GPT-4.5 Preview', 'description': 'Preview build of GPT-4.5'},
-            {'id': 'gpt-4.1', 'name': 'GPT-4.1', 'description': 'Enhanced GPT-4'},
-            {'id': 'gpt-4.1-mini', 'name': 'GPT-4.1 Mini', 'description': 'Fast GPT-4.1'},
-            {'id': 'gpt-4.1-nano', 'name': 'GPT-4.1 Nano', 'description': 'Lightweight GPT-4.1'},
-
-            # ===== Omni =====
-            {'id': 'gpt-4o', 'name': 'GPT-4o', 'description': 'Omni-modal GPT-4'},
-            {'id': 'gpt-4o-mini', 'name': 'GPT-4o Mini', 'description': 'Efficient omni-modal model'},
-
-            # ===== Reasoning (o-series) =====
-            {'id': 'o4-mini', 'name': 'o4 Mini', 'description': 'Latest compact reasoning model'},
-            {'id': 'o3', 'name': 'o3', 'description': 'Advanced reasoning'},
-            {'id': 'o3-mini', 'name': 'o3 Mini', 'description': 'Compact reasoning'},
-            {'id': 'o1-pro', 'name': 'o1 Pro', 'description': 'High-tier reasoning'},
-            {'id': 'o1', 'name': 'o1', 'description': 'Reasoning model'},
-            {'id': 'o1-mini', 'name': 'o1 Mini', 'description': 'Lightweight reasoning'},
-
-            # ===== OpenRouter - OpenAI OSS =====
-            {'id': 'openrouter:openai/gpt-oss-120b', 'name': 'GPT-OSS 120B', 'description': 'Open-source 120B model'},
-            {'id': 'openrouter:openai/gpt-oss-120b:exacto', 'name': 'GPT-OSS 120B Exacto',
-             'description': 'Deterministic 120B variant'},
-            {'id': 'openrouter:openai/gpt-oss-20b', 'name': 'GPT-OSS 20B', 'description': 'Open-source 20B model'},
-            {'id': 'openrouter:openai/gpt-oss-20b:free', 'name': 'GPT-OSS 20B Free',
-             'description': 'Free tier 20B model'},
-            {'id': 'openrouter:openai/gpt-oss-safeguard-20b', 'name': 'GPT-OSS Safeguard 20B',
-             'description': 'Safety-focused OSS model'},
-
-            # ===== Codex / Coding =====
-            {'id': 'openrouter:openai/codex-mini', 'name': 'Codex Mini',
-             'description': 'Fast lightweight coding model'},
-            {'id': 'openrouter:openai/gpt-5-codex', 'name': 'GPT-5 Codex', 'description': 'Advanced GPT-5 coding'},
-            {'id': 'openrouter:openai/gpt-5.1-codex', 'name': 'GPT-5.1 Codex', 'description': 'Stable GPT-5.1 coding'},
-            {'id': 'openrouter:openai/gpt-5.1-codex-max', 'name': 'GPT-5.1 Codex Max',
-             'description': 'Maximum-power coding model'},
-            {'id': 'openrouter:openai/gpt-5.1-codex-mini', 'name': 'GPT-5.1 Codex Mini',
-             'description': 'Efficient coding model'},
-
-            # ===== Claude (Direct) =====
-            {'id': 'claude-sonnet-4', 'name': 'Claude Sonnet 4', 'description': 'Anthropic Sonnet 4'},
-            {'id': 'claude-sonnet-4-5', 'name': 'Claude Sonnet 4.5', 'description': 'Anthropic Sonnet 4.5'},
-            {'id': 'claude-opus-4', 'name': 'Claude Opus 4', 'description': 'Anthropic Opus 4 flagship'},
-            {'id': 'claude-opus-4-1', 'name': 'Claude Opus 4.1', 'description': 'Anthropic Opus 4.1'},
-            {'id': 'claude-opus-4-5', 'name': 'Claude Opus 4.5', 'description': 'Anthropic Opus 4.5'},
-            {'id': 'claude-opus-4-6', 'name': 'Claude Opus 4.6', 'description': 'Anthropic Opus 4.6'},
-            {'id': 'claude-haiku-4-5', 'name': 'Claude Haiku 4.5',
-             'description': 'Anthropic Haiku 4.5 - fast and efficient'},
-
-            # ===== DeepSeek (Direct) =====
-            {'id': 'deepseek/deepseek-chat', 'name': 'DeepSeek Chat', 'description': 'DeepSeek general chat model'},
-            {'id': 'deepseek/deepseek-chat-v3-0324', 'name': 'DeepSeek Chat v3 (03-24)',
-             'description': 'DeepSeek Chat v3 March 2024'},
-            {'id': 'deepseek/deepseek-chat-v3.1', 'name': 'DeepSeek Chat v3.1', 'description': 'DeepSeek Chat v3.1'},
-            {'id': 'deepseek/deepseek-r1', 'name': 'DeepSeek R1', 'description': 'DeepSeek reasoning model'},
-            {'id': 'deepseek/deepseek-r1-0528', 'name': 'DeepSeek R1 (05-28)',
-             'description': 'DeepSeek R1 May 2028 update'},
-            {'id': 'deepseek/deepseek-r1-0528:free', 'name': 'DeepSeek R1 (05-28) Free',
-             'description': 'Free tier R1 May update'},
-            {'id': 'deepseek/deepseek-r1-distill-llama-70b', 'name': 'DeepSeek R1 Distill LLaMA 70B',
-             'description': 'R1 distilled into LLaMA 70B'},
-            {'id': 'deepseek/deepseek-r1-distill-qwen-32b', 'name': 'DeepSeek R1 Distill Qwen 32B',
-             'description': 'R1 distilled into Qwen 32B'},
-            {'id': 'deepseek/deepseek-reasoner', 'name': 'DeepSeek Reasoner',
-             'description': 'DeepSeek dedicated reasoning model'},
-            {'id': 'deepseek/deepseek-v3.1-terminus', 'name': 'DeepSeek V3.1 Terminus',
-             'description': 'DeepSeek V3.1 Terminus variant'},
-            {'id': 'deepseek/deepseek-v3.1-terminus:exacto', 'name': 'DeepSeek V3.1 Terminus Exacto',
-             'description': 'Deterministic Terminus variant'},
-            {'id': 'deepseek/deepseek-v3.2', 'name': 'DeepSeek V3.2', 'description': 'DeepSeek V3.2'},
-            {'id': 'deepseek/deepseek-v3.2-exp', 'name': 'DeepSeek V3.2 Experimental',
-             'description': 'Experimental DeepSeek V3.2'},
-            {'id': 'deepseek/deepseek-v3.2-speciale', 'name': 'DeepSeek V3.2 Speciale',
-             'description': 'Special edition DeepSeek V3.2'},
-
-            # ===== Gemini (Direct) =====
-            {'id': 'gemini-3-pro-preview', 'name': 'Gemini 3 Pro Preview',
-             'description': 'Google Gemini 3 Pro Preview'},
-            {'id': 'gemini-3-flash-preview', 'name': 'Gemini 3 Flash Preview',
-             'description': 'Google Gemini 3 Flash Preview'},
-            {'id': 'gemini-2.5-pro-preview-05-06', 'name': 'Gemini 2.5 Pro Preview (05-06)',
-             'description': 'Gemini 2.5 Pro Preview May 2025'},
-            {'id': 'gemini-2.5-pro-preview', 'name': 'Gemini 2.5 Pro Preview', 'description': 'Gemini 2.5 Pro Preview'},
-            {'id': 'gemini-2.5-pro', 'name': 'Gemini 2.5 Pro', 'description': 'Google Gemini 2.5 Pro'},
-            {'id': 'gemini-2.5-flash-preview-09-2025', 'name': 'Gemini 2.5 Flash Preview (Sep 2025)',
-             'description': 'Gemini 2.5 Flash Sep 2025 Preview'},
-            {'id': 'gemini-2.5-flash-lite-preview-09-2025', 'name': 'Gemini 2.5 Flash Lite Preview (Sep 2025)',
-             'description': 'Gemini 2.5 Flash Lite Sep 2025 Preview'},
-            {'id': 'gemini-2.5-flash-lite', 'name': 'Gemini 2.5 Flash Lite', 'description': 'Gemini 2.5 Flash Lite'},
-            {'id': 'gemini-2.5-flash', 'name': 'Gemini 2.5 Flash', 'description': 'Google Gemini 2.5 Flash'},
-            {'id': 'gemini-2.0-flash-lite-001', 'name': 'Gemini 2.0 Flash Lite 001',
-             'description': 'Gemini 2.0 Flash Lite stable release'},
-            {'id': 'gemini-2.0-flash-lite', 'name': 'Gemini 2.0 Flash Lite', 'description': 'Gemini 2.0 Flash Lite'},
-            {'id': 'gemini-2.0-flash-exp:free', 'name': 'Gemini 2.0 Flash Exp (Free)',
-             'description': 'Experimental Gemini 2.0 Flash - free'},
-            {'id': 'gemini-2.0-flash-001', 'name': 'Gemini 2.0 Flash 001',
-             'description': 'Gemini 2.0 Flash stable release'},
-            {'id': 'gemini-2.0-flash', 'name': 'Gemini 2.0 Flash', 'description': 'Google Gemini 2.0 Flash'},
-
-            # ===== xAI Grok (Direct) =====
-            {'id': 'x-ai/grok-vision-beta', 'name': 'Grok Vision Beta', 'description': 'Grok with vision capabilities'},
-            {'id': 'x-ai/grok-code-fast-1', 'name': 'Grok Code Fast 1', 'description': 'Grok fast coding model'},
-            {'id': 'x-ai/grok-beta', 'name': 'Grok Beta', 'description': 'Grok beta model'},
-            {'id': 'x-ai/grok-4.1-fast', 'name': 'Grok 4.1 Fast', 'description': 'Fast Grok 4.1'},
-            {'id': 'x-ai/grok-4-fast', 'name': 'Grok 4 Fast', 'description': 'Fast Grok 4'},
-            {'id': 'x-ai/grok-4', 'name': 'Grok 4', 'description': 'xAI Grok 4 flagship'},
-            {'id': 'x-ai/grok-3-mini-fast', 'name': 'Grok 3 Mini Fast', 'description': 'Fast Grok 3 Mini'},
-            {'id': 'x-ai/grok-3-mini-beta', 'name': 'Grok 3 Mini Beta', 'description': 'Grok 3 Mini Beta'},
-            {'id': 'x-ai/grok-3-mini', 'name': 'Grok 3 Mini', 'description': 'Compact Grok 3'},
-            {'id': 'x-ai/grok-3-fast', 'name': 'Grok 3 Fast', 'description': 'Fast Grok 3'},
-            {'id': 'x-ai/grok-3-beta', 'name': 'Grok 3 Beta', 'description': 'Grok 3 Beta'},
-            {'id': 'x-ai/grok-3', 'name': 'Grok 3', 'description': 'xAI Grok 3'},
-            {'id': 'x-ai/grok-2-vision', 'name': 'Grok 2 Vision', 'description': 'Grok 2 with vision'},
-            {'id': 'x-ai/grok-2', 'name': 'Grok 2', 'description': 'xAI Grok 2'},
-
-            # ===== Moonshot Kimi (Direct) =====
-            {'id': 'moonshotai/kimi-k2', 'name': 'Kimi K2', 'description': 'Moonshot Kimi K2'},
-            {'id': 'moonshotai/kimi-k2-0905', 'name': 'Kimi K2 (09-05)', 'description': 'Kimi K2 September update'},
-            {'id': 'moonshotai/kimi-k2-thinking', 'name': 'Kimi K2 Thinking',
-             'description': 'Kimi K2 with reasoning mode'},
-            {'id': 'moonshotai/kimi-k2.5', 'name': 'Kimi K2.5', 'description': 'Moonshot Kimi K2.5'},
-
-            # ===== TNG Tech (Direct) =====
-            {'id': 'tngtech/tng-r1t-chimera', 'name': 'TNG R1T Chimera', 'description': 'TNG R1T Chimera model'},
-            {'id': 'tngtech/tng-r1t-chimera:free', 'name': 'TNG R1T Chimera (Free)',
-             'description': 'TNG R1T Chimera - free tier'},
-            {'id': 'tngtech/deepseek-r1t-chimera', 'name': 'DeepSeek R1T Chimera',
-             'description': 'TNG DeepSeek R1T Chimera'},
-            {'id': 'tngtech/deepseek-r1t-chimera:free', 'name': 'DeepSeek R1T Chimera (Free)',
-             'description': 'TNG DeepSeek R1T Chimera - free'},
-            {'id': 'tngtech/deepseek-r1t2-chimera', 'name': 'DeepSeek R1T2 Chimera',
-             'description': 'TNG DeepSeek R1T2 Chimera'},
-            {'id': 'tngtech/deepseek-r1t2-chimera:free', 'name': 'DeepSeek R1T2 Chimera (Free)',
-             'description': 'TNG DeepSeek R1T2 Chimera - free'},
-
-            # ===== OpenRouter - Agentica / AI21 / Aion =====
-            {'id': 'openrouter:agentica-org/deepcoder-14b-preview', 'name': 'DeepCoder 14B Preview',
-             'description': 'Agentica DeepCoder 14B'},
-            {'id': 'openrouter:agentica-org/deepcoder-14b-preview:free', 'name': 'DeepCoder 14B Preview (Free)',
-             'description': 'Agentica DeepCoder 14B - free'},
-            {'id': 'openrouter:ai21/jamba-large-1.7', 'name': 'Jamba Large 1.7', 'description': 'AI21 Jamba Large 1.7'},
-            {'id': 'openrouter:aion-labs/aion-1.0', 'name': 'Aion 1.0', 'description': 'Aion Labs Aion 1.0'},
-            {'id': 'openrouter:aion-labs/aion-1.0-mini', 'name': 'Aion 1.0 Mini',
-             'description': 'Aion Labs compact model'},
-            {'id': 'openrouter:aion-labs/aion-rp-llama-3.1-8b', 'name': 'Aion RP LLaMA 3.1 8B',
-             'description': 'Aion roleplay LLaMA 3.1 8B'},
-
-            # ===== OpenRouter - Coding Specialists =====
-            {'id': 'openrouter:alfredpros/codellama-7b-instruct-solidity', 'name': 'CodeLLaMA 7B Solidity',
-             'description': 'Solidity-tuned CodeLLaMA 7B'},
-
-            # ===== OpenRouter - Alibaba / AllenAI =====
-            {'id': 'openrouter:alibaba/tongyi-deepresearch-30b-a3b', 'name': 'Tongyi DeepResearch 30B',
-             'description': 'Alibaba Tongyi research model'},
-            {'id': 'openrouter:allenai/olmo-3-32b-thinking', 'name': 'OLMo 3 32B Thinking',
-             'description': 'AllenAI OLMo 3 32B with thinking'},
-            {'id': 'openrouter:allenai/olmo-3-7b-instruct', 'name': 'OLMo 3 7B Instruct',
-             'description': 'AllenAI OLMo 3 7B instruction-tuned'},
-            {'id': 'openrouter:allenai/olmo-3-7b-think', 'name': 'OLMo 3 7B Think',
-             'description': 'AllenAI OLMo 3 7B with reasoning'},
-            {'id': 'openrouter:allenai/olmo-3.1-32b-think:free', 'name': 'OLMo 3.1 32B Think (Free)',
-             'description': 'AllenAI OLMo 3.1 32B thinking - free'},
-            {'id': 'openrouter:alpindale/goliath-120b', 'name': 'Goliath 120B',
-             'description': 'Alpindale Goliath 120B'},
-
-            # ===== OpenRouter - Amazon Nova =====
-            {'id': 'openrouter:amazon/nova-2-lite-v1', 'name': 'Amazon Nova 2 Lite',
-             'description': 'Amazon Nova 2 Lite v1'},
-            {'id': 'openrouter:amazon/nova-lite-v1', 'name': 'Amazon Nova Lite', 'description': 'Amazon Nova Lite v1'},
-            {'id': 'openrouter:amazon/nova-micro-v1', 'name': 'Amazon Nova Micro',
-             'description': 'Amazon Nova Micro v1'},
-            {'id': 'openrouter:amazon/nova-premier-v1', 'name': 'Amazon Nova Premier',
-             'description': 'Amazon Nova Premier v1'},
-            {'id': 'openrouter:amazon/nova-pro-v1', 'name': 'Amazon Nova Pro', 'description': 'Amazon Nova Pro v1'},
-
-            # ===== OpenRouter - Anthracite =====
-            {'id': 'openrouter:anthracite-org/magnum-v2-72b', 'name': 'Magnum v2 72B',
-             'description': 'Anthracite Magnum v2 72B'},
-            {'id': 'openrouter:anthracite-org/magnum-v4-72b', 'name': 'Magnum v4 72B',
-             'description': 'Anthracite Magnum v4 72B'},
-
-            # ===== OpenRouter - Anthropic Claude =====
-            {'id': 'openrouter:anthropic/claude-3-haiku', 'name': 'Claude 3 Haiku (OR)',
-             'description': 'Claude 3 Haiku via OpenRouter'},
-            {'id': 'openrouter:anthropic/claude-3-opus', 'name': 'Claude 3 Opus (OR)',
-             'description': 'Claude 3 Opus via OpenRouter'},
-            {'id': 'openrouter:anthropic/claude-3.5-haiku', 'name': 'Claude 3.5 Haiku (OR)',
-             'description': 'Claude 3.5 Haiku via OpenRouter'},
-            {'id': 'openrouter:anthropic/claude-3.5-haiku-20241022', 'name': 'Claude 3.5 Haiku 2024-10-22 (OR)',
-             'description': 'Claude 3.5 Haiku Oct 2024 via OpenRouter'},
-            {'id': 'openrouter:anthropic/claude-3.5-sonnet', 'name': 'Claude 3.5 Sonnet (OR)',
-             'description': 'Claude 3.5 Sonnet via OpenRouter'},
-            {'id': 'openrouter:anthropic/claude-3.5-sonnet-20240620', 'name': 'Claude 3.5 Sonnet 2024-06-20 (OR)',
-             'description': 'Claude 3.5 Sonnet Jun 2024 via OpenRouter'},
-            {'id': 'openrouter:anthropic/claude-3.7-sonnet', 'name': 'Claude 3.7 Sonnet (OR)',
-             'description': 'Claude 3.7 Sonnet via OpenRouter'},
-            {'id': 'openrouter:anthropic/claude-3.7-sonnet:thinking', 'name': 'Claude 3.7 Sonnet Thinking (OR)',
-             'description': 'Claude 3.7 Sonnet with extended thinking'},
-            {'id': 'openrouter:anthropic/claude-haiku-4.5', 'name': 'Claude Haiku 4.5 (OR)',
-             'description': 'Claude Haiku 4.5 via OpenRouter'},
-            {'id': 'openrouter:anthropic/claude-opus-4', 'name': 'Claude Opus 4 (OR)',
-             'description': 'Claude Opus 4 via OpenRouter'},
-            {'id': 'openrouter:anthropic/claude-opus-4.1', 'name': 'Claude Opus 4.1 (OR)',
-             'description': 'Claude Opus 4.1 via OpenRouter'},
-            {'id': 'openrouter:anthropic/claude-opus-4.5', 'name': 'Claude Opus 4.5 (OR)',
-             'description': 'Claude Opus 4.5 via OpenRouter'},
-            {'id': 'openrouter:anthropic/claude-opus-4.6', 'name': 'Claude Opus 4.6 (OR)',
-             'description': 'Claude Opus 4.6 via OpenRouter'},
-            {'id': 'openrouter:anthropic/claude-sonnet-4', 'name': 'Claude Sonnet 4 (OR)',
-             'description': 'Claude Sonnet 4 via OpenRouter'},
-            {'id': 'openrouter:anthropic/claude-sonnet-4.5', 'name': 'Claude Sonnet 4.5 (OR)',
-             'description': 'Claude Sonnet 4.5 via OpenRouter'},
-
-            # ===== OpenRouter - Arcee AI =====
-            {'id': 'openrouter:arcee-ai/coder-large', 'name': 'Arcee Coder Large',
-             'description': 'Arcee AI large coding model'},
-            {'id': 'openrouter:arcee-ai/maestro-reasoning', 'name': 'Arcee Maestro Reasoning',
-             'description': 'Arcee AI reasoning model'},
-            {'id': 'openrouter:arcee-ai/spotlight', 'name': 'Arcee Spotlight',
-             'description': 'Arcee AI Spotlight model'},
-            {'id': 'openrouter:arcee-ai/virtuoso-large', 'name': 'Arcee Virtuoso Large',
-             'description': 'Arcee AI large general model'},
-
-            # ===== OpenRouter - ArliAI =====
-            {'id': 'openrouter:arliai/qwq-32b-arliai-rpr-v1', 'name': 'QwQ 32B ArliAI RPR v1',
-             'description': 'ArliAI roleplay QwQ 32B v1'},
-            {'id': 'openrouter:arliai/qwq-32b-arliai-rpr-v1:free', 'name': 'QwQ 32B ArliAI RPR v1 (Free)',
-             'description': 'ArliAI roleplay QwQ 32B - free'},
-
-            # ===== OpenRouter - Baidu ERNIE =====
-            {'id': 'openrouter:baidu/ernie-4.5-21b-a3b', 'name': 'ERNIE 4.5 21B', 'description': 'Baidu ERNIE 4.5 21B'},
-            {'id': 'openrouter:baidu/ernie-4.5-21b-a3b-thinking', 'name': 'ERNIE 4.5 21B Thinking',
-             'description': 'Baidu ERNIE 4.5 21B with thinking'},
-            {'id': 'openrouter:baidu/ernie-4.5-300b-a47b', 'name': 'ERNIE 4.5 300B',
-             'description': 'Baidu ERNIE 4.5 300B flagship'},
-            {'id': 'openrouter:baidu/ernie-4.5-vl-28b-a3b', 'name': 'ERNIE 4.5 VL 28B',
-             'description': 'Baidu ERNIE 4.5 vision-language 28B'},
-            {'id': 'openrouter:baidu/ernie-4.5-vl-424b-a47b', 'name': 'ERNIE 4.5 VL 424B',
-             'description': 'Baidu ERNIE 4.5 vision-language 424B'},
-
-            # ===== OpenRouter - ByteDance Seed =====
-            {'id': 'openrouter:bytedance-seed/seed-1.6', 'name': 'Seed 1.6', 'description': 'ByteDance Seed 1.6'},
-            {'id': 'openrouter:bytedance-seed/seed-1.6-flash', 'name': 'Seed 1.6 Flash',
-             'description': 'ByteDance Seed 1.6 Flash'},
-            {'id': 'openrouter:bytedance-seed/seedream-4.5', 'name': 'Seedream 4.5',
-             'description': 'ByteDance Seedream 4.5'},
-            {'id': 'openrouter:bytedance/seed-oss-36b-instruct', 'name': 'Seed OSS 36B Instruct',
-             'description': 'ByteDance open-source 36B'},
-            {'id': 'openrouter:bytedance/ui-tars-1.5-7b', 'name': 'UI-TARS 1.5 7B',
-             'description': 'ByteDance UI agent model'},
-
-            # ===== OpenRouter - Cognitive Computations =====
-            {'id': 'openrouter:cognitivecomputations/dolphin-mistral-24b-venice-edition:free',
-             'name': 'Dolphin Mistral 24B Venice (Free)', 'description': 'Dolphin Mistral 24B Venice - free'},
-            {'id': 'openrouter:cognitivecomputations/dolphin-mixtral-8x22b', 'name': 'Dolphin Mixtral 8x22B',
-             'description': 'Dolphin Mixtral 8x22B'},
-            {'id': 'openrouter:cognitivecomputations/dolphin3.0-mistral-24b', 'name': 'Dolphin 3.0 Mistral 24B',
-             'description': 'Dolphin 3.0 on Mistral 24B'},
-            {'id': 'openrouter:cognitivecomputations/dolphin3.0-mistral-24b:free',
-             'name': 'Dolphin 3.0 Mistral 24B (Free)', 'description': 'Dolphin 3.0 Mistral 24B - free'},
-            {'id': 'openrouter:cognitivecomputations/dolphin3.0-r1-mistral-24b', 'name': 'Dolphin 3.0 R1 Mistral 24B',
-             'description': 'Dolphin 3.0 R1 reasoning on Mistral 24B'},
-            {'id': 'openrouter:cognitivecomputations/dolphin3.0-r1-mistral-24b:free',
-             'name': 'Dolphin 3.0 R1 Mistral 24B (Free)', 'description': 'Dolphin 3.0 R1 Mistral 24B - free'},
-
-            # ===== OpenRouter - Cohere =====
-            {'id': 'openrouter:cohere/command', 'name': 'Command', 'description': 'Cohere Command'},
-            {'id': 'openrouter:cohere/command-a', 'name': 'Command A', 'description': 'Cohere Command A'},
-            {'id': 'openrouter:cohere/command-r', 'name': 'Command R', 'description': 'Cohere Command R'},
-            {'id': 'openrouter:cohere/command-r-03-2024', 'name': 'Command R (Mar 2024)',
-             'description': 'Cohere Command R March 2024'},
-            {'id': 'openrouter:cohere/command-r-08-2024', 'name': 'Command R (Aug 2024)',
-             'description': 'Cohere Command R August 2024'},
-            {'id': 'openrouter:cohere/command-r-plus', 'name': 'Command R+', 'description': 'Cohere Command R Plus'},
-            {'id': 'openrouter:cohere/command-r-plus-04-2024', 'name': 'Command R+ (Apr 2024)',
-             'description': 'Cohere Command R+ April 2024'},
-            {'id': 'openrouter:cohere/command-r-plus-08-2024', 'name': 'Command R+ (Aug 2024)',
-             'description': 'Cohere Command R+ August 2024'},
-            {'id': 'openrouter:cohere/command-r7b-12-2024', 'name': 'Command R7B (Dec 2024)',
-             'description': 'Cohere Command R7B December 2024'},
-
-            # ===== OpenRouter - DeepCogito / DeepSeek =====
-            {'id': 'openrouter:deepcogito/cogito-v2-preview-deepseek-671b', 'name': 'Cogito v2 DeepSeek 671B',
-             'description': 'DeepCogito Cogito v2 on DeepSeek 671B'},
-            {'id': 'openrouter:deepseek/deepseek-chat', 'name': 'DeepSeek Chat (OR)',
-             'description': 'DeepSeek Chat via OpenRouter'},
-            {'id': 'openrouter:deepseek/deepseek-chat-v3-0324', 'name': 'DeepSeek Chat v3 (03-24) (OR)',
-             'description': 'DeepSeek Chat v3 March 2024 via OR'},
-            {'id': 'openrouter:deepseek/deepseek-chat-v3-0324:free', 'name': 'DeepSeek Chat v3 (03-24) Free',
-             'description': 'DeepSeek Chat v3 March 2024 - free'},
-            {'id': 'openrouter:deepseek/deepseek-chat-v3.1', 'name': 'DeepSeek Chat v3.1 (OR)',
-             'description': 'DeepSeek Chat v3.1 via OR'},
-            {'id': 'openrouter:deepseek/deepseek-chat-v3.1:free', 'name': 'DeepSeek Chat v3.1 (Free)',
-             'description': 'DeepSeek Chat v3.1 - free'},
-            {'id': 'openrouter:deepseek/deepseek-prover-v2', 'name': 'DeepSeek Prover v2',
-             'description': 'DeepSeek math/proof reasoning model'},
-            {'id': 'openrouter:deepseek/deepseek-r1', 'name': 'DeepSeek R1 (OR)',
-             'description': 'DeepSeek R1 via OpenRouter'},
-            {'id': 'openrouter:deepseek/deepseek-r1-0528', 'name': 'DeepSeek R1 (05-28) (OR)',
-             'description': 'DeepSeek R1 May 2028 via OR'},
-            {'id': 'openrouter:deepseek/deepseek-r1-0528-qwen3-8b', 'name': 'DeepSeek R1 0528 Qwen3 8B',
-             'description': 'R1 0528 distilled into Qwen3 8B'},
-            {'id': 'openrouter:deepseek/deepseek-r1-0528-qwen3-8b:free', 'name': 'DeepSeek R1 0528 Qwen3 8B (Free)',
-             'description': 'R1 0528 Qwen3 8B - free'},
-            {'id': 'openrouter:deepseek/deepseek-r1-0528:free', 'name': 'DeepSeek R1 (05-28) Free',
-             'description': 'DeepSeek R1 May 2028 - free'},
-            {'id': 'openrouter:deepseek/deepseek-r1-distill-llama-70b', 'name': 'DeepSeek R1 Distill LLaMA 70B (OR)',
-             'description': 'R1 distilled LLaMA 70B via OR'},
-            {'id': 'openrouter:deepseek/deepseek-r1-distill-llama-70b:free',
-             'name': 'DeepSeek R1 Distill LLaMA 70B (Free)', 'description': 'R1 distilled LLaMA 70B - free'},
-            {'id': 'openrouter:deepseek/deepseek-r1-distill-llama-8b', 'name': 'DeepSeek R1 Distill LLaMA 8B',
-             'description': 'R1 distilled into LLaMA 8B'},
-            {'id': 'openrouter:deepseek/deepseek-r1-distill-qwen-14b', 'name': 'DeepSeek R1 Distill Qwen 14B',
-             'description': 'R1 distilled into Qwen 14B'},
-            {'id': 'openrouter:deepseek/deepseek-r1-distill-qwen-14b:free',
-             'name': 'DeepSeek R1 Distill Qwen 14B (Free)', 'description': 'R1 distilled Qwen 14B - free'},
-            {'id': 'openrouter:deepseek/deepseek-r1-distill-qwen-32b', 'name': 'DeepSeek R1 Distill Qwen 32B (OR)',
-             'description': 'R1 distilled Qwen 32B via OR'},
-            {'id': 'openrouter:deepseek/deepseek-r1:free', 'name': 'DeepSeek R1 (Free)',
-             'description': 'DeepSeek R1 - free tier'},
-            {'id': 'openrouter:deepseek/deepseek-v3.1-base', 'name': 'DeepSeek V3.1 Base',
-             'description': 'DeepSeek V3.1 base model'},
-            {'id': 'openrouter:deepseek/deepseek-v3.1-terminus', 'name': 'DeepSeek V3.1 Terminus (OR)',
-             'description': 'DeepSeek V3.1 Terminus via OR'},
-            {'id': 'openrouter:deepseek/deepseek-v3.2', 'name': 'DeepSeek V3.2 (OR)',
-             'description': 'DeepSeek V3.2 via OR'},
-            {'id': 'openrouter:deepseek/deepseek-v3.2-exp', 'name': 'DeepSeek V3.2 Experimental (OR)',
-             'description': 'Experimental DeepSeek V3.2 via OR'},
-            {'id': 'openrouter:deepseek/deepseek-v3.2-speciale', 'name': 'DeepSeek V3.2 Speciale (OR)',
-             'description': 'Special edition DeepSeek V3.2 via OR'},
-
-            # ===== OpenRouter - EleutherAI =====
-            {'id': 'openrouter:eleutherai/llemma_7b', 'name': 'LLemma 7B', 'description': 'EleutherAI math LLM 7B'},
-
-            # ===== OpenRouter - Google Gemini =====
-            {'id': 'openrouter:google/gemini-2.0-flash-001', 'name': 'Gemini 2.0 Flash 001 (OR)',
-             'description': 'Gemini 2.0 Flash stable via OR'},
-            {'id': 'openrouter:google/gemini-2.0-flash-exp:free', 'name': 'Gemini 2.0 Flash Exp (Free)',
-             'description': 'Experimental Gemini 2.0 Flash - free'},
-            {'id': 'openrouter:google/gemini-2.0-flash-lite-001', 'name': 'Gemini 2.0 Flash Lite 001 (OR)',
-             'description': 'Gemini 2.0 Flash Lite stable via OR'},
-            {'id': 'openrouter:google/gemini-2.5-flash', 'name': 'Gemini 2.5 Flash (OR)',
-             'description': 'Gemini 2.5 Flash via OR'},
-            {'id': 'openrouter:google/gemini-2.5-flash-image', 'name': 'Gemini 2.5 Flash Image',
-             'description': 'Gemini 2.5 Flash with image generation'},
-            {'id': 'openrouter:google/gemini-2.5-flash-image-preview', 'name': 'Gemini 2.5 Flash Image Preview',
-             'description': 'Gemini 2.5 Flash image preview'},
-            {'id': 'openrouter:google/gemini-2.5-flash-image-preview:free',
-             'name': 'Gemini 2.5 Flash Image Preview (Free)', 'description': 'Gemini 2.5 Flash image preview - free'},
-            {'id': 'openrouter:google/gemini-2.5-flash-lite', 'name': 'Gemini 2.5 Flash Lite (OR)',
-             'description': 'Gemini 2.5 Flash Lite via OR'},
-            {'id': 'openrouter:google/gemini-2.5-flash-lite-preview-06-17',
-             'name': 'Gemini 2.5 Flash Lite Preview (Jun 17)', 'description': 'Gemini 2.5 Flash Lite Preview Jun 2025'},
-            {'id': 'openrouter:google/gemini-2.5-flash-lite-preview-09-2025',
-             'name': 'Gemini 2.5 Flash Lite Preview (Sep 2025)',
-             'description': 'Gemini 2.5 Flash Lite Sep 2025 Preview via OR'},
-            {'id': 'openrouter:google/gemini-2.5-flash-preview-09-2025',
-             'name': 'Gemini 2.5 Flash Preview (Sep 2025) (OR)',
-             'description': 'Gemini 2.5 Flash Sep 2025 Preview via OR'},
-            {'id': 'openrouter:google/gemini-2.5-pro', 'name': 'Gemini 2.5 Pro (OR)',
-             'description': 'Gemini 2.5 Pro via OR'},
-            {'id': 'openrouter:google/gemini-2.5-pro-exp-03-25', 'name': 'Gemini 2.5 Pro Exp (03-25)',
-             'description': 'Gemini 2.5 Pro Experimental Mar 2025'},
-            {'id': 'openrouter:google/gemini-2.5-pro-preview', 'name': 'Gemini 2.5 Pro Preview (OR)',
-             'description': 'Gemini 2.5 Pro Preview via OR'},
-            {'id': 'openrouter:google/gemini-2.5-pro-preview-05-06', 'name': 'Gemini 2.5 Pro Preview (05-06) (OR)',
-             'description': 'Gemini 2.5 Pro Preview May 2025 via OR'},
-            {'id': 'openrouter:google/gemini-3-flash-preview', 'name': 'Gemini 3 Flash Preview (OR)',
-             'description': 'Gemini 3 Flash Preview via OR'},
-            {'id': 'openrouter:google/gemini-embedding-001', 'name': 'Gemini Embedding 001',
-             'description': 'Google Gemini embedding model'},
-            {'id': 'openrouter:google/gemini-flash-1.5', 'name': 'Gemini Flash 1.5',
-             'description': 'Google Gemini Flash 1.5'},
-            {'id': 'openrouter:google/gemini-flash-1.5-8b', 'name': 'Gemini Flash 1.5 8B',
-             'description': 'Gemini Flash 1.5 8B'},
-            {'id': 'openrouter:google/gemini-pro-1.5', 'name': 'Gemini Pro 1.5',
-             'description': 'Google Gemini Pro 1.5'},
-
-            # ===== OpenRouter - Google Gemma =====
-            {'id': 'openrouter:google/gemma-2-27b-it', 'name': 'Gemma 2 27B Instruct',
-             'description': 'Google Gemma 2 27B instruction-tuned'},
-            {'id': 'openrouter:google/gemma-2-9b-it', 'name': 'Gemma 2 9B Instruct',
-             'description': 'Google Gemma 2 9B instruction-tuned'},
-            {'id': 'openrouter:google/gemma-2-9b-it:free', 'name': 'Gemma 2 9B Instruct (Free)',
-             'description': 'Gemma 2 9B instruction-tuned - free'},
-            {'id': 'openrouter:google/gemma-3-12b-it', 'name': 'Gemma 3 12B Instruct',
-             'description': 'Google Gemma 3 12B'},
-            {'id': 'openrouter:google/gemma-3-12b-it:free', 'name': 'Gemma 3 12B Instruct (Free)',
-             'description': 'Gemma 3 12B - free'},
-            {'id': 'openrouter:google/gemma-3-27b-it', 'name': 'Gemma 3 27B Instruct',
-             'description': 'Google Gemma 3 27B'},
-            {'id': 'openrouter:google/gemma-3-27b-it:free', 'name': 'Gemma 3 27B Instruct (Free)',
-             'description': 'Gemma 3 27B - free'},
-            {'id': 'openrouter:google/gemma-3-4b-it', 'name': 'Gemma 3 4B Instruct',
-             'description': 'Google Gemma 3 4B'},
-            {'id': 'openrouter:google/gemma-3-4b-it:free', 'name': 'Gemma 3 4B Instruct (Free)',
-             'description': 'Gemma 3 4B - free'},
-            {'id': 'openrouter:google/gemma-3n-e2b-it:free', 'name': 'Gemma 3n E2B Instruct (Free)',
-             'description': 'Gemma 3n E2B - free'},
-            {'id': 'openrouter:google/gemma-3n-e4b-it', 'name': 'Gemma 3n E4B Instruct',
-             'description': 'Google Gemma 3n E4B'},
-            {'id': 'openrouter:google/gemma-3n-e4b-it:free', 'name': 'Gemma 3n E4B Instruct (Free)',
-             'description': 'Gemma 3n E4B - free'},
-
-            # ===== OpenRouter - Gryphe / IBM =====
-            {'id': 'openrouter:gryphe/mythomax-l2-13b', 'name': 'MythoMax L2 13B',
-             'description': 'Gryphe MythoMax LLaMA 2 13B'},
-            {'id': 'openrouter:ibm-granite/granite-4.0-h-micro', 'name': 'Granite 4.0 H Micro',
-             'description': 'IBM Granite 4.0 H Micro'},
-
-            # ===== OpenRouter - Inception Mercury =====
-            {'id': 'openrouter:inception/mercury', 'name': 'Mercury', 'description': 'Inception Mercury model'},
-            {'id': 'openrouter:inception/mercury-coder', 'name': 'Mercury Coder',
-             'description': 'Inception Mercury coding model'},
-
-            # ===== OpenRouter - InclusionAI / Infermatic / Inflection =====
-            {'id': 'openrouter:inclusionai/ling-1t', 'name': 'Ling 1T', 'description': 'InclusionAI Ling 1 Trillion'},
-            {'id': 'openrouter:inclusionai/ring-1t', 'name': 'Ring 1T', 'description': 'InclusionAI Ring 1 Trillion'},
-            {'id': 'openrouter:infermatic/mn-inferor-12b', 'name': 'MN Inferor 12B',
-             'description': 'Infermatic MN Inferor 12B'},
-            {'id': 'openrouter:inflection/inflection-3-pi', 'name': 'Inflection 3 Pi',
-             'description': 'Inflection Pi model'},
-            {'id': 'openrouter:inflection/inflection-3-productivity', 'name': 'Inflection 3 Productivity',
-             'description': 'Inflection productivity model'},
-
-            # ===== OpenRouter - Embedding Models =====
-            {'id': 'openrouter:intfloat/e5-base-v2', 'name': 'E5 Base v2',
-             'description': 'intfloat E5 base embedding model'},
-            {'id': 'openrouter:intfloat/e5-large-v2', 'name': 'E5 Large v2',
-             'description': 'intfloat E5 large embedding model'},
-            {'id': 'openrouter:intfloat/multilingual-e5-large', 'name': 'Multilingual E5 Large',
-             'description': 'Multilingual E5 large embedding'},
-
-            # ===== OpenRouter - KwaiPilot / Liquid =====
-            {'id': 'openrouter:kwaipilot/kat-coder-pro:free', 'name': 'KAT Coder Pro (Free)',
-             'description': 'KwaiPilot KAT Coder Pro - free'},
-            {'id': 'openrouter:liquid/lfm-2.2-6b', 'name': 'LFM 2.2 6B', 'description': 'Liquid LFM 2.2 6B'},
-            {'id': 'openrouter:liquid/lfm-3b', 'name': 'LFM 3B', 'description': 'Liquid LFM 3B'},
-            {'id': 'openrouter:liquid/lfm-7b', 'name': 'LFM 7B', 'description': 'Liquid LFM 7B'},
-            {'id': 'openrouter:liquid/lfm2-8b-a1b', 'name': 'LFM2 8B A1B', 'description': 'Liquid LFM2 8B A1B'},
-
-            # ===== OpenRouter - Mancer / Meituan =====
-            {'id': 'openrouter:mancer/weaver', 'name': 'Weaver', 'description': 'Mancer Weaver creative model'},
-            {'id': 'openrouter:meituan/longcat-flash-chat', 'name': 'LongCat Flash Chat',
-             'description': 'Meituan LongCat Flash Chat'},
-
-            # ===== OpenRouter - Meta LLaMA 3 =====
-            {'id': 'openrouter:meta-llama/llama-3-70b-instruct', 'name': 'LLaMA 3 70B Instruct',
-             'description': 'Meta LLaMA 3 70B instruction-tuned'},
-            {'id': 'openrouter:meta-llama/llama-3-8b-instruct', 'name': 'LLaMA 3 8B Instruct',
-             'description': 'Meta LLaMA 3 8B instruction-tuned'},
-            {'id': 'openrouter:meta-llama/llama-3.1-405b', 'name': 'LLaMA 3.1 405B',
-             'description': 'Meta LLaMA 3.1 405B'},
-            {'id': 'openrouter:meta-llama/llama-3.1-405b-instruct', 'name': 'LLaMA 3.1 405B Instruct',
-             'description': 'Meta LLaMA 3.1 405B instruction-tuned'},
-            {'id': 'openrouter:meta-llama/llama-3.1-405b-instruct:free', 'name': 'LLaMA 3.1 405B Instruct (Free)',
-             'description': 'LLaMA 3.1 405B Instruct - free'},
-            {'id': 'openrouter:meta-llama/llama-3.1-70b-instruct', 'name': 'LLaMA 3.1 70B Instruct',
-             'description': 'Meta LLaMA 3.1 70B instruction-tuned'},
-            {'id': 'openrouter:meta-llama/llama-3.1-8b-instruct', 'name': 'LLaMA 3.1 8B Instruct',
-             'description': 'Meta LLaMA 3.1 8B instruction-tuned'},
-            {'id': 'openrouter:meta-llama/llama-3.2-11b-vision-instruct', 'name': 'LLaMA 3.2 11B Vision',
-             'description': 'Meta LLaMA 3.2 11B vision model'},
-            {'id': 'openrouter:meta-llama/llama-3.2-1b-instruct', 'name': 'LLaMA 3.2 1B Instruct',
-             'description': 'Meta LLaMA 3.2 1B instruction-tuned'},
-            {'id': 'openrouter:meta-llama/llama-3.2-3b-instruct', 'name': 'LLaMA 3.2 3B Instruct',
-             'description': 'Meta LLaMA 3.2 3B instruction-tuned'},
-            {'id': 'openrouter:meta-llama/llama-3.2-3b-instruct:free', 'name': 'LLaMA 3.2 3B Instruct (Free)',
-             'description': 'LLaMA 3.2 3B Instruct - free'},
-            {'id': 'openrouter:meta-llama/llama-3.2-90b-vision-instruct', 'name': 'LLaMA 3.2 90B Vision',
-             'description': 'Meta LLaMA 3.2 90B vision model'},
-            {'id': 'openrouter:meta-llama/llama-3.3-70b-instruct', 'name': 'LLaMA 3.3 70B Instruct',
-             'description': 'Meta LLaMA 3.3 70B instruction-tuned'},
-            {'id': 'openrouter:meta-llama/llama-3.3-70b-instruct:free', 'name': 'LLaMA 3.3 70B Instruct (Free)',
-             'description': 'LLaMA 3.3 70B Instruct - free'},
-            {'id': 'openrouter:meta-llama/llama-3.3-8b-instruct:free', 'name': 'LLaMA 3.3 8B Instruct (Free)',
-             'description': 'LLaMA 3.3 8B Instruct - free'},
-
-            # ===== OpenRouter - Meta LLaMA 4 =====
-            {'id': 'openrouter:meta-llama/llama-4-maverick', 'name': 'LLaMA 4 Maverick',
-             'description': 'Meta LLaMA 4 Maverick'},
-            {'id': 'openrouter:meta-llama/llama-4-maverick:free', 'name': 'LLaMA 4 Maverick (Free)',
-             'description': 'LLaMA 4 Maverick - free'},
-            {'id': 'openrouter:meta-llama/llama-4-scout', 'name': 'LLaMA 4 Scout', 'description': 'Meta LLaMA 4 Scout'},
-            {'id': 'openrouter:meta-llama/llama-4-scout:free', 'name': 'LLaMA 4 Scout (Free)',
-             'description': 'LLaMA 4 Scout - free'},
-            {'id': 'openrouter:meta-llama/llama-guard-2-8b', 'name': 'LLaMA Guard 2 8B',
-             'description': 'Meta content safety model v2'},
-            {'id': 'openrouter:meta-llama/llama-guard-3-8b', 'name': 'LLaMA Guard 3 8B',
-             'description': 'Meta content safety model v3'},
-            {'id': 'openrouter:meta-llama/llama-guard-4-12b', 'name': 'LLaMA Guard 4 12B',
-             'description': 'Meta content safety model v4'},
-
-            # ===== OpenRouter - Microsoft =====
-            {'id': 'openrouter:microsoft/mai-ds-r1', 'name': 'MAI-DS R1',
-             'description': 'Microsoft MAI Data Science R1'},
-            {'id': 'openrouter:microsoft/mai-ds-r1:free', 'name': 'MAI-DS R1 (Free)',
-             'description': 'Microsoft MAI-DS R1 - free'},
-            {'id': 'openrouter:microsoft/phi-3-medium-128k-instruct', 'name': 'Phi-3 Medium 128K',
-             'description': 'Microsoft Phi-3 Medium 128K context'},
-            {'id': 'openrouter:microsoft/phi-3-mini-128k-instruct', 'name': 'Phi-3 Mini 128K',
-             'description': 'Microsoft Phi-3 Mini 128K context'},
-            {'id': 'openrouter:microsoft/phi-3.5-mini-128k-instruct', 'name': 'Phi-3.5 Mini 128K',
-             'description': 'Microsoft Phi-3.5 Mini 128K context'},
-            {'id': 'openrouter:microsoft/phi-4', 'name': 'Phi-4', 'description': 'Microsoft Phi-4'},
-            {'id': 'openrouter:microsoft/phi-4-multimodal-instruct', 'name': 'Phi-4 Multimodal',
-             'description': 'Microsoft Phi-4 multimodal instruction'},
-            {'id': 'openrouter:microsoft/phi-4-reasoning-plus', 'name': 'Phi-4 Reasoning+',
-             'description': 'Microsoft Phi-4 enhanced reasoning'},
-            {'id': 'openrouter:microsoft/wizardlm-2-8x22b', 'name': 'WizardLM 2 8x22B',
-             'description': 'Microsoft WizardLM 2 MoE 8x22B'},
-
-            # ===== OpenRouter - MiniMax =====
-            {'id': 'openrouter:minimax/minimax-01', 'name': 'MiniMax 01', 'description': 'MiniMax 01'},
-            {'id': 'openrouter:minimax/minimax-m1', 'name': 'MiniMax M1', 'description': 'MiniMax M1'},
-            {'id': 'openrouter:minimax/minimax-m2', 'name': 'MiniMax M2', 'description': 'MiniMax M2'},
-            {'id': 'openrouter:minimax/minimax-m2.1', 'name': 'MiniMax M2.1', 'description': 'MiniMax M2.1'},
-            {'id': 'openrouter:minimax/minimax-m2:free', 'name': 'MiniMax M2 (Free)',
-             'description': 'MiniMax M2 - free'},
-
-            # ===== OpenRouter - Mistral =====
-            {'id': 'openrouter:mistralai/codestral-2501', 'name': 'Codestral 2501',
-             'description': 'Mistral Codestral Jan 2025'},
-            {'id': 'openrouter:mistralai/codestral-2508', 'name': 'Codestral 2508',
-             'description': 'Mistral Codestral Aug 2025'},
-            {'id': 'openrouter:mistralai/codestral-embed-2505', 'name': 'Codestral Embed 2505',
-             'description': 'Mistral Codestral embedding May 2025'},
-            {'id': 'openrouter:mistralai/devstral-2512', 'name': 'Devstral 2512',
-             'description': 'Mistral Devstral Dec 2025'},
-            {'id': 'openrouter:mistralai/devstral-2512:free', 'name': 'Devstral 2512 (Free)',
-             'description': 'Devstral Dec 2025 - free'},
-            {'id': 'openrouter:mistralai/devstral-medium', 'name': 'Devstral Medium',
-             'description': 'Mistral Devstral Medium'},
-            {'id': 'openrouter:mistralai/devstral-small', 'name': 'Devstral Small',
-             'description': 'Mistral Devstral Small'},
-            {'id': 'openrouter:mistralai/devstral-small-2505', 'name': 'Devstral Small 2505',
-             'description': 'Mistral Devstral Small May 2025'},
-            {'id': 'openrouter:mistralai/devstral-small-2505:free', 'name': 'Devstral Small 2505 (Free)',
-             'description': 'Devstral Small May 2025 - free'},
-            {'id': 'openrouter:mistralai/magistral-medium-2506', 'name': 'Magistral Medium 2506',
-             'description': 'Mistral Magistral Medium Jun 2025'},
-            {'id': 'openrouter:mistralai/magistral-medium-2506:thinking', 'name': 'Magistral Medium 2506 Thinking',
-             'description': 'Magistral Medium with thinking mode'},
-            {'id': 'openrouter:mistralai/magistral-small-2506', 'name': 'Magistral Small 2506',
-             'description': 'Mistral Magistral Small Jun 2025'},
-            {'id': 'openrouter:mistralai/ministral-14b-2512', 'name': 'Ministral 14B 2512',
-             'description': 'Mistral Ministral 14B Dec 2025'},
-            {'id': 'openrouter:mistralai/ministral-3b', 'name': 'Ministral 3B', 'description': 'Mistral Ministral 3B'},
-            {'id': 'openrouter:mistralai/ministral-3b-2512', 'name': 'Ministral 3B 2512',
-             'description': 'Mistral Ministral 3B Dec 2025'},
-            {'id': 'openrouter:mistralai/ministral-8b', 'name': 'Ministral 8B', 'description': 'Mistral Ministral 8B'},
-            {'id': 'openrouter:mistralai/ministral-8b-2512', 'name': 'Ministral 8B 2512',
-             'description': 'Mistral Ministral 8B Dec 2025'},
-            {'id': 'openrouter:mistralai/mistral-7b-instruct', 'name': 'Mistral 7B Instruct',
-             'description': 'Mistral 7B instruction-tuned'},
-            {'id': 'openrouter:mistralai/mistral-7b-instruct-v0.1', 'name': 'Mistral 7B Instruct v0.1',
-             'description': 'Mistral 7B Instruct v0.1'},
-            {'id': 'openrouter:mistralai/mistral-7b-instruct-v0.3', 'name': 'Mistral 7B Instruct v0.3',
-             'description': 'Mistral 7B Instruct v0.3'},
-            {'id': 'openrouter:mistralai/mistral-7b-instruct:free', 'name': 'Mistral 7B Instruct (Free)',
-             'description': 'Mistral 7B - free'},
-            {'id': 'openrouter:mistralai/mistral-embed-2312', 'name': 'Mistral Embed 2312',
-             'description': 'Mistral embedding model Dec 2023'},
-            {'id': 'openrouter:mistralai/mistral-large', 'name': 'Mistral Large', 'description': 'Mistral Large'},
-            {'id': 'openrouter:mistralai/mistral-large-2407', 'name': 'Mistral Large (Jul 2024)',
-             'description': 'Mistral Large July 2024'},
-            {'id': 'openrouter:mistralai/mistral-large-2411', 'name': 'Mistral Large (Nov 2024)',
-             'description': 'Mistral Large November 2024'},
-            {'id': 'openrouter:mistralai/mistral-large-2512', 'name': 'Mistral Large (Dec 2025)',
-             'description': 'Mistral Large December 2025'},
-            {'id': 'openrouter:mistralai/mistral-medium-3', 'name': 'Mistral Medium 3',
-             'description': 'Mistral Medium 3'},
-            {'id': 'openrouter:mistralai/mistral-medium-3.1', 'name': 'Mistral Medium 3.1',
-             'description': 'Mistral Medium 3.1'},
-            {'id': 'openrouter:mistralai/mistral-nemo', 'name': 'Mistral Nemo', 'description': 'Mistral Nemo'},
-            {'id': 'openrouter:mistralai/mistral-nemo:free', 'name': 'Mistral Nemo (Free)',
-             'description': 'Mistral Nemo - free'},
-            {'id': 'openrouter:mistralai/mistral-saba', 'name': 'Mistral Saba',
-             'description': 'Mistral Saba Middle East/South Asia optimized'},
-            {'id': 'openrouter:mistralai/mistral-small', 'name': 'Mistral Small', 'description': 'Mistral Small'},
-            {'id': 'openrouter:mistralai/mistral-small-24b-instruct-2501', 'name': 'Mistral Small 24B (Jan 2025)',
-             'description': 'Mistral Small 24B Jan 2025'},
-            {'id': 'openrouter:mistralai/mistral-small-24b-instruct-2501:free',
-             'name': 'Mistral Small 24B (Jan 2025) Free', 'description': 'Mistral Small 24B Jan 2025 - free'},
-            {'id': 'openrouter:mistralai/mistral-small-3.1-24b-instruct', 'name': 'Mistral Small 3.1 24B',
-             'description': 'Mistral Small 3.1 24B'},
-            {'id': 'openrouter:mistralai/mistral-small-3.1-24b-instruct:free', 'name': 'Mistral Small 3.1 24B (Free)',
-             'description': 'Mistral Small 3.1 24B - free'},
-            {'id': 'openrouter:mistralai/mistral-small-3.2-24b-instruct', 'name': 'Mistral Small 3.2 24B',
-             'description': 'Mistral Small 3.2 24B'},
-            {'id': 'openrouter:mistralai/mistral-small-3.2-24b-instruct:free', 'name': 'Mistral Small 3.2 24B (Free)',
-             'description': 'Mistral Small 3.2 24B - free'},
-            {'id': 'openrouter:mistralai/mistral-small-creative', 'name': 'Mistral Small Creative',
-             'description': 'Mistral Small tuned for creative tasks'},
-            {'id': 'openrouter:mistralai/mixtral-8x22b-instruct', 'name': 'Mixtral 8x22B Instruct',
-             'description': 'Mistral Mixtral MoE 8x22B'},
-            {'id': 'openrouter:mistralai/mixtral-8x7b-instruct', 'name': 'Mixtral 8x7B Instruct',
-             'description': 'Mistral Mixtral MoE 8x7B'},
-            {'id': 'openrouter:mistralai/pixtral-12b', 'name': 'Pixtral 12B',
-             'description': 'Mistral Pixtral multimodal 12B'},
-            {'id': 'openrouter:mistralai/pixtral-large-2411', 'name': 'Pixtral Large (Nov 2024)',
-             'description': 'Mistral Pixtral Large November 2024'},
-
-            # ===== OpenRouter - Moonshot Kimi =====
-            {'id': 'openrouter:moonshotai/kimi-k2', 'name': 'Kimi K2 (OR)', 'description': 'Kimi K2 via OpenRouter'},
-            {'id': 'openrouter:moonshotai/kimi-k2-0905', 'name': 'Kimi K2 (09-05) (OR)',
-             'description': 'Kimi K2 Sep update via OR'},
-            {'id': 'openrouter:moonshotai/kimi-k2-thinking', 'name': 'Kimi K2 Thinking (OR)',
-             'description': 'Kimi K2 with reasoning via OR'},
-            {'id': 'openrouter:moonshotai/kimi-k2:free', 'name': 'Kimi K2 (Free)',
-             'description': 'Kimi K2 - free tier'},
-            {'id': 'openrouter:moonshotai/kimi-linear-48b-a3b-instruct', 'name': 'Kimi Linear 48B Instruct',
-             'description': 'Moonshot Kimi Linear 48B'},
-            {'id': 'openrouter:moonshotai/kimi-vl-a3b-thinking', 'name': 'Kimi VL A3B Thinking',
-             'description': 'Kimi vision-language thinking model'},
-            {'id': 'openrouter:moonshotai/kimi-vl-a3b-thinking:free', 'name': 'Kimi VL A3B Thinking (Free)',
-             'description': 'Kimi VL thinking - free'},
-
-            # ===== OpenRouter - Morph =====
-            {'id': 'openrouter:morph/morph-v3-fast', 'name': 'Morph v3 Fast', 'description': 'Morph v3 fast model'},
-            {'id': 'openrouter:morph/morph-v3-large', 'name': 'Morph v3 Large', 'description': 'Morph v3 large model'},
-
-            # ===== OpenRouter - NeverSleep =====
-            {'id': 'openrouter:neversleep/llama-3-lumimaid-70b', 'name': 'Lumimaid LLaMA 3 70B',
-             'description': 'NeverSleep Lumimaid LLaMA 3 70B'},
-            {'id': 'openrouter:neversleep/llama-3.1-lumimaid-8b', 'name': 'Lumimaid LLaMA 3.1 8B',
-             'description': 'NeverSleep Lumimaid LLaMA 3.1 8B'},
-            {'id': 'openrouter:neversleep/noromaid-20b', 'name': 'Noromaid 20B',
-             'description': 'NeverSleep Noromaid 20B'},
-
-            # ===== OpenRouter - Nex-AGI / NousResearch =====
-            {'id': 'openrouter:nex-agi/deepseek-v3.1-nex-n1:free', 'name': 'DeepSeek V3.1 Nex N1 (Free)',
-             'description': 'Nex-AGI DeepSeek V3.1 - free'},
-            {'id': 'openrouter:nousresearch/deephermes-3-llama-3-8b-preview:free',
-             'name': 'DeepHermes 3 LLaMA 3 8B (Free)', 'description': 'NousResearch DeepHermes 3 8B - free'},
-            {'id': 'openrouter:nousresearch/deephermes-3-mistral-24b-preview', 'name': 'DeepHermes 3 Mistral 24B',
-             'description': 'NousResearch DeepHermes 3 on Mistral 24B'},
-            {'id': 'openrouter:nousresearch/hermes-2-pro-llama-3-8b', 'name': 'Hermes 2 Pro LLaMA 3 8B',
-             'description': 'NousResearch Hermes 2 Pro on LLaMA 3 8B'},
-            {'id': 'openrouter:nousresearch/hermes-3-llama-3.1-405b', 'name': 'Hermes 3 LLaMA 3.1 405B',
-             'description': 'NousResearch Hermes 3 405B'},
-            {'id': 'openrouter:nousresearch/hermes-3-llama-3.1-70b', 'name': 'Hermes 3 LLaMA 3.1 70B',
-             'description': 'NousResearch Hermes 3 70B'},
-            {'id': 'openrouter:nousresearch/hermes-4-405b', 'name': 'Hermes 4 405B',
-             'description': 'NousResearch Hermes 4 405B'},
-            {'id': 'openrouter:nousresearch/hermes-4-70b', 'name': 'Hermes 4 70B',
-             'description': 'NousResearch Hermes 4 70B'},
-            {'id': 'openrouter:nousresearch/nous-hermes-2-mixtral-8x7b-dpo', 'name': 'Nous Hermes 2 Mixtral 8x7B DPO',
-             'description': 'NousResearch Hermes 2 on Mixtral 8x7B'},
-
-            # ===== OpenRouter - NVIDIA =====
-            {'id': 'openrouter:nvidia/llama-3.1-nemotron-70b-instruct', 'name': 'Nemotron 70B Instruct',
-             'description': 'NVIDIA Nemotron LLaMA 3.1 70B'},
-            {'id': 'openrouter:nvidia/llama-3.1-nemotron-ultra-253b-v1', 'name': 'Nemotron Ultra 253B',
-             'description': 'NVIDIA Nemotron Ultra 253B'},
-            {'id': 'openrouter:nvidia/llama-3.1-nemotron-ultra-253b-v1:free', 'name': 'Nemotron Ultra 253B (Free)',
-             'description': 'NVIDIA Nemotron Ultra 253B - free'},
-            {'id': 'openrouter:nvidia/llama-3.3-nemotron-super-49b-v1', 'name': 'Nemotron Super 49B v1',
-             'description': 'NVIDIA Nemotron Super 49B v1'},
-            {'id': 'openrouter:nvidia/llama-3.3-nemotron-super-49b-v1.5', 'name': 'Nemotron Super 49B v1.5',
-             'description': 'NVIDIA Nemotron Super 49B v1.5'},
-            {'id': 'openrouter:nvidia/nemotron-3-nano-30b-a3b', 'name': 'Nemotron 3 Nano 30B',
-             'description': 'NVIDIA Nemotron 3 Nano 30B'},
-            {'id': 'openrouter:nvidia/nemotron-3-nano-30b-a3b:free', 'name': 'Nemotron 3 Nano 30B (Free)',
-             'description': 'NVIDIA Nemotron 3 Nano 30B - free'},
-            {'id': 'openrouter:nvidia/nemotron-nano-12b-v2-vl', 'name': 'Nemotron Nano 12B v2 VL',
-             'description': 'NVIDIA Nemotron Nano 12B vision-language'},
-            {'id': 'openrouter:nvidia/nemotron-nano-12b-v2-vl:free', 'name': 'Nemotron Nano 12B v2 VL (Free)',
-             'description': 'NVIDIA Nemotron Nano 12B VL - free'},
-            {'id': 'openrouter:nvidia/nemotron-nano-9b-v2', 'name': 'Nemotron Nano 9B v2',
-             'description': 'NVIDIA Nemotron Nano 9B v2'},
-            {'id': 'openrouter:nvidia/nemotron-nano-9b-v2:free', 'name': 'Nemotron Nano 9B v2 (Free)',
-             'description': 'NVIDIA Nemotron Nano 9B v2 - free'},
-
-            # ===== OpenRouter - OpenAI (full) =====
-            {'id': 'openrouter:openai/chatgpt-4o-latest', 'name': 'ChatGPT-4o Latest',
-             'description': 'Latest ChatGPT-4o via OR'},
-            {'id': 'openrouter:openai/gpt-3.5-turbo', 'name': 'GPT-3.5 Turbo', 'description': 'OpenAI GPT-3.5 Turbo'},
-            {'id': 'openrouter:openai/gpt-3.5-turbo-0613', 'name': 'GPT-3.5 Turbo (Jun 2023)',
-             'description': 'GPT-3.5 Turbo June 2023'},
-            {'id': 'openrouter:openai/gpt-3.5-turbo-16k', 'name': 'GPT-3.5 Turbo 16K',
-             'description': 'GPT-3.5 Turbo extended context'},
-            {'id': 'openrouter:openai/gpt-3.5-turbo-instruct', 'name': 'GPT-3.5 Turbo Instruct',
-             'description': 'GPT-3.5 Turbo instruction-tuned'},
-            {'id': 'openrouter:openai/gpt-4', 'name': 'GPT-4', 'description': 'OpenAI GPT-4'},
-            {'id': 'openrouter:openai/gpt-4-0314', 'name': 'GPT-4 (Mar 2023)', 'description': 'GPT-4 March 2023'},
-            {'id': 'openrouter:openai/gpt-4-1106-preview', 'name': 'GPT-4 Turbo Preview (Nov 2023)',
-             'description': 'GPT-4 November 2023 preview'},
-            {'id': 'openrouter:openai/gpt-4-turbo', 'name': 'GPT-4 Turbo', 'description': 'OpenAI GPT-4 Turbo'},
-            {'id': 'openrouter:openai/gpt-4-turbo-preview', 'name': 'GPT-4 Turbo Preview',
-             'description': 'OpenAI GPT-4 Turbo Preview'},
-            {'id': 'openrouter:openai/gpt-4.1', 'name': 'GPT-4.1 (OR)', 'description': 'GPT-4.1 via OpenRouter'},
-            {'id': 'openrouter:openai/gpt-4.1-mini', 'name': 'GPT-4.1 Mini (OR)',
-             'description': 'GPT-4.1 Mini via OpenRouter'},
-            {'id': 'openrouter:openai/gpt-4.1-nano', 'name': 'GPT-4.1 Nano (OR)',
-             'description': 'GPT-4.1 Nano via OpenRouter'},
-            {'id': 'openrouter:openai/gpt-4o', 'name': 'GPT-4o (OR)', 'description': 'GPT-4o via OpenRouter'},
-            {'id': 'openrouter:openai/gpt-4o-2024-05-13', 'name': 'GPT-4o (May 2024)',
-             'description': 'GPT-4o May 2024'},
-            {'id': 'openrouter:openai/gpt-4o-2024-08-06', 'name': 'GPT-4o (Aug 2024)',
-             'description': 'GPT-4o August 2024'},
-            {'id': 'openrouter:openai/gpt-4o-2024-11-20', 'name': 'GPT-4o (Nov 2024)',
-             'description': 'GPT-4o November 2024'},
-            {'id': 'openrouter:openai/gpt-4o-audio-preview', 'name': 'GPT-4o Audio Preview',
-             'description': 'GPT-4o with audio capabilities'},
-            {'id': 'openrouter:openai/gpt-4o-mini', 'name': 'GPT-4o Mini (OR)',
-             'description': 'GPT-4o Mini via OpenRouter'},
-            {'id': 'openrouter:openai/gpt-4o-mini-2024-07-18', 'name': 'GPT-4o Mini (Jul 2024)',
-             'description': 'GPT-4o Mini July 2024'},
-            {'id': 'openrouter:openai/gpt-4o-mini-search-preview', 'name': 'GPT-4o Mini Search Preview',
-             'description': 'GPT-4o Mini with search'},
-            {'id': 'openrouter:openai/gpt-4o-search-preview', 'name': 'GPT-4o Search Preview',
-             'description': 'GPT-4o with search'},
-            {'id': 'openrouter:openai/gpt-4o:extended', 'name': 'GPT-4o Extended',
-             'description': 'GPT-4o extended context'},
-            {'id': 'openrouter:openai/gpt-5', 'name': 'GPT-5 (OR)', 'description': 'GPT-5 via OpenRouter'},
-            {'id': 'openrouter:openai/gpt-5-chat', 'name': 'GPT-5 Chat (OR)',
-             'description': 'GPT-5 Chat via OpenRouter'},
-            {'id': 'openrouter:openai/gpt-5-image', 'name': 'GPT-5 Image',
-             'description': 'GPT-5 with image generation'},
-            {'id': 'openrouter:openai/gpt-5-image-mini', 'name': 'GPT-5 Image Mini',
-             'description': 'Compact GPT-5 image model'},
-            {'id': 'openrouter:openai/gpt-5-mini', 'name': 'GPT-5 Mini (OR)',
-             'description': 'GPT-5 Mini via OpenRouter'},
-            {'id': 'openrouter:openai/gpt-5-nano', 'name': 'GPT-5 Nano (OR)',
-             'description': 'GPT-5 Nano via OpenRouter'},
-            {'id': 'openrouter:openai/gpt-5-pro', 'name': 'GPT-5 Pro (OR)', 'description': 'GPT-5 Pro via OpenRouter'},
-            {'id': 'openrouter:openai/gpt-5.1', 'name': 'GPT-5.1 (OR)', 'description': 'GPT-5.1 via OpenRouter'},
-            {'id': 'openrouter:openai/gpt-5.1-chat', 'name': 'GPT-5.1 Chat (OR)',
-             'description': 'GPT-5.1 Chat via OpenRouter'},
-            {'id': 'openrouter:openai/gpt-5.2', 'name': 'GPT-5.2 (OR)', 'description': 'GPT-5.2 via OpenRouter'},
-            {'id': 'openrouter:openai/gpt-5.2-chat', 'name': 'GPT-5.2 Chat (OR)',
-             'description': 'GPT-5.2 Chat via OpenRouter'},
-            {'id': 'openrouter:openai/gpt-5.2-pro', 'name': 'GPT-5.2 Pro (OR)',
-             'description': 'GPT-5.2 Pro via OpenRouter'},
-            {'id': 'openrouter:openai/o1', 'name': 'o1 (OR)', 'description': 'o1 reasoning via OpenRouter'},
-            {'id': 'openrouter:openai/o1-mini', 'name': 'o1 Mini (OR)', 'description': 'o1 Mini via OpenRouter'},
-            {'id': 'openrouter:openai/o1-mini-2024-09-12', 'name': 'o1 Mini (Sep 2024)',
-             'description': 'o1 Mini September 2024'},
-            {'id': 'openrouter:openai/o1-pro', 'name': 'o1 Pro (OR)', 'description': 'o1 Pro via OpenRouter'},
-            {'id': 'openrouter:openai/o3', 'name': 'o3 (OR)', 'description': 'o3 via OpenRouter'},
-            {'id': 'openrouter:openai/o3-deep-research', 'name': 'o3 Deep Research',
-             'description': 'o3 with deep research capability'},
-            {'id': 'openrouter:openai/o3-mini', 'name': 'o3 Mini (OR)', 'description': 'o3 Mini via OpenRouter'},
-            {'id': 'openrouter:openai/o3-mini-high', 'name': 'o3 Mini High',
-             'description': 'o3 Mini high reasoning effort'},
-            {'id': 'openrouter:openai/o3-pro', 'name': 'o3 Pro', 'description': 'o3 Pro via OpenRouter'},
-            {'id': 'openrouter:openai/o4-mini', 'name': 'o4 Mini (OR)', 'description': 'o4 Mini via OpenRouter'},
-            {'id': 'openrouter:openai/o4-mini-deep-research', 'name': 'o4 Mini Deep Research',
-             'description': 'o4 Mini with deep research'},
-            {'id': 'openrouter:openai/o4-mini-high', 'name': 'o4 Mini High', 'description': 'o4 Mini high effort'},
-            {'id': 'openrouter:openai/text-embedding-3-large', 'name': 'Text Embedding 3 Large',
-             'description': 'OpenAI text embedding large'},
-            {'id': 'openrouter:openai/text-embedding-3-small', 'name': 'Text Embedding 3 Small',
-             'description': 'OpenAI text embedding small'},
-            {'id': 'openrouter:openai/text-embedding-ada-002', 'name': 'Text Embedding Ada 002',
-             'description': 'OpenAI Ada embedding model'},
-
-            # ===== OpenRouter - OpenGVLab / OpenRouter Meta =====
-            {'id': 'openrouter:opengvlab/internvl3-14b', 'name': 'InternVL3 14B',
-             'description': 'OpenGVLab InternVL3 14B vision-language'},
-            {'id': 'openrouter:openrouter/auto', 'name': 'OpenRouter Auto', 'description': 'Automatic model routing'},
-            {'id': 'openrouter:openrouter/bert-nebulon-alpha', 'name': 'BERT Nebulon Alpha',
-             'description': 'OpenRouter BERT Nebulon Alpha'},
-            {'id': 'openrouter:openrouter/polaris-alpha', 'name': 'Polaris Alpha',
-             'description': 'OpenRouter Polaris Alpha'},
-
-            # ===== OpenRouter - Perplexity =====
-            {'id': 'openrouter:perplexity/sonar', 'name': 'Sonar', 'description': 'Perplexity Sonar'},
-            {'id': 'openrouter:perplexity/sonar-pro', 'name': 'Sonar Pro', 'description': 'Perplexity Sonar Pro'},
-            {'id': 'openrouter:perplexity/sonar-pro-search', 'name': 'Sonar Pro Search',
-             'description': 'Perplexity Sonar Pro with live search'},
-            {'id': 'openrouter:perplexity/sonar-deep-research', 'name': 'Sonar Deep Research',
-             'description': 'Perplexity deep research model'},
-            {'id': 'openrouter:perplexity/sonar-reasoning-pro', 'name': 'Sonar Reasoning Pro',
-             'description': 'Perplexity Sonar with advanced reasoning'},
-
-            # ===== OpenRouter - Prime Intellect / Pygmalion =====
-            {'id': 'openrouter:prime-intellect/intellect-3', 'name': 'Intellect 3', 'description': 'Prime Intellect 3'},
-            {'id': 'openrouter:pygmalionai/mythalion-13b', 'name': 'Mythalion 13B',
-             'description': 'PygmalionAI Mythalion 13B'},
-
-            # ===== OpenRouter - Qwen =====
-            {'id': 'openrouter:qwen/qwen-2.5-72b-instruct', 'name': 'Qwen 2.5 72B Instruct',
-             'description': 'Alibaba Qwen 2.5 72B'},
-            {'id': 'openrouter:qwen/qwen-2.5-72b-instruct:free', 'name': 'Qwen 2.5 72B Instruct (Free)',
-             'description': 'Qwen 2.5 72B - free'},
-            {'id': 'openrouter:qwen/qwen-2.5-7b-instruct', 'name': 'Qwen 2.5 7B Instruct',
-             'description': 'Alibaba Qwen 2.5 7B'},
-            {'id': 'openrouter:qwen/qwen-2.5-coder-32b-instruct', 'name': 'Qwen 2.5 Coder 32B',
-             'description': 'Qwen 2.5 coding specialist 32B'},
-            {'id': 'openrouter:qwen/qwen-2.5-coder-32b-instruct:free', 'name': 'Qwen 2.5 Coder 32B (Free)',
-             'description': 'Qwen 2.5 Coder 32B - free'},
-            {'id': 'openrouter:qwen/qwen-2.5-vl-7b-instruct', 'name': 'Qwen 2.5 VL 7B',
-             'description': 'Qwen 2.5 vision-language 7B'},
-            {'id': 'openrouter:qwen/qwen-max', 'name': 'Qwen Max', 'description': 'Alibaba Qwen Max'},
-            {'id': 'openrouter:qwen/qwen-plus', 'name': 'Qwen Plus', 'description': 'Alibaba Qwen Plus'},
-            {'id': 'openrouter:qwen/qwen-plus-2025-07-28', 'name': 'Qwen Plus (Jul 2025)',
-             'description': 'Qwen Plus July 2025'},
-            {'id': 'openrouter:qwen/qwen-plus-2025-07-28:thinking', 'name': 'Qwen Plus (Jul 2025) Thinking',
-             'description': 'Qwen Plus July 2025 with thinking'},
-            {'id': 'openrouter:qwen/qwen-turbo', 'name': 'Qwen Turbo', 'description': 'Alibaba Qwen Turbo'},
-            {'id': 'openrouter:qwen/qwen-vl-max', 'name': 'Qwen VL Max', 'description': 'Qwen vision-language Max'},
-            {'id': 'openrouter:qwen/qwen-vl-plus', 'name': 'Qwen VL Plus', 'description': 'Qwen vision-language Plus'},
-            {'id': 'openrouter:qwen/qwen2.5-vl-32b-instruct', 'name': 'Qwen 2.5 VL 32B',
-             'description': 'Qwen 2.5 vision-language 32B'},
-            {'id': 'openrouter:qwen/qwen2.5-vl-32b-instruct:free', 'name': 'Qwen 2.5 VL 32B (Free)',
-             'description': 'Qwen 2.5 VL 32B - free'},
-            {'id': 'openrouter:qwen/qwen2.5-vl-72b-instruct', 'name': 'Qwen 2.5 VL 72B',
-             'description': 'Qwen 2.5 vision-language 72B'},
-            {'id': 'openrouter:qwen/qwen2.5-vl-72b-instruct:free', 'name': 'Qwen 2.5 VL 72B (Free)',
-             'description': 'Qwen 2.5 VL 72B - free'},
-            {'id': 'openrouter:qwen/qwen3-14b', 'name': 'Qwen3 14B', 'description': 'Alibaba Qwen3 14B'},
-            {'id': 'openrouter:qwen/qwen3-14b:free', 'name': 'Qwen3 14B (Free)', 'description': 'Qwen3 14B - free'},
-            {'id': 'openrouter:qwen/qwen3-235b-a22b', 'name': 'Qwen3 235B A22B',
-             'description': 'Qwen3 MoE 235B active 22B'},
-            {'id': 'openrouter:qwen/qwen3-235b-a22b-2507', 'name': 'Qwen3 235B A22B (Jul 2025)',
-             'description': 'Qwen3 235B Jul 2025'},
-            {'id': 'openrouter:qwen/qwen3-235b-a22b-thinking-2507', 'name': 'Qwen3 235B A22B Thinking (Jul 2025)',
-             'description': 'Qwen3 235B with thinking Jul 2025'},
-            {'id': 'openrouter:qwen/qwen3-235b-a22b:free', 'name': 'Qwen3 235B A22B (Free)',
-             'description': 'Qwen3 235B - free'},
-            {'id': 'openrouter:qwen/qwen3-30b-a3b', 'name': 'Qwen3 30B A3B', 'description': 'Qwen3 MoE 30B active 3B'},
-            {'id': 'openrouter:qwen/qwen3-30b-a3b-instruct-2507', 'name': 'Qwen3 30B A3B Instruct (Jul 2025)',
-             'description': 'Qwen3 30B Instruct Jul 2025'},
-            {'id': 'openrouter:qwen/qwen3-30b-a3b-thinking-2507', 'name': 'Qwen3 30B A3B Thinking (Jul 2025)',
-             'description': 'Qwen3 30B Thinking Jul 2025'},
-            {'id': 'openrouter:qwen/qwen3-30b-a3b:free', 'name': 'Qwen3 30B A3B (Free)',
-             'description': 'Qwen3 30B - free'},
-            {'id': 'openrouter:qwen/qwen3-32b', 'name': 'Qwen3 32B', 'description': 'Alibaba Qwen3 32B'},
-            {'id': 'openrouter:qwen/qwen3-4b:free', 'name': 'Qwen3 4B (Free)', 'description': 'Qwen3 4B - free'},
-            {'id': 'openrouter:qwen/qwen3-8b', 'name': 'Qwen3 8B', 'description': 'Alibaba Qwen3 8B'},
-            {'id': 'openrouter:qwen/qwen3-8b:free', 'name': 'Qwen3 8B (Free)', 'description': 'Qwen3 8B - free'},
-            {'id': 'openrouter:qwen/qwen3-coder', 'name': 'Qwen3 Coder', 'description': 'Qwen3 coding specialist'},
-            {'id': 'openrouter:qwen/qwen3-coder-30b-a3b-instruct', 'name': 'Qwen3 Coder 30B Instruct',
-             'description': 'Qwen3 Coder 30B instruction-tuned'},
-            {'id': 'openrouter:qwen/qwen3-coder-flash', 'name': 'Qwen3 Coder Flash',
-             'description': 'Fast Qwen3 coding model'},
-            {'id': 'openrouter:qwen/qwen3-coder-plus', 'name': 'Qwen3 Coder Plus',
-             'description': 'Enhanced Qwen3 coding model'},
-            {'id': 'openrouter:qwen/qwen3-coder:free', 'name': 'Qwen3 Coder (Free)',
-             'description': 'Qwen3 Coder - free'},
-            {'id': 'openrouter:qwen/qwen3-embedding-0.6b', 'name': 'Qwen3 Embedding 0.6B',
-             'description': 'Qwen3 compact embedding model'},
-            {'id': 'openrouter:qwen/qwen3-embedding-4b', 'name': 'Qwen3 Embedding 4B',
-             'description': 'Qwen3 medium embedding model'},
-            {'id': 'openrouter:qwen/qwen3-embedding-8b', 'name': 'Qwen3 Embedding 8B',
-             'description': 'Qwen3 large embedding model'},
-            {'id': 'openrouter:qwen/qwen3-max', 'name': 'Qwen3 Max', 'description': 'Qwen3 Max flagship'},
-            {'id': 'openrouter:qwen/qwen3-next-80b-a3b-instruct', 'name': 'Qwen3 Next 80B Instruct',
-             'description': 'Qwen3 Next 80B instruction-tuned'},
-            {'id': 'openrouter:qwen/qwen3-next-80b-a3b-thinking', 'name': 'Qwen3 Next 80B Thinking',
-             'description': 'Qwen3 Next 80B with thinking'},
-            {'id': 'openrouter:qwen/qwen3-vl-30b-a3b-instruct', 'name': 'Qwen3 VL 30B Instruct',
-             'description': 'Qwen3 vision-language 30B'},
-            {'id': 'openrouter:qwen/qwen3-vl-30b-a3b-thinking', 'name': 'Qwen3 VL 30B Thinking',
-             'description': 'Qwen3 VL 30B with thinking'},
-            {'id': 'openrouter:qwen/qwen3-vl-8b-instruct', 'name': 'Qwen3 VL 8B Instruct',
-             'description': 'Qwen3 vision-language 8B'},
-            {'id': 'openrouter:qwen/qwen3-vl-8b-thinking', 'name': 'Qwen3 VL 8B Thinking',
-             'description': 'Qwen3 VL 8B with thinking'},
-            {'id': 'openrouter:qwen/qwq-32b', 'name': 'QwQ 32B', 'description': 'Qwen QwQ 32B reasoning model'},
-            {'id': 'openrouter:qwen/qwq-32b-preview', 'name': 'QwQ 32B Preview', 'description': 'Qwen QwQ 32B preview'},
-            {'id': 'openrouter:qwen/qwq-32b:free', 'name': 'QwQ 32B (Free)', 'description': 'QwQ 32B - free'},
-
-            # ===== OpenRouter - Raifle / RekaAI / Relace =====
-            {'id': 'openrouter:raifle/sorcererlm-8x22b', 'name': 'SorcererLM 8x22B',
-             'description': 'Raifle SorcererLM MoE 8x22B'},
-            {'id': 'openrouter:rekaai/reka-flash-3:free', 'name': 'Reka Flash 3 (Free)',
-             'description': 'RekaAI Reka Flash 3 - free'},
-            {'id': 'openrouter:relace/relace-apply-3', 'name': 'Relace Apply 3', 'description': 'Relace Apply 3 model'},
-
-            # ===== OpenRouter - SAO10K =====
-            {'id': 'openrouter:sao10k/l3-euryale-70b', 'name': 'L3 Euryale 70B',
-             'description': 'SAO10K LLaMA 3 Euryale 70B'},
-            {'id': 'openrouter:sao10k/l3-lunaris-8b', 'name': 'L3 Lunaris 8B',
-             'description': 'SAO10K LLaMA 3 Lunaris 8B'},
-            {'id': 'openrouter:sao10k/l3.1-euryale-70b', 'name': 'L3.1 Euryale 70B',
-             'description': 'SAO10K LLaMA 3.1 Euryale 70B'},
-            {'id': 'openrouter:sao10k/l3.3-euryale-70b', 'name': 'L3.3 Euryale 70B',
-             'description': 'SAO10K LLaMA 3.3 Euryale 70B'},
-
-            # ===== OpenRouter - SarvamAI / SCB10X / Shisa / Sopho / Switchpoint =====
-            {'id': 'openrouter:sarvamai/sarvam-m:free', 'name': 'Sarvam M (Free)',
-             'description': 'SarvamAI Sarvam M - free'},
-            {'id': 'openrouter:scb10x/llama3.1-typhoon2-70b-instruct', 'name': 'Typhoon2 70B Instruct',
-             'description': 'SCB10X Typhoon2 LLaMA 3.1 70B'},
-            {'id': 'openrouter:shisa-ai/shisa-v2-llama3.3-70b', 'name': 'Shisa V2 LLaMA 3.3 70B',
-             'description': 'Shisa AI v2 on LLaMA 3.3 70B'},
-            {'id': 'openrouter:shisa-ai/shisa-v2-llama3.3-70b:free', 'name': 'Shisa V2 LLaMA 3.3 70B (Free)',
-             'description': 'Shisa V2 70B - free'},
-            {'id': 'openrouter:sophosympatheia/midnight-rose-70b', 'name': 'Midnight Rose 70B',
-             'description': 'Sophosympatheia Midnight Rose 70B'},
-            {'id': 'openrouter:switchpoint/router', 'name': 'Switchpoint Router',
-             'description': 'Switchpoint intelligent router'},
-
-            # ===== OpenRouter - Tencent / TheDrummer =====
-            {'id': 'openrouter:tencent/hunyuan-a13b-instruct', 'name': 'HunYuan A13B Instruct',
-             'description': 'Tencent HunYuan A13B'},
-            {'id': 'openrouter:tencent/hunyuan-a13b-instruct:free', 'name': 'HunYuan A13B Instruct (Free)',
-             'description': 'Tencent HunYuan A13B - free'},
-            {'id': 'openrouter:thedrummer/anubis-70b-v1.1', 'name': 'Anubis 70B v1.1',
-             'description': 'TheDrummer Anubis 70B v1.1'},
-            {'id': 'openrouter:thedrummer/anubis-pro-105b-v1', 'name': 'Anubis Pro 105B v1',
-             'description': 'TheDrummer Anubis Pro 105B'},
-            {'id': 'openrouter:thedrummer/cydonia-24b-v4.1', 'name': 'Cydonia 24B v4.1',
-             'description': 'TheDrummer Cydonia 24B v4.1'},
-            {'id': 'openrouter:thedrummer/rocinante-12b', 'name': 'Rocinante 12B',
-             'description': 'TheDrummer Rocinante 12B'},
-            {'id': 'openrouter:thedrummer/skyfall-36b-v2', 'name': 'Skyfall 36B v2',
-             'description': 'TheDrummer Skyfall 36B v2'},
-            {'id': 'openrouter:thedrummer/unslopnemo-12b', 'name': 'UnslopNemo 12B',
-             'description': 'TheDrummer UnslopNemo 12B'},
-
-            # ===== OpenRouter - Embedding Models (GTE / THUDM) =====
-            {'id': 'openrouter:thenlper/gte-base', 'name': 'GTE Base', 'description': 'GTE base embedding model'},
-            {'id': 'openrouter:thenlper/gte-large', 'name': 'GTE Large', 'description': 'GTE large embedding model'},
-            {'id': 'openrouter:thudm/glm-4-32b', 'name': 'GLM-4 32B', 'description': 'THUDM GLM-4 32B'},
-            {'id': 'openrouter:thudm/glm-4.1v-9b-thinking', 'name': 'GLM-4.1V 9B Thinking',
-             'description': 'THUDM GLM-4.1V 9B vision thinking'},
-            {'id': 'openrouter:thudm/glm-z1-32b', 'name': 'GLM-Z1 32B', 'description': 'THUDM GLM-Z1 32B'},
-
-            # ===== OpenRouter - TNG Tech =====
-            {'id': 'openrouter:tngtech/deepseek-r1t-chimera', 'name': 'DeepSeek R1T Chimera (OR)',
-             'description': 'TNG DeepSeek R1T Chimera via OR'},
-            {'id': 'openrouter:tngtech/deepseek-r1t-chimera:free', 'name': 'DeepSeek R1T Chimera (OR, Free)',
-             'description': 'TNG DeepSeek R1T Chimera - free'},
-            {'id': 'openrouter:tngtech/deepseek-r1t2-chimera:free', 'name': 'DeepSeek R1T2 Chimera (OR, Free)',
-             'description': 'TNG DeepSeek R1T2 Chimera via OR - free'},
-            {'id': 'openrouter:tngtech/tng-r1t-chimera', 'name': 'TNG R1T Chimera (OR)',
-             'description': 'TNG R1T Chimera via OR'},
-            {'id': 'openrouter:tngtech/tng-r1t-chimera:free', 'name': 'TNG R1T Chimera (OR, Free)',
-             'description': 'TNG R1T Chimera via OR - free'},
-
-            # ===== OpenRouter - Undi95 / xAI =====
-            {'id': 'openrouter:undi95/remm-slerp-l2-13b', 'name': 'ReMM SLERP L2 13B',
-             'description': 'Undi95 ReMM SLERP LLaMA 2 13B'},
-            {'id': 'openrouter:x-ai/grok-2-1212', 'name': 'Grok 2 (12-12) (OR)',
-             'description': 'Grok 2 December 2024 via OR'},
-            {'id': 'openrouter:x-ai/grok-2-vision-1212', 'name': 'Grok 2 Vision (12-12)',
-             'description': 'Grok 2 Vision December 2024'},
-            {'id': 'openrouter:x-ai/grok-3', 'name': 'Grok 3 (OR)', 'description': 'Grok 3 via OpenRouter'},
-            {'id': 'openrouter:x-ai/grok-3-beta', 'name': 'Grok 3 Beta (OR)', 'description': 'Grok 3 Beta via OR'},
-            {'id': 'openrouter:x-ai/grok-3-mini', 'name': 'Grok 3 Mini (OR)', 'description': 'Grok 3 Mini via OR'},
-            {'id': 'openrouter:x-ai/grok-3-mini-beta', 'name': 'Grok 3 Mini Beta (OR)',
-             'description': 'Grok 3 Mini Beta via OR'},
-            {'id': 'openrouter:x-ai/grok-4', 'name': 'Grok 4 (OR)', 'description': 'Grok 4 via OpenRouter'},
-            {'id': 'openrouter:x-ai/grok-4-fast:free', 'name': 'Grok 4 Fast (Free)',
-             'description': 'Grok 4 Fast - free tier'},
-            {'id': 'openrouter:x-ai/grok-4.1-fast:free', 'name': 'Grok 4.1 Fast (Free)',
-             'description': 'Grok 4.1 Fast - free tier'},
-            {'id': 'openrouter:x-ai/grok-code-fast-1', 'name': 'Grok Code Fast 1 (OR)',
-             'description': 'Grok coding model via OR'},
-            {'id': 'openrouter:x-ai/grok-vision-beta', 'name': 'Grok Vision Beta (OR)',
-             'description': 'Grok Vision Beta via OR'},
-
-            # ===== OpenRouter - Xiaomi / Z-AI =====
-            {'id': 'openrouter:xiaomi/mimo-v2-flash:free', 'name': 'MiMo V2 Flash (Free)',
-             'description': 'Xiaomi MiMo V2 Flash - free'},
-            {'id': 'openrouter:z-ai/glm-4-32b', 'name': 'GLM-4 32B (Z-AI)', 'description': 'Z-AI GLM-4 32B'},
-            {'id': 'openrouter:z-ai/glm-4.5', 'name': 'GLM-4.5', 'description': 'Z-AI GLM-4.5'},
-            {'id': 'openrouter:z-ai/glm-4.5-air', 'name': 'GLM-4.5 Air', 'description': 'Z-AI GLM-4.5 Air'},
-            {'id': 'openrouter:z-ai/glm-4.5-air:free', 'name': 'GLM-4.5 Air (Free)',
-             'description': 'Z-AI GLM-4.5 Air - free'},
-            {'id': 'openrouter:z-ai/glm-4.5v', 'name': 'GLM-4.5V', 'description': 'Z-AI GLM-4.5 vision model'},
-            {'id': 'openrouter:z-ai/glm-4.6', 'name': 'GLM-4.6', 'description': 'Z-AI GLM-4.6'},
-            {'id': 'openrouter:z-ai/glm-4.6:exacto', 'name': 'GLM-4.6 Exacto',
-             'description': 'Z-AI GLM-4.6 deterministic variant'},
-            {'id': 'openrouter:z-ai/glm-4.6v', 'name': 'GLM-4.6V', 'description': 'Z-AI GLM-4.6 vision model'},
-            {'id': 'openrouter:z-ai/glm-4.7', 'name': 'GLM-4.7', 'description': 'Z-AI GLM-4.7'},
-        ]
+        """Get Puter.js models (provider == 'puter') from core/models.json."""
+        return [m for m in self._load_all_models() if m.get('provider') == 'puter']
 
     def get_gemini_models(self):
-        """Get available Gemini models"""
-        return [
-            # GEMINI 2.5 MODELS
-            {
-                'id': 'gemini-2.5-flash',
-                'name': 'Gemini 2.5 Flash ⚡ (RECOMMENDED)',
-                'description': '✅ FREE: 5 RPM, 20/day - Current model, best balance'
-            },
-            {
-                'id': 'gemini-2.5-flash-lite',
-                'name': 'Gemini 2.5 Flash Lite ⚡⚡',
-                'description': '✅ FREE: 10 RPM, 20/day - Faster, lightweight version'
-            },
-            # GEMINI 3 MODEL
-            {
-                'id': 'gemini-3-flash',
-                'name': 'Gemini 3 Flash 🆕',
-                'description': '✅ FREE: 5 RPM, 20/day - NEWEST model (just released!)'
-            },
-            # GEMMA MODELS
-            {
-                'id': 'gemma-3-27b',
-                'name': 'Gemma 3 27B 🔥',
-                'description': '✅ FREE: 30 RPM, 14,400/day - Highest limits! Open source'
-            },
-            {
-                'id': 'gemma-3-12b',
-                'name': 'Gemma 3 12B',
-                'description': '✅ FREE: 30 RPM, 14,400/day - Open source, very fast'
-            },
-            {
-                'id': 'gemma-3-4b',
-                'name': 'Gemma 3 4B',
-                'description': '✅ FREE: 30 RPM, 14,400/day - Smallest, ultra-fast'
-            },
-        ]
+        """Get Gemini models (provider == 'gemini') from core/models.json."""
+        return [m for m in self._load_all_models() if m.get('provider') == 'gemini']
+
+    def get_anthropic_models(self):
+        """Get Anthropic/Claude models (provider == 'anthropic') from core/models.json."""
+        return [m for m in self._load_all_models() if m.get('provider') == 'anthropic']
+
+    def get_anthropic_model(self):
+        return self.settings.get('anthropic_model', 'claude-sonnet-4-5-20250929')
+
+    def set_anthropic_model(self, model):
+        log.info(f"[AssistantController.set_anthropic_model] model='{model}'")
+        self.settings['anthropic_model'] = model
+        self.ai.set_anthropic_model(model)
+        self.save_settings()
+
+    def get_gemini_model(self):
+        return self.settings.get('gemini_model', 'gemini-2.5-flash')
+
+    def set_gemini_model(self, model):
+        log.info(f"[AssistantController.set_gemini_model] model='{model}'")
+        self.settings['gemini_model'] = model
+        self.ai.set_gemini_model(model)
+        self.save_settings()
+    # ── Anthropic generation-param getters/setters ────────────────────────────
+
+    def get_anthropic_temperature(self):
+        return float(self.settings.get('anthropic_temperature', 1.0))
+
+    def set_anthropic_temperature(self, value):
+        self.settings['anthropic_temperature'] = float(value)
+        self.ai.set_anthropic_temperature(value)
+        self.save_settings()
+
+    def get_anthropic_max_tokens(self):
+        return int(self.settings.get('anthropic_max_tokens', 8192))
+
+    def set_anthropic_max_tokens(self, value):
+        self.settings['anthropic_max_tokens'] = int(value)
+        self.ai.set_anthropic_max_tokens(value)
+        self.save_settings()
+
+    def get_anthropic_auto_tokens(self):
+        return bool(self.settings.get('anthropic_auto_tokens', True))
+
+    def set_anthropic_auto_tokens(self, enabled):
+        self.settings['anthropic_auto_tokens'] = bool(enabled)
+        self.ai.set_anthropic_auto_tokens(enabled)
+        self.save_settings()
+
+    # ── Gemini generation-param getters/setters ───────────────────────────────
+
+    def get_gemini_temperature(self):
+        return float(self.settings.get('gemini_temperature', 1.0))
+
+    def set_gemini_temperature(self, value):
+        self.settings['gemini_temperature'] = float(value)
+        self.ai.set_gemini_temperature(value)
+        self.save_settings()
+
+    def get_gemini_max_tokens(self):
+        return int(self.settings.get('gemini_max_tokens', 8192))
+
+    def set_gemini_max_tokens(self, value):
+        self.settings['gemini_max_tokens'] = int(value)
+        self.ai.set_gemini_max_tokens(value)
+        self.save_settings()
+
+    def get_gemini_auto_tokens(self):
+        return bool(self.settings.get('gemini_auto_tokens', True))
+
+    def set_gemini_auto_tokens(self, enabled):
+        self.settings['gemini_auto_tokens'] = bool(enabled)
+        self.ai.set_gemini_auto_tokens(enabled)
+        self.save_settings()
+
+    def get_gemini_top_p(self):
+        v = self.settings.get('gemini_top_p', None)
+        return float(v) if v is not None else None
+
+    def set_gemini_top_p(self, value):
+        v = float(value) if value is not None else None
+        self.settings['gemini_top_p'] = v
+        self.ai.set_gemini_top_p(v)
+        self.save_settings()
+
+    def get_gemini_top_k(self):
+        v = self.settings.get('gemini_top_k', None)
+        return int(v) if v is not None else None
+
+    def set_gemini_top_k(self, value):
+        v = int(value) if value is not None else None
+        self.settings['gemini_top_k'] = v
+        self.ai.set_gemini_top_k(v)
+        self.save_settings()
