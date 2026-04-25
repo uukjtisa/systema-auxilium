@@ -27,6 +27,43 @@ NOTES
 - This file is reimported fresh on every request. Live edits take effect immediately.
 - All configuration (API keys, URLs, models) lives here — the app forwards nothing.
 - You can import any library available in your Python environment.
+- You can also just use AI to build you a custom provider script. See below.
+
+════════════════════════════════════════════════════════════════════════════════
+NOT A FAMILIAR WITH PYTHON? LET AN AI WRITE THIS FOR YOU
+════════════════════════════════════════════════════════════════════════════════
+
+You can ask any AI assistant (ChatGPT, Claude, Gemini, etc.) to build your
+custom provider script. Just copy and paste this prompt:
+
+──────────────────────────────────────────────────────────────────────────────
+I need a Python script that connects to [your AI provider name] API and acts
+as a custom provider for my desktop AI assistant app.
+
+The script must define exactly this function:
+
+    def chat(system_prompt: str, messages: list[dict]) -> str
+
+Where:
+- system_prompt is a plain string (the AI's instructions), may be empty
+- messages is a list of {"role": "user"/"assistant", "content": "..."} dicts,
+  alternating, with the latest user message last
+- The function must return the AI's reply as a non-empty string
+- Any exception raised will be caught and shown as an error
+
+My API details:
+- Provider: [e.g. OpenAI / Mistral / Groq / etc.]
+- API URL: [e.g. https://api.openai.com/v1/chat/completions]
+- API Key: [your key here, or tell the AI to leave a placeholder]
+- Model: [e.g. gpt-4o / mistral-large / etc.]
+
+Use only the requests library (no SDK). Keep it simple and self-contained.
+──────────────────────────────────────────────────────────────────────────────
+
+Then save the script it gives you, and point the Custom Script Provider at it
+in Settings. That's it.
+
+════════════════════════════════════════════════════════════════════════════════
 """
 
 import requests
