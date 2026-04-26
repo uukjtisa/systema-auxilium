@@ -1093,6 +1093,38 @@ class SettingsWindow(BaseWindow):
         sec_lay.addStretch()
         tabs.addTab(sec_scroll, "🔒  Security")
 
+        # ════════════════════════════════════════════════════════════════════
+        # TAB 6 — System
+        # ════════════════════════════════════════════════════════════════════
+        sys_scroll, sys_lay = _make_scroll_tab()
+
+        tl_group = QGroupBox("🔒 Tool Execution Locking")
+        tl_group.setStyleSheet(_GROUP)
+        tl_lay = QVBoxLayout(tl_group)
+        self.tool_exec_lockout_checkbox = QCheckBox("Enable Tool Execution Lockout")
+        self.tool_exec_lockout_checkbox.setStyleSheet(_CHECK)
+        tl_lay.addWidget(self.tool_exec_lockout_checkbox)
+        tl_lay.addWidget(_info_box(
+            "When enabled, the agent will no longer be able to do anything but generate chat responses."))
+        sys_lay.addWidget(tl_group)
+
+        sp_group = QGroupBox("🤖 System Prompt Hijacking")
+        sp_group.setStyleSheet(_GROUP)
+        sp_lay = QVBoxLayout(sp_group)
+        self.system_prompt_hijack_checkbox = QCheckBox("Enable System Prompt Hijack")
+        self.system_prompt_hijack_checkbox.setStyleSheet(_CHECK)
+        sp_lay.addWidget(self.system_prompt_hijack_checkbox)
+        sp_lay.addWidget(_info_box(
+            "Replace the system prompt with the one below."))
+        self.system_prompt_hijack_input = QTextEdit()
+        self.system_prompt_hijack_input.setPlaceholderText("Enter your custom system prompt here...")
+        self.system_prompt_hijack_input.setFixedHeight(120)
+        self.system_prompt_hijack_input.setStyleSheet(_INPUT)
+        sp_lay.addWidget(self.system_prompt_hijack_input)
+        sys_lay.addWidget(sp_group)
+        sys_lay.addStretch()
+        tabs.addTab(sys_scroll, "💻 System")
+
         main_layout.addWidget(tabs, stretch=1)
 
         # ── Footer (always visible, pinned) ──────────────────────────────────
@@ -1467,6 +1499,19 @@ class SettingsWindow(BaseWindow):
         supervised_mode = self.controller.settings.get('supervised_execution', True)  # Default ON
         self.supervised_checkbox.setChecked(supervised_mode)
 
+        # Load Tool lockout switch
+        tool_exec_locked = self.controller.settings.get('tool_execution_lockout', False)
+        self.tool_exec_lockout_checkbox.setChecked(tool_exec_locked)
+
+        # Load system prompt hijacking
+        sys_prompt_hijacked = self.controller.settings.get('system_prompt_hijacked', False)
+        self.system_prompt_hijack_checkbox.setChecked(sys_prompt_hijacked)
+
+        # Load system prompt
+        self.system_prompt_hijack_input.setPlainText(
+            self.controller.settings.get('custom_system_prompt', '')
+        )
+
         # Load interrupt mode
         interrupt_mode = self.controller.settings.get('voice_interrupt_mode', 'manual')
         index = self.interrupt_mode_combo.findData(interrupt_mode)
@@ -1655,6 +1700,16 @@ class SettingsWindow(BaseWindow):
         # Save supervised execution mode
         supervised_mode = self.supervised_checkbox.isChecked()
         self.controller.settings['supervised_execution'] = supervised_mode
+
+        # Save system prompt hijacking and Tool lockout switch
+        self.controller.set_tool_execution_lockout(self.tool_exec_lockout_checkbox.isChecked())
+        self.controller.set_system_prompt_hijack(
+            self.system_prompt_hijack_checkbox.isChecked(),
+            self.system_prompt_hijack_input.toPlainText()
+        )
+
+        # Save custom system prompt
+        self.controller.settings['custom_system_prompt'] = self.system_prompt_hijack_input.toPlainText()
 
         # Save voice devices
         input_device = self.input_device_combo.currentData()
