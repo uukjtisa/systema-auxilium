@@ -112,6 +112,10 @@ class AIEngine:
 
         # Custom script provider — path to user's .py file
         self.custom_script_path = ""
+        # System tab flags
+        self.tool_execution_lockout = False
+        self.system_prompt_hijacked = False
+        self.custom_system_prompt = ""
 
         log.info(f"[AIEngine.__init__] ── Initialization complete | provider='{self.ai_provider}' | "
                  f"anthropic_model='{self.anthropic_model}' | "
@@ -194,6 +198,8 @@ class AIEngine:
 
     def _get_effective_system_prompt(self) -> str:
         """Return the system prompt enriched with any currently active skills."""
+        if self.system_prompt_hijacked and self.custom_system_prompt.strip():
+            return self.custom_system_prompt
         return self.system_prompt + self._render_active_skills()
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -219,6 +225,13 @@ class AIEngine:
         log.info(f"[AIEngine.set_provider] AI provider changing: '{self.ai_provider}' → '{provider}'")
         self.ai_provider = provider
         self.log(f"AI provider set to: {provider}")
+
+    def set_tool_execution_lockout(self, value: bool):
+        self.tool_execution_lockout = value
+
+    def set_system_prompt_hijack(self, enabled: bool, custom_prompt: str = ""):
+        self.system_prompt_hijacked = enabled
+        self.custom_system_prompt = custom_prompt
 
     def set_custom_script_path(self, path):
         log.info(f"[AIEngine.set_custom_script_path] path → '{path}'")
@@ -768,6 +781,16 @@ class AIEngine:
         log.debug(f"[AIEngine._process_ai_response] Preview: '{ai_text[:120].replace(chr(10), '↵')}'")
         self._clear_memory_context()
         self.last_raw_response = ai_text
+
+        if self.tool_execution_lockout:
+            self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+            return {
+                'response': ai_text,
+                'has_work_call': False,
+                'in_work_mode': False,
+                'thinking': False,
+                'session_name': None
+            }
 
         # Check for set_session_name call (handle first as it's simple)
         session_name = None

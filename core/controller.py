@@ -139,6 +139,11 @@ class AssistantController(QObject):
         # Apply settings
         log.debug("[AssistantController.__init__] Applying AI provider settings...")
         self.ai.set_provider(self.settings.get('ai_provider', 'anthropic'))
+        self.ai.set_tool_execution_lockout(self.settings.get('tool_execution_lockout', False))
+        self.ai.set_system_prompt_hijack(
+            self.settings.get('system_prompt_hijacked', False),
+            self.settings.get('custom_system_prompt', '')
+        )
         self.ai.set_anthropic_model(self.settings.get('anthropic_model', 'claude-sonnet-4-5-20250929'))
         self.ai.set_anthropic_temperature(self.settings.get('anthropic_temperature', 1.0))
         self.ai.set_anthropic_max_tokens(self.settings.get('anthropic_max_tokens', 8192))
@@ -388,6 +393,9 @@ class AssistantController(QObject):
             'glass_background_enabled': False,
             'glass_background_opacity': 0.75,
             'custom_script_path': '',
+            'tool_execution_lockout': False,
+            'system_prompt_hijacked': False,
+            'custom_system_prompt': ''
         }
 
     def save_settings(self):
@@ -907,6 +915,17 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
     def get_ai_provider(self):
         """Get current AI provider"""
         return self.settings.get('ai_provider', 'anthropic')
+
+    def set_tool_execution_lockout(self, value: bool):
+        self.settings['tool_execution_lockout'] = value
+        self.ai.set_tool_execution_lockout(value)
+        self.save_settings()
+
+    def set_system_prompt_hijack(self, enabled: bool, custom_prompt: str = ""):
+        self.settings['system_prompt_hijacked'] = enabled
+        self.settings['custom_system_prompt'] = custom_prompt
+        self.ai.set_system_prompt_hijack(enabled, custom_prompt)
+        self.save_settings()
 
     def set_ai_provider(self, provider):
         """Set AI provider"""
