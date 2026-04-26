@@ -138,6 +138,7 @@ class AssistantController(QObject):
 
         # Apply settings
         log.debug("[AssistantController.__init__] Applying AI provider settings...")
+        self.ai.set_provider(self.settings.get('ai_provider', 'anthropic'))
         self.ai.set_tool_execution_lockout(self.settings.get('tool_execution_lockout', False))
         self.ai.set_system_prompt_hijack(
             self.settings.get('system_prompt_hijacked', False),
