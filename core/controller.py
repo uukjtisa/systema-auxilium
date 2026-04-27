@@ -160,6 +160,7 @@ class AssistantController(QObject):
         self.ai.set_puter_tts_voice(self.settings.get('puter_tts_voice'))
         self.ai.set_puter_timeout(self.settings.get('puter_timeout', 30))
         self.ai.set_custom_script_path(self.settings.get('custom_script_path', ''))
+        self._update_system_prompt()
         log.debug("[AssistantController.__init__] All AI settings applied")
 
         # Auto-start Puter if selected
