@@ -3,7 +3,7 @@ Systema Auxilium - Operating System Helper Agent
 An AI assistant that can control the system via Python interpreter
 
 Original Architecture & Implementation:
-    - Nicanor III W. Cariasa
+    - Niccc2007 (https://github.com/uukjtisa)
 """
 
 import faulthandler
