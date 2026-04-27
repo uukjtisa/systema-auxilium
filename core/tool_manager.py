@@ -136,329 +136,92 @@ class ToolManager:
             print(f"Warning: Could not create .generated directory: {e}")
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Public parse methods
+    # Public parse methods - Fence-based parsing (new format)
     # ─────────────────────────────────────────────────────────────────────────
 
+    def _parse_fence(self, text, tool_name):
+            """
+            Extract content from a code fence whose language identifier matches tool_name.
+            Fuzzy-matches the identifier (strips underscores, lowercases) so
+            work_environment / workEnvironment / workenvironment all resolve correctly.
+            Returns (content, remaining_text) or None.
+            """
+            norm_target = self._norm_key(tool_name)
+            pattern = r'```[ \t]*(\w+)(?:[ \t]*\n|[ \t]+)(.*?)[ \t]*```'
+            for match in re.finditer(pattern, text, re.DOTALL):
+                if self._norm_key(match.group(1)) == norm_target:
+                    content = match.group(2).strip()
+                    remaining = (text[:match.start()] + text[match.end():]).strip()
+                    log.debug(f"[ToolManager._parse_fence] ✓ Matched '{tool_name}' | content_len={len(content)}")
+                    return content, remaining
+            return None
+
     def parse_work_environment(self, text):
-        """
-        Parse work_environment call from AI output.
-        Supports both new format  {"tool": "work_environment", "input": "..."}
-        and legacy format         {"work_environment": true,   "input": "..."}.
-
-        Returns:
-            tuple: (code, remaining_text) or None if not found
-        """
-        log.debug(f"[ToolManager.parse_work_environment] Parsing {len(text)} char text for work_environment")
-        json_data = self._extract_json(text, tool_key='work_environment')
-
-        if json_data and self._has_tool_key(json_data, 'work_environment'):
-            code = (self._get_tool_value(json_data, 'input') or '').strip()
-            remaining_text = self._remove_json_from_text(text, json_data, tool_key='work_environment')
-            log.info(f"[ToolManager.parse_work_environment] ✓ Found work_environment call | "
-                     f"format={'new' if 'tool' in json_data else 'legacy'} | "
-                     f"code_len={len(code)} | remaining_text_len={len(remaining_text)}")
-            log.debug(f"[ToolManager.parse_work_environment] code_preview='{code[:80].replace(chr(10), '↵')}'")
-            return code, remaining_text
-
-        log.debug("[ToolManager.parse_work_environment] No work_environment call found")
-        return None
+            """Parse work_environment fence from AI output. Returns (code, remaining_text) or None."""
+            log.debug(f"[ToolManager.parse_work_environment] Parsing {len(text)} chars")
+            result = self._parse_fence(text, 'work_environment')
+            if result:
+                code, remaining = result
+                log.info(f"[ToolManager.parse_work_environment] ✓ Found | code_len={len(code)}")
+                return code, remaining
+            log.debug("[ToolManager.parse_work_environment] Not found")
+            return None
 
     def parse_execute_code(self, text):
-        """
-        Parse execute_code call from AI output.
-        Supports both new format  {"tool": "execute_code", "input": "..."}
-        and legacy format         {"execute_code": true,   "input": "..."}.
-
-        Returns:
-            tuple: (code, remaining_text) or None if not found
-        """
-        log.debug(f"[ToolManager.parse_execute_code] Parsing {len(text)} char text for execute_code")
-        json_data = self._extract_json(text, tool_key='execute_code')
-
-        if json_data and self._has_tool_key(json_data, 'execute_code'):
-            code = (self._get_tool_value(json_data, 'input') or '').strip()
-            remaining_text = self._remove_json_from_text(text, json_data, tool_key='execute_code')
-            log.info(f"[ToolManager.parse_execute_code] ✓ Found execute_code call | "
-                     f"format={'new' if 'tool' in json_data else 'legacy'} | "
-                     f"code_len={len(code)} | remaining_text_len={len(remaining_text)}")
-            log.debug(f"[ToolManager.parse_execute_code] code_preview='{code[:80].replace(chr(10), '↵')}'")
-            return code, remaining_text
-
-        log.debug("[ToolManager.parse_execute_code] No execute_code call found")
-        return None
+            """Parse execute_code fence from AI output. Returns (code, remaining_text) or None."""
+            log.debug(f"[ToolManager.parse_execute_code] Parsing {len(text)} chars")
+            result = self._parse_fence(text, 'execute_code')
+            if result:
+                code, remaining = result
+                log.info(f"[ToolManager.parse_execute_code] ✓ Found | code_len={len(code)}")
+                return code, remaining
+            log.debug("[ToolManager.parse_execute_code] Not found")
+            return None
 
     def parse_set_session_name(self, text):
-        """
-        Parse set_session_name from AI output using multi-strategy aggressive extraction.
-
-        Returns:
-            tuple: (session_name, remaining_text) or None if not found
-        """
-        log.info(f"[ToolManager.parse_set_session_name] ── Parsing {len(text)} char text "
-                  f"(aggressive multi-strategy) ──")
-
-        # ── Strategy 1: well-formed JSON (existing robust path) ──────────────
-        json_data = self._extract_json(text, tool_key='set_session_name')
-
-        if json_data and self._has_tool_key(json_data, 'set_session_name'):
-            is_new_format = 'tool' in json_data
-            if is_new_format:
-                session_name = (self._get_tool_value(json_data, 'input') or '').strip()
-                log.debug(f"[ToolManager.parse_set_session_name] Strategy 1 — NEW format | "
-                          f"reading 'input' key | name='{session_name}'")
-            else:
-                session_name = (self._get_tool_value(json_data, 'set_session_name') or '').strip()
-                log.debug(f"[ToolManager.parse_set_session_name] Strategy 1 — LEGACY format | "
-                          f"reading 'set_session_name' key | name='{session_name}'")
-
-            # Fallback: new format but "input" was empty → try key directly
-            if not session_name and is_new_format:
-                session_name = (self._get_tool_value(json_data, 'set_session_name') or '').strip()
-                log.warning(f"[ToolManager.parse_set_session_name] Strategy 1 — new format 'input' empty; "
-                            f"fell back to direct key | name='{session_name}'")
-
-            if session_name:
-                remaining_text = self._remove_json_from_text(text, json_data, tool_key='set_session_name')
-                log.info(f"[ToolManager.parse_set_session_name] ✓ Strategy 1 success | "
-                         f"name='{session_name}' | remaining_len={len(remaining_text)}")
-                return session_name, remaining_text
-            else:
-                log.warning("[ToolManager.parse_set_session_name] Strategy 1 found JSON but name was empty — "
-                            "falling through to aggressive strategies")
-
-        # ── Strategies 2-5: regex-based fallback ──────────────────────────────
-        log.debug("[ToolManager.parse_set_session_name] Strategy 1 failed — trying regex strategies")
-        result = self._extract_session_name_aggressive(text)
-
-        if result:
-            strategy, session_name, span_start, span_end = result
-            log.info(f"[ToolManager.parse_set_session_name] ✓ Strategy '{strategy}' success | "
-                     f"name='{session_name}' | span=({span_start}, {span_end})")
-            # Remove the matched span from text
-            remaining_text = self._cleanup_orphaned_braces(
-                (text[:span_start] + text[span_end:]).strip()
-            )
-            log.debug(f"[ToolManager.parse_set_session_name] remaining_len={len(remaining_text)}")
-            return session_name, remaining_text
-
-        log.debug("[ToolManager.parse_set_session_name] All strategies failed — no set_session_name found")
-        return None
+            """Parse set_session_name fence from AI output. Returns (name, remaining_text) or None."""
+            log.debug(f"[ToolManager.parse_set_session_name] Parsing {len(text)} chars")
+            result = self._parse_fence(text, 'set_session_name')
+            if result:
+                name, remaining = result
+                log.info(f"[ToolManager.parse_set_session_name] ✓ Found | name='{name}'")
+                return name, remaining
+            log.debug("[ToolManager.parse_set_session_name] Not found")
+            return None
 
     def parse_memorize(self, text):
-        """
-        Parse memorize tool call from AI output.
-        Format: {"tool": "memorize", "input": "memory text here"}
-
-        Returns:
-            tuple: (memory_text, remaining_text) or None if not found
-        """
-        log.debug(f"[ToolManager.parse_memorize] Parsing {len(text)} chars for memorize call")
-        json_data = self._extract_json(text, tool_key='memorize')
-
-        if json_data and self._has_tool_key(json_data, 'memorize'):
-            memory_text = (self._get_tool_value(json_data, 'input') or '').strip()
-            remaining_text = self._remove_json_from_text(text, json_data, tool_key='memorize')
-            log.info(f"[ToolManager.parse_memorize] ✓ Found memorize call | "
-                     f"text='{memory_text[:60]}' | remaining_len={len(remaining_text)}")
-            return memory_text, remaining_text
-
-        log.debug("[ToolManager.parse_memorize] No memorize call found")
-        return None
+            """Parse memorize fence from AI output. Returns (memory_text, remaining_text) or None."""
+            log.debug(f"[ToolManager.parse_memorize] Parsing {len(text)} chars")
+            result = self._parse_fence(text, 'memorize')
+            if result:
+                memory_text, remaining = result
+                log.info(f"[ToolManager.parse_memorize] ✓ Found | text='{memory_text[:60]}'")
+                return memory_text, remaining
+            log.debug("[ToolManager.parse_memorize] Not found")
+            return None
 
     def parse_load_skill(self, text):
-        """
-        Parse load_skill tool call from AI output.
-        Format: {"tool": "load_skill", "input": "skill_name"}
-
-        Returns:
-            tuple: (skill_name, remaining_text) or None if not found
-        """
-        log.debug(f"[ToolManager.parse_load_skill] Parsing {len(text)} chars for load_skill call")
-        json_data = self._extract_json(text, tool_key='load_skill')
-
-        if json_data and self._has_tool_key(json_data, 'load_skill'):
-            skill_name = (self._get_tool_value(json_data, 'input') or '').strip()
-            remaining_text = self._remove_json_from_text(text, json_data, tool_key='load_skill')
-            log.info(f"[ToolManager.parse_load_skill] ✓ Found load_skill call | "
-                     f"skill_name='{skill_name}' | remaining_len={len(remaining_text)}")
-            return skill_name, remaining_text
-
-        log.debug("[ToolManager.parse_load_skill] No load_skill call found")
-        return None
+            """Parse load_skill fence from AI output. Returns (skill_name, remaining_text) or None."""
+            log.debug(f"[ToolManager.parse_load_skill] Parsing {len(text)} chars")
+            result = self._parse_fence(text, 'load_skill')
+            if result:
+                skill_name, remaining = result
+                log.info(f"[ToolManager.parse_load_skill] ✓ Found | skill='{skill_name}'")
+                return skill_name, remaining
+            log.debug("[ToolManager.parse_load_skill] Not found")
+            return None
 
     def parse_unload_skill(self, text):
-        """
-        Parse unload_skill tool call from AI output.
-        Format: {"tool": "unload_skill", "input": "skill_name"}
-
-        Returns:
-            tuple: (skill_name, remaining_text) or None if not found
-        """
-        log.debug(f"[ToolManager.parse_unload_skill] Parsing {len(text)} chars for unload_skill call")
-        json_data = self._extract_json(text, tool_key='unload_skill')
-
-        if json_data and self._has_tool_key(json_data, 'unload_skill'):
-            skill_name = (self._get_tool_value(json_data, 'input') or '').strip()
-            remaining_text = self._remove_json_from_text(text, json_data, tool_key='unload_skill')
-            log.info(f"[ToolManager.parse_unload_skill] ✓ Found unload_skill call | "
-                     f"skill_name='{skill_name}' | remaining_len={len(remaining_text)}")
-            return skill_name, remaining_text
-
-        log.debug("[ToolManager.parse_unload_skill] No unload_skill call found")
-        return None
-
-
-
-    def _extract_session_name_aggressive(self, text):
-        """
-        Regex-based fallback for finding a session name anywhere in *text*.
-
-        Tries strategies in order and returns the one found earliest in the text.
-        Each result is a tuple: (strategy_label, name, span_start, span_end)
-        where [span_start:span_end] is the range in text to remove.
-
-        Returns the first (earliest) match or None.
-        """
-        results = []
-
-        # ── Strategy 2: new format inside a ```json fence ────────────────────
-        # Matches: ```json { ... "tool": "set_session_name" ... "input": "value" ... } ```
-        fence_new = re.search(
-            r'```(?:json)?\s*\{[^`]*"tool"\s*:\s*"set_?session_?name"[^`]*"input"\s*:\s*"([^"]+)"[^`]*\}\s*```',
-            text, re.DOTALL | re.IGNORECASE
-        )
-        if fence_new:
-            name = fence_new.group(1).strip()
-            log.debug(f"[ToolManager._extract_session_name_aggressive] Strategy 2 (fence new) "
-                      f"hit | name='{name}' | span=({fence_new.start()}, {fence_new.end()})")
-            results.append(('fence_new_format', name, fence_new.start(), fence_new.end()))
-
-        # ── Strategy 3: legacy format inside a ```json fence ────────────────
-        # Matches: ```json { ... "set_session_name": "value" ... } ```
-        # Excludes blocks that also have "tool": (those are Strategy 2)
-        for m in re.finditer(
-            r'```(?:json)?\s*(\{[^`]*\})\s*```',
-            text, re.DOTALL
-        ):
-            block = m.group(1)
-            if re.search(r'"tool"\s*:', block, re.IGNORECASE):
-                continue  # new format — already handled
-            ssn_match = re.search(r'"set_?session_?name"\s*:\s*"([^"]+)"', block, re.IGNORECASE)
-            if ssn_match:
-                name = ssn_match.group(1).strip()
-                log.debug(f"[ToolManager._extract_session_name_aggressive] Strategy 3 (fence legacy) "
-                          f"hit | name='{name}' | span=({m.start()}, {m.end()})")
-                results.append(('fence_legacy_format', name, m.start(), m.end()))
-                break  # take first
-
-        # ── Strategy 4: raw "set_session_name": "value" anywhere in text ────
-        # This catches bare key-value pairs, slightly broken JSON, and any other
-        # occurrence of the key no matter where it is.
-        raw_kv = re.search(
-            r'"set_?session_?name"\s*:\s*"([^"]+)"',
-            text, re.IGNORECASE
-        )
-        if raw_kv:
-            name = raw_kv.group(1).strip()
-            # Try to extend the span to cover the surrounding {} block if any
-            # (so we remove the whole bare JSON, not just the key-value pair)
-            block_span = self._find_enclosing_json_span(text, raw_kv.start())
-            if block_span:
-                span = block_span
-            else:
-                span = (raw_kv.start(), raw_kv.end())
-            log.debug(f"[ToolManager._extract_session_name_aggressive] Strategy 4 (raw kv) "
-                      f"hit | name='{name}' | span={span}")
-            results.append(('raw_key_value', name, span[0], span[1]))
-
-        # ── Strategy 5: "tool": "set_session_name" + nearby "input": "value" ─
-        # Handles new format where the JSON is slightly malformed/unenclosed.
-        tool_m = re.search(r'"tool"\s*:\s*"set_?session_?name"', text, re.IGNORECASE)
-        if tool_m:
-            # Search for "input": "value" within 300 chars forward
-            window_end = min(len(text), tool_m.start() + 300)
-            window = text[tool_m.start():window_end]
-            input_m = re.search(r'"input"\s*:\s*"([^"]+)"', window, re.IGNORECASE)
-            if input_m:
-                name = input_m.group(1).strip()
-                abs_end = tool_m.start() + input_m.end()
-                # Try to cover enclosing {} block
-                block_span = self._find_enclosing_json_span(text, tool_m.start())
-                span = block_span if block_span else (tool_m.start(), abs_end)
-                log.debug(f"[ToolManager._extract_session_name_aggressive] Strategy 5 (bare new) "
-                          f"hit | name='{name}' | span={span}")
-                results.append(('bare_new_format', name, span[0], span[1]))
-
-        if not results:
-            log.debug("[ToolManager._extract_session_name_aggressive] No match found by any strategy")
+            """Parse unload_skill fence from AI output. Returns (skill_name, remaining_text) or None."""
+            log.debug(f"[ToolManager.parse_unload_skill] Parsing {len(text)} chars")
+            result = self._parse_fence(text, 'unload_skill')
+            if result:
+                skill_name, remaining = result
+                log.info(f"[ToolManager.parse_unload_skill] ✓ Found | skill='{skill_name}'")
+                return skill_name, remaining
+            log.debug("[ToolManager.parse_unload_skill] Not found")
             return None
 
-        # Return earliest match by position in text
-        results.sort(key=lambda r: r[2])
-        best = results[0]
-        log.debug(f"[ToolManager._extract_session_name_aggressive] Best result: "
-                  f"strategy='{best[0]}' | name='{best[1]}' | span=({best[2]}, {best[3]})")
-        return best
-
-    def _find_enclosing_json_span(self, text, pos):
-        """
-        Given a position *pos* inside *text*, walk backwards to find the
-        opening { of the enclosing JSON object, then forward to its matching }.
-
-        Returns (start, end) or None if no enclosing object is found.
-        Used by the aggressive session name extractor to clean up whole blocks.
-        """
-        log.debug(f"[ToolManager._find_enclosing_json_span] Looking for enclosing {{ at pos={pos}}}")
-
-        # Walk back to find the nearest unmatched opening brace
-        brace_depth = 0
-        in_string = False
-        escape_next = False
-        open_pos = None
-
-        for i in range(pos, -1, -1):
-            char = text[i]
-            # Simplified reverse scan (no escape tracking backwards is perfect,
-            # but sufficient for our purpose of locating the object start)
-            if char == '}' and not in_string:
-                brace_depth += 1
-            elif char == '{' and not in_string:
-                if brace_depth == 0:
-                    open_pos = i
-                    break
-                brace_depth -= 1
-
-        if open_pos is None:
-            log.debug("[ToolManager._find_enclosing_json_span] No opening { found")
-            return None
-
-        # Walk forward from open_pos to find the matching closing brace
-        brace_count = 0
-        in_string = False
-        escape_next = False
-        for i in range(open_pos, len(text)):
-            char = text[i]
-            if escape_next:
-                escape_next = False
-                continue
-            if char == '\\':
-                escape_next = True
-                continue
-            if char == '"':
-                in_string = not in_string
-                continue
-            if not in_string:
-                if char == '{':
-                    brace_count += 1
-                elif char == '}':
-                    brace_count -= 1
-                    if brace_count == 0:
-                        log.debug(f"[ToolManager._find_enclosing_json_span] Found enclosing span: "
-                                  f"({open_pos}, {i + 1})")
-                        return open_pos, i + 1
-
-        log.debug("[ToolManager._find_enclosing_json_span] Could not find matching closing }")
-        return None
 
     # ─────────────────────────────────────────────────────────────────────────
     # Single-exec policy enforcement
@@ -466,148 +229,41 @@ class ToolManager:
 
     def enforce_single_exec_policy(self, text):
         """
-        Scan *text* for code-execution tool calls (work_environment / execute_code).
-        If more than one is found:
-          - The first one is left in place (will be executed normally).
-          - All subsequent ones are stripped from the text.
-          - self.exec_violations is incremented.
-
-        set_session_name is intentionally EXEMPT from this policy and is never
-        counted or removed by this method.
-
-        Args:
-            text (str): Raw AI response text (with JSON tool calls embedded).
+        Scan text for code-execution tool fences (work_environment / execute_code).
+        If more than one is found, keep only the first and drop the rest.
+        set_session_name is intentionally EXEMPT from this policy.
 
         Returns:
-            tuple:
-                cleaned_text (str)  — text with extra exec tool calls removed.
-                violation (bool)    — True if at least one extra call was dropped.
-                violation_msg (str) — Human-readable note about what was dropped
-                                      (empty string when no violation).
+            tuple: (cleaned_text, violation_bool, violation_msg)
         """
         log.info(f"[ToolManager.enforce_single_exec_policy] Scanning {len(text)} chars for policy violations")
+        pattern = r'```[ \t]*(\w+)[ \t]*\n.*?```'
+        matches = []
+        for match in re.finditer(pattern, text, re.DOTALL):
+            canonical = self._tool_keys_norm.get(self._norm_key(match.group(1)))
+            if canonical and canonical in self._exec_tool_keys:
+                matches.append((match, canonical))
 
-        found_exec_calls = []  # list of (canonical_tool_name, json_data, matched_text_span)
-
-        # ── Collect all code-fence JSON blocks ──────────────────────────────
-        code_block_pattern = r'```(?:json)?\s*(\{[^`]+\})\s*```'
-        for match in re.finditer(code_block_pattern, text, re.DOTALL):
-            try:
-                data = json.loads(match.group(1).strip())
-                canonical = self._find_canonical_tool_key(data)
-                if canonical and canonical in self._exec_tool_keys:
-                    found_exec_calls.append({
-                        'canonical': canonical,
-                        'data': data,
-                        'span_start': match.start(),
-                        'span_end': match.end(),
-                        'raw': match.group(0),
-                        'source': 'code_fence',
-                    })
-                    log.debug(f"[ToolManager.enforce_single_exec_policy] Found exec tool in code-fence | "
-                              f"tool='{canonical}' | span=({match.start()}, {match.end()})")
-            except json.JSONDecodeError:
-                pass
-
-        # ── Collect all bare JSON blocks ─────────────────────────────────────
-        search_start = 0
-        while True:
-            pos = text.find('{', search_start)
-            if pos == -1:
-                break
-
-            brace_count = 0
-            in_string = False
-            escape_next = False
-            end_pos = None
-
-            for i in range(pos, len(text)):
-                char = text[i]
-                if escape_next:
-                    escape_next = False
-                    continue
-                if char == '\\':
-                    escape_next = True
-                    continue
-                if char == '"':
-                    in_string = not in_string
-                    continue
-                if not in_string:
-                    if char == '{':
-                        brace_count += 1
-                    elif char == '}':
-                        brace_count -= 1
-                        if brace_count == 0:
-                            end_pos = i + 1
-                            break
-
-            if end_pos:
-                raw_json = text[pos:end_pos]
-                # Skip if this range overlaps with an already-found code-fence block
-                overlaps = any(
-                    c['source'] == 'code_fence' and c['span_start'] <= pos < c['span_end']
-                    for c in found_exec_calls
-                )
-                if not overlaps:
-                    try:
-                        data = json.loads(raw_json)
-                        canonical = self._find_canonical_tool_key(data)
-                        if canonical and canonical in self._exec_tool_keys:
-                            found_exec_calls.append({
-                                'canonical': canonical,
-                                'data': data,
-                                'span_start': pos,
-                                'span_end': end_pos,
-                                'raw': raw_json,
-                                'source': 'bare',
-                            })
-                            log.debug(f"[ToolManager.enforce_single_exec_policy] Found exec tool in bare JSON | "
-                                      f"tool='{canonical}' | span=({pos}, {end_pos})")
-                    except json.JSONDecodeError:
-                        pass
-                search_start = end_pos
-            else:
-                break
-
-        # Sort by position in text so we always keep the FIRST one
-        found_exec_calls.sort(key=lambda c: c['span_start'])
-
-        log.info(f"[ToolManager.enforce_single_exec_policy] Total exec tool calls found: {len(found_exec_calls)}")
-
-        if len(found_exec_calls) <= 1:
+        if len(matches) <= 1:
             log.debug("[ToolManager.enforce_single_exec_policy] No violation — returning text unchanged")
             return text, False, ""
 
-        # ── Violation: drop all but the first ───────────────────────────────
-        extras = found_exec_calls[1:]
+        extras = matches[1:]
         self.exec_violations += 1
-        log.warning(f"[ToolManager.enforce_single_exec_policy] ✗ POLICY VIOLATION #{self.exec_violations} — "
-                    f"{len(extras)} extra exec tool call(s) dropped | "
-                    f"keeping='{found_exec_calls[0]['canonical']}' at pos {found_exec_calls[0]['span_start']} | "
-                    f"dropping={[e['canonical'] for e in extras]}")
-
-        dropped_names = [e['canonical'] for e in extras]
+        dropped_names = [name for _, name in extras]
         violation_msg = (
             f"[POLICY] {len(extras)} extra code-execution tool call(s) were dropped "
             f"({', '.join(dropped_names)}). Only the first call was kept. "
             f"Total violations this session: {self.exec_violations}."
         )
+        log.warning(f"[ToolManager.enforce_single_exec_policy] ✗ POLICY VIOLATION #{self.exec_violations} — "
+                    f"dropping {dropped_names}")
 
-        # Remove extras from text (work backwards to preserve offsets)
-        for extra in reversed(extras):
-            start = extra['span_start']
-            end = extra['span_end']
+        for match, _ in reversed(extras):
+            text = text[:match.start()] + text[match.end():]
 
-            # For code-fence blocks we need to also remove the fence markers that
-            # surround the bare JSON; the span already covers the full fence.
-            text = text[:start] + text[end:]
-            log.debug(f"[ToolManager.enforce_single_exec_policy] Removed extra '{extra['canonical']}' "
-                      f"from span ({start}, {end}) | text now {len(text)} chars")
-
-        cleaned = self._cleanup_orphaned_braces(text.strip())
-        log.info(f"[ToolManager.enforce_single_exec_policy] ✓ Policy enforced | "
-                 f"cleaned_len={len(cleaned)} | violation_msg='{violation_msg}'")
-        return cleaned, True, violation_msg
+        log.info(f"[ToolManager.enforce_single_exec_policy] ✓ Policy enforced")
+        return text.strip(), True, violation_msg
 
     # ─────────────────────────────────────────────────────────────────────────
     # Supervised execution helpers
@@ -914,17 +570,18 @@ class ToolManager:
 
     def strip_tool_calls(self, text):
         """
-        Remove all tool call JSON blocks from text for display purposes.
+        Remove all tool call fences from text for display purposes.
         Does NOT execute any code — purely for cleaning stored messages before rendering.
-        Handles both new format {"tool": "...", "input": "..."} and legacy formats.
         """
         if not text:
             log.debug("[ToolManager.strip_tool_calls] Empty text — returning as-is")
             return text
-        log.debug(f"[ToolManager.strip_tool_calls] Stripping tool calls from {len(text)} char text | "
-                  f"keys={self._tool_keys}")
+        log.debug(f"[ToolManager.strip_tool_calls] Stripping tool fences from {len(text)} char text")
         for key in self._tool_keys:
-            text = self._remove_json_from_text(text, None, tool_key=key)
+            result = self._parse_fence(text, key)
+            while result is not None:
+                _, text = result
+                result = self._parse_fence(text, key)
         log.debug(f"[ToolManager.strip_tool_calls] ✓ Stripped | resulting_len={len(text)}")
         return text
 
@@ -1015,291 +672,6 @@ class ToolManager:
         log.debug(f"[ToolManager._get_tool_value] Field '{field_key}' not found in data keys {list(data.keys())}")
         return None
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # JSON extraction helpers
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def _count_unmatched_closing_braces(self, text):
-        """
-        Count top-level unmatched closing braces in text (outside strings and
-        code fences).  Returns how many orphaned } characters exist.
-        """
-        # Strip code fences so their braces are not counted
-        stripped = re.sub(r'```[^`]*```', '', text, flags=re.DOTALL)
-        depth = 0
-        in_string = False
-        escape_next = False
-        for char in stripped:
-            if escape_next:
-                escape_next = False
-                continue
-            if char == '\\':
-                escape_next = True
-                continue
-            if char == '"' and not escape_next:
-                in_string = not in_string
-                continue
-            if not in_string:
-                if char == '{':
-                    depth += 1
-                elif char == '}':
-                    depth -= 1
-        return max(0, -depth)
-
-    def _strip_orphaned_fence_markers(self, text: str) -> str:
-        """
-        Remove dangling ```json / ``` / ``` code-fence markers that remain
-        after the bare JSON brace-counting scanner removes a {…} block that
-        was originally inside a fenced code block.
-
-        Only removes lines whose ENTIRE content is a fence marker so we never
-        accidentally delete real content.
-        """
-        lines = text.splitlines()
-        cleaned = []
-        for line in lines:
-            stripped = line.strip()
-            # Match lines that are ONLY a fence marker (with optional "json" or "json ")
-            if re.fullmatch(r'```(?:json)?', stripped):
-                log.debug(f"[ToolManager._strip_orphaned_fence_markers] Removed orphaned marker: {stripped!r}")
-                continue
-            cleaned.append(line)
-        result = '\n'.join(cleaned)
-        if result != text:
-            log.debug(f"[ToolManager._strip_orphaned_fence_markers] Stripped fence markers | "
-                      f"before={len(text)} chars → after={len(result)} chars")
-        return result
-
-    def _cleanup_orphaned_braces(self, text):
-        """
-        Strip lone } lines from the END of text, but only as many as are
-        actually unmatched.  Removes AI formatting artifacts (e.g. a stray }
-        after a code block) without touching valid JSON that must remain for
-        sibling parse calls.
-        """
-        unmatched = self._count_unmatched_closing_braces(text)
-        if unmatched == 0:
-            return text.strip()
-        lines = text.splitlines()
-        removed = 0
-        while removed < unmatched and lines:
-            if lines[-1].strip() == '}':
-                lines.pop()
-                removed += 1
-            else:
-                break  # last line is not a lone } — stop
-        return '\n'.join(lines).strip()
-
-    def _extract_json(self, text, tool_key=None):
-        """
-        Extract all valid JSON tool blocks from text and return the one matching
-        tool_key.  Supports both ```json code blocks and bare JSON, and handles
-        AI inconsistencies like missing underscores in key names.
-
-        Also supports the new unified format {"tool": "tool_name", "input": "..."}
-        as well as the legacy format {"tool_name": true, "input": "..."}.
-
-        Scans ALL occurrences of both patterns so mixed responses (e.g. one
-        bare JSON + one code-block JSON) are handled correctly.
-
-        Args:
-            text: The text to search
-            tool_key: Optional canonical key (e.g. 'execute_code').  When
-                      provided, returns the first JSON containing this key
-                      (fuzzy-matched).  When None, returns the first tool JSON
-                      found (preserves original behaviour).
-
-        Returns:
-            dict or None
-        """
-        log.debug(f"[ToolManager._extract_json] text_len={len(text)} | tool_key='{tool_key}'")
-        candidates = []
-        seen_spans = []  # track (start, end) of code-fence spans to avoid double-counting
-
-        # ── Collect code-block JSONs: ```json {...} ``` ──────────────────────
-        # Uses (?:[^`]|`(?!``))* instead of [^`]+ so single backticks INSIDE
-        # JSON string values are matched correctly — only TRIPLE backtick stops.
-        code_block_pattern = r'```(?:json)?\s*(\{(?:[^`]|`(?!``))*\})\s*```'
-        for match in re.finditer(code_block_pattern, text, re.DOTALL):
-            try:
-                data = json.loads(match.group(1).strip())
-                if self._find_canonical_tool_key(data):
-                    candidates.append(data)
-                    seen_spans.append((match.start(), match.end()))
-                    log.debug(f"[ToolManager._extract_json] Code-fence JSON found at ({match.start()}, "
-                              f"{match.end()}) | keys={list(data.keys())}")
-            except json.JSONDecodeError as e:
-                log.debug(f"[ToolManager._extract_json] Code-fence JSON parse error: {e}")
-
-        # ── Collect bare JSONs — brace-counting ─────────────────────────────
-        start = 0
-        while True:
-            start_pos = text.find('{', start)
-            if start_pos == -1:
-                break
-
-            # Skip if this position is inside a code-fence span
-            in_fence = any(fs <= start_pos < fe for fs, fe in seen_spans)
-            if in_fence:
-                start = start_pos + 1
-                continue
-
-            brace_count = 0
-            in_string = False
-            escape_next = False
-            end_pos = None
-
-            for i in range(start_pos, len(text)):
-                char = text[i]
-                if escape_next:
-                    escape_next = False
-                    continue
-                if char == '\\':
-                    escape_next = True
-                    continue
-                if char == '"':
-                    in_string = not in_string
-                    continue
-                if not in_string:
-                    if char == '{':
-                        brace_count += 1
-                    elif char == '}':
-                        brace_count -= 1
-                        if brace_count == 0:
-                            end_pos = i + 1
-                            break
-
-            if end_pos:
-                try:
-                    data = json.loads(text[start_pos:end_pos])
-                    if self._find_canonical_tool_key(data):
-                        candidates.append(data)
-                        log.debug(f"[ToolManager._extract_json] Bare JSON found at ({start_pos}, "
-                                  f"{end_pos}) | keys={list(data.keys())}")
-                except json.JSONDecodeError as e:
-                    log.debug(f"[ToolManager._extract_json] Bare JSON parse error at ({start_pos}, "
-                              f"{end_pos}): {e}")
-                start = end_pos
-            else:
-                break
-
-        log.debug(f"[ToolManager._extract_json] Total candidates found: {len(candidates)}")
-
-        if not candidates:
-            log.debug("[ToolManager._extract_json] No tool JSON found in text")
-            return None
-
-        if tool_key:
-            for data in candidates:
-                if self._has_tool_key(data, tool_key):
-                    log.debug(f"[ToolManager._extract_json] ✓ Returning first candidate matching '{tool_key}'")
-                    return data
-            log.debug(f"[ToolManager._extract_json] No candidate matches tool_key='{tool_key}'")
-            return None
-
-        # No specific key requested — return first found
-        log.debug("[ToolManager._extract_json] No tool_key filter — returning first candidate")
-        return candidates[0]
-
-    def _remove_json_from_text(self, text, json_data, tool_key=None):
-        """
-        Remove the JSON block for the given tool_key from text, leaving all
-        other tool blocks intact.
-
-        Uses brace-counting for both code-fence AND bare JSON blocks, so new
-        format {"tool": "...", "input": "..."} and legacy format are handled
-        identically — the block is located by parsing and using _has_tool_key,
-        not by fragile key-name regex.
-
-        Args:
-            text: The original text
-            json_data: The parsed JSON dict (used to verify the right block) — may be None
-            tool_key: The specific tool key whose block should be removed
-
-        Returns:
-            str: Text with the matching JSON block removed
-        """
-        log.debug(f"[ToolManager._remove_json_from_text] text_len={len(text)} | tool_key='{tool_key}'")
-
-        # ── Pattern 1: code-fence blocks ────────────────────────────────────
-        # Uses (?:[^`]|`(?!``))* so single backticks inside JSON values don't
-        # break the match — only TRIPLE backtick terminates the fence.
-        code_block_pattern = r'```(?:json)?\s*(\{(?:[^`]|`(?!``))*\})\s*```'
-        for match in re.finditer(code_block_pattern, text, re.DOTALL):
-            try:
-                found_json = json.loads(match.group(1))
-                should_remove = (
-                    (tool_key and self._has_tool_key(found_json, tool_key)) or
-                    (not tool_key and self._find_canonical_tool_key(found_json))
-                )
-                if should_remove:
-                    log.debug(f"[ToolManager._remove_json_from_text] Removing code-fence block "
-                              f"at ({match.start()}, {match.end()}) | tool_key='{tool_key}'")
-                    text = text[:match.start()] + text[match.end():]
-                    return self._cleanup_orphaned_braces(text.strip())
-            except Exception as e:
-                log.debug(f"[ToolManager._remove_json_from_text] Code-fence JSON error: {e}")
-
-        # ── Pattern 2: bare JSON — brace counting ────────────────────────────
-        # After removing {…}, also strip any orphaned ```json / ``` fence markers
-        # that were left behind (this happens when the JSON value contained a
-        # backtick which broke the code-fence regex in Pattern 1).
-        search_start = 0
-        while True:
-            start_pos = text.find('{', search_start)
-            if start_pos == -1:
-                break
-
-            brace_count = 0
-            in_string = False
-            escape_next = False
-            end_pos = None
-
-            for i in range(start_pos, len(text)):
-                char = text[i]
-                if escape_next:
-                    escape_next = False
-                    continue
-                if char == '\\':
-                    escape_next = True
-                    continue
-                if char == '"':
-                    in_string = not in_string
-                    continue
-                if not in_string:
-                    if char == '{':
-                        brace_count += 1
-                    elif char == '}':
-                        brace_count -= 1
-                        if brace_count == 0:
-                            end_pos = i + 1
-                            break
-
-            if end_pos:
-                try:
-                    candidate = json.loads(text[start_pos:end_pos])
-                    should_remove = (
-                        (tool_key and self._has_tool_key(candidate, tool_key)) or
-                        (not tool_key and self._find_canonical_tool_key(candidate))
-                    )
-                    if should_remove:
-                        log.debug(f"[ToolManager._remove_json_from_text] Removing bare JSON block "
-                                  f"at ({start_pos}, {end_pos}) | tool_key='{tool_key}'")
-                        # Remove the {…} block
-                        text = text[:start_pos] + text[end_pos:]
-                        # ── Cleanup orphaned fence markers left by the removal ──
-                        # If the JSON was inside a ```json … ``` fence, the fence
-                        # opening/closing markers are now dangling — strip them.
-                        text = self._strip_orphaned_fence_markers(text)
-                        return self._cleanup_orphaned_braces(text.strip())
-                except json.JSONDecodeError:
-                    pass
-                search_start = end_pos
-            else:
-                break
-
-        log.debug(f"[ToolManager._remove_json_from_text] No matching block found for tool_key='{tool_key}'")
-        return self._cleanup_orphaned_braces(text.strip())
 
     # ─────────────────────────────────────────────────────────────────────────
     # GUI execution helpers

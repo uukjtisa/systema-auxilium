@@ -2,7 +2,7 @@
 
 **License:** MIT
 
-**Author / Architect:** Nic2007 ([@uukjtisa](https://github.com/uukjtisa))
+**Author / Architect:** Niccc2007 ([@uukjtisa](https://github.com/uukjtisa))
 
 > ⚠️ **Work in Progress** — This project is actively developed. Not all features are fully polished or tested. Contributions and patience are genuinely appreciated.
 
@@ -156,4 +156,4 @@ For authorship, AI tooling disclosure, and legal information, see the [NOTICE](N
 
 ---
 
-**Systema Auxilium** — Nic2007
+**Systema Auxilium** — Niccc2007

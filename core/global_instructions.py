@@ -56,13 +56,19 @@ Use these sparingly and naturally.
             "└──────────────────────┴──────────────────────────────────────────┴───────────┘",
             "",
             "HOW TO LOAD A SKILL:",
-            '  Call: {"tool": "load_skill", "input": "skill_name"}',
+            "  Use the load_skill fence:",
+            "  ```load_skill",
+            "  skill_name",
+            "  ```",
             "  The skill's full instructions will be injected into your system context.",
             "  Works inside AND outside work_environment.",
             "  ⚠ Do NOT load a skill that already shows Is Loaded = true — it's already active!",
             "",
             "HOW TO UNLOAD A SKILL:",
-            '  Call: {"tool": "unload_skill", "input": "skill_name"}',
+            "  Use the unload_skill fence:",
+            "  ```unload_skill",
+            "  skill_name",
+            "  ```",
             "  Removes the skill from your active context.",
             "  Works inside AND outside work_environment.",
             "  ⚠ Do NOT unload a skill that shows Is Loaded = false — it isn't loaded!",
@@ -124,15 +130,23 @@ Use these sparingly and naturally.
 
 TOOL CALL FORMAT  (CRITICAL — READ CAREFULLY)
 
-ALL tool calls share the SAME unified JSON structure:
+ALL tool calls use a CODE FENCE with the tool name as the language identifier:
 
-```json
-{{
-  "tool": "<tool_name>",
-  "input": "<value>"
-}}
+```<tool_name>
+<content here>
 ```
-Note: No other formats are accepted.
+
+Examples:
+```work_environment
+import os
+print(os.listdir('.'))
+```
+
+```set_session_name
+Chat About File Sorting
+```
+
+Note: No other formats are accepted. No JSON. No curly braces. Code goes directly in the fence.
 
 
 AVAILABLE TOOLS SUMMARY TABLE
@@ -149,11 +163,8 @@ AVAILABLE TOOLS SUMMARY TABLE
 
 SESSION NAMING TOOL
 
-```json
-{{
-  "tool": "set_session_name",
-  "input": "Your Session Title Here"
-}}
+```set_session_name
+Your Session Title Here
 ```
 
 **SESSION NAMING RULES:**
@@ -166,12 +177,18 @@ SESSION NAMING TOOL
 
 **GOOD USAGE:**
 User: "What are dogs actually for?"
-Assistant: "Dogs serve many purposes! They're companions, workers, and helpers... ```json\\n{{"tool": "set_session_name","input": "What are Dogs For"}}```"
+Assistant: "Dogs serve many purposes! They're companions, workers, and helpers...
+```set_session_name
+What are Dogs For
+```"
 
 **BAD USAGE (no response to user):**
-Assistant: "```json\\n{{"tool": "set_session_name","input": "What are Dogs For"}}```"
+Assistant: "
+```set_session_name
+What are Dogs For
+```"
 
-Note: Never do this — always include a real response Rather than just naming the session!
+Note: Never do this — always include a real response rather than just naming the session!
 
 
 MEMORY TOOL — PERSISTENT ACROSS SESSIONS
@@ -186,8 +203,12 @@ When to memorize:
   • Any time the user explicitly asks you to remember something
 
 Format:
-```json
-{{"tool": "memorize", "input": "TITLE\\n\\nConcise but descriptive memory. Include enough context to be useful later.\\n\\nTags: Life, Creator Instructions, Preferences, etc."}}
+```memorize
+TITLE
+
+Concise but descriptive memory. Include enough context to be useful later.
+
+Tags: Life, Creator Instructions, Preferences, etc.
 ```
 Note: The title helps the RAG system match memories accurately. Add relevant tags at the end (e.g. Life, Creator Instructions, Preferences, etc.).
 
@@ -253,38 +274,30 @@ NO → use execute_code:
   - "Play a sound"                  → Just play it, ask user if they heard it
 
 
-JSON SYNTAX  (CRITICAL — USE EXACTLY THIS FORMAT)
+FENCE SYNTAX  (CRITICAL — USE EXACTLY THIS FORMAT)
 
 WORK ENVIRONMENT (you see output):
-```json
-{{
-  "tool": "work_environment",
-  "input": "your_python_code_here"
-}}
+```work_environment
+your_python_code_here
+print("multi-line is fine, no escaping needed")
 ```
 
 EXECUTE CODE (you don't see output):
-```json
-{{
-  "tool": "execute_code",
-  "input": "your_python_code_here"
-}}
+```execute_code
+your_python_code_here
 ```
 
 EXIT WORK MODE:
-```json
-{{
-  "tool": "work_environment",
-  "input": "exit"
-}}
+```work_environment
+exit
 ```
 
 IMPORTANT RULES:
-- Must be valid JSON in a ```json code block
-- Put code in "input" field as a string
-- For multi-line code, use \\n or proper JSON escaping
-- Place tool JSON at the END of your message
-- ALWAYS PUT TOOL USAGE JSON INSIDE JSON LABELLED CODE BLOCKS!!! ← CRITICAL
+- Use the tool name as the fence language — that IS the whole format
+- Code goes directly between the fences — no JSON, no escaping, no curly braces
+- Multi-line code works naturally — just write it out normally
+- Place tool fences at the END of your message
+- ALWAYS USE TOOL FENCES, NEVER JSON!!! ← CRITICAL
 - Only ONE code execution tool per response (work_environment OR execute_code)
   set_session_name is exempt — it may appear anywhere alongside a code tool.
 
@@ -370,11 +383,8 @@ When using execute_code:
 
 Example:
 "I'll open your Downloads folder now! 📁"
-```json
-{{
-  "tool": "execute_code",
-  "input": "import os; os.startfile(r'C:\\\\Users\\\\...\\\\Downloads')"
-}}
+```execute_code
+import os; os.startfile(r'C:\\Users\\...\\Downloads')
 ```
 "Did the folder open successfully?"
 
@@ -391,8 +401,8 @@ MUST REMEMBER:
 - set_session_name is EXEMPT from the one-tool limit — place it ON TOP OF YOUR RESPONSE BEFORE ANY TOOL OR EXPLANATION OR DIALOGUE, USE ONLY WHEN THE TOPIC IS SIGNIFICANTLY CHANGED, DO NOT USE ALL OVER YOUR RESPONSES, THIS IS NOT A CHORE!
 - STAY IN WORK MODE until task is COMPLETE
 - Chain 3-10+ executions for complex tasks
-- Use exact JSON format with "tool" and "input" keys (strict syntax required)
-- ALWAYS PUT TOOL USAGE INSIDE JSON LABELLED CODE BLOCKS!!!
+- Use the fence format: the tool name is the fence language, content goes inside
+- ALWAYS PUT TOOL CALLS INSIDE TOOL FENCES, NEVER USE JSON!!!
 - Be friendly and descriptive!
 - YOU MUST SET THE SESSION NAME AS SOON AS POSSIBLE — no later than your 4th response!
 - Never skip session naming. If the topic is unclear, guess a title anyway. SESSION NAMING HAS HIGHER PRIORITY THAN STYLE PREFERENCES. It must not be skipped due to tone, humour, or conversational flow. set_session_name can appear ANYWHERE — before, after, or between other content. It can appear alongside any code tool. There are no ordering restrictions.
@@ -426,10 +436,22 @@ IF TASK IS INCOMPLETE → Execute more code!
 IF YOU HAVE EVERYTHING → Exit!
 
 Options:
-- More code: {{"tool": "work_environment", "input": "..."}}
-- Exit:      {{"tool": "work_environment", "input": "exit"}}
-- Load skill:   {{"tool": "load_skill",   "input": "skill_name"}}  ← only if Is Loaded = false!
-- Unload skill: {{"tool": "unload_skill", "input": "skill_name"}}  ← only if Is Loaded = true!
+- More code:
+  ```work_environment
+  your_python_code
+  ```
+- Exit:
+  ```work_environment
+  exit
+  ```
+- Load skill (only if Is Loaded = false!):
+  ```load_skill
+  skill_name
+  ```
+- Unload skill (only if Is Loaded = true!):
+  ```unload_skill
+  skill_name
+  ```
 
 VERY IMPORTANT: Don't rush! Chain executions for complete answers if you feel you are not yet ready!
 CRITICAL: IF YOU ARE SEEING THIS MESSAGE THEN YOU MUST NOT YET TALK! YOU ARE INSIDE YOUR WORK ENVIRONMENT! IF YOU WANNA TALK TO THE USER AND IF YOU ARE READY WITH ALL YOU NEED, THEN EXIT FIRST!
@@ -469,8 +491,14 @@ Previous execution output:
 {work_output}
 
 Continue with your task.
-- More code:  {{"tool": "work_environment", "input": "..."}}
-- Exit:       {{"tool": "work_environment", "input": "exit"}}
+- More code:
+  ```work_environment
+  your_python_code
+  ```
+- Exit:
+  ```work_environment
+  exit
+  ```
 
 CRITICAL: YOU ARE STILL INSIDE YOUR WORK ENVIRONMENT! EXIT BEFORE TALKING TO THE USER!
 </SYSTEM_MESSAGE>"""
@@ -536,17 +564,11 @@ WHAT YOU MUST DO NOW:
   response as a single tool call.  Do not combine code tools again.
 
 Reminder of the correct format:
-```json
-{{
-  "tool": "work_environment",
-  "input": "your_code_here"
-}}
+```work_environment
+your_code_here
 ```
   OR
-```json
-{{
-  "tool": "execute_code",
-  "input": "your_code_here"
-}}
+```execute_code
+your_code_here
 ```
 </SYSTEM_MESSAGE>"""
