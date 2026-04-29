@@ -11,8 +11,6 @@ from core.tool_manager import ToolManager
 from core.memory_manager import get_memory_manager
 from core.global_instructions import (
     get_system_prompt,
-    POST_EXIT_PROMPT,
-    POST_EXIT_PROMPT_VOICE,
 )
 
 
@@ -714,27 +712,6 @@ class AIEngine:
                  f"→ _process_work_mode_response()")
         return self._process_work_mode_response(ai_text)
 
-    def send_post_exit_prompt(self):
-        """Send post-exit prompt to guide AI to report findings."""
-        log.info(f"[AIEngine.send_post_exit_prompt] voice_mode={self.voice_mode} | "
-                 f"provider='{self.ai_provider}'")
-        self.log("Sending post-exit prompt")
-
-        prompt = POST_EXIT_PROMPT_VOICE if self.voice_mode else POST_EXIT_PROMPT
-        self.conversation_history.append({'role': 'system', 'content': prompt})
-        log.debug(f"[AIEngine.send_post_exit_prompt] Using "
-                  f"{'POST_EXIT_PROMPT_VOICE' if self.voice_mode else 'POST_EXIT_PROMPT'} | "
-                  f"history_len={len(self.conversation_history)}")
-
-        ai_text = self._call_provider()
-        if not ai_text:
-            log.error("[AIEngine.send_post_exit_prompt] ✗ No AI text returned")
-            return self._make_error_result(f"Error: No response from {self.ai_provider} provider")
-
-        log.info(f"[AIEngine.send_post_exit_prompt] ✓ Got response | length={len(ai_text)} chars | "
-                 f"→ _process_ai_response()")
-        return self._process_ai_response(ai_text)
-
     def _get_ai_response_internal(self, prompt):
         """Get a single-turn AI response without touching conversation history.
         Used for code explanation dialogs, approval dialogs, etc."""
@@ -987,6 +964,17 @@ class AIEngine:
 
         log.debug("[AIEngine._process_work_mode_response] Checking for consecutive work_environment call...")
 
+        # Check for set_session_name call (handle first as it's simple)
+        session_name = None
+        log.debug("[AIEngine._process_ai_response] Checking for set_session_name call...")
+        session_name_call = self.tool_manager.parse_set_session_name(ai_text)
+        if session_name_call:
+            session_name, remaining_text = session_name_call
+            log.info(f"[AIEngine._process_ai_response] set_session_name detected → '{session_name}' | "
+                     f"remaining text length={len(remaining_text)}")
+            self.log(f"Set session name call detected: {session_name}")
+            ai_text = remaining_text
+
         # ── Check for load_skill call (work_environment exclusive) ────────────
         load_skill_result = self.tool_manager.parse_load_skill(ai_text)
         if load_skill_result:
@@ -1009,6 +997,7 @@ class AIEngine:
                     'has_work_call': True,
                     'in_work_mode': True,
                     'thinking': True,
+                    'session_name': session_name,
                 }
 
             log.info(f"[AIEngine._process_work_mode_response] Skill '{skill_name}' loaded | "
@@ -1031,6 +1020,7 @@ class AIEngine:
                 'in_work_mode': True,
                 'thinking': True,
                 'skill_loaded': skill_name,
+                'session_name': session_name,
             }
 
         # ── Check for unload_skill call ────────────────────────────────────────
@@ -1055,6 +1045,7 @@ class AIEngine:
                     'has_work_call': True,
                     'in_work_mode': True,
                     'thinking': True,
+                    'session_name': session_name,
                 }
 
             log.info(f"[AIEngine._process_work_mode_response] Skill '{skill_name}' unloaded")
@@ -1071,6 +1062,7 @@ class AIEngine:
                 'in_work_mode': True,
                 'thinking': True,
                 'skill_unloaded': skill_name,
+                'session_name': session_name,
             }
 
         work_call = self.tool_manager.parse_work_environment(ai_text)
@@ -1098,6 +1090,7 @@ class AIEngine:
                     'has_work_call': False,
                     'in_work_mode': False,
                     'thinking': False,
+                    'session_name': session_name,
                     'exited_work_mode': True
                 }
 
@@ -1129,6 +1122,7 @@ class AIEngine:
                 'response': ai_text,
                 'has_work_call': False,
                 'in_work_mode': False,
+                'session_name': session_name,
                 'thinking': False
             }
 

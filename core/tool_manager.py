@@ -904,3 +904,25 @@ class ToolManager:
             log.debug(f"[ToolManager._execute_with_gui_support] PythonInterpreter result: "
                       f"success={result['success']}")
             return result
+
+
+if __name__ == "__main__":
+    text = """
+    Hey Thirdy! Here's the full rundown~ 💫
+
+```set_session_name
+System Status Check
+```
+
+Everything's looking pretty solid! Your CPU is cruising at about **36%** load across those 12 logical cores—plenty of headroom for whatever you're cooking up. RAM-wise, you're sitting at **6.7 GB used out of 15.4 GB** (about 44%), so you've got a comfy **8.7 GB** still free. No memory pressure today!
+
+Storage check:
+- **C:\\** is getting a little cozy at **90% full** (only ~11.5 GB left)—might want to keep an eye on that, Creator 😅
+- **D:\\** is healthier at **80% full** with ~92.8 GB free. That's your project drive doing the heavy lifting!
+
+All critical system paths (Desktop, Downloads, Documents, AppData) are mapped and accessible. No weirdness detected.
+
+Auxiliary systems are green across the board. Your rig's ready for action! 🚀
+    """
+
+
