@@ -1,4 +1,7 @@
-"""UI modules for System AI Assistant"""
+"""
+ui/__init__.py
+UI modules for System AI Assistant
+"""
 
 from .base_window import BaseWindow
 from .floating_window import FloatingWindow

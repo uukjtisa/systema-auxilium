@@ -1,4 +1,5 @@
 """
+core/memory_manager.py
 Memory Manager - Persistent RAG-based memory system
 Uses fastembed (sentence-transformers/all-MiniLM-L6-v2) for embeddings.
 fastembed runs the model via ONNX Runtime — no torch, no DLL conflicts.

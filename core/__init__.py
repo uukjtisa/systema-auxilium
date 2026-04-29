@@ -1,4 +1,7 @@
-"""Core modules for System AI Assistant"""
+"""
+core/__init__.py
+Core modules for System AI Assistant
+"""
 
 from .ai_engine import AIEngine
 from .tool_manager import ToolManager

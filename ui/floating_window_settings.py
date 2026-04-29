@@ -1,4 +1,5 @@
 """
+ui/floating_window_settings.py
 Appearance Settings Window - Configure floating window appearance
 """
 

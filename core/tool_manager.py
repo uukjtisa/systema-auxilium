@@ -1,4 +1,5 @@
 """
+core/tool_manager.py
 Tool Manager - Simplified work environment and code execution system
 FIXED: Code approval dialog now runs on main thread using Qt signals
 UPDATED: GUI execution now uses subprocess with .generated folder

@@ -1,4 +1,5 @@
 """
+core/path_syncer.py
 Path Syncer - Live system environment merger
 Reads real system environment variables (registry on Windows, config files on Linux/macOS)
 and merges any NEW paths/vars into the running Python process's os.environ.

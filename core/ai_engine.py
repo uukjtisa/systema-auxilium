@@ -1,4 +1,5 @@
 """
+core/ai_engine.py
 AI Engine - Handles AI interactions
 UNIFIED: Single _build_messages() for all providers. Each _http_* helper
          converts the standard message format to its provider's requirements.

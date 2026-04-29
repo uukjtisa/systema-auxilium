@@ -1,4 +1,5 @@
 """
+core/ai_worker.py
 AI Worker - Runs AI operations in background thread
 UPDATED: Updated to match new work_environment and execute_code naming
 """

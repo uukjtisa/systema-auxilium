@@ -1,4 +1,5 @@
 """
+core/voice_handler.py
 Voice Handler - Complete voice input/output system
 FIXED: Added proper initialization and error handling to prevent hangs
 UPDATED: Unified colored logging system matching ToolManager style

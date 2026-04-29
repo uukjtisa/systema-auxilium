@@ -1,4 +1,5 @@
 """
+ui/manual_response_window.py
 ManualResponseWindow — popup that lets the user type the AI's response manually.
 
 Normal mode  : just shows a response input and Submit / Cancel.

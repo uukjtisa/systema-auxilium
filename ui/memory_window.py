@@ -1,4 +1,5 @@
 """
+ui/memory_window.py
 Memory Window - UI for managing AI persistent memories
 Matches the dark theme and style of existing windows in the project.
 
