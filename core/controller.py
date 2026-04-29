@@ -685,7 +685,7 @@ You are Systema Auxilium. If the user asks about your name, tell them it is Syst
 Let the user know they can give you a custom name from the sidebar (top-left ☰ menu → custom assistant name field).
 """
 
-        # Add user name if set
+        # Add username if set
         user_name = self.get_user_name()
         if user_name:
             log.debug(f"[AssistantController._update_system_prompt] Injecting user_name='{user_name}'")
@@ -1205,16 +1205,11 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             if self._chat:
                 self._chat.add_skill_card_message(skill_name, loaded=False)
 
-        # Check if AI just exited tool mode
+        # Check if AI just exited tool mode — summary is already in the response above
         if result.get('exited_work_mode'):
-            log.info("[AssistantController.handle_ai_response] AI exited work mode — "
-                     "scheduling post-exit prompt in 500ms")
-            self.log("AI exited work mode - sending post-exit prompt")
-            if self._chat:
-                self._chat.add_system_message(
-                    "🔄 **Work Completed** - AI is now preparing its report..."
-                )
-            QTimer.singleShot(500, self.send_post_exit_prompt)
+            log.info(
+                "[AssistantController.handle_ai_response] AI exited work mode — summary included in response")
+            self.work_mode_timer.stop()
             return
 
         if result['thinking']:
@@ -1222,63 +1217,6 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             # Start tool mode timer
             self.work_mode_timer.start()
 
-    def send_post_exit_prompt(self):
-        """NEW: Send post-exit prompt to guide AI to report findings"""
-        log.info("[AssistantController.send_post_exit_prompt] ── Sending post-exit prompt ──────────────")
-        if self.is_processing:
-            log.warning("[AssistantController.send_post_exit_prompt] Already processing — skipping")
-            self.log("Already processing - skipping post-exit prompt")
-            return
-
-        self.is_processing = True
-        log.debug("[AssistantController.send_post_exit_prompt] is_processing=True | showing thinking")
-        self.ui.show_thinking()
-
-        # Debug: Show that we're sending post-exit prompt
-        if self.settings.get('debug_mode'):
-            self.ui.show_debug_message("system",
-                "••• SENDING POST-EXIT PROMPT •••\n"
-                "Asking AI to report its findings to the user...")
-
-        # Create worker thread for post-exit prompt
-        self.current_worker = AIWorker(self.ai, 'post_exit')
-        self.current_worker.response_ready.connect(self.handle_post_exit_response)
-        self.current_worker.error_occurred.connect(self.handle_ai_error)
-        self.current_worker.start()
-
-    def handle_post_exit_response(self, result):
-        """Handle response after post-exit prompt"""
-        log.info(f"[AssistantController.handle_post_exit_response] ── Response received | "
-                 f"has_response={bool(result.get('response'))} | "
-                 f"session_name={repr(result.get('session_name'))} ──")
-        self.ui.hide_thinking()
-        self.is_processing = False
-        log.debug("[AssistantController.handle_post_exit_response] is_processing=False | thinking hidden")
-
-        # Debug mode
-        if self.settings.get('debug_mode'):
-            raw_response = self.ai.last_raw_response
-            if raw_response:
-                self.ui.show_debug_message("ai",
-                    f"••• AI's REPORT TO USER •••\n{raw_response}")
-
-        # Show the AI's report to user
-        if result.get('response'):
-            log.debug(f"[AssistantController.handle_post_exit_response] Showing AI message | "
-                      f"len={len(result['response'])}")
-            self.ui.show_ai_message(result['response'])
-
-            # SESSION SAVE: Mark session as having messages and auto-save
-            if not self.session_has_messages:
-                self.session_has_messages = True
-                log.debug("[AssistantController.handle_post_exit_response] session_has_messages=True")
-            self._auto_save_session()
-
-        # Handle session rename (AI may set name in post-exit report)
-        if result.get('session_name'):
-            log.debug(f"[AssistantController.handle_post_exit_response] AI set session name: "
-                      f"'{result['session_name']}'")
-            self.set_session_name(result['session_name'])
 
     def handle_work_mode_response(self, result):
         """Handle tool mode response from worker thread"""
@@ -1314,20 +1252,19 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
                         f"━━━ CHAINING EXECUTION ━━━\n"
                         f"AI is analyzing output and chaining more executions...")
 
+        # Check if AI set a session name
+        if result.get('session_name'):
+            log.debug(f"[AssistantController.handle_work_mode_response] AI set session name: "
+                      f"'{result['session_name']}'")
+            self.set_session_name(result['session_name'])
+
         # Update UI
         self.ui.handle_work_mode_update(result)
 
-        # NEW: Check if AI just exited tool mode
+        # Check if AI just exited tool mode — summary is already in the response
         if result.get('exited_work_mode'):
-            self.log("AI exited tool mode - sending post-exit prompt")
+            self.log("AI exited tool mode")
             self.work_mode_timer.stop()
-            # Show system message FIRST
-            if self._chat:
-                self._chat.add_system_message(
-                    "🔄 **Work Completed** - AI is now preparing its report..."
-                )
-            # Send post-exit prompt with delay
-            QTimer.singleShot(500, self.send_post_exit_prompt)
             return
 
         if result['thinking']:

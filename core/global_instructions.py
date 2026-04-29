@@ -292,6 +292,16 @@ EXIT WORK MODE:
 exit
 ```
 
+IMPORTANT: When you exit work mode, write your full summary BEFORE the exit fence
+in the SAME response. Do not wait for a follow-up turn. The exit fence must come last.
+Example of correct exit response:
+  "I found 3 config files. The main issue is in settings.json where the timeout
+  is set to 0.
+
+```work_environment
+  exit
+```"
+
 IMPORTANT RULES:
 - Use the tool name as the fence language — that IS the whole format
 - Code goes directly between the fences — no JSON, no escaping, no curly braces
@@ -311,13 +321,10 @@ When you say you'll do something, DO IT in that SAME response!
 [waits for next turn]
 
 ✓ GOOD (efficient):
-"I'll check that file for you now."
-```json
-{{
-  "tool": "work_environment",
-  "input": "print(open('file.txt').read())"
-}}
-```
+"I'll check that file for you now.
+```work_environment
+print(open('file.txt').read())
+```"
 
 NEVER announce intention without the actual JSON in the same response!
 
@@ -455,7 +462,7 @@ Options:
 
 VERY IMPORTANT: Don't rush! Chain executions for complete answers if you feel you are not yet ready!
 CRITICAL: IF YOU ARE SEEING THIS MESSAGE THEN YOU MUST NOT YET TALK! YOU ARE INSIDE YOUR WORK ENVIRONMENT! IF YOU WANNA TALK TO THE USER AND IF YOU ARE READY WITH ALL YOU NEED, THEN EXIT FIRST!
-VERY CRITICAL: WHEN YOU ARE GONNA EXIT, YOU CAN ONLY HAVE AN EXIT TOOL CALL IN YOUR RESPONSE, NO REPORTS, NO CHAT, NO OTHER WORDS! BECAUSE YOU CAN ONLY TALK TO THE USER AFTER EXITING, NOT WHILE EXITING!
+VERY CRITICAL: WHEN YOU ARE GONNA EXIT, IN YOUR RESPONSE, THERE MUST BE A REPORT, AND OTHER SUMMARY OF WHAT YOU HAVE DONE!
 """
 
 WORK_MODE_PROMPT = "<SYSTEM_MESSAGE>\n" + _WORK_CONTINUATION_BLOCK + "</SYSTEM_MESSAGE>"
@@ -514,23 +521,6 @@ You are in normal chat mode. Respond to the user naturally.
 SKILL_UNLOADED_CHAT_PROMPT = """<SYSTEM_MESSAGE>
 SKILL '{skill_name}' has been unloaded from your system context.
 You are in normal chat mode. Respond to the user naturally.
-</SYSTEM_MESSAGE>"""
-
-
-
-
-POST_EXIT_PROMPT = """<SYSTEM_MESSAGE>
-You have exited work mode. You are now talking to the user.
-Report what you discovered. Give a clear, comprehensive summary.
-If you haven't named the session then name it now, UNLESS YOU ALREADY HAVE!
-IF THE TOPIC HAS CHANGED SIGNIFICANTLY THEN YOU CAN RENAME THE SESSION AGAIN.
-</SYSTEM_MESSAGE>"""
-
-
-POST_EXIT_PROMPT_VOICE = """<SYSTEM_MESSAGE>
-[VOICE MODE - YOU MUST USE Clean text for TTS]
-You have exited work mode. Now talking to the user.
-Report your findings clearly and concisely.
 </SYSTEM_MESSAGE>"""
 
 
