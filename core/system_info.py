@@ -1,4 +1,5 @@
 """
+core/system_info.py
 System Information Detector
 Detects system info at startup and formats it for AI prompt
 """

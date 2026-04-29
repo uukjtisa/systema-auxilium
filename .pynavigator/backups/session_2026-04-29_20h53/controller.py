@@ -1,5 +1,4 @@
 """
-core/controller.py
 Main Controller - Orchestrates the AI assistant with Voice Support
 MAIN INITIATOR FOR ALL UI AND CORE MODULES
 UPDATED: work_environment and execute_code integration, voice mode, device management, TTS control

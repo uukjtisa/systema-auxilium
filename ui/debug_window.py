@@ -1,4 +1,5 @@
 """
+ui/debug_window.py
 Debug Window - Shows AI tool usage conversations
 """
 

@@ -1,4 +1,5 @@
 """
+core/global_instructions.py
 Global Instructions - AI system prompts
 """
 

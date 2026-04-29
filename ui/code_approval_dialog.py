@@ -1,4 +1,5 @@
 """
+ui/code_approval_dialog.py
 Code Approval Dialog - Shows code before execution for supervised mode
 FIXED: Simple chat window for explanations, stays on top, no crashes
 """
