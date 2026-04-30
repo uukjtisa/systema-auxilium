@@ -8,6 +8,19 @@
 
 ---
 
+# Table of Contents
+- [Things to take into consideration](#things-to-take-into-consideration)
+- [What is Systema Auxilium](#what-is-systema-auxilium)
+- [What Can It Do](#what-can-it-do)
+- [About AI System Control](#about-ai-system-control)
+- [Recommended Python Environment](#recommended-python-environment)
+- [How to Install](#how-to-install)
+- [Safety Warnings](#safety-warnings)
+- [Contributing](#contributing)
+- [NOTICE](#notice)
+
+---
+
 ## Things to take into consideration.
 
 This is a **hobby project** built and maintained by a single person.
@@ -17,8 +30,9 @@ This is a **hobby project** built and maintained by a single person.
 **Bugs are expected.** Some features have not been deeply tested, and certain functions may behave unexpectedly depending on your setup. And tool calls may leak if the LLM misses proper usage. If something breaks, please try to replicate it and open an issue. Any details you can provide will help a lot. And if you happen to know your way around Python, taking a look at the bug yourself would be even more appreciated! :)
 
 - **Lighter models may struggle to follow the system prompt tool format reliably.**
-- **Model compatibility is limited.** This project was developed and tested almost exclusively using the **GPT-5.2** model via the API Provider [Puter.js](https://puter.com) with **limited free rates.** Other models, both lighter open-source ones and stronger alternatives, have **not** been tested. 
+- **Model Instruction following capability.** This project was developed and tested almost exclusively using the **GPT-5.2** model via the API Provider [Puter.js](https://puter.com) with **limited free rates.** Other models, both lighter open-source ones and stronger alternatives, have **not** been tested. 
 - When the LLM fails to follow the format in tool usage, unintentional results may occur, like tool usage leaking into chat.
+- **System Prompt is not perfect.** I am still actively working on analyzing the system prompt to identify redundant and unnecessary instructions.
 - I'm open to suggestions for revamping the tool system. If you're experienced in agentic stuff, please consider mentoring me! **:)**
 
 Development happens in whatever time I can spare. Updates may be slow, inconsistent, or temporarily halted during academic periods. I have no prior experience maintaining a codebase of this scale, so there may be structural ambiguity in places. I appreciate your patience.
