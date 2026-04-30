@@ -137,6 +137,9 @@ class AssistantController(QObject):
         )
         log.info("[AssistantController.__init__] AIEngine created")
 
+        # Wire chat window bridge into tool_manager so it can call add_system_message etc.
+        self.ai.tool_manager._get_chat = lambda: self._chat
+
         # Apply settings
         log.debug("[AssistantController.__init__] Applying AI provider settings...")
         self.ai.set_provider(self.settings.get('ai_provider', 'anthropic'))

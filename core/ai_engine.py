@@ -12,6 +12,7 @@ from core.tool_manager import ToolManager
 from core.memory_manager import get_memory_manager
 from core.global_instructions import (
     get_system_prompt,
+    EMPTY_EXIT_SUMMARY_PROMPT,
 )
 
 
@@ -760,6 +761,10 @@ class AIEngine:
         self._clear_memory_context()
         self.last_raw_response = ai_text
 
+        # ── Single-exec guardrail ──────────────────────────────────────────────────
+        self.tool_manager.enforce_single_exec_policy(ai_text)
+        # ──────────────────────────────────────────────────────────────────────────
+
         if self.tool_execution_lockout:
             self.conversation_history.append({'role': 'assistant', 'content': ai_text})
             return {
@@ -862,16 +867,14 @@ class AIEngine:
             work_output = self.tool_manager.run_work_environment(code)
 
             if work_output == "EXITED_WORK_MODE":
-                log.info("[AIEngine._process_ai_response] Work environment returned EXITED_WORK_MODE — "
-                         "clearing work mode flag (skills persist)")
+                # Shouldn't happen on first entry — AI should never exit immediately.
+                # Kept as a safety net only.
+                log.warning("[AIEngine._process_ai_response] Unexpected immediate exit on work mode entry")
                 self.tool_manager.in_work_mode = False
-
                 if ai_text and ai_text.strip():
                     self.conversation_history.append({'role': 'assistant', 'content': ai_text})
-                    log.debug("[AIEngine._process_ai_response] Full ai_text appended to history (exit path)")
-
                 return {
-                    'response': visible_text if visible_text.strip() else "",
+                    'response': visible_text if visible_text and visible_text.strip() else "",
                     'has_work_call': False,
                     'in_work_mode': False,
                     'thinking': False,
@@ -962,6 +965,10 @@ class AIEngine:
         log.debug(f"[AIEngine._process_work_mode_response] Preview: "
                   f"'{ai_text[:100].replace(chr(10), '↵')}'")
         self.last_raw_response = ai_text
+
+        # ── Single-exec guardrail ──────────────────────────────────────────────────
+        self.tool_manager.enforce_single_exec_policy(ai_text)
+        # ──────────────────────────────────────────────────────────────────────────
 
         log.debug("[AIEngine._process_work_mode_response] Checking for consecutive work_environment call...")
 
@@ -1086,8 +1093,26 @@ class AIEngine:
                     self.conversation_history.append({'role': 'assistant', 'content': ai_text})
                     log.debug("[AIEngine._process_work_mode_response] ai_text appended to history (exit)")
 
+                # ── Empty-exit guard ──────────────────────────────────────────
+                if not visible_text or not visible_text.strip():
+                    log.warning("[AIEngine._process_work_mode_response] Exit without summary detected — "
+                                "injecting reminder and re-calling provider")
+                    self.conversation_history.append({'role': 'system', 'content': EMPTY_EXIT_SUMMARY_PROMPT})
+                    ai_text2 = self._call_provider()
+                    if ai_text2:
+                        return self._process_ai_response(ai_text2)
+                    return {
+                        'response': "",
+                        'has_work_call': False,
+                        'in_work_mode': False,
+                        'thinking': False,
+                        'session_name': session_name,
+                        'exited_work_mode': True
+                    }
+                # ─────────────────────────────────────────────────────────────
+
                 return {
-                    'response': visible_text if (visible_text and visible_text.strip()) else "",
+                    'response': visible_text,
                     'has_work_call': False,
                     'in_work_mode': False,
                     'thinking': False,
