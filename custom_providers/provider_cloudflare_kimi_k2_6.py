@@ -16,7 +16,8 @@ Multi-account support (sequential + disk-persisted exhaustion cache):
       cache survives script reloads and process restarts.
     - Exhausted accounts are instantly skipped on every call — no wasted
       requests or neurons.
-    - Cached accounts are automatically unblocked after UTC midnight resets.
+    - Cached accounts are automatically unblocked 24 hours after being marked
+      exhausted (i.e. when Cloudflare's per-account rolling window resets).
     - Only ONE account is ever called per request.
     - When ALL accounts are exhausted, returns a human-readable error
       instead of crashing.
@@ -77,13 +78,9 @@ def _save_cache(cache: dict) -> None:
         print(f"[provider] Warning: could not write exhaustion cache: {e}")
 
 
-def _next_utc_midnight() -> float:
-    """Return the Unix timestamp of the next UTC midnight."""
-    now = datetime.datetime.now(datetime.timezone.utc)
-    midnight = (now + datetime.timedelta(days=1)).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
-    return midnight.timestamp()
+def _reset_after_24h() -> float:
+    """Return the Unix timestamp 24 hours from now."""
+    return time.time() + 86400
 
 
 def _hours_left(reset_ts: float) -> str:
@@ -97,14 +94,14 @@ def _hours_left(reset_ts: float) -> str:
 
 
 def _mark_exhausted(account_id: str, label: str) -> None:
-    """Record an account as exhausted until UTC midnight. Persisted to disk."""
+    """Record an account as exhausted for 24 hours from now. Persisted to disk."""
     cache = _load_cache()
-    reset_ts = _next_utc_midnight()
+    reset_ts = _reset_after_24h()
     cache[account_id] = reset_ts
     _save_cache(cache)
     reset_str = datetime.datetime.fromtimestamp(
         reset_ts, tz=datetime.timezone.utc
-    ).strftime("%H:%M UTC")
+    ).strftime("%Y-%m-%d %H:%M UTC")
     hrs = _hours_left(reset_ts)
     print(f"[provider] x {label} exhausted — resets at {reset_str} ({hrs} from now)")
 
@@ -112,7 +109,7 @@ def _mark_exhausted(account_id: str, label: str) -> None:
 def _is_account_available(account: dict) -> bool:
     """
     Returns True if the account is not exhausted.
-    Automatically unblocks accounts whose reset timestamp has passed.
+    Automatically unblocks accounts whose 24-hour reset period has passed.
     """
     aid = account["account_id"]
     cache = _load_cache()
@@ -120,10 +117,10 @@ def _is_account_available(account: dict) -> bool:
     if reset_ts is None:
         return True
     if time.time() >= reset_ts:
-        # UTC midnight has passed — unblock and remove from cache
+        # 24-hour cooldown has passed — unblock and remove from cache
         del cache[aid]
         _save_cache(cache)
-        print(f"[provider] {account.get('label', aid)} unblocked after UTC midnight.")
+        print(f"[provider] {account.get('label', aid)} unblocked after 24h cooldown.")
         return True
     return False
 
@@ -156,7 +153,7 @@ def chat(system_prompt: str, messages: list) -> str:
     Iterates accounts sequentially, instantly skipping any marked exhausted
     in the on-disk cache. Only ONE live account is called per request.
     Neuron-limit failures are written to disk and skipped on future calls
-    until UTC midnight — even across script reloads and process restarts.
+    for 24 hours — even across script reloads and process restarts.
     """
     full_messages = (
         [{"role": "system", "content": system_prompt}] if system_prompt else []
@@ -204,8 +201,8 @@ def chat(system_prompt: str, messages: list) -> str:
         f"their daily free neuron limit.\n\n"
         f"Exhausted accounts: {exhausted}\n\n"
         f"Last error: {last_error}\n\n"
-        "Quota resets at midnight UTC. You can add more free accounts to the "
-        "ACCOUNTS list in the provider script, or upgrade to Workers Paid."
+        "Quota resets 24 hours after hitting the limit. You can add more free "
+        "accounts to the ACCOUNTS list in the provider script, or upgrade to Workers Paid."
     )
 
 
