@@ -1,4 +1,5 @@
 """
+core/tool_manager.py
 Tool Manager - Simplified work environment and code execution system
 FIXED: Code approval dialog now runs on main thread using Qt signals
 UPDATED: GUI execution now uses subprocess with .generated folder
@@ -17,7 +18,7 @@ import threading
 import subprocess
 import os
 from datetime import datetime
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, pyqtSignal, QTimer
 from core.python_interpreter import PythonInterpreter
 from core.memory_manager import get_memory_manager
 from core.logger import _make_logger, _NoOpLogger
@@ -32,6 +33,7 @@ log = _make_logger("ToolManager") if _verbose else _NoOpLogger()
 class ApprovalSignal(QObject):
     """Signal object for requesting code approval on main thread"""
     request_approval = pyqtSignal(str, str, object)  # code, execution_type, callback
+    system_message   = pyqtSignal(str)               # text → chat window, main thread only
 
 
 class ToolManager:
@@ -76,6 +78,7 @@ class ToolManager:
         # Work mode state
         self.in_work_mode = False
         self.last_work_output = None
+        self.last_work_annotation = None  # set by parse_work_environment when bracket present
         log.debug("[ToolManager.__init__] Work mode state: in_work_mode=False | last_work_output=None")
 
         # ── Violation tracking ────────────────────────────────────────────────
@@ -92,6 +95,7 @@ class ToolManager:
         log.debug("[ToolManager.__init__] Creating ApprovalSignal and connecting to main thread handler")
         self.approval_signal = ApprovalSignal()
         self.approval_signal.request_approval.connect(self._show_approval_dialog_on_main_thread)
+        self.approval_signal.system_message.connect(self._deliver_system_message)
         log.debug("[ToolManager.__init__] ApprovalSignal connected")
 
         # Setup .generated folder (relative to working directory)
@@ -113,7 +117,43 @@ class ToolManager:
         self._exec_tool_keys = {'work_environment', 'execute_code'}
         log.debug(f"[ToolManager.__init__] Exec tool keys (policy-restricted): {self._exec_tool_keys}")
 
+        # ── Chat window bridge ────────────────────────────────────────────────
+        # Injected by the controller after construction via:
+        #   self.ai.tool_manager._get_chat = lambda: self._chat
+        self._get_chat = None
+
         log.info("[ToolManager.__init__] ✓ ToolManager initialization complete")
+
+    # ── Chat window bridge ────────────────────────────────────────────────────
+
+    @property
+    def _chat(self):
+        """
+        Returns the live ChatWindow instance, or None if not yet created
+        or if no bridge has been injected.
+        """
+
+        if callable(self._get_chat):
+            chat = self._get_chat()
+        else:
+            chat = None
+
+        if chat is None:
+            log.debug("[ToolManager._chat] | [chat_window.py] NONE")
+        else:
+            is_active = getattr(chat, "isVisible", lambda: True)()
+            log.debug(f"[ToolManager._chat] | [chat_window.py] ACTIVE={is_active} | {chat}")
+
+        return chat
+
+    def _deliver_system_message(self, text: str):
+        """
+        Slot — always runs on the main thread (connected via signal).
+        Forwards a system message to the chat window safely.
+        """
+        chat = self._chat
+        if chat:
+            chat.add_system_message(text)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Directory helpers
@@ -140,32 +180,70 @@ class ToolManager:
     # ─────────────────────────────────────────────────────────────────────────
 
     def _parse_fence(self, text, tool_name):
-            """
-            Extract content from a code fence whose language identifier matches tool_name.
-            Fuzzy-matches the identifier (strips underscores, lowercases) so
-            work_environment / workEnvironment / workenvironment all resolve correctly.
-            Returns (content, remaining_text) or None.
-            """
-            norm_target = self._norm_key(tool_name)
-            pattern = r'```[ \t]*(\w+)(?:[ \t]*\n|[ \t]+)(.*?)[ \t]*```'
-            for match in re.finditer(pattern, text, re.DOTALL):
-                if self._norm_key(match.group(1)) == norm_target:
-                    content = match.group(2).strip()
-                    remaining = (text[:match.start()] + text[match.end():]).strip()
-                    log.debug(f"[ToolManager._parse_fence] ✓ Matched '{tool_name}' | content_len={len(content)}")
-                    return content, remaining
-            return None
+        """
+        Extract content from a code fence whose language identifier matches tool_name.
+        Fuzzy-matches the identifier (strips underscores, lowercases) so
+        work_environment / workEnvironment / workenvironment all resolve correctly.
+        Returns (content, remaining_text) or None.
+        For work_environment, also supports ```work_environment: [annotation] format
+        and returns (content, remaining_text, annotation).
+        """
+        norm_target = self._norm_key(tool_name)
+
+        # ── Special handling for work_environment with inline annotation ──
+        if norm_target == "workenvironment":
+            # Format: ```work_environment: [annotation]\n<code>\n```
+            # Colon is optional: ```work_environment [annotation]\n<code>\n``` also works
+            pattern_we = r'```[ \t]*work_environment[ \t]*:?[ \t]*\[(.*?)\][ \t]*(?:\n|\r\n)(.*?)[ \t]*```'
+            match = re.search(pattern_we, text, re.DOTALL)
+            if match:
+                annotation = match.group(1).strip()
+                content = match.group(2).strip()
+                remaining = (text[:match.start()] + text[match.end():]).strip()
+                log.debug(
+                    f"[ToolManager._parse_fence] ✓ Matched 'work_environment' "
+                    f"annotation='{annotation}' | content_len={len(content)}"
+                )
+                return content, remaining, annotation
+            # If annotated format not found, fall through to general parser
+
+        # ── General case for all tools (including plain work_environment) ──
+        pattern = r'```[ \t]*(\w+)(?:[ \t]*\n|[ \t]+)(.*?)[ \t]*```'
+        for match in re.finditer(pattern, text, re.DOTALL):
+            if self._norm_key(match.group(1)) == norm_target:
+                content = match.group(2).strip()
+                remaining = (text[:match.start()] + text[match.end():]).strip()
+                log.debug(f"[ToolManager._parse_fence] ✓ Matched '{tool_name}' | content_len={len(content)}")
+                return content, remaining
+        return None
 
     def parse_work_environment(self, text):
-            """Parse work_environment fence from AI output. Returns (code, remaining_text) or None."""
-            log.debug(f"[ToolManager.parse_work_environment] Parsing {len(text)} chars")
-            result = self._parse_fence(text, 'work_environment')
-            if result:
+        """Parse work_environment fence from AI output. Returns (code, remaining_text) or None."""
+        log.debug(f"[ToolManager.parse_work_environment] Parsing {len(text)} chars")
+
+        result = self._parse_fence(text, 'work_environment')
+
+        if result:
+            if len(result) == 3:
+                code, remaining, annotation = result
+                self.last_work_annotation = annotation
+                log.info(
+                    f"[ToolManager.parse_work_environment] ✓ Found with annotation='{annotation}' | code_len={len(code)}")
+                if annotation:
+                    # Emit via signal — safe from any thread
+                    self.approval_signal.system_message.emit(
+                        f"**Working:** ***{annotation}***"
+                    )
+                    log.debug(f"[ToolManager.parse_work_environment] | SENT SYSTEM MESSAGE TO CHAT: {annotation}")
+            else:
                 code, remaining = result
-                log.info(f"[ToolManager.parse_work_environment] ✓ Found | code_len={len(code)}")
-                return code, remaining
-            log.debug("[ToolManager.parse_work_environment] Not found")
-            return None
+                self.last_work_annotation = None
+                log.info(f"[ToolManager.parse_work_environment] ✓ Found (no annotation) | code_len={len(code)}")
+
+            return code, remaining
+
+        log.debug("[ToolManager.parse_work_environment] Not found")
+        return None
 
     def parse_execute_code(self, text):
             """Parse execute_code fence from AI output. Returns (code, remaining_text) or None."""
@@ -237,7 +315,7 @@ class ToolManager:
             tuple: (cleaned_text, violation_bool, violation_msg)
         """
         log.info(f"[ToolManager.enforce_single_exec_policy] Scanning {len(text)} chars for policy violations")
-        pattern = r'```[ \t]*(\w+)[ \t]*\n.*?```'
+        pattern = r'```[ \t]*(\w+)[^\n]*\n.*?```'
         matches = []
         for match in re.finditer(pattern, text, re.DOTALL):
             canonical = self._tool_keys_norm.get(self._norm_key(match.group(1)))
@@ -258,6 +336,16 @@ class ToolManager:
         )
         log.warning(f"[ToolManager.enforce_single_exec_policy] ✗ POLICY VIOLATION #{self.exec_violations} — "
                     f"dropping {dropped_names}")
+
+        # Notify the user via chat window (signal is thread-safe)
+        self.approval_signal.system_message.emit(
+            f"⚠️ **NOTICE:** LLM failed to follow instructions — it used {len(extras)} more "
+            f"work environment and/or execute code blocks in one response ({', '.join(dropped_names)}). Only the "
+            f"first call was kept and executed. "
+            "To reduce how often this happens, consider using a "
+            "more capable model."
+            f"\nTotal violations this session: {self.exec_violations}"
+        )
 
         for match, _ in reversed(extras):
             text = text[:match.start()] + text[match.end():]
@@ -580,7 +668,12 @@ class ToolManager:
         for key in self._tool_keys:
             result = self._parse_fence(text, key)
             while result is not None:
-                _, text = result
+                # _parse_fence returns 3-tuple for annotated work_environment,
+                # 2-tuple for everything else (including plain work_environment)
+                if len(result) == 3:
+                    _, text, _ = result  # annotation discarded — not re-injected on session load
+                else:
+                    _, text = result
                 result = self._parse_fence(text, key)
         log.debug(f"[ToolManager.strip_tool_calls] ✓ Stripped | resulting_len={len(text)}")
         return text
@@ -904,3 +997,5 @@ class ToolManager:
             log.debug(f"[ToolManager._execute_with_gui_support] PythonInterpreter result: "
                       f"success={result['success']}")
             return result
+
+

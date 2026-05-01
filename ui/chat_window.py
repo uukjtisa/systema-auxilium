@@ -1,4 +1,5 @@
 """
+ui/chat_window.py
 Chat Window - Modern conversation interface with Voice Support
 Features:
 - Voice input/output toggle

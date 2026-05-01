@@ -1,4 +1,5 @@
 """
+core/puter_server.py
 Puter.js Server - Selenium-based WebSocket server with persistent browser profile
 Complete feature set: Chat, Images, TTS (Standard + ElevenLabs), STT, Text-to-Image, Quota Reset, Account Setup
 """

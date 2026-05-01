@@ -9,7 +9,7 @@
 # GUI Framework
 PyQt6>=6.4.0
 
-# HTTP Requests & Web
+# HTTP Requests & Web (For Puter.js API Bridge)
 requests>=2.28.0
 Flask>=2.3.0
 Flask-CORS>=4.0.0
@@ -18,8 +18,9 @@ flask-socketio>=5.3.0
 # AI Provider SDKs
 anthropic>=0.40.0          # Anthropic Claude API (official SDK)
 google-genai>=1.0.0        # Google Gemini API (new unified SDK, replaces google-generativeai)
+openai                     # For Scripted Providers that use REST API
 
-# Memory Recall (fastembed + numpy — no ChromaDB, no hnswlib, no native crashes)
+# Memory Recall
 fastembed
 numpy>=2.0.0
 # ⚠ onnxruntime 1.20+ has DLL initialization issues on Windows.
@@ -54,13 +55,18 @@ Pillow>=10.0.0
 
 
 # ============================================================================
-# OPTIONAL DEPENDENCIES (Enhanced Features)
+# OPTIONAL
 # ============================================================================
 
-# --- Computer Vision (OpenCV) ---
-# Uncomment to enable the AI's visual/camera capabilities
-# Requires numpy>=2.0.0 (already satisfied above)
-# opencv-python>=4.8.0
+# --- web-browser (skill) --- 
+# Recommended
+beautifulsoup4
+duckduckgo_search
+trafilatura
+
+# --- data-viz (skill) --- 
+# Recommended
+pandas
 
 # --- Local AI Models (LLaMA) ---
 # Uncomment to enable offline AI with LLaMA models (Only for capable hardware)

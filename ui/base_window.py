@@ -1,4 +1,5 @@
 """
+ui/base_window.py
 BaseWindow — shared frameless window chrome for all top-level windows.
 
 Provides:

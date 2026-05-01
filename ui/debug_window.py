@@ -1,4 +1,5 @@
 """
+ui/debug_window.py
 Debug Window - Shows AI tool usage conversations
 """
 
@@ -335,8 +336,7 @@ class DebugWindow(BaseWindow):
             # Patch the names that ai_engine captured with `from X import Y`
             ae.get_system_prompt          = gi.get_system_prompt
             ae.get_gemini_system_prompt   = gi.get_gemini_system_prompt
-            ae.POST_EXIT_PROMPT           = gi.POST_EXIT_PROMPT
-            ae.POST_EXIT_PROMPT_VOICE     = gi.POST_EXIT_PROMPT_VOICE
+
             # Rebuild the live prompt
             controller._update_system_prompt()
         except Exception as e:

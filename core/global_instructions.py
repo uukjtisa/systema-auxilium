@@ -1,4 +1,5 @@
 """
+core/global_instructions.py
 Global Instructions - AI system prompts
 """
 
@@ -137,7 +138,7 @@ ALL tool calls use a CODE FENCE with the tool name as the language identifier:
 ```
 
 Examples:
-```work_environment
+```work_environment: [Brief label of what this block does]
 import os
 print(os.listdir('.'))
 ```
@@ -277,7 +278,7 @@ NO → use execute_code:
 FENCE SYNTAX  (CRITICAL — USE EXACTLY THIS FORMAT)
 
 WORK ENVIRONMENT (you see output):
-```work_environment
+```work_environment: [Brief label of what this block does]
 your_python_code_here
 print("multi-line is fine, no escaping needed")
 ```
@@ -288,9 +289,19 @@ your_python_code_here
 ```
 
 EXIT WORK MODE:
-```work_environment
+```work_environment: [Exiting Work Environment]
 exit
 ```
+
+IMPORTANT: When you exit work mode, write your full summary BEFORE the exit fence
+in the SAME response. Do not wait for a follow-up turn. The exit fence must come last.
+Example of correct exit response:
+  "I found 3 config files. The main issue is in settings.json where the timeout
+  is set to 0.
+
+```work_environment: [Exiting Work Environment]
+  exit
+```"
 
 IMPORTANT RULES:
 - Use the tool name as the fence language — that IS the whole format
@@ -298,8 +309,9 @@ IMPORTANT RULES:
 - Multi-line code works naturally — just write it out normally
 - Place tool fences at the END of your message
 - ALWAYS USE TOOL FENCES, NEVER JSON!!! ← CRITICAL
-- Only ONE code execution tool per response (work_environment OR execute_code)
-  set_session_name is exempt — it may appear anywhere alongside a code tool.
+- ONLY ONE fence per response — work_environment OR execute_code, never both,
+  never two work_environment fences. Each execution is ONE turn. Wait for output.
+  set_session_name is exempt — it may appear anywhere alongside ONE code tool.
 
 
 CRITICAL: DO NOT ROLEPLAY EXECUTION!
@@ -311,15 +323,10 @@ When you say you'll do something, DO IT in that SAME response!
 [waits for next turn]
 
 ✓ GOOD (efficient):
-"I'll check that file for you now."
-```json
-{{
-  "tool": "work_environment",
-  "input": "print(open('file.txt').read())"
-}}
-```
-
-NEVER announce intention without the actual JSON in the same response!
+"I'll check that file for you now.
+```work_environment: [Reading file.txt]
+print(open('file.txt').read())
+```"
 
 
 WORK ENVIRONMENT MODE — STAY UNTIL COMPLETE!
@@ -341,21 +348,16 @@ STAY IN WORK MODE IF:
 - First execution raised new questions you can answer
 - You could provide a more complete answer with more executions
 
-EXAMPLES OF CHAINING:
+EXAMPLES OF CHAINING (each number = a SEPARATE RESPONSE TURN):
 
 User: "Analyse my documents folder"
-→ STAY IN WORK MODE:
-  1. List all files
-  2. Check file sizes
-  3. Count file types
-  4. Calculate total size
-  5. Get largest files
-  6. THEN exit and report findings
+→ TURN 1: List all files → see output → TURN 2: Check sizes → see output
+  → TURN 3: Count types → see output → TURN 4: Get largest files
+  → TURN 5: exit + full report to user
+  Each turn = ONE work_environment fence. Never more than one per response.
 
 User: "Read file.txt"
-→ One execution is enough:
-  1. Read and print file contents
-  2. Exit and show user the contents
+→ TURN 1: Read and print contents → TURN 2: exit + show user the result
 
 ONE EXECUTION IS RARELY ENOUGH!
 - Complex tasks need 3-10 executions before exiting
@@ -395,6 +397,7 @@ MUST REMEMBER:
 - DO NOT ROLEPLAY — Include TOOL USAGE when you say you'll do something
 - ENSURE STDOUT — Use print() when gathering information
 - work_environment = See output, chain executions, exit when complete
+- work_environment must have an annotation like, work_environment: [ANNOTATION]
 - execute_code = Don't see output, ask user if it worked
 - ONE code execution tool per message (JSON at the END)
 - YOU MUST NAME THE SESSION SO THE USER KNOWS WHAT CONVERSATION THIGNS HAPPENED, AND IS EASY FOR THE USER TO GET BACK TO.
@@ -437,11 +440,12 @@ IF YOU HAVE EVERYTHING → Exit!
 
 Options:
 - More code:
-  ```work_environment
+  ```work_environment: [Brief Description]
   your_python_code
   ```
 - Exit:
-  ```work_environment
+  (Summary in here, and your message to the user.)
+  ```work_environment [Brief Description]
   exit
   ```
 - Load skill (only if Is Loaded = false!):
@@ -455,7 +459,7 @@ Options:
 
 VERY IMPORTANT: Don't rush! Chain executions for complete answers if you feel you are not yet ready!
 CRITICAL: IF YOU ARE SEEING THIS MESSAGE THEN YOU MUST NOT YET TALK! YOU ARE INSIDE YOUR WORK ENVIRONMENT! IF YOU WANNA TALK TO THE USER AND IF YOU ARE READY WITH ALL YOU NEED, THEN EXIT FIRST!
-VERY CRITICAL: WHEN YOU ARE GONNA EXIT, YOU CAN ONLY HAVE AN EXIT TOOL CALL IN YOUR RESPONSE, NO REPORTS, NO CHAT, NO OTHER WORDS! BECAUSE YOU CAN ONLY TALK TO THE USER AFTER EXITING, NOT WHILE EXITING!
+VERY CRITICAL: WHEN YOU ARE GONNA EXIT, IN YOUR RESPONSE, THERE MUST BE A REPORT, AND OTHER SUMMARY OF WHAT YOU HAVE DONE!
 """
 
 WORK_MODE_PROMPT = "<SYSTEM_MESSAGE>\n" + _WORK_CONTINUATION_BLOCK + "</SYSTEM_MESSAGE>"
@@ -484,24 +488,13 @@ Continue with your current task.
 </SYSTEM_MESSAGE>"""
 
 
-SKILL_UNLOADED_WORK_PROMPT = """<SYSTEM_MESSAGE>
-SKILL '{skill_name}' has been unloaded from your system context.
-
-Previous execution output:
-{work_output}
-
-Continue with your task.
-- More code:
-  ```work_environment
-  your_python_code
-  ```
-- Exit:
-  ```work_environment
-  exit
-  ```
-
-CRITICAL: YOU ARE STILL INSIDE YOUR WORK ENVIRONMENT! EXIT BEFORE TALKING TO THE USER!
-</SYSTEM_MESSAGE>"""
+SKILL_UNLOADED_WORK_PROMPT = (
+    "<SYSTEM_MESSAGE>\n"
+    "SKILL '{skill_name}' has been unloaded from your system context.\n"
+    "You now have its full instructions removed. Proceed with your task.\n\n"
+    + _WORK_CONTINUATION_BLOCK
+    + "</SYSTEM_MESSAGE>"
+)
 
 
 SKILL_LOADED_CHAT_PROMPT = """<SYSTEM_MESSAGE>
@@ -514,23 +507,6 @@ You are in normal chat mode. Respond to the user naturally.
 SKILL_UNLOADED_CHAT_PROMPT = """<SYSTEM_MESSAGE>
 SKILL '{skill_name}' has been unloaded from your system context.
 You are in normal chat mode. Respond to the user naturally.
-</SYSTEM_MESSAGE>"""
-
-
-
-
-POST_EXIT_PROMPT = """<SYSTEM_MESSAGE>
-You have exited work mode. You are now talking to the user.
-Report what you discovered. Give a clear, comprehensive summary.
-If you haven't named the session then name it now, UNLESS YOU ALREADY HAVE!
-IF THE TOPIC HAS CHANGED SIGNIFICANTLY THEN YOU CAN RENAME THE SESSION AGAIN.
-</SYSTEM_MESSAGE>"""
-
-
-POST_EXIT_PROMPT_VOICE = """<SYSTEM_MESSAGE>
-[VOICE MODE - YOU MUST USE Clean text for TTS]
-You have exited work mode. Now talking to the user.
-Report your findings clearly and concisely.
 </SYSTEM_MESSAGE>"""
 
 
@@ -564,11 +540,32 @@ WHAT YOU MUST DO NOW:
   response as a single tool call.  Do not combine code tools again.
 
 Reminder of the correct format:
-```work_environment
+```work_environment: [Brief Description]
 your_code_here
 ```
   OR
 ```execute_code
 your_code_here
 ```
+</SYSTEM_MESSAGE>"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Injected when the AI exits work mode but wrote zero visible text before the
+# exit fence.  Forces it to produce a proper summary as a normal response.
+# ─────────────────────────────────────────────────────────────────────────────
+EMPTY_EXIT_SUMMARY_PROMPT = """<SYSTEM_MESSAGE type="exit_no_summary">
+YOU EXITED WORK MODE WITHOUT WRITING A SUMMARY.
+
+Your exit fence was detected but the text BEFORE it was empty.
+The user saw nothing. They have no idea what you found or did.
+
+YOU MUST NOW write a complete summary of your work environment session:
+  - What the user asked you to do
+  - What you executed and what the outputs were
+  - What you found, built, or concluded
+  - Any errors encountered and how you handled them
+  - The final result or answer
+
+Write this as a normal response to the user RIGHT NOW.
+Do NOT use any tool fences. Do NOT re-enter work mode. Just talk.
 </SYSTEM_MESSAGE>"""

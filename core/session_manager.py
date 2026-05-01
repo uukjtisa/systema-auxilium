@@ -1,4 +1,5 @@
 """
+core/session_manager.py
 Session Manager - Handles session save/load/delete operations
 """
 

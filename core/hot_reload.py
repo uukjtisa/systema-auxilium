@@ -1,4 +1,5 @@
 """
+core/hot_reload.py
 Hot Reload — pure reload mechanism. Owns nothing, knows nothing about
 the app structure. The registry and post-hooks live in debug_window.py.
 

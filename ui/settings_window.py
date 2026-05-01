@@ -1,4 +1,5 @@
 """
+ui/settings_window.py
 Settings Window - Configure API key, AI provider, Puter.js settings, Google Gemini, and Voice
 FIXED: Voice settings now actually work - VAD and TTS voice selection are functional
 """

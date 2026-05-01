@@ -1,4 +1,5 @@
 """
+core/python_interpreter.py
 Python Interpreter Tool - Full interactive Python interpreter using code module
 Handles both single-line expressions AND multi-line code blocks
 HANDLES ALL CODE FROM CODE EXECUTION TOOL CALLS

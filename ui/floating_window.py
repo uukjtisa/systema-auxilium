@@ -1,4 +1,5 @@
 """
+ui/floating_window.py
 Floating Window - Main chat interface with configurable appearance
 Based on the prototype test_accessing_app.py
 """
