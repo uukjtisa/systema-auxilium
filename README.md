@@ -121,16 +121,16 @@ It is **strongly recommended** to run this project using **Python 3.10.11**, the
 ## How to Install
 
 ### Windows
-Run `create_env.bat` — this will install all dependencies and generate a `run.bat` for you.
+Run `setup.bat` — this will install all dependencies and generate a `run.bat` for you.
 
 Tested on **Windows 11** and **Windows 10**.
 
 ### Linux (Debian-based) & macOS
-Run `create_env.sh` (Linux) or `create_env_mac.sh` (macOS) — these will set up your virtual environment and generate the equivalent helper scripts.
+Run `setup.sh` (Linux) or `setup_macOs.sh` (macOS) — these will set up your virtual environment and generate the equivalent helper scripts.
 
 ```bash
-bash create_env.sh       # Linux
-bash create_env_mac.sh   # macOS
+bash setup.sh       # Linux
+bash setup_macOs.sh   # macOS
 ```
 
 > I only have access to a Windows 11 machine, so that's the only platform I can personally test on. The Linux and macOS setup scripts are included but unverified by me — use them at your own discretion.
