@@ -278,29 +278,61 @@ class ChatWindowTUI:
                 print(f"[ChatWindowTUI] set_names error: {e}")
 
     def _launch_terminal(self):
+        import shlex
         cmd_args = [sys.executable, str(_SCRIPT), "--tui", "--port", str(self._port)]
+
         if sys.platform == "win32":
+            import tempfile
+            # Write a .bat file — avoids cmd.exe mangling paths that have spaces
+            tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.bat',
+                                              delete=False, prefix='systema_tui_')
+            tmp.write('@echo off\n')
+            tmp.write(' '.join(f'"{a}"' for a in cmd_args) + '\n')
+            tmp.write('echo.\n')
+            tmp.write('echo --- EXITED %ERRORLEVEL% --- press enter to close\n')
+            tmp.write('pause > nul\n')
+            tmp.close()
             self._proc = subprocess.Popen(
-                cmd_args,
+                ["cmd", "/k", tmp.name],
                 creationflags=subprocess.CREATE_NEW_CONSOLE,
             )
+
         elif sys.platform == "darwin":
-            joined = " ".join(f'"{a}"' for a in cmd_args)
+            # shlex.quote handles spaces in any path component
+            joined = " ".join(shlex.quote(a) for a in cmd_args)
+            # || read keeps Terminal.app open if the script crashes
             script = (
                 f'tell application "Terminal"\n'
-                f'    do script "{joined}"\n'
+                f'    do script "{joined} || read -p \\"Press Enter to close\\""\n'
                 f'    activate\nend tell'
             )
             self._proc = subprocess.Popen(["osascript", "-e", script])
+
+
         else:
+            import tempfile, os, stat
+            # Write a temp shell script — avoids all quoting/spaces issues
+            tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.sh',
+
+                                              delete=False, prefix='systema_tui_')
+            tmp.write('#!/bin/bash\n')
+            tmp.write('export TERM=xterm-256color\n')
+            tmp.write('export COLORTERM=truecolor\n')
+            tmp.write(' '.join(shlex.quote(a) for a in cmd_args) + '\n')
+            tmp.write('echo ""\n')
+            tmp.write('echo "--- EXITED $? --- press enter to close"\n')
+            tmp.write('read\n')
+            tmp.close()
+            os.chmod(tmp.name, os.stat(tmp.name).st_mode | stat.S_IEXEC)
             for term, extra in [
-                ("gnome-terminal", ["--"]),
-                ("xfce4-terminal", ["-e"]),
-                ("konsole", ["-e"]),
-                ("xterm", ["-e"]),
+                ("gnome-terminal", ["--", "bash", tmp.name]),
+                ("qterminal", ["-e", "bash", tmp.name]),
+                ("xfce4-terminal", ["-e", f"bash {shlex.quote(tmp.name)}"]),
+                ("konsole", ["-e", "bash", tmp.name]),
+                ("xterm", ["-e", "bash", tmp.name]),
             ]:
                 try:
-                    self._proc = subprocess.Popen([term] + extra + cmd_args)
+                    self._proc = subprocess.Popen([term] + extra)
                     break
                 except FileNotFoundError:
                     continue
