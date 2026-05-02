@@ -1158,6 +1158,7 @@ class CodeBlockWidget(QWidget):
             }}
         """)
 
+
 class ChatWindow(BaseWindow):
     """Modern chat window with AI conversation"""
 
@@ -3286,15 +3287,8 @@ class ChatWindow(BaseWindow):
 
     def _remove_tool_usage_format(self, content):
         """Remove tool usage JSON blocks from AI message"""
-        import re
-        cleaned = re.sub(
-            r'```json\s*\{[^}]*(?:"work_environment"|"execute_code"|"set_session_name")[^}]*\}.*?```',
-            '',
-            content,
-            flags=re.DOTALL
-        )
-        cleaned = re.sub(r'\n\s*\n\s*\n+', '\n\n', cleaned)
-        return cleaned.strip()
+        cleaned = self.controller.ai.tool_manager.strip_tool_calls(content)
+        return cleaned
 
     def _open_names_dialog(self):
         """Quick inline dialog to edit user + assistant names."""
@@ -3724,8 +3718,9 @@ class ChatWindow(BaseWindow):
 
     def _load_session_clicked(self, session_id):
         """Load session when clicked"""
-        if session_id == self.controller.current_session_id:
-            return
+        # if session_id == self.controller.current_session_id:
+        #     return
+        # commented because it's used by the floating window to switch back to the chat_window and load the history again from the TUI version
 
         self.controller.load_session(session_id)
 
