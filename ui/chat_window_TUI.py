@@ -282,10 +282,18 @@ class ChatWindowTUI:
         cmd_args = [sys.executable, str(_SCRIPT), "--tui", "--port", str(self._port)]
 
         if sys.platform == "win32":
-            # /k keeps the window open after the script exits so errors are visible
-            # subprocess on Windows auto-quotes args that contain spaces
+            import tempfile
+            # Write a .bat file — avoids cmd.exe mangling paths that have spaces
+            tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.bat',
+                                              delete=False, prefix='systema_tui_')
+            tmp.write('@echo off\n')
+            tmp.write(' '.join(f'"{a}"' for a in cmd_args) + '\n')
+            tmp.write('echo.\n')
+            tmp.write('echo --- EXITED %ERRORLEVEL% --- press enter to close\n')
+            tmp.write('pause > nul\n')
+            tmp.close()
             self._proc = subprocess.Popen(
-                ["cmd", "/k"] + cmd_args,
+                ["cmd", "/k", tmp.name],
                 creationflags=subprocess.CREATE_NEW_CONSOLE,
             )
 
@@ -300,20 +308,28 @@ class ChatWindowTUI:
             )
             self._proc = subprocess.Popen(["osascript", "-e", script])
 
-        else:
-            # shlex.quote handles every space in python path, script path, etc.
-            cmd_str = " ".join(shlex.quote(a) for a in cmd_args)
-            # bash -c wrapper: runs the command, then keeps terminal open on exit/error
-            on_exit = f'{cmd_str}; echo ""; echo "[Exited — press Enter to close]"; read'
 
+        else:
+            import tempfile, os, stat
+            # Write a temp shell script — avoids all quoting/spaces issues
+            tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.sh',
+
+                                              delete=False, prefix='systema_tui_')
+            tmp.write('#!/bin/bash\n')
+            tmp.write('export TERM=xterm-256color\n')
+            tmp.write('export COLORTERM=truecolor\n')
+            tmp.write(' '.join(shlex.quote(a) for a in cmd_args) + '\n')
+            tmp.write('echo ""\n')
+            tmp.write('echo "--- EXITED $? --- press enter to close"\n')
+            tmp.write('read\n')
+            tmp.close()
+            os.chmod(tmp.name, os.stat(tmp.name).st_mode | stat.S_IEXEC)
             for term, extra in [
-                # gnome-terminal: pass bash -c as separate args (handles spaces natively)
-                ("gnome-terminal", ["--", "bash", "-c", on_exit]),
-                # xfce4 / konsole: --hold keeps window open; -e takes a single shell string
-                ("xfce4-terminal", ["--hold", "-e", f"bash -c {shlex.quote(cmd_str)}"]),
-                ("konsole",        ["--hold", "-e", f"bash -c {shlex.quote(cmd_str)}"]),
-                # xterm: -hold keeps open; -e bash -c takes the full cmd as one arg
-                ("xterm",          ["-hold", "-e", "bash", "-c", on_exit]),
+                ("gnome-terminal", ["--", "bash", tmp.name]),
+                ("qterminal", ["-e", "bash", tmp.name]),
+                ("xfce4-terminal", ["-e", f"bash {shlex.quote(tmp.name)}"]),
+                ("konsole", ["-e", "bash", tmp.name]),
+                ("xterm", ["-e", "bash", tmp.name]),
             ]:
                 try:
                     self._proc = subprocess.Popen([term] + extra)
