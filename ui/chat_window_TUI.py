@@ -278,29 +278,45 @@ class ChatWindowTUI:
                 print(f"[ChatWindowTUI] set_names error: {e}")
 
     def _launch_terminal(self):
+        import shlex
         cmd_args = [sys.executable, str(_SCRIPT), "--tui", "--port", str(self._port)]
+
         if sys.platform == "win32":
+            # /k keeps the window open after the script exits so errors are visible
+            # subprocess on Windows auto-quotes args that contain spaces
             self._proc = subprocess.Popen(
-                cmd_args,
+                ["cmd", "/k"] + cmd_args,
                 creationflags=subprocess.CREATE_NEW_CONSOLE,
             )
+
         elif sys.platform == "darwin":
-            joined = " ".join(f'"{a}"' for a in cmd_args)
+            # shlex.quote handles spaces in any path component
+            joined = " ".join(shlex.quote(a) for a in cmd_args)
+            # || read keeps Terminal.app open if the script crashes
             script = (
                 f'tell application "Terminal"\n'
-                f'    do script "{joined}"\n'
+                f'    do script "{joined} || read -p \\"Press Enter to close\\""\n'
                 f'    activate\nend tell'
             )
             self._proc = subprocess.Popen(["osascript", "-e", script])
+
         else:
+            # shlex.quote handles every space in python path, script path, etc.
+            cmd_str = " ".join(shlex.quote(a) for a in cmd_args)
+            # bash -c wrapper: runs the command, then keeps terminal open on exit/error
+            on_exit = f'{cmd_str}; echo ""; echo "[Exited — press Enter to close]"; read'
+
             for term, extra in [
-                ("gnome-terminal", ["--"]),
-                ("xfce4-terminal", ["-e"]),
-                ("konsole", ["-e"]),
-                ("xterm", ["-e"]),
+                # gnome-terminal: pass bash -c as separate args (handles spaces natively)
+                ("gnome-terminal", ["--", "bash", "-c", on_exit]),
+                # xfce4 / konsole: --hold keeps window open; -e takes a single shell string
+                ("xfce4-terminal", ["--hold", "-e", f"bash -c {shlex.quote(cmd_str)}"]),
+                ("konsole",        ["--hold", "-e", f"bash -c {shlex.quote(cmd_str)}"]),
+                # xterm: -hold keeps open; -e bash -c takes the full cmd as one arg
+                ("xterm",          ["-hold", "-e", "bash", "-c", on_exit]),
             ]:
                 try:
-                    self._proc = subprocess.Popen([term] + extra + cmd_args)
+                    self._proc = subprocess.Popen([term] + extra)
                     break
                 except FileNotFoundError:
                     continue

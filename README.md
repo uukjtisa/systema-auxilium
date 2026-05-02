@@ -25,7 +25,7 @@
 
 This is a **hobby project** built and maintained by a single person.
 
-**I only have access to a Windows 11 machine, so that's the only platform I can personally test on. Linux and macOS setup scripts are included but unverified by me; use them at your own discretion.**
+**I only have access to Windows 11 (Main workspace), Windows 10 (VM), and a Kali Linux (VM) (<u>both VMs use Python 3.10</u>), so these are the only platforms I can personally test on. And even then, I can only test one thing at a time, so there may be some other unintended behaviors.**
 
 **Bugs are expected.** Some features have not been deeply tested, and certain functions may behave unexpectedly depending on your setup. And tool calls may leak if the LLM misses proper usage. If something breaks, please try to replicate it and open an issue. Any details you can provide will help a lot. And if you happen to know your way around Python, taking a look at the bug yourself would be even more appreciated! :)
 
@@ -57,7 +57,7 @@ It serves as a personalized companion that helps with general automation, making
 
 ## What Can It Do?
 
-Systema Auxilium uses Python to do active work on your computer. So it can do almost anything the Python Interpreter can do on your computer.
+Systema Auxilium uses Python to do actual work on your computer. Its capabilities are scoped to what the Python interpreter can do, which is broad, so responsible use and reviewing generated code before execution is strongly encouraged.
 
 **File & Folder Management**
 Read, write, create, move, rename, or delete files and directories. Analyse folders, count file types, calculate sizes, list contents — all from a single sentence.
@@ -85,7 +85,7 @@ Switch between AI backends with ease:
 **Session Naming**
 The assistant automatically names each conversation session so you can easily navigate back to previous tasks.
 
-**Guided Execution Mode** *(Implemented as of now but not perfect. Any suggestions would be welcomed.)*
+**Safe Execution Settings** *(Functional but still being refined — edge cases exist. Suggestions welcome.)*
 A safety-first mode that shows you the generated Python code *before* it runs, so you can review, approve, or reject every action.
 
 ---
@@ -117,6 +117,23 @@ It is **strongly recommended** to run this project using **Python 3.10.11**, the
 
 **Official Python 3.10.11 release:** https://www.python.org/downloads/release/python-31011/
 
+**Kali Linux install script I used to install Python 3.10 (use at your own discretion)**
+
+```bash
+sudo apt install -y build-essential wget libssl-dev zlib1g-dev \
+libncurses5-dev libncursesw5-dev libreadline-dev libsqlite3-dev \
+libgdbm-dev libdb5.3-dev libbz2-dev libexpat1-dev liblzma-dev tk-dev
+
+cd /tmp
+wget https://www.python.org/ftp/python/3.10.14/Python-3.10.14.tgz
+tar -xf Python-3.10.14.tgz
+cd Python-3.10.14
+
+./configure --enable-optimizations
+make -j$(nproc)
+sudo make altinstall
+```
+
 ---
 ## How to Install
 
@@ -133,7 +150,7 @@ bash setup.sh       # Linux
 bash setup_macOs.sh   # macOS
 ```
 
-> I only have access to a Windows 11 machine, so that's the only platform I can personally test on. The Linux and macOS setup scripts are included but unverified by me — use them at your own discretion.
+> Mac OS setup script is untested. So far i have only tested the respective setup script for these: Windows 11, 10, and Kali Linux (Python3.10)
 
 ### Manual Setup (any platform)
 
