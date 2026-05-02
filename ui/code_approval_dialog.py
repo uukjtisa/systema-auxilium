@@ -1,4 +1,5 @@
 """
+ui/code_approval_dialog.py
 Code Approval Dialog - Shows code before execution for supervised mode
 FIXED: Simple chat window for explanations, stays on top, no crashes
 """
@@ -109,18 +110,19 @@ class SimpleChatWidget(QWidget):
     def init_ui(self):
         """Initialize the chat UI"""
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 0, 0, 0)  # Left padding for side panel
+        layout.setContentsMargins(12, 0, 0, 0)
         layout.setSpacing(8)
 
         # Chat title/header
         header = QLabel("💬 Code Analysis Chat")
         header.setStyleSheet("""
             QLabel {
-                color: #E8EAED;
-                font-size: 13px;
+                color: #8B949E;
+                font-size: 12px;
                 font-weight: 600;
                 margin-bottom: 8px;
                 padding: 8px 0px;
+                letter-spacing: 0.5px;
             }
         """)
         layout.addWidget(header)
@@ -130,14 +132,22 @@ class SimpleChatWidget(QWidget):
         self.chat_display.setReadOnly(True)
         self.chat_display.setStyleSheet("""
             QTextEdit {
-                background-color: #1A1A1A;
-                border: 1px solid #3C3C3C;
+                background-color: #0D1117;
+                border: 1px solid rgba(88, 166, 255, 0.18);
                 border-radius: 8px;
                 padding: 12px;
                 font-size: 12px;
-                color: #E8EAED;
+                color: #E6EDF3;
                 line-height: 1.5;
             }
+            QScrollBar:vertical {
+                background: transparent; width: 6px; border: none;
+            }
+            QScrollBar::handle:vertical {
+                background: #21262D; border-radius: 3px; min-height: 20px;
+            }
+            QScrollBar::handle:vertical:hover { background: #30363D; }
+            QScrollBar::add-line, QScrollBar::sub-line { height: 0; }
         """)
         layout.addWidget(self.chat_display, 1)
 
@@ -147,18 +157,18 @@ class SimpleChatWidget(QWidget):
 
         self.input_field = QTextEdit()
         self.input_field.setPlaceholderText("Ask about the code...")
-        self.input_field.setMaximumHeight(50)  # Slightly smaller for side panel
+        self.input_field.setMaximumHeight(50)
         self.input_field.setStyleSheet("""
             QTextEdit {
-                background-color: #1A1A1A;
-                border: 1px solid #3C3C3C;
+                background-color: #161B22;
+                border: 1px solid rgba(88, 166, 255, 0.18);
                 border-radius: 6px;
                 padding: 8px;
                 font-size: 12px;
-                color: #E8EAED;
+                color: #E6EDF3;
             }
             QTextEdit:focus {
-                border: 1px solid #1A73E8;
+                border: 1px solid rgba(88, 166, 255, 0.55);
             }
         """)
 
@@ -166,20 +176,22 @@ class SimpleChatWidget(QWidget):
         send_btn = QPushButton("Send")
         send_btn.setStyleSheet("""
             QPushButton {
-                background-color: #1A73E8;
-                border: none;
+                background-color: rgba(88, 166, 255, 0.12);
+                border: 1px solid rgba(88, 166, 255, 0.28);
                 border-radius: 6px;
-                padding: 10px 20px;
+                padding: 10px 18px;
                 font-size: 12px;
-                color: white;
+                color: #58A6FF;
                 font-weight: 600;
             }
             QPushButton:hover {
-                background-color: #1557B0;
+                background-color: rgba(88, 166, 255, 0.22);
+                border-color: #58A6FF;
             }
             QPushButton:disabled {
-                background-color: #3A3A3A;
-                color: #6A6A6A;
+                background-color: transparent;
+                border-color: #21262D;
+                color: #30363D;
             }
         """)
         send_btn.clicked.connect(self.send_user_message)
@@ -194,30 +206,18 @@ class SimpleChatWidget(QWidget):
         message = self.input_field.toPlainText().strip()
         if not message:
             return
-
-        # Add to chat display
-        self.add_message("You", message, "#1A73E8")
-
-        # Emit signal
+        self.add_message("You", message, "#58A6FF")
         self.send_message.emit(message)
-
-        # Clear input
         self.input_field.clear()
 
-    def add_message(self, sender, message, color="#9AA0A6"):
+    def add_message(self, sender, message, color="#8B949E"):
         """Add message to chat display"""
         self.message_history.append((sender, message))
-
-        # Format message
-        formatted = f'<div style="margin-bottom: 12px;">'
-        formatted += f'<b style="color: {color};">{sender}:</b><br>'
-        formatted += f'<span style="color: #E8EAED;">{message}</span>'
+        formatted = f'<div style="margin-bottom: 10px; padding: 8px 10px; background: rgba(88,166,255,0.04); border-left: 2px solid {color}; border-radius: 3px;">'
+        formatted += f'<b style="color: {color}; font-size: 11px;">{sender}</b><br>'
+        formatted += f'<span style="color: #E6EDF3; font-size: 12px;">{message}</span>'
         formatted += '</div>'
-
-        # Append to display
         self.chat_display.append(formatted)
-
-        # Scroll to bottom
         cursor = self.chat_display.textCursor()
         cursor.movePosition(cursor.MoveOperation.End)
         self.chat_display.setTextCursor(cursor)
@@ -229,13 +229,11 @@ class SimpleChatWidget(QWidget):
 
     def show_loading(self):
         """Show loading indicator"""
-        formatted = '<div style="margin-bottom: 12px;">'
-        formatted += '<b style="color: #9AA0A6;">AI:</b><br>'
-        formatted += '<span style="color: #9AA0A6;"><i>Thinking...</i></span>'
+        formatted = '<div style="margin-bottom: 10px; padding: 8px 10px; background: rgba(88,166,255,0.04); border-left: 2px solid #30363D; border-radius: 3px;">'
+        formatted += '<b style="color: #30363D; font-size: 11px;">AI</b><br>'
+        formatted += '<span style="color: #8B949E; font-size: 12px;"><i>Thinking…</i></span>'
         formatted += '</div>'
         self.chat_display.append(formatted)
-
-        # Scroll to bottom
         cursor = self.chat_display.textCursor()
         cursor.movePosition(cursor.MoveOperation.End)
         self.chat_display.setTextCursor(cursor)
@@ -248,7 +246,7 @@ class SimpleChatWidget(QWidget):
         # Rebuild display without last message
         self.chat_display.clear()
         for sender, message in self.message_history:
-            color = "#1A73E8" if sender == "You" else "#9AA0A6"
+            color = "#58A6FF" if sender == "You" else "#8B949E"
             formatted = f'<div style="margin-bottom: 12px;">'
             formatted += f'<b style="color: {color};">{sender}:</b><br>'
             formatted += f'<span style="color: #E8EAED;">{message}</span>'
@@ -301,7 +299,11 @@ class CodeApprovalDialog(QDialog):
 
         self.setStyleSheet("""
             QDialog {
-                background-color: #212121;
+                background-color: #0D1117;
+            }
+            QWidget {
+                color: #E6EDF3;
+                font-family: 'Segoe UI', -apple-system, system-ui, sans-serif;
             }
         """)
 
@@ -313,8 +315,8 @@ class CodeApprovalDialog(QDialog):
         title = QLabel("⚠️ Code Execution Approval (You can disable this pop up in the settings)")
         title.setStyleSheet("""
             QLabel {
-                color: #E8EAED;
-                font-size: 16px;
+                color: #E6EDF3;
+                font-size: 15px;
                 font-weight: 600;
                 margin-bottom: 8px;
             }
@@ -324,7 +326,7 @@ class CodeApprovalDialog(QDialog):
         # Description
         desc_text = "work environment" if self.execution_type == "work_environment" else "direct execution"
         desc = QLabel(f"The AI wants to execute the following code ({desc_text}). Review and approve:")
-        desc.setStyleSheet("color: #9AA0A6; font-size: 11px; margin-bottom: 8px;")
+        desc.setStyleSheet("color: #8B949E; font-size: 11px; margin-bottom: 8px;")
         desc.setWordWrap(True)
         layout.addWidget(desc)
 
@@ -340,18 +342,18 @@ class CodeApprovalDialog(QDialog):
         self.code_edit.setPlainText(self.code)
         self.code_edit.setStyleSheet("""
             QTextEdit {
-                background-color: #1A1A1A;
-                border: 1px solid #3C3C3C;
+                background-color: #0D1117;
+                border: 1px solid rgba(88, 166, 255, 0.18);
                 border-radius: 8px;
                 padding: 12px;
                 font-size: 13px;
                 font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-                color: #E8EAED;
+                color: #E6EDF3;
                 line-height: 1.6;
             }
             QTextEdit:focus {
-                border: 1px solid #1A73E8;
-                background-color: #151515;
+                border: 1px solid rgba(88, 166, 255, 0.55);
+                background-color: #0a0f16;
             }
         """)
 
@@ -367,8 +369,8 @@ class CodeApprovalDialog(QDialog):
         self.chat_widget.send_message.connect(self.handle_chat_message)
         self.chat_widget.setStyleSheet("""
             SimpleChatWidget {
-                background-color: #1A1A1A;
-                border-left: 2px solid #3C3C3C;
+                background-color: #0D1117;
+                border-left: 1px solid rgba(88, 166, 255, 0.18);
                 border-radius: 0px;
                 padding-left: 12px;
             }
@@ -386,7 +388,7 @@ class CodeApprovalDialog(QDialog):
         warning = QLabel("⚠️ Only approve code you understand and trust")
         warning.setStyleSheet("""
             QLabel {
-                color: #F28B82;
+                color: rgba(242, 139, 130, 0.85);
                 font-size: 11px;
                 font-style: italic;
                 margin-top: 4px;
@@ -398,21 +400,30 @@ class CodeApprovalDialog(QDialog):
         button_layout = QHBoxLayout()
         button_layout.setSpacing(8)
 
+        _btn_base = """
+            QPushButton {
+                border-radius: 6px;
+                padding: 9px 20px;
+                font-size: 12px;
+                font-weight: 500;
+            }
+        """
+
         # Explain button
         self.explain_btn = QPushButton("🤔 Explain")
         self.explain_btn.setStyleSheet("""
             QPushButton {
                 background-color: transparent;
-                border: 1px solid #3C3C3C;
+                border: 1px solid #30363D;
                 border-radius: 6px;
-                padding: 10px 20px;
+                padding: 9px 20px;
                 font-size: 12px;
-                color: #9AA0A6;
+                color: #8B949E;
             }
             QPushButton:hover {
-                background-color: #2A2A2A;
-                color: #E8EAED;
-                border-color: #4A4A4A;
+                background-color: rgba(88, 166, 255, 0.08);
+                color: #E6EDF3;
+                border-color: rgba(88, 166, 255, 0.4);
             }
         """)
         self.explain_btn.clicked.connect(self.on_explain)
@@ -422,14 +433,14 @@ class CodeApprovalDialog(QDialog):
         reject_btn.setStyleSheet("""
             QPushButton {
                 background-color: transparent;
-                border: 1px solid #F28B82;
+                border: 1px solid rgba(242, 139, 130, 0.45);
                 border-radius: 6px;
-                padding: 10px 20px;
+                padding: 9px 20px;
                 font-size: 12px;
                 color: #F28B82;
             }
             QPushButton:hover {
-                background-color: #4A2A2A;
+                background-color: rgba(242, 139, 130, 0.1);
                 border-color: #F28B82;
             }
         """)
@@ -439,16 +450,18 @@ class CodeApprovalDialog(QDialog):
         accept_btn = QPushButton("✅ Accept & Execute")
         accept_btn.setStyleSheet("""
             QPushButton {
-                background-color: #1A73E8;
-                border: none;
+                background-color: rgba(88, 166, 255, 0.15);
+                border: 1px solid rgba(88, 166, 255, 0.45);
                 border-radius: 6px;
-                padding: 10px 24px;
+                padding: 9px 24px;
                 font-size: 12px;
-                color: white;
+                color: #58A6FF;
                 font-weight: 600;
             }
             QPushButton:hover {
-                background-color: #1557B0;
+                background-color: rgba(88, 166, 255, 0.25);
+                border-color: #58A6FF;
+                color: #79BBFF;
             }
         """)
         accept_btn.clicked.connect(self.on_accept)
@@ -496,7 +509,7 @@ class CodeApprovalDialog(QDialog):
             )
 
             if not self._is_explained:
-                self.chat_widget.add_message("You", "Explain this code and assess its safety", "#1A73E8")
+                self.chat_widget.add_message("You", "Explain this code and assess its safety", "#58A6FF")
                 self.request_ai_response(explain_prompt)
                 self._is_explained = True
         else:
@@ -545,7 +558,7 @@ class CodeApprovalDialog(QDialog):
 
             # Rebuild chat without loading message
             for sender, message in temp_history:
-                color = "#1A73E8" if sender == "You" else "#9AA0A6"
+                color = "#58A6FF" if sender == "You" else "#8B949E"
                 formatted = f'<div style="margin-bottom: 12px;">'
                 formatted += f'<b style="color: {color};">{sender}:</b><br>'
                 formatted += f'<span style="color: #E8EAED;">{message}</span>'
@@ -553,7 +566,7 @@ class CodeApprovalDialog(QDialog):
                 self.chat_widget.chat_display.append(formatted)
 
         # Add actual response
-        self.chat_widget.add_message("AI", response, "#4CAF50")
+        self.chat_widget.add_message("AI", response, "#3FB950")
 
     def on_ai_error(self, error_msg):
         """Handle AI error from worker thread"""
@@ -568,7 +581,7 @@ class CodeApprovalDialog(QDialog):
 
             # Rebuild chat without loading message
             for sender, message in temp_history:
-                color = "#1A73E8" if sender == "You" else "#9AA0A6"
+                color = "#58A6FF" if sender == "You" else "#8B949E"
                 formatted = f'<div style="margin-bottom: 12px;">'
                 formatted += f'<b style="color: {color};">{sender}:</b><br>'
                 formatted += f'<span style="color: #E8EAED;">{message}</span>'

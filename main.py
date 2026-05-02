@@ -1,9 +1,10 @@
 """
+main.py
 Systema Auxilium - Operating System Helper Agent
 An AI assistant that can control the system via Python interpreter
 
 Original Architecture & Implementation:
-    - Niccc2007
+    - Niccc2007 (https://github.com/uukjtisa)
 """
 
 import faulthandler
@@ -189,7 +190,7 @@ def main():
 
     print(
         "======================CAUTION======================\n\n"
-        "This AI can execute system-level actions if ran with "
+        "This Agent can execute system-level actions if ran with "
         "sufficient permissions.\nUse caution when issuing prompts.\n"
         "You are responsible for the actions taken.\n\n"
         "======================CAUTION======================"

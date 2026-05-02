@@ -1,4 +1,5 @@
 """
+core/ai_worker.py
 AI Worker - Runs AI operations in background thread
 UPDATED: Updated to match new work_environment and execute_code naming
 """
@@ -48,10 +49,6 @@ class AIWorker(QThread):
             elif self.operation == 'continue_tool':
                 log.debug("[AIWorker.run] Dispatching → ai_engine.continue_work_mode()")
                 result = self.ai_engine.continue_work_mode()
-
-            elif self.operation == 'post_exit':
-                log.debug("[AIWorker.run] Dispatching → ai_engine.send_post_exit_prompt()")
-                result = self.ai_engine.send_post_exit_prompt()
 
             else:
                 log.warning(f"[AIWorker.run] Unknown operation: '{self.operation}' — returning stub result")

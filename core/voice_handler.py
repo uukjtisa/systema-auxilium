@@ -1,4 +1,5 @@
 """
+core/voice_handler.py
 Voice Handler - Complete voice input/output system
 FIXED: Added proper initialization and error handling to prevent hangs
 UPDATED: Unified colored logging system matching ToolManager style
@@ -30,7 +31,13 @@ except ImportError:
 
 # Silero VAD import
 try:
-    import torch
+    try:
+        import torch
+
+        TORCH_AVAILABLE = True
+    except (ImportError, OSError):
+        torch = None
+        TORCH_AVAILABLE = False
     import torchaudio
     SILERO_AVAILABLE = True
 except ImportError:

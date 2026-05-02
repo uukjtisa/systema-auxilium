@@ -1,18 +1,18 @@
 """
+core/ai_engine.py
 AI Engine - Handles AI interactions
-FIXED: Removed voice mode prompt logic, using single prompt for all modes
-UPDATED: Added supervised execution support with code approval dialogs
-UPDATED: Appends error traceback to execute_code failures
+UNIFIED: Single _build_messages() for all providers. Each _http_* helper
+         converts the standard message format to its provider's requirements.
+         Anthropic uses the `anthropic` SDK, Gemini uses `google-genai` SDK,
+         Puter uses raw HTTP to the local puter_server.
 """
 
-import requests
 from core.logger import _make_logger, _NoOpLogger
 from core.tool_manager import ToolManager
+from core.memory_manager import get_memory_manager
 from core.global_instructions import (
     get_system_prompt,
-    POST_EXIT_PROMPT,
-    POST_EXIT_PROMPT_VOICE,
-    get_gemini_system_prompt
+    EMPTY_EXIT_SUMMARY_PROMPT,
 )
 
 
@@ -21,12 +21,18 @@ _verbose = True
 log = _make_logger("AIEngine") if _verbose else _NoOpLogger()
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Priming acknowledgement prepended to every conversation as an assistant turn
+_ASSISTANT_PRIMING = (
+    "I understand. I will use My Work Environment when I need to complete "
+    "complex tasks or need information, and Execute Single commands for quick actions."
+)
+
 
 class AIEngine:
     """AI conversation engine"""
 
     def __init__(self, log_callback=None, api_key='', puter_server=None, gemini_api_key='', system_info='',
-                 voice_mode=False, elevenlabs_enabled=False, settings_callback=None):
+                 voice_mode=False, elevenlabs_enabled=False, settings_callback=None, skill_manager=None):
         log.info("[AIEngine.__init__] ── Initializing AI Engine ──────────────────────────────")
         log.debug(f"[AIEngine.__init__] Parameters: voice_mode={voice_mode} | "
                   f"elevenlabs_enabled={elevenlabs_enabled} | "
@@ -35,68 +41,97 @@ class AIEngine:
                   f"has_settings_callback={settings_callback is not None}")
 
         self.log_callback = log_callback
+        self.settings_callback = settings_callback
         self.conversation_history = []
         log.debug("[AIEngine.__init__] conversation_history initialized (empty)")
 
-        # Store these first so tool_manager can access them
         self.api_key = api_key
         self.gemini_api_key = gemini_api_key
         self.puter_server = puter_server
         log.debug("[AIEngine.__init__] API keys and puter_server reference stored")
 
-        # Initialize tool_manager with settings callback and AI engine reference
         log.debug("[AIEngine.__init__] Creating ToolManager instance")
         self.tool_manager = ToolManager(
             settings_callback=settings_callback,
-            ai_engine=self  # Pass self so dialog can call AI for explanations
+            ai_engine=self
         )
         log.info("[AIEngine.__init__] ToolManager created and attached")
 
-        # LLaMA provider removed
+        self.memory_manager = get_memory_manager()
+        self._pending_memory_context = ""
+        log.info(f"[AIEngine.__init__] MemoryManager attached | ready={self.memory_manager.is_ready}")
 
-        # Store system information
         self.system_info = system_info
         log.debug(f"[AIEngine.__init__] system_info stored | length={len(system_info)} chars")
 
-        # Voice mode flags
         self.voice_mode = voice_mode
         self.elevenlabs_enabled = elevenlabs_enabled
         log.debug(f"[AIEngine.__init__] Voice flags set: voice_mode={voice_mode} | "
                   f"elevenlabs_enabled={elevenlabs_enabled}")
 
-        # Generate system prompt with voice flags
-        log.debug("[AIEngine.__init__] Generating system prompt via get_system_prompt()")
-        self.system_prompt = get_system_prompt(system_info, voice_mode, elevenlabs_enabled)
+        self.skill_manager = skill_manager
+        if skill_manager:
+            skill_manager.skills_changed.connect(self._on_skills_changed)
+            skill_manager.loaded_skills_changed.connect(self._on_skills_changed)
+            log.info("[AIEngine.__init__] SkillManager wired — skills_changed + loaded_skills_changed connected")
+        self.system_prompt = get_system_prompt(
+            system_info, voice_mode, elevenlabs_enabled,
+            skills=skill_manager.get_skills() if skill_manager else []
+        )
         log.info(f"[AIEngine.__init__] System prompt generated | length={len(self.system_prompt)} chars")
 
-        # Store last raw response
         self.last_raw_response = None
 
         # Provider settings
         self.ai_provider = 'anthropic'
+        self.anthropic_model = 'claude-sonnet-4-5-20250929'
         self.puter_model = 'gpt-4o-mini'
-        self.gemini_model = 'gemini-2.0-flash-exp'
+        self.gemini_model = 'gemini-2.5-flash'
 
-        self.tts_provider = 'edge-tts'  # Can be 'edge-tts' or 'puter'
+        # Anthropic generation params
+        self.anthropic_temperature = 1.0     # 0.0-1.0 (Anthropic range)
+        self.anthropic_max_tokens  = 8192    # manual value when auto is off
+        self.anthropic_auto_tokens = True    # auto-scale max_tokens
+
+        # Gemini generation params
+        self.gemini_temperature  = 1.0       # 0.0-2.0 (Gemini range)
+        self.gemini_max_tokens   = 8192
+        self.gemini_auto_tokens  = True
+        self.gemini_top_p        = None      # None = use API default
+        self.gemini_top_k        = None      # None = use API default
+
+        self.tts_provider = 'edge-tts'
         self.puter_tts_model = 'tts-1'
         self.puter_tts_voice = None
-        self.puter_timeout = 30  # Default timeout in seconds
+        self.puter_timeout = 30
 
-        # API endpoints
-        self.anthropic_api_url = "https://api.anthropic.com/v1/messages"
-        self.gemini_api_url_template = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        # Manual provider — set by controller to a callable that blocks until
+        # the user types a response.  Signature:
+        #   fn(context: str, work_mode: bool, work_output: str) -> str | None
+        self.manual_response_fn = None
+
+        # Custom script provider — path to user's .py file
+        self.custom_script_path = ""
+        # System tab flags
+        self.tool_execution_lockout = False
+        self.system_prompt_hijacked = False
+        self.custom_system_prompt = ""
 
         log.info(f"[AIEngine.__init__] ── Initialization complete | provider='{self.ai_provider}' | "
+                 f"anthropic_model='{self.anthropic_model}' | "
                  f"puter_model='{self.puter_model}' | gemini_model='{self.gemini_model}' | "
                  f"timeout={self.puter_timeout}s ──")
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # VOICE / VOICE-SETTINGS METHODS
+    # ═══════════════════════════════════════════════════════════════════════════
+
     def set_voice_mode(self, enabled):
         """Enable/disable voice mode flag"""
-        log.info(f"[AIEngine.set_voice_mode] voice_mode → {enabled} | "
-                 f"regenerating system prompt")
+        log.info(f"[AIEngine.set_voice_mode] voice_mode → {enabled} | regenerating system prompt")
         self.voice_mode = enabled
-        # Regenerate prompt
-        self.system_prompt = get_system_prompt(self.system_info, self.voice_mode, self.elevenlabs_enabled)
+        self.system_prompt = get_system_prompt(self.system_info, self.voice_mode, self.elevenlabs_enabled,
+                                               skills=self.skill_manager.get_skills() if self.skill_manager else [])
         log.debug(f"[AIEngine.set_voice_mode] System prompt regenerated | "
                   f"length={len(self.system_prompt)} chars")
         if enabled:
@@ -110,98 +145,76 @@ class AIEngine:
                  f"elevenlabs_enabled={elevenlabs_enabled} | regenerating prompt")
         self.voice_mode = voice_mode
         self.elevenlabs_enabled = elevenlabs_enabled
-        self.system_prompt = get_system_prompt(self.system_info, voice_mode, elevenlabs_enabled)
+        self.system_prompt = get_system_prompt(self.system_info, voice_mode, elevenlabs_enabled,
+                                               skills=self.skill_manager.get_skills() if self.skill_manager else [])
         log.debug(f"[AIEngine.update_voice_settings] Prompt regenerated | "
                   f"length={len(self.system_prompt)} chars")
         self.log(f"Voice settings updated: voice_mode={voice_mode}, elevenlabs={elevenlabs_enabled}")
 
-    def _get_ai_response_internal(self, prompt):
-        """Get AI response without adding to conversation history"""
-        log.debug(f"[AIEngine._get_ai_response_internal] provider='{self.ai_provider}' | "
-                  f"prompt_len={len(prompt)} chars")
-        # This is similar to get_response but doesn't modify conversation_history
-        if self.ai_provider == 'anthropic':
-            return self._get_anthropic_response_internal(prompt)
-        elif self.ai_provider == 'gemini':
-            return self._get_gemini_response_internal(prompt)
-        elif self.ai_provider == 'puter':
-            return self._get_puter_response_internal(prompt)
-        else:
-            log.error(f"[AIEngine._get_ai_response_internal] Unknown provider: '{self.ai_provider}'")
-            return "Error: Unknown provider"
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SKILL METHODS
+    # ═══════════════════════════════════════════════════════════════════════════
 
-    def _get_anthropic_response_internal(self, prompt):
-        """Get Anthropic response for internal use (explanation)"""
-        log.debug(f"[AIEngine._get_anthropic_response_internal] Sending internal Anthropic request | "
-                  f"prompt_len={len(prompt)} chars")
-        try:
-            url = "https://api.anthropic.com/v1/messages"
-            headers = {
-                "x-api-key": self.api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
-            }
+    def _on_skills_changed(self):
+        """Regenerate system prompt when the skills folder changes."""
+        log.info("[AIEngine._on_skills_changed] Skills changed — regenerating system prompt")
+        self.system_prompt = get_system_prompt(
+            self.system_info,
+            self.voice_mode,
+            self.elevenlabs_enabled,
+            skills=self.skill_manager.get_skills() if self.skill_manager else []
+        )
+        log.info(f"[AIEngine._on_skills_changed] System prompt regenerated | "
+                 f"length={len(self.system_prompt)} chars")
 
-            data = {
-                "model": "claude-sonnet-4-20250514",
-                "max_tokens": 2000,
-                "messages": [{"role": "user", "content": prompt}]
-            }
+    def _render_active_skills(self) -> str:
+        """Build the skill injection block appended to the system prompt.
 
-            response = requests.post(url, headers=headers, json=data, timeout=30)
-            response.raise_for_status()
-            result = response.json()
-            reply = result['content'][0]['text']
-            log.debug(f"[AIEngine._get_anthropic_response_internal] ✓ Response received | "
-                      f"length={len(reply)} chars")
-            return reply
+        Format sent to the API:
+            SKILL: media-converter
+            <instructions — frontmatter stripped>
 
-        except Exception as e:
-            log.error(f"[AIEngine._get_anthropic_response_internal] ✗ Failed: {type(e).__name__}: {e}")
-            return f"Error getting explanation: {str(e)}"
+            SKILL: another-skill
+            <instructions — frontmatter stripped>
+        """
+        active = self.skill_manager.get_loaded_skills() if self.skill_manager else {}
+        if not active:
+            return ""
 
-    def _get_gemini_response_internal(self, prompt):
-        """Get Gemini response for internal use (explanation)"""
-        log.debug(f"[AIEngine._get_gemini_response_internal] Sending internal Gemini request | "
-                  f"model='{self.gemini_model}' | prompt_len={len(prompt)} chars")
-        try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.gemini_model}:generateContent?key={self.gemini_api_key}"
+        from core.skill_manager import SkillManager
 
-            data = {
-                "contents": [{
-                    "parts": [{"text": prompt}]
-                }]
-            }
+        lines = [
+            "",
+            "═══════════════════════════════════════════════════════════",
+            "LOADED SKILLS (currently active)",
+            "═══════════════════════════════════════════════════════════",
+        ]
+        for name, content in active.items():
+            instructions = SkillManager.strip_frontmatter(content)
+            lines.append(f"\nSKILL: {name}")
+            lines.append(instructions)
+        lines.append("═══════════════════════════════════════════════════════════")
+        return "\n".join(lines)
 
-            response = requests.post(url, json=data, timeout=30)
-            response.raise_for_status()
-            result = response.json()
-            reply = result['candidates'][0]['content']['parts'][0]['text']
-            log.debug(f"[AIEngine._get_gemini_response_internal] ✓ Response received | "
-                      f"length={len(reply)} chars")
-            return reply
+    def _get_effective_system_prompt(self) -> str:
+        """Return the system prompt enriched with any currently active skills."""
+        if self.system_prompt_hijacked and self.custom_system_prompt.strip():
+            return self.custom_system_prompt
+        return self.system_prompt + self._render_active_skills()
 
-        except Exception as e:
-            log.error(f"[AIEngine._get_gemini_response_internal] ✗ Failed: {type(e).__name__}: {e}")
-            return f"Error getting explanation: {str(e)}"
-
-    def _get_puter_response_internal(self, prompt):
-        """Get Puter response for internal use (explanation)"""
-        log.debug(f"[AIEngine._get_puter_response_internal] Delegating to generate_response | "
-                  f"prompt_len={len(prompt)} chars")
-        try:
-            response = self.generate_response(prompt)
-            log.debug(f"[AIEngine._get_puter_response_internal] ✓ Got response")
-            return response
-
-        except Exception as e:
-            log.error(f"[AIEngine._get_puter_response_internal] ✗ Failed: {type(e).__name__}: {e}")
-            return f"Error getting explanation: {str(e)}"
+    # ═══════════════════════════════════════════════════════════════════════════
+    # PROVIDER SETTERS
+    # ═══════════════════════════════════════════════════════════════════════════
 
     def set_api_key(self, api_key):
         log.info("[AIEngine.set_api_key] Anthropic API key updated")
         self.api_key = api_key
         self.log("Anthropic API key updated")
+
+    def set_anthropic_model(self, model):
+        log.info(f"[AIEngine.set_anthropic_model] Anthropic model: '{self.anthropic_model}' → '{model}'")
+        self.anthropic_model = model
+        self.log(f"Anthropic model set to: {model}")
 
     def set_gemini_api_key(self, api_key):
         log.info("[AIEngine.set_gemini_api_key] Gemini API key updated")
@@ -213,6 +226,18 @@ class AIEngine:
         self.ai_provider = provider
         self.log(f"AI provider set to: {provider}")
 
+    def set_tool_execution_lockout(self, value: bool):
+        self.tool_execution_lockout = value
+
+    def set_system_prompt_hijack(self, enabled: bool, custom_prompt: str = ""):
+        self.system_prompt_hijacked = enabled
+        self.custom_system_prompt = custom_prompt
+
+    def set_custom_script_path(self, path):
+        log.info(f"[AIEngine.set_custom_script_path] path → '{path}'")
+        self.custom_script_path = path
+        self.log(f"Custom script path set to: {path}")
+
     def set_puter_model(self, model):
         log.info(f"[AIEngine.set_puter_model] Puter model: '{self.puter_model}' → '{model}'")
         self.puter_model = model
@@ -222,6 +247,52 @@ class AIEngine:
         log.info(f"[AIEngine.set_gemini_model] Gemini model: '{self.gemini_model}' → '{model}'")
         self.gemini_model = model
         self.log(f"Gemini model set to: {model}")
+
+    # ── Generation-parameter setters ──────────────────────────────────────────
+
+    def set_anthropic_temperature(self, value):
+        self.anthropic_temperature = float(value)
+        log.debug(f"[AIEngine] anthropic_temperature → {self.anthropic_temperature}")
+
+    def set_anthropic_max_tokens(self, value):
+        self.anthropic_max_tokens = int(value)
+        log.debug(f"[AIEngine] anthropic_max_tokens → {self.anthropic_max_tokens}")
+
+    def set_anthropic_auto_tokens(self, enabled):
+        self.anthropic_auto_tokens = bool(enabled)
+        log.debug(f"[AIEngine] anthropic_auto_tokens → {self.anthropic_auto_tokens}")
+
+    def set_gemini_temperature(self, value):
+        self.gemini_temperature = float(value)
+        log.debug(f"[AIEngine] gemini_temperature → {self.gemini_temperature}")
+
+    def set_gemini_max_tokens(self, value):
+        self.gemini_max_tokens = int(value)
+        log.debug(f"[AIEngine] gemini_max_tokens → {self.gemini_max_tokens}")
+
+    def set_gemini_auto_tokens(self, enabled):
+        self.gemini_auto_tokens = bool(enabled)
+        log.debug(f"[AIEngine] gemini_auto_tokens → {self.gemini_auto_tokens}")
+
+    def set_gemini_top_p(self, value):
+        self.gemini_top_p = float(value) if value is not None else None
+        log.debug(f"[AIEngine] gemini_top_p → {self.gemini_top_p}")
+
+    def set_gemini_top_k(self, value):
+        self.gemini_top_k = int(value) if value is not None else None
+        log.debug(f"[AIEngine] gemini_top_k → {self.gemini_top_k}")
+
+    def _calc_auto_max_tokens(self, model_max: int) -> int:
+        """Estimate a smart max_tokens based on current conversation size.
+        Targets leaving enough tokens for a solid reply without hitting limits."""
+        # Rough token count: ~4 chars per token
+        total_chars = sum(len(m.get('content', '')) for m in self.conversation_history)
+        total_chars += len(self._get_effective_system_prompt())
+        used_tokens = total_chars // 4
+        # Leave at least 1024 for a short response, up to model_max
+        headroom = max(model_max - used_tokens - 512, 1024)
+        # But cap at a sensible ceiling so we don't request absurd amounts
+        return min(headroom, model_max)
 
     def set_tts_provider(self, provider):
         log.info(f"[AIEngine.set_tts_provider] TTS provider: '{self.tts_provider}' → '{provider}'")
@@ -253,330 +324,433 @@ class AIEngine:
         if self.log_callback:
             self.log_callback(message, level)
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # MESSAGE BUILDER  (unified — OpenAI-compatible format)
+    # Each _http_* helper converts this standard format to its own API shape.
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _get_history_with_memory(self) -> list:
+        """Return conversation_history with pending memory context injected
+        immediately before the most recent user message (if any)."""
+        history_copy = list(self.conversation_history)
+        if self._pending_memory_context and history_copy:
+            insert_at = None
+            for i in range(len(history_copy) - 1, -1, -1):
+                if history_copy[i]['role'] == 'user':
+                    insert_at = i
+                    break
+            if insert_at is not None:
+                history_copy.insert(insert_at, {
+                    'role': 'system',
+                    'content': self._pending_memory_context
+                })
+        return history_copy
+
+    def _build_messages(self):
+        """Build unified standard message list (OpenAI-compatible format).
+        Structure: [{role: system/assistant/user, content: str}, ...]
+        All three provider http-helpers consume this and convert as needed."""
+        log.debug(f"[AIEngine._build_messages] Building message list | "
+                  f"history_len={len(self.conversation_history)}")
+        messages = [
+            {'role': 'system',    'content': self._get_effective_system_prompt()},
+            {'role': 'assistant', 'content': _ASSISTANT_PRIMING}
+        ]
+        messages.extend(self._get_history_with_memory())
+        log.debug(f"[AIEngine._build_messages] Built {len(messages)} total messages")
+        return messages
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # THIN HTTP HELPERS  (one per provider — convert unified format as needed)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _extract_system_and_convo(messages):
+        """Split unified message list into (system_prompt, conversation_list).
+        The first 'system' role becomes the system prompt string.
+        Any subsequent 'system' role messages are wrapped as user turns.
+        Consecutive messages of the same role are merged (required by Anthropic)."""
+        system_prompt = None
+        convo = []
+        for msg in messages:
+            role, content = msg['role'], msg['content']
+            if role == 'system':
+                if system_prompt is None:
+                    system_prompt = content
+                else:
+                    # Inject as a user message so the conversation stays valid
+                    convo.append({'role': 'user', 'content': f'[SYSTEM]: {content}'})
+            else:
+                convo.append({'role': role, 'content': content})
+
+        # Merge consecutive same-role turns (Anthropic & Gemini both require alternation)
+        merged = []
+        for msg in convo:
+            if merged and merged[-1]['role'] == msg['role']:
+                merged[-1]['content'] += '\n' + msg['content']
+            else:
+                merged.append(dict(msg))
+
+        return system_prompt, merged
+
+    def _http_anthropic(self, messages) -> str | None:
+        """Make an Anthropic API call using the official SDK.
+        Respects anthropic_temperature, anthropic_max_tokens, anthropic_auto_tokens."""
+        log.debug(f"[AIEngine._http_anthropic] model='{self.anthropic_model}' | "
+                  f"messages={len(messages)} | temp={self.anthropic_temperature} | "
+                  f"auto_tokens={self.anthropic_auto_tokens}")
+        try:
+            if not self.api_key:
+                log.error("[AIEngine._http_anthropic] ✗ No Anthropic API key")
+                self.log("Anthropic API key is not set", "ERROR")
+                return None
+
+            import anthropic
+            client = anthropic.Anthropic(api_key=self.api_key)
+
+            system_prompt, convo = self._extract_system_and_convo(messages)
+
+            # Resolve max_tokens
+            model_max = 64000  # safe ceiling; Anthropic SDK will cap to model limit
+            max_tokens = (self._calc_auto_max_tokens(model_max)
+                          if self.anthropic_auto_tokens
+                          else self.anthropic_max_tokens)
+            max_tokens = max(256, max_tokens)
+
+            log.debug(f"[AIEngine._http_anthropic] max_tokens={max_tokens} | ")
+
+            kwargs = {
+                'model':       self.anthropic_model,
+                'max_tokens':  max_tokens,
+                'messages':    convo,
+                'temperature': self.anthropic_temperature,
+            }
+            if system_prompt:
+                kwargs['system'] = system_prompt
+
+            response = client.messages.create(**kwargs)
+            text = response.content[0].text
+            log.info(f"[AIEngine._http_anthropic] ✓ Response | length={len(text)} chars")
+            return text
+
+        except Exception as e:
+            log.error(f"[AIEngine._http_anthropic] ✗ {type(e).__name__}: {e}")
+            self.log(f"Anthropic error: {e}", "ERROR")
+            return None
+
+    def _http_gemini(self, messages) -> str | None:
+        """Make a Gemini API call using the google-genai SDK.
+        Respects gemini_temperature, gemini_max_tokens, gemini_auto_tokens, top_p, top_k."""
+        log.debug(f"[AIEngine._http_gemini] model='{self.gemini_model}' | "
+                  f"messages={len(messages)} | temp={self.gemini_temperature} | "
+                  f"auto_tokens={self.gemini_auto_tokens}")
+        try:
+            if not self.gemini_api_key:
+                log.error("[AIEngine._http_gemini] ✗ No Gemini API key")
+                self.log("Gemini API key is not set", "ERROR")
+                return None
+
+            from google import genai
+            from google.genai import types as genai_types
+
+            client = genai.Client(api_key=self.gemini_api_key)
+            system_prompt, convo = self._extract_system_and_convo(messages)
+
+            # Convert to Gemini contents format: role 'assistant' → 'model'
+            contents = []
+            for msg in convo:
+                gemini_role = 'model' if msg['role'] == 'assistant' else 'user'
+                contents.append({
+                    'role':  gemini_role,
+                    'parts': [{'text': msg['content']}]
+                })
+
+            # Resolve max_output_tokens
+            model_max = 65536
+            max_out = (self._calc_auto_max_tokens(model_max)
+                       if self.gemini_auto_tokens
+                       else self.gemini_max_tokens)
+            max_out = max(256, max_out)
+
+            config_kwargs = {
+                'max_output_tokens': max_out,
+                'temperature':       self.gemini_temperature,
+            }
+            if system_prompt:
+                config_kwargs['system_instruction'] = system_prompt
+            if self.gemini_top_p is not None:
+                config_kwargs['top_p'] = self.gemini_top_p
+            if self.gemini_top_k is not None:
+                config_kwargs['top_k'] = self.gemini_top_k
+
+            log.debug(f"[AIEngine._http_gemini] config={config_kwargs}")
+
+            response = client.models.generate_content(
+                model=self.gemini_model,
+                contents=contents,
+                config=genai_types.GenerateContentConfig(**config_kwargs),
+            )
+            text = response.text
+            log.info(f"[AIEngine._http_gemini] ✓ Response | length={len(text)} chars")
+            return text
+
+        except Exception as e:
+            log.error(f"[AIEngine._http_gemini] ✗ {type(e).__name__}: {e}")
+            self.log(f"Gemini error: {e}", "ERROR")
+            return None
+
+    def _http_puter(self, messages, image=None) -> str | None:
+        """Make a Puter.js API call via the local puter server.
+        Messages are already in OpenAI-compatible format — no conversion needed."""
+        log.debug(f"[AIEngine._http_puter] model='{self.puter_model}' | "
+                  f"messages={len(messages)} | has_image={image is not None} | timeout={self.puter_timeout}s")
+        try:
+            if not self.puter_server:
+                log.error("[AIEngine._http_puter] ✗ puter_server is None")
+                return None
+            if not self.puter_server.is_running:
+                log.error("[AIEngine._http_puter] ✗ puter_server not running")
+                return None
+
+            result = self.puter_server.send_chat_request(
+                messages=messages,
+                model=self.puter_model,
+                image=image,
+                timeout=self.puter_timeout
+            )
+            if result:
+                log.info(f"[AIEngine._http_puter] ✓ Response | length={len(result)} chars")
+            else:
+                log.error("[AIEngine._http_puter] ✗ No response from Puter server")
+            return result
+
+        except Exception as e:
+            log.error(f"[AIEngine._http_puter] ✗ {type(e).__name__}: {e}")
+            self.log(f"Puter error: {e}", "ERROR")
+            return None
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # UNIFIED PROVIDER DISPATCHER
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _http_manual(self) -> str | None:
+        """Manual provider — blocks the worker thread until the user submits a response.
+
+        Shows the side panel whenever the most-recently appended history entry has
+        role='system' (covers work-mode output, post-exit prompt, and any other
+        system injection).  The panel displays the FULL system message so the user
+        can see exactly what the real model would have received.
+        """
+        if not self.manual_response_fn:
+            log.error("[AIEngine._http_manual] manual_response_fn not set")
+            return None
+
+        # Walk back through history to find what was just injected
+        has_system_msg = False
+        system_content = ""
+        context = ""
+
+        for entry in reversed(self.conversation_history):
+            role = entry.get('role', '')
+            content = entry.get('content', '')
+            if role == 'system' and not has_system_msg:
+                # First system entry from the end — this is what the AI would see
+                has_system_msg = True
+                system_content = content
+            elif role == 'user' and not context:
+                context = content
+            if has_system_msg and context:
+                break
+
+        log.info(f"[AIEngine._http_manual] Requesting manual response | "
+                 f"has_system_msg={has_system_msg} | context_len={len(context)}")
+        result = self.manual_response_fn(context, has_system_msg, system_content)
+        if result is None:
+            log.warning("[AIEngine._http_manual] User cancelled manual response")
+            return None
+        log.info(f"[AIEngine._http_manual] Got manual response | length={len(result)}")
+        return result
+
+    def _http_custom_script(self, messages) -> str | None:
+        """Custom script provider — reimports the user's .py file on every call
+        and invokes its chat(system_prompt, messages) function."""
+        import importlib.util, traceback
+
+        if not self.custom_script_path:
+            log.error("[AIEngine._http_custom_script] ✗ No custom script path set")
+            self.log("Custom script path is not set", "ERROR")
+            return None
+
+        import os
+        if not os.path.isfile(self.custom_script_path):
+            log.error(f"[AIEngine._http_custom_script] ✗ File not found: '{self.custom_script_path}'")
+            self.log(f"Custom script not found: {self.custom_script_path}", "ERROR")
+            return None
+
+        try:
+            spec = importlib.util.spec_from_file_location("custom_provider", self.custom_script_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        except Exception as e:
+            log.error(f"[AIEngine._http_custom_script] ✗ Failed to load script: {e}\n{traceback.format_exc()}")
+            self.log(f"Custom script load error: {e}", "ERROR")
+            return None
+
+        if not hasattr(module, 'chat') or not callable(module.chat):
+            log.error("[AIEngine._http_custom_script] ✗ Script has no callable chat() function")
+            self.log("Custom script must define a chat(system_prompt, messages) function", "ERROR")
+            return None
+
+        system_prompt, convo = self._extract_system_and_convo(messages)
+
+        try:
+            result = module.chat(system_prompt or "", convo)
+        except Exception as e:
+            log.error(f"[AIEngine._http_custom_script] ✗ chat() raised: {e}\n{traceback.format_exc()}")
+            self.log(f"Custom script error: {e}", "ERROR")
+            return None
+
+        if not result or not isinstance(result, str):
+            log.error("[AIEngine._http_custom_script] ✗ chat() returned empty or non-string value")
+            self.log("Custom script chat() must return a non-empty string", "ERROR")
+            return None
+
+        log.info(f"[AIEngine._http_custom_script] ✓ Response | length={len(result)} chars")
+        return result
+
+    def _call_provider(self, image=None) -> str | None:
+        """Build the unified message list, dispatch to the active provider.
+        Returns raw AI text, or None on failure."""
+        log.debug(f"[AIEngine._call_provider] provider='{self.ai_provider}' | has_image={image is not None}")
+        messages = self._build_messages()
+        if self.ai_provider == 'anthropic':
+            return self._http_anthropic(messages)
+        elif self.ai_provider == 'gemini':
+            return self._http_gemini(messages)
+        elif self.ai_provider == 'puter':
+            return self._http_puter(messages, image=image)
+        elif self.ai_provider == 'manual':
+            return self._http_manual()
+        elif self.ai_provider == 'custom_script':
+            return self._http_custom_script(messages)
+        else:
+            log.error(f"[AIEngine._call_provider] Unknown provider: '{self.ai_provider}'")
+            return None
+
+    def _make_error_result(self, message="Error: No response from AI") -> dict:
+        """Return a standard error result dict."""
+        return {
+            'response': message,
+            'has_work_call': False,
+            'in_work_mode': False,
+            'thinking': False
+        }
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # PUBLIC GENERATION METHODS  (now provider-agnostic)
+    # ═══════════════════════════════════════════════════════════════════════════
+
     def generate_response(self, user_message):
+        """Generate a response to a user message."""
         msg_preview = user_message[:80].replace('\n', '↵')
         log.info(f"[AIEngine.generate_response] ── New request | provider='{self.ai_provider}' | "
-                 f"history_len={len(self.conversation_history)} | "
-                 f"msg='{msg_preview}' ──")
+                 f"history_len={len(self.conversation_history)} | msg='{msg_preview}' ──")
 
-        self.conversation_history.append({
-            'role': 'user',
-            'content': user_message
-        })
-        log.debug(f"[AIEngine.generate_response] User message appended to history | "
+        self._inject_memories(user_message)
+        self.conversation_history.append({'role': 'user', 'content': user_message})
+        log.debug(f"[AIEngine.generate_response] User message appended | "
                   f"total history entries={len(self.conversation_history)}")
 
+        ai_text = self._call_provider()
+        if not ai_text:
+            log.error("[AIEngine.generate_response] ✗ No AI text returned")
+            return self._make_error_result(f"Error: No response from {self.ai_provider} provider")
 
-        if self.ai_provider == 'puter':
-            log.debug("[AIEngine.generate_response] → Dispatching to _generate_puter_response()")
-            return self._generate_puter_response()
-        elif self.ai_provider == 'gemini':
-            log.debug("[AIEngine.generate_response] → Dispatching to _generate_gemini_response()")
-            return self._generate_gemini_response()
-        else:
-            log.debug("[AIEngine.generate_response] → Dispatching to _generate_anthropic_response()")
-            return self._generate_anthropic_response()
+        log.info(f"[AIEngine.generate_response] ✓ Got response | length={len(ai_text)} chars | "
+                 f"→ _process_ai_response()")
+        return self._process_ai_response(ai_text)
 
     def generate_response_with_image(self, user_message, image_path):
-        """Generate response with image attachment (Puter only)"""
+        """Generate response with image attachment (Puter only)."""
         log.info(f"[AIEngine.generate_response_with_image] provider='{self.ai_provider}' | "
                  f"image='{image_path}' | msg_len={len(user_message)}")
         if self.ai_provider != 'puter':
             log.warning(f"[AIEngine.generate_response_with_image] Image attachment requires Puter, "
                         f"current provider='{self.ai_provider}' — returning error")
-            return {
-                'response': "Error: Image attachment only supported with Puter",
-                'has_work_call': False,
-                'in_work_mode': False,
-                'thinking': False
-            }
+            return self._make_error_result("Error: Image attachment only supported with Puter")
 
-        self.conversation_history.append({
-            'role': 'user',
-            'content': user_message
-        })
+        self.conversation_history.append({'role': 'user', 'content': user_message})
         log.debug(f"[AIEngine.generate_response_with_image] User message appended | "
                   f"history_len={len(self.conversation_history)}")
 
-        return self._generate_puter_response_with_image(image_path)
+        ai_text = self._call_provider(image=image_path)
+        if not ai_text:
+            log.error("[AIEngine.generate_response_with_image] ✗ No AI text returned")
+            return self._make_error_result("Error: No response from Puter server")
 
-    def _generate_puter_response_with_image(self, image_path):
-        """Generate Puter response with image"""
-        log.info(f"[AIEngine._generate_puter_response_with_image] image='{image_path}'")
+        log.info(f"[AIEngine.generate_response_with_image] ✓ Got response | "
+                 f"length={len(ai_text)} chars | → _process_ai_response()")
+        return self._process_ai_response(ai_text)
+
+    def continue_work_mode(self):
+        """Continue work mode execution with AI analyzing previous output."""
+        log.info(f"[AIEngine.continue_work_mode] in_work_mode={self.tool_manager.in_work_mode} | "
+                 f"provider='{self.ai_provider}'")
+        if not self.tool_manager.in_work_mode:
+            log.warning("[AIEngine.continue_work_mode] Not in work mode — returning early")
+            return self._make_error_result("Not in work mode")
+
+        work_prompt = self.tool_manager.get_work_mode_prompt()
+        self.conversation_history.append({'role': 'system', 'content': work_prompt})
+        log.debug(f"[AIEngine.continue_work_mode] Work mode prompt appended | "
+                  f"prompt_len={len(work_prompt)} | history_len={len(self.conversation_history)}")
+
+        ai_text = self._call_provider()
+        if not ai_text:
+            log.error("[AIEngine.continue_work_mode] ✗ No AI text returned")
+            return self._make_error_result(f"Error: No response from {self.ai_provider} provider")
+
+        log.info(f"[AIEngine.continue_work_mode] ✓ Got response | length={len(ai_text)} chars | "
+                 f"→ _process_work_mode_response()")
+        return self._process_work_mode_response(ai_text)
+
+    def _get_ai_response_internal(self, prompt):
+        """Get a single-turn AI response without touching conversation history.
+        Used for code explanation dialogs, approval dialogs, etc."""
+        log.debug(f"[AIEngine._get_ai_response_internal] provider='{self.ai_provider}' | "
+                  f"prompt_len={len(prompt)} chars")
         try:
-            if not self.puter_server:
-                log.error("[AIEngine._generate_puter_response_with_image] puter_server is None")
-                return {
-                    'response': "Error: Puter server not initialized",
-                    'has_work_call': False,
-                    'in_work_mode': False,
-                    'thinking': False
-                }
-
-            if not self.puter_server.is_running:
-                log.error("[AIEngine._generate_puter_response_with_image] puter_server.is_running=False")
-                return {
-                    'response': "Error: Puter server not running",
-                    'has_work_call': False,
-                    'in_work_mode': False,
-                    'thinking': False
-                }
-
-            # NEW FORMAT: Build messages array
-            messages = [
-                {"role": "system", "content": self.system_prompt},
-                {"role": "assistant",
-                 "content": "I understand. I will use My Work Environment when I need to complete complex tasks or need information, and Execute Single commands for quick actions."}
-            ]
-
-            # Add conversation history
-            for msg in self.conversation_history:
-                messages.append({
-                    "role": msg['role'],
-                    "content": msg['content']
-                })
-
-            log.debug(f"[AIEngine._generate_puter_response_with_image] Sending to Puter | "
-                      f"model='{self.puter_model}' | messages={len(messages)} | "
-                      f"timeout={self.puter_timeout}s | image='{image_path}'")
-
-            # Send with image
-            ai_reply = self.puter_server.send_chat_request(
-                messages=messages,
-                model=self.puter_model,
-                image=image_path,
-                timeout=self.puter_timeout
-            )
-
-            if not ai_reply:
-                log.error("[AIEngine._generate_puter_response_with_image] ✗ No reply from Puter server")
-                return {
-                    'response': "Error: No response from Puter server",
-                    'has_work_call': False,
-                    'in_work_mode': False,
-                    'thinking': False
-                }
-
-            log.info(f"[AIEngine._generate_puter_response_with_image] ✓ Reply received | "
-                     f"length={len(ai_reply)} chars | → _process_ai_response()")
-            return self._process_ai_response(ai_reply)
-
-        except Exception as e:
-            log.error(f"[AIEngine._generate_puter_response_with_image] ✗ Exception: {type(e).__name__}: {e}")
-            self.log(f"Puter error: {e}", "ERROR")
-            return {
-                'response': f"Error: {e}",
-                'has_work_call': False,
-                'in_work_mode': False,
-                'thinking': False
-            }
-
-    def _generate_puter_response(self):
-        log.info(f"[AIEngine._generate_puter_response] Starting | model='{self.puter_model}' | "
-                 f"history_len={len(self.conversation_history)} | timeout={self.puter_timeout}s")
-        try:
-            if not self.puter_server:
-                log.error("[AIEngine._generate_puter_response] puter_server is None")
-                return {
-                    'response': "Error: Puter server not initialized",
-                    'has_work_call': False,
-                    'in_work_mode': False,
-                    'thinking': False
-                }
-
-            if not self.puter_server.is_running:
-                log.error("[AIEngine._generate_puter_response] puter_server.is_running=False")
-                return {
-                    'response': "Error: Puter server not running",
-                    'has_work_call': False,
-                    'in_work_mode': False,
-                    'thinking': False
-                }
-
-            # NEW FORMAT: Build messages array with system prompt and history
-            messages = [
-                {"role": "system", "content": self.system_prompt},
-                {"role": "assistant",
-                 "content": "I understand. I will use My Work Environment when I need to complete complex tasks or need information, and Execute Single commands for quick actions."}
-            ]
-
-            # Add conversation history
-            for msg in self.conversation_history:
-                messages.append({
-                    "role": msg['role'],
-                    "content": msg['content']
-                })
-
-            log.debug(f"[AIEngine._generate_puter_response] Sending to Puter | "
-                      f"total messages={len(messages)}")
-
-            ai_reply = self.puter_server.send_chat_request(
-                messages=messages,
-                model=self.puter_model,
-                timeout=self.puter_timeout
-            )
-
-            if not ai_reply:
-                log.error("[AIEngine._generate_puter_response] ✗ No reply from Puter server")
-                return {
-                    'response': "Error: No response from Puter server",
-                    'has_work_call': False,
-                    'in_work_mode': False,
-                    'thinking': False
-                }
-
-            log.info(f"[AIEngine._generate_puter_response] ✓ Reply received | "
-                     f"length={len(ai_reply)} chars | → _process_ai_response()")
-            return self._process_ai_response(ai_reply)
-
-        except Exception as e:
-            log.error(f"[AIEngine._generate_puter_response] ✗ Exception: {type(e).__name__}: {e}")
-            self.log(f"Puter error: {e}", "ERROR")
-            return {
-                'response': f"Error: {e}",
-                'has_work_call': False,
-                'in_work_mode': False,
-                'thinking': False
-            }
-
-    def _generate_gemini_response(self):
-        log.info(f"[AIEngine._generate_gemini_response] Starting | model='{self.gemini_model}' | "
-                 f"history_len={len(self.conversation_history)} | timeout={self.puter_timeout}s")
-        try:
-            if not self.gemini_api_key:
-                log.error("[AIEngine._generate_gemini_response] gemini_api_key not set")
-                return {
-                    'response': "Error: Gemini API key not set",
-                    'has_work_call': False,
-                    'in_work_mode': False,
-                    'thinking': False
-                }
-
-            messages = self._build_gemini_messages()
-            api_url = self.gemini_api_url_template.format(model=self.gemini_model)
-            log.debug(f"[AIEngine._generate_gemini_response] Built {len(messages)} message(s) | "
-                      f"url='{api_url}'")
-
-            headers = {
-                "Content-Type": "application/json",
-                "x-goog-api-key": self.gemini_api_key
-            }
-
-            request_body = {
-                "contents": messages
-            }
-
-            log.debug(f"[AIEngine._generate_gemini_response] POSTing to Gemini API...")
-            response = requests.post(
-                api_url,
-                headers=headers,
-                json=request_body,
-                timeout=self.puter_timeout
-            )
-
-            log.debug(f"[AIEngine._generate_gemini_response] Response status: {response.status_code}")
-
-            if response.status_code == 200:
-                data = response.json()
-                if 'candidates' in data and len(data['candidates']) > 0:
-                    candidate = data['candidates'][0]
-                    if 'content' in candidate and 'parts' in candidate['content']:
-                        parts = candidate['content']['parts']
-                        ai_text = ''.join([part.get('text', '') for part in parts])
-                        log.info(f"[AIEngine._generate_gemini_response] ✓ Got response | "
-                                 f"length={len(ai_text)} chars | → _process_ai_response()")
-                        return self._process_ai_response(ai_text)
-
-                log.warning("[AIEngine._generate_gemini_response] ✗ Unexpected response format — "
-                            "no candidates or content parts found")
-                return {
-                    'response': "Error: Unexpected Gemini response format",
-                    'has_work_call': False,
-                    'in_work_mode': False,
-                    'thinking': False
-                }
+            single_turn = [{'role': 'user', 'content': prompt}]
+            if self.ai_provider == 'anthropic':
+                result = self._http_anthropic(single_turn)
+            elif self.ai_provider == 'gemini':
+                result = self._http_gemini(single_turn)
+            elif self.ai_provider == 'puter':
+                result = self._http_puter(single_turn)
+            elif self.ai_provider == 'custom_script':
+                result = self._http_custom_script(single_turn)
             else:
-                error_msg = f"Gemini API Error: {response.status_code}"
-                log.error(f"[AIEngine._generate_gemini_response] ✗ HTTP {response.status_code}")
-                self.log(error_msg, "ERROR")
-                return {
-                    'response': f"Error: {error_msg}",
-                    'has_work_call': False,
-                    'in_work_mode': False,
-                    'thinking': False
-                }
+                log.error(f"[AIEngine._get_ai_response_internal] Unknown provider: '{self.ai_provider}'")
+                return f"Error: Unknown provider '{self.ai_provider}'"
 
-        except Exception as e:
-            error_msg = f"Gemini Error: {e}"
-            log.error(f"[AIEngine._generate_gemini_response] ✗ Exception: {type(e).__name__}: {e}")
-            self.log(error_msg, "ERROR")
-            return {
-                'response': error_msg,
-                'has_work_call': False,
-                'in_work_mode': False,
-                'thinking': False
-            }
-
-    def _generate_anthropic_response(self):
-        log.info(f"[AIEngine._generate_anthropic_response] Starting | "
-                 f"history_len={len(self.conversation_history)} | timeout={self.puter_timeout}s | "
-                 f"has_api_key={bool(self.api_key)}")
-        messages = self._build_messages()
-        log.debug(f"[AIEngine._generate_anthropic_response] Built {len(messages)} message(s)")
-
-        try:
-            headers = {
-                "Content-Type": "application/json",
-                "anthropic-version": "2023-06-01"
-            }
-
-            if self.api_key:
-                headers["x-api-key"] = self.api_key
-
-            log.debug(f"[AIEngine._generate_anthropic_response] POSTing to {self.anthropic_api_url}")
-            response = requests.post(
-                self.anthropic_api_url,
-                headers=headers,
-                json={
-                    "model": "claude-sonnet-4-20250514",
-                    "max_tokens": 2000,
-                    "messages": messages
-                },
-                timeout=self.puter_timeout
-            )
-            log.debug(f"[AIEngine._generate_anthropic_response] Response status: {response.status_code}")
-
-            if response.status_code == 200:
-                data = response.json()
-                ai_text = data['content'][0]['text']
-                log.info(f"[AIEngine._generate_anthropic_response] ✓ Got response | "
-                         f"length={len(ai_text)} chars | → _process_ai_response()")
-                return self._process_ai_response(ai_text)
+            if result:
+                log.debug(f"[AIEngine._get_ai_response_internal] ✓ Got response | length={len(result)} chars")
+                return result
             else:
-                error_msg = f"API Error: {response.status_code}"
-                log.error(f"[AIEngine._generate_anthropic_response] ✗ HTTP {response.status_code}")
-                self.log(error_msg, "ERROR")
-                return {
-                    'response': f"Error: {error_msg}",
-                    'has_work_call': False,
-                    'in_work_mode': False,
-                    'thinking': False
-                }
+                log.error("[AIEngine._get_ai_response_internal] ✗ No response returned")
+                return "Error getting explanation: no response from provider"
 
         except Exception as e:
-            error_msg = f"Error: {e}"
-            log.error(f"[AIEngine._generate_anthropic_response] ✗ Exception: {type(e).__name__}: {e}")
-            self.log(error_msg, "ERROR")
-            return {
-                'response': error_msg,
-                'has_work_call': False,
-                'in_work_mode': False,
-                'thinking': False
-            }
+            log.error(f"[AIEngine._get_ai_response_internal] ✗ {type(e).__name__}: {e}")
+            return f"Error getting explanation: {str(e)}"
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # RESPONSE PROCESSING  (unchanged — already unified)
+    # ═══════════════════════════════════════════════════════════════════════════
 
     def _process_ai_response(self, ai_text):
         """
-        Process AI response and handle work_environment, execute_code, or set_session_name calls
+        Process AI response and handle work_environment, execute_code, or set_session_name calls.
 
         Returns:
             dict: Response data with execution status
@@ -584,7 +758,22 @@ class AIEngine:
         log.info(f"[AIEngine._process_ai_response] ── Processing response | "
                  f"length={len(ai_text)} chars ──")
         log.debug(f"[AIEngine._process_ai_response] Preview: '{ai_text[:120].replace(chr(10), '↵')}'")
+        self._clear_memory_context()
         self.last_raw_response = ai_text
+
+        # ── Single-exec guardrail ──────────────────────────────────────────────────
+        self.tool_manager.enforce_single_exec_policy(ai_text)
+        # ──────────────────────────────────────────────────────────────────────────
+
+        if self.tool_execution_lockout:
+            self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+            return {
+                'response': ai_text,
+                'has_work_call': False,
+                'in_work_mode': False,
+                'thinking': False,
+                'session_name': None
+            }
 
         # Check for set_session_name call (handle first as it's simple)
         session_name = None
@@ -595,8 +784,75 @@ class AIEngine:
             log.info(f"[AIEngine._process_ai_response] set_session_name detected → '{session_name}' | "
                      f"remaining text length={len(remaining_text)}")
             self.log(f"Set session name call detected: {session_name}")
-            # Use the cleaned text for further processing
             ai_text = remaining_text
+
+        memorize_result = self.tool_manager.parse_memorize(ai_text)
+        if memorize_result:
+            memory_text, ai_text = memorize_result
+            self.memory_manager.memorize(memory_text)
+            log.info(f"[AIEngine] Memory stored: '{memory_text[:60]}'")
+
+        # ── Check for load_skill call (now valid anywhere) ────────────────────
+        load_skill_result = self.tool_manager.parse_load_skill(ai_text)
+        if load_skill_result:
+            from core.global_instructions import SKILL_LOADED_CHAT_PROMPT, SKILL_ALREADY_LOADED_PROMPT
+            skill_name, remaining_text = load_skill_result
+            log.info(f"[AIEngine._process_ai_response] load_skill detected (outside work) → '{skill_name}'")
+            if self.skill_manager:
+                success, msg = self.skill_manager.load_skill(skill_name)
+            else:
+                success, msg = False, "ERROR: No skill manager"
+            if not success:
+                self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+                self.conversation_history.append({
+                    'role': 'system',
+                    'content': SKILL_ALREADY_LOADED_PROMPT.format(skill_name=skill_name, reason=msg)
+                })
+            else:
+                self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+                self.conversation_history.append({
+                    'role': 'system',
+                    'content': SKILL_LOADED_CHAT_PROMPT.format(skill_name=skill_name)
+                })
+            return {
+                'response': remaining_text.strip() if remaining_text and remaining_text.strip()
+                            else (f"✅ Skill '{skill_name}' loaded." if success else f"⚠ {msg}"),
+                'has_work_call': False,
+                'in_work_mode': False,
+                'thinking': False,
+                'skill_loaded': skill_name if success else None,
+            }
+
+        # ── Check for unload_skill call (valid anywhere) ──────────────────────
+        unload_skill_result = self.tool_manager.parse_unload_skill(ai_text)
+        if unload_skill_result:
+            from core.global_instructions import SKILL_UNLOADED_CHAT_PROMPT, SKILL_NOT_LOADED_PROMPT
+            skill_name, remaining_text = unload_skill_result
+            log.info(f"[AIEngine._process_ai_response] unload_skill detected (outside work) → '{skill_name}'")
+            if self.skill_manager:
+                success, msg = self.skill_manager.unload_skill(skill_name)
+            else:
+                success, msg = False, "ERROR: No skill manager"
+            if not success:
+                self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+                self.conversation_history.append({
+                    'role': 'system',
+                    'content': SKILL_NOT_LOADED_PROMPT.format(skill_name=skill_name, reason=msg)
+                })
+            else:
+                self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+                self.conversation_history.append({
+                    'role': 'system',
+                    'content': SKILL_UNLOADED_CHAT_PROMPT.format(skill_name=skill_name)
+                })
+            return {
+                'response': remaining_text.strip() if remaining_text and remaining_text.strip()
+                            else (f"🗑 Skill '{skill_name}' unloaded." if success else f"⚠ {msg}"),
+                'has_work_call': False,
+                'in_work_mode': False,
+                'thinking': False,
+                'skill_unloaded': skill_name if success else None,
+            }
 
         # Check for work_environment call
         log.debug("[AIEngine._process_ai_response] Checking for work_environment call...")
@@ -605,29 +861,20 @@ class AIEngine:
             code, visible_text = work_call
             log.info(f"[AIEngine._process_ai_response] work_environment detected | "
                      f"code_len={len(code)} | visible_text_len={len(visible_text)}")
-            log.debug(f"[AIEngine._process_ai_response] Code preview: '{code[:100].replace(chr(10), '↵')}'")
             self.log(f"Work environment call detected")
 
-            # Execute code in work mode
             log.debug("[AIEngine._process_ai_response] → Calling tool_manager.run_work_environment()")
             work_output = self.tool_manager.run_work_environment(code)
 
-            # Check if AI exited work mode
             if work_output == "EXITED_WORK_MODE":
-                log.info("[AIEngine._process_ai_response] Work environment returned EXITED_WORK_MODE — "
-                         "clearing work mode flag")
+                # Shouldn't happen on first entry — AI should never exit immediately.
+                # Kept as a safety net only.
+                log.warning("[AIEngine._process_ai_response] Unexpected immediate exit on work mode entry")
                 self.tool_manager.in_work_mode = False
-
-                # Add FULL AI TEXT to history for consistency
                 if ai_text and ai_text.strip():
-                    self.conversation_history.append({
-                        'role': 'assistant',
-                        'content': ai_text
-                    })
-                    log.debug("[AIEngine._process_ai_response] Full ai_text appended to history (exit path)")
-
+                    self.conversation_history.append({'role': 'assistant', 'content': ai_text})
                 return {
-                    'response': visible_text if visible_text.strip() else "",
+                    'response': visible_text if visible_text and visible_text.strip() else "",
                     'has_work_call': False,
                     'in_work_mode': False,
                     'thinking': False,
@@ -635,17 +882,12 @@ class AIEngine:
                     'session_name': session_name
                 }
 
-            # Store output for next iteration
             log.debug(f"[AIEngine._process_ai_response] Storing work output | "
                       f"length={len(work_output)} chars | in_work_mode → True")
             self.tool_manager.last_work_output = work_output
             self.tool_manager.in_work_mode = True
 
-            # Add FULL AI TEXT to history (with JSON) so AI remembers tool usage
-            self.conversation_history.append({
-                'role': 'assistant',
-                'content': ai_text  # Keep original with JSON for AI's memory!
-            })
+            self.conversation_history.append({'role': 'assistant', 'content': ai_text})
             log.debug("[AIEngine._process_ai_response] Full ai_text (with JSON) appended to history")
 
             return {
@@ -664,31 +906,23 @@ class AIEngine:
             code, visible_text = execute_call
             log.info(f"[AIEngine._process_ai_response] execute_code detected | "
                      f"code_len={len(code)} | visible_text_len={len(visible_text)}")
-            log.debug(f"[AIEngine._process_ai_response] Code preview: '{code[:100].replace(chr(10), '↵')}'")
             self.log(f"Execute code call detected")
 
-            # Execute code (AI doesn't see output)
             log.debug("[AIEngine._process_ai_response] → Calling tool_manager.run_execute_code()")
             result = self.tool_manager.run_execute_code(code, self.log_callback)
             log.info(f"[AIEngine._process_ai_response] execute_code result: success={result['success']} | "
                      f"has_error={bool(result.get('error'))}")
 
-            # Add FULL AI TEXT to history (with JSON) so AI remembers tool usage
-            self.conversation_history.append({
-                'role': 'assistant',
-                'content': ai_text  # Keep original with JSON for AI's memory!
-            })
+            self.conversation_history.append({'role': 'assistant', 'content': ai_text})
 
-            # If execution failed, append error traceback to visible text
             response_text = visible_text
             if not result['success'] and result.get('error'):
-                # Append error block at the very bottom
                 error_block = f"\n\n```Error\n{result['error']}\n```"
                 response_text = response_text + error_block
                 log.warning(f"[AIEngine._process_ai_response] Execution failed — error appended to response")
 
             return {
-                'response': response_text,  # Return clean text (with error if failed) to display in chat
+                'response': response_text,
                 'has_work_call': False,
                 'in_work_mode': False,
                 'thinking': False,
@@ -700,30 +934,21 @@ class AIEngine:
         # No execution calls - normal response
         log.info(f"[AIEngine._process_ai_response] No tool calls detected — normal text response | "
                  f"length={len(ai_text)} chars")
-        self.conversation_history.append({
-            'role': 'assistant',
-            'content': ai_text
-        })
-        log.debug("[AIEngine._process_ai_response] Response appended to history | "
+        self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+        log.debug("assistant response appended to history | "
                   f"total history entries={len(self.conversation_history)}")
 
-        # ── Safety net: strip any remaining tool JSON from display text ───────
-        # Catches edge cases where parse_set_session_name detected the name but
-        # removal failed (e.g. backtick in value broke code-fence regex), or
-        # where parse_set_session_name missed entirely.  History keeps ai_text
-        # as-is; only the display copy gets stripped.
+        # Safety net: strip any remaining tool JSON from display text
         display_text = self.tool_manager.strip_tool_calls(ai_text)
         if display_text != ai_text:
             log.warning(f"[AIEngine._process_ai_response] Safety net stripped residual tool JSON | "
                         f"before={len(ai_text)} → after={len(display_text)} chars")
-            # Attempt to recover session name if parsing missed it earlier
             if not session_name:
                 missed_call = self.tool_manager.parse_set_session_name(ai_text)
                 if missed_call:
                     session_name = missed_call[0]
                     log.info(f"[AIEngine._process_ai_response] Safety net recovered session_name: "
                              f"'{session_name}'")
-        # ──────────────────────────────────────────────────────────────────────
 
         return {
             'response': display_text,
@@ -733,237 +958,121 @@ class AIEngine:
             'session_name': session_name
         }
 
-    def continue_work_mode(self):
-        """Continue work mode execution with AI analyzing previous output"""
-        log.info(f"[AIEngine.continue_work_mode] in_work_mode={self.tool_manager.in_work_mode} | "
-                 f"provider='{self.ai_provider}'")
-        if not self.tool_manager.in_work_mode:
-            log.warning("[AIEngine.continue_work_mode] Not in work mode — returning early")
-            return {
-                'response': "Not in work mode",
-                'has_work_call': False,
-                'in_work_mode': False,
-                'thinking': False
-            }
-
-            # Add work mode prompt to conversation
-        work_prompt = self.tool_manager.get_work_mode_prompt()
-        self.conversation_history.append({
-            'role': 'system',
-            'content': work_prompt
-        })
-        log.debug(f"[AIEngine.continue_work_mode] Work mode prompt appended | "
-                  f"prompt_len={len(work_prompt)} | history_len={len(self.conversation_history)}")
-
-        # Generate next response based on provider
-        if self.ai_provider == 'puter':
-            log.debug("[AIEngine.continue_work_mode] → _continue_work_mode_puter()")
-            return self._continue_work_mode_puter()
-        elif self.ai_provider == 'gemini':
-            log.debug("[AIEngine.continue_work_mode] → _continue_work_mode_gemini()")
-            return self._continue_work_mode_gemini()
-        else:
-            log.debug("[AIEngine.continue_work_mode] → _continue_work_mode_anthropic()")
-            return self._continue_work_mode_anthropic()
-
-    def send_post_exit_prompt(self):
-        """Send post-exit prompt (same for all modes now)"""
-        log.info(f"[AIEngine.send_post_exit_prompt] Sending post-exit prompt | "
-                 f"voice_mode={self.voice_mode} | provider='{self.ai_provider}'")
-        self.log("Sending post-exit prompt")
-        if self.voice_mode:
-            self.conversation_history.append({
-                'role': 'system',
-                'content': POST_EXIT_PROMPT_VOICE
-            })
-            log.debug("[AIEngine.send_post_exit_prompt] Using POST_EXIT_PROMPT_VOICE")
-        else:
-            self.conversation_history.append({
-                'role': 'system',
-                'content': POST_EXIT_PROMPT
-            })
-            log.debug("[AIEngine.send_post_exit_prompt] Using POST_EXIT_PROMPT")
-
-        log.debug(f"[AIEngine.send_post_exit_prompt] History length after append: "
-                  f"{len(self.conversation_history)}")
-
-        if self.ai_provider == 'puter':
-            return self._generate_puter_response()
-        elif self.ai_provider == 'gemini':
-            return self._generate_gemini_response()
-        else:
-            return self._generate_anthropic_response()
-
-    def _continue_work_mode_puter(self):
-        log.info(f"[AIEngine._continue_work_mode_puter] model='{self.puter_model}' | "
-                 f"history_len={len(self.conversation_history)}")
-        try:
-            # NEW FORMAT: Build full message history
-            messages = [
-                {"role": "system", "content": self.system_prompt},
-                {"role": "assistant",
-                 "content": "I understand. I will use My Work Environment when I need to complete complex tasks or need information, and Execute Single commands for quick actions."}
-            ]
-
-            # Add conversation history (includes the tool prompt)
-            for msg in self.conversation_history:
-                messages.append({
-                    "role": msg['role'],
-                    "content": msg['content']
-                })
-
-            log.debug(f"[AIEngine._continue_work_mode_puter] Sending {len(messages)} messages to Puter")
-
-            ai_reply = self.puter_server.send_chat_request(
-                messages=messages,
-                model=self.puter_model,
-                timeout=self.puter_timeout
-            )
-
-            if not ai_reply:
-                log.error("[AIEngine._continue_work_mode_puter] ✗ No reply from Puter server")
-                return {
-                    'response': "Error: No response",
-                    'has_work_call': False,
-                    'in_work_mode': False,
-                    'thinking': False
-                }
-
-            log.info(f"[AIEngine._continue_work_mode_puter] ✓ Reply received | "
-                     f"length={len(ai_reply)} chars | → _process_work_mode_response()")
-            return self._process_work_mode_response(ai_reply)
-
-        except Exception as e:
-            log.error(f"[AIEngine._continue_work_mode_puter] ✗ Exception: {type(e).__name__}: {e}")
-            return {
-                'response': f"Error: {e}",
-                'has_work_call': False,
-                'in_work_mode': False,
-                'thinking': False
-            }
-
-    def _continue_work_mode_gemini(self):
-        log.info(f"[AIEngine._continue_work_mode_gemini] model='{self.gemini_model}' | "
-                 f"history_len={len(self.conversation_history)}")
-        try:
-            messages = self._build_gemini_messages()
-            api_url = self.gemini_api_url_template.format(model=self.gemini_model)
-            log.debug(f"[AIEngine._continue_work_mode_gemini] Built {len(messages)} messages | "
-                      f"POSTing to Gemini API")
-
-            headers = {
-                "Content-Type": "application/json",
-                "x-goog-api-key": self.gemini_api_key
-            }
-
-            request_body = {
-                "contents": messages
-            }
-
-            response = requests.post(
-                api_url,
-                headers=headers,
-                json=request_body,
-                timeout=self.puter_timeout
-            )
-            log.debug(f"[AIEngine._continue_work_mode_gemini] Response status: {response.status_code}")
-
-            if response.status_code == 200:
-                data = response.json()
-                if 'candidates' in data and len(data['candidates']) > 0:
-                    candidate = data['candidates'][0]
-                    if 'content' in candidate and 'parts' in candidate['content']:
-                        parts = candidate['content']['parts']
-                        ai_text = ''.join([part.get('text', '') for part in parts])
-                        log.info(f"[AIEngine._continue_work_mode_gemini] ✓ Got response | "
-                                 f"length={len(ai_text)} chars")
-                        return self._process_work_mode_response(ai_text)
-
-                log.warning("[AIEngine._continue_work_mode_gemini] ✗ Unexpected response format")
-                return {
-                    'response': "Error: Unexpected response format",
-                    'has_work_call': False,
-                    'in_work_mode': False,
-                    'thinking': False
-                }
-            else:
-                log.error(f"[AIEngine._continue_work_mode_gemini] ✗ HTTP {response.status_code}")
-                return {
-                    'response': f"Gemini API Error: {response.status_code}",
-                    'has_work_call': False,
-                    'in_work_mode': False,
-                    'thinking': False
-                }
-
-        except Exception as e:
-            log.error(f"[AIEngine._continue_work_mode_gemini] ✗ Exception: {type(e).__name__}: {e}")
-            return {
-                'response': f"Error: {e}",
-                'has_work_call': False,
-                'in_work_mode': False,
-                'thinking': False
-            }
-
-    def _continue_work_mode_anthropic(self):
-        log.info(f"[AIEngine._continue_work_mode_anthropic] history_len={len(self.conversation_history)}")
-        messages = self._build_messages()
-        log.debug(f"[AIEngine._continue_work_mode_anthropic] Built {len(messages)} messages | "
-                  f"POSTing to Anthropic API")
-
-        try:
-            headers = {
-                "Content-Type": "application/json",
-                "anthropic-version": "2023-06-01"
-            }
-
-            if self.api_key:
-                headers["x-api-key"] = self.api_key
-
-            response = requests.post(
-                self.anthropic_api_url,
-                headers=headers,
-                json={
-                    "model": "claude-sonnet-4-20250514",
-                    "max_tokens": 2000,
-                    "messages": messages
-                },
-                timeout=self.puter_timeout
-            )
-            log.debug(f"[AIEngine._continue_work_mode_anthropic] Response status: {response.status_code}")
-
-            if response.status_code == 200:
-                data = response.json()
-                ai_text = data['content'][0]['text']
-                log.info(f"[AIEngine._continue_work_mode_anthropic] ✓ Got response | "
-                         f"length={len(ai_text)} chars")
-                return self._process_work_mode_response(ai_text)
-            else:
-                log.error(f"[AIEngine._continue_work_mode_anthropic] ✗ HTTP {response.status_code}")
-                return {
-                    'response': f"API Error: {response.status_code}",
-                    'has_work_call': False,
-                    'in_work_mode': False,
-                    'thinking': False
-                }
-
-        except Exception as e:
-            log.error(f"[AIEngine._continue_work_mode_anthropic] ✗ Exception: {type(e).__name__}: {e}")
-            return {
-                'response': f"Error: {e}",
-                'has_work_call': False,
-                'in_work_mode': False,
-                'thinking': False
-            }
-
     def _process_work_mode_response(self, ai_text):
-        """Process AI response while in work mode"""
+        """Process AI response while in work mode."""
         log.info(f"[AIEngine._process_work_mode_response] Processing work mode response | "
                  f"length={len(ai_text)} chars")
         log.debug(f"[AIEngine._process_work_mode_response] Preview: "
                   f"'{ai_text[:100].replace(chr(10), '↵')}'")
         self.last_raw_response = ai_text
 
+        # ── Single-exec guardrail ──────────────────────────────────────────────────
+        self.tool_manager.enforce_single_exec_policy(ai_text)
+        # ──────────────────────────────────────────────────────────────────────────
+
         log.debug("[AIEngine._process_work_mode_response] Checking for consecutive work_environment call...")
+
+        # Check for set_session_name call (handle first as it's simple)
+        session_name = None
+        log.debug("[AIEngine._process_ai_response] Checking for set_session_name call...")
+        session_name_call = self.tool_manager.parse_set_session_name(ai_text)
+        if session_name_call:
+            session_name, remaining_text = session_name_call
+            log.info(f"[AIEngine._process_ai_response] set_session_name detected → '{session_name}' | "
+                     f"remaining text length={len(remaining_text)}")
+            self.log(f"Set session name call detected: {session_name}")
+            ai_text = remaining_text
+
+        # ── Check for load_skill call (work_environment exclusive) ────────────
+        load_skill_result = self.tool_manager.parse_load_skill(ai_text)
+        if load_skill_result:
+            from core.global_instructions import SKILL_LOADED_WORK_PROMPT, SKILL_ALREADY_LOADED_PROMPT
+            skill_name, remaining_text = load_skill_result
+            log.info(f"[AIEngine._process_work_mode_response] load_skill detected → '{skill_name}'")
+
+            if self.skill_manager:
+                success, msg = self.skill_manager.load_skill(skill_name)
+            else:
+                success, msg = False, f"ERROR: No skill manager — cannot load '{skill_name}'"
+
+            if not success:
+                log.warning(f"[AIEngine._process_work_mode_response] load_skill failed: {msg}")
+                already_msg = SKILL_ALREADY_LOADED_PROMPT.format(skill_name=skill_name, reason=msg)
+                self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+                self.conversation_history.append({'role': 'system', 'content': already_msg})
+                return {
+                    'response': f"⚠ {msg}",
+                    'has_work_call': True,
+                    'in_work_mode': True,
+                    'thinking': True,
+                    'session_name': session_name,
+                }
+
+            log.info(f"[AIEngine._process_work_mode_response] Skill '{skill_name}' loaded | "
+                     f"total loaded: {list(self.skill_manager.get_loaded_skills().keys())}")
+
+            if remaining_text and remaining_text.strip():
+                self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+
+            work_output = self.tool_manager.last_work_output or "No previous output"
+            skill_loaded_msg = SKILL_LOADED_WORK_PROMPT.format(
+                skill_name=skill_name,
+                work_output=work_output
+            )
+            self.conversation_history.append({'role': 'system', 'content': skill_loaded_msg})
+            log.debug("[AIEngine._process_work_mode_response] Skill-loaded work prompt appended to history")
+
+            return {
+                'response': f"Loading skill: {skill_name}...",
+                'has_work_call': True,
+                'in_work_mode': True,
+                'thinking': True,
+                'skill_loaded': skill_name,
+                'session_name': session_name,
+            }
+
+        # ── Check for unload_skill call ────────────────────────────────────────
+        unload_skill_result = self.tool_manager.parse_unload_skill(ai_text)
+        if unload_skill_result:
+            from core.global_instructions import SKILL_UNLOADED_WORK_PROMPT, SKILL_NOT_LOADED_PROMPT
+            skill_name, remaining_text = unload_skill_result
+            log.info(f"[AIEngine._process_work_mode_response] unload_skill detected → '{skill_name}'")
+
+            if self.skill_manager:
+                success, msg = self.skill_manager.unload_skill(skill_name)
+            else:
+                success, msg = False, "ERROR: No skill manager"
+
+            if not success:
+                log.warning(f"[AIEngine._process_work_mode_response] unload_skill failed: {msg}")
+                not_loaded_msg = SKILL_NOT_LOADED_PROMPT.format(skill_name=skill_name, reason=msg)
+                self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+                self.conversation_history.append({'role': 'system', 'content': not_loaded_msg})
+                return {
+                    'response': f"⚠ {msg}",
+                    'has_work_call': True,
+                    'in_work_mode': True,
+                    'thinking': True,
+                    'session_name': session_name,
+                }
+
+            log.info(f"[AIEngine._process_work_mode_response] Skill '{skill_name}' unloaded")
+            work_output = self.tool_manager.last_work_output or "No previous output"
+            unloaded_msg = SKILL_UNLOADED_WORK_PROMPT.format(
+                skill_name=skill_name,
+                work_output=work_output
+            )
+            self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+            self.conversation_history.append({'role': 'system', 'content': unloaded_msg})
+            return {
+                'response': f"Unloading skill: {skill_name}...",
+                'has_work_call': True,
+                'in_work_mode': True,
+                'thinking': True,
+                'skill_unloaded': skill_name,
+                'session_name': session_name,
+            }
+
         work_call = self.tool_manager.parse_work_environment(ai_text)
 
         if work_call:
@@ -977,22 +1086,37 @@ class AIEngine:
 
             if work_output == "EXITED_WORK_MODE":
                 log.info("[AIEngine._process_work_mode_response] Work environment exited — "
-                         "clearing in_work_mode flag")
+                         "clearing in_work_mode flag (skills persist)")
                 self.tool_manager.in_work_mode = False
 
-                # Add FULL AI TEXT to history for consistency
                 if ai_text and ai_text.strip():
-                    self.conversation_history.append({
-                        'role': 'assistant',
-                        'content': ai_text
-                    })
+                    self.conversation_history.append({'role': 'assistant', 'content': ai_text})
                     log.debug("[AIEngine._process_work_mode_response] ai_text appended to history (exit)")
 
+                # ── Empty-exit guard ──────────────────────────────────────────
+                if not visible_text or not visible_text.strip():
+                    log.warning("[AIEngine._process_work_mode_response] Exit without summary detected — "
+                                "injecting reminder and re-calling provider")
+                    self.conversation_history.append({'role': 'system', 'content': EMPTY_EXIT_SUMMARY_PROMPT})
+                    ai_text2 = self._call_provider()
+                    if ai_text2:
+                        return self._process_ai_response(ai_text2)
+                    return {
+                        'response': "",
+                        'has_work_call': False,
+                        'in_work_mode': False,
+                        'thinking': False,
+                        'session_name': session_name,
+                        'exited_work_mode': True
+                    }
+                # ─────────────────────────────────────────────────────────────
+
                 return {
-                    'response': visible_text if (visible_text and visible_text.strip()) else "",
+                    'response': visible_text,
                     'has_work_call': False,
                     'in_work_mode': False,
                     'thinking': False,
+                    'session_name': session_name,
                     'exited_work_mode': True
                 }
 
@@ -1000,11 +1124,7 @@ class AIEngine:
                       f"output_len={len(work_output)} chars | storing for next iteration")
             self.tool_manager.last_work_output = work_output
 
-            # Add FULL AI TEXT to history (with JSON) so AI remembers tool usage
-            self.conversation_history.append({
-                'role': 'assistant',
-                'content': ai_text  # Keep original with JSON for AI's memory!
-            })
+            self.conversation_history.append({'role': 'assistant', 'content': ai_text})
             log.debug("[AIEngine._process_work_mode_response] ai_text (with JSON) appended to history")
 
             return {
@@ -1017,13 +1137,10 @@ class AIEngine:
 
         else:
             log.info("[AIEngine._process_work_mode_response] No more work_environment calls — "
-                     "AI is done, clearing in_work_mode")
+                     "AI is done, clearing in_work_mode (skills persist)")
             self.tool_manager.in_work_mode = False
 
-            self.conversation_history.append({
-                'role': 'assistant',
-                'content': ai_text
-            })
+            self.conversation_history.append({'role': 'assistant', 'content': ai_text})
             log.debug("[AIEngine._process_work_mode_response] Normal response appended to history | "
                       f"total entries={len(self.conversation_history)}")
 
@@ -1031,55 +1148,59 @@ class AIEngine:
                 'response': ai_text,
                 'has_work_call': False,
                 'in_work_mode': False,
+                'session_name': session_name,
                 'thinking': False
             }
 
-    def _build_messages(self):
-        log.debug(f"[AIEngine._build_messages] Building Anthropic message list | "
-                  f"history_len={len(self.conversation_history)}")
-        messages = [
-            {
-                'role': 'system',
-                'content': self.system_prompt
-            },
-            {
-                'role': 'assistant',
-                'content': 'I understand. I will use My Work Environment when I need to complete complex tasks or need information, and Execute Single commands for quick actions.'
-            }
-        ]
+    # ═══════════════════════════════════════════════════════════════════════════
+    # MEMORY METHODS
+    # ═══════════════════════════════════════════════════════════════════════════
 
-        messages.extend(self.conversation_history)
-        log.debug(f"[AIEngine._build_messages] Built {len(messages)} total messages")
-        return messages
+    def _inject_memories(self, user_message: str):
+        """Perform semantic recall and stage memory context for the next API call."""
+        self._pending_memory_context = ""
 
-    def _build_gemini_messages(self):
-        log.debug(f"[AIEngine._build_gemini_messages] Building Gemini message list | "
-                  f"history_len={len(self.conversation_history)}")
-        messages = []
+        if not self.memory_manager or not self.memory_manager.is_ready:
+            return
 
-        # Use voice-aware prompt
-        gemini_prompt = get_gemini_system_prompt(self.system_info, self.voice_mode, self.elevenlabs_enabled)
-        log.debug(f"[AIEngine._build_gemini_messages] Gemini system prompt length={len(gemini_prompt)}")
+        memory_enabled = True
+        memory_threshold = 0.4
+        memory_max = 5
 
-        messages.append({
-            "parts": [{"text": gemini_prompt}],
-            "role": "system"
-        })
+        if self.settings_callback:
+            settings = self.settings_callback()
+            memory_enabled = settings.get('memory_enabled', True)
+            memory_threshold = float(settings.get('memory_threshold', 0.4))
+            memory_max = int(settings.get('memory_max_results', 5))
 
-        messages.append({
-            "parts": [{"text": 'I understand. I will use My Work Environment when I need to complete complex tasks or need information, and Execute Single commands for quick actions.'}],
-            "role": "model"
-        })
+        if not memory_enabled:
+            return
 
-        for msg in self.conversation_history:
-            role = "model" if msg['role'] == 'assistant' else "user"
-            messages.append({
-                "parts": [{"text": msg['content']}],
-                "role": role
-            })
+        recalled = self.memory_manager.recall(
+            query=user_message,
+            threshold=memory_threshold,
+            max_results=memory_max
+        )
 
-        log.debug(f"[AIEngine._build_gemini_messages] Built {len(messages)} total messages")
-        return messages
+        if recalled:
+            lines = "\n".join(f"- {m['text']}" for m in recalled)
+            self._pending_memory_context = (
+                f"<SYSTEM_MEM_RECALL>\n"
+                f"MEMORIES DETECTED:\n"
+                f"{lines}\n"
+                f"<SYSTEM_MEM_RECALL/>"
+            )
+            log.info(f"[AIEngine._inject_memories] Staged {len(recalled)} memories as system message")
+        else:
+            log.debug("[AIEngine._inject_memories] No memories passed threshold — skipping injection")
+
+    def _clear_memory_context(self):
+        """Call after the API response is received to remove temporary memory context."""
+        self._pending_memory_context = ""
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # CONVERSATION MANAGEMENT
+    # ═══════════════════════════════════════════════════════════════════════════
 
     def clear_history(self):
         """Clear conversation history and reset work mode"""
@@ -1096,7 +1217,6 @@ class AIEngine:
         """Remove the last user message from conversation history"""
         log.debug(f"[AIEngine.remove_last_user_message] Scanning {len(self.conversation_history)} "
                   f"entries for last user message")
-        # Find and remove the last user message
         for i in range(len(self.conversation_history) - 1, -1, -1):
             if self.conversation_history[i]['role'] == 'user':
                 removed_msg = self.conversation_history.pop(i)

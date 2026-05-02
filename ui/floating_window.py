@@ -1,4 +1,5 @@
 """
+ui/floating_window.py
 Floating Window - Main chat interface with configurable appearance
 Based on the prototype test_accessing_app.py
 """
@@ -15,7 +16,13 @@ from PIL import Image, ImageDraw
 import json
 import os
 import math
+from pathlib import Path
 
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Anchor to app root at import time — immune to os.chdir() ─────────────────
+_APP_ROOT = Path(__file__).resolve().parent.parent
+# ─────────────────────────────────────────────────────────────────────────────
 
 class FloatingWindow(QWidget):
     """Floating AI assistant icon with configurable appearance"""
@@ -63,9 +70,13 @@ class FloatingWindow(QWidget):
         self.appearance_window = None
         self.tray_icon = None
         self.debug_window = None
+        self.use_tui = False  # toggle: True = TUI mode, False = PyQt6 ChatWindow
+        self.tui_window = None  # ChatWindowTUI proxy instance (lazy)
+        self._real_chat_window = None  # preserved PyQt6 window when TUI is active
 
         # Load settings
         self.settings = self.load_settings()
+        self.use_tui = self.settings.get('use_tui', False)
 
         # Window settings
         self.setWindowFlags(
@@ -174,7 +185,7 @@ class FloatingWindow(QWidget):
 
     def load_settings(self):
         """Load appearance settings from file"""
-        settings_file = os.path.expanduser('floating_window_config.json')
+        settings_file = _APP_ROOT / "floating_window_config.json"
         try:
             if os.path.exists(settings_file):
                 with open(settings_file, 'r') as f:
@@ -189,7 +200,7 @@ class FloatingWindow(QWidget):
 
     def save_settings(self):
         """Save appearance settings to file"""
-        settings_file = 'floating_window_config.json'
+        settings_file = _APP_ROOT / "floating_window_config.json"
         try:
             # Save current position
             self.settings['position'] = (self.x(), self.y())
@@ -431,6 +442,10 @@ class FloatingWindow(QWidget):
         """Show right-click menu"""
         menu = QMenu()
         menu.addAction(QAction("💬 Open Chat", self, triggered=self.open_chat))
+        tui_action = QAction(">_ Toggle TUI Chat Mode", self, checkable=True,
+                             triggered=self.toggle_tui_mode)
+        tui_action.setChecked(self.use_tui)
+        menu.addAction(tui_action)
         menu.addAction(QAction("🎨 Appearance", self, triggered=self.open_appearance_settings))
         menu.addAction(QAction("⚙️ Settings", self, triggered=self.open_settings))
 
@@ -504,15 +519,55 @@ class FloatingWindow(QWidget):
             self.chat_window.show_ai_message(message)
 
     def open_chat(self):
-        """Open chat window"""
-        if self.chat_window is None:
-            self.chat_window = ChatWindow(self.controller)
-        if not self.chat_window.isVisible():
+        """Open chat window (PyQt6 or TUI depending on mode)"""
+        if self.use_tui:
+            if self.tui_window is None:
+                from ui.chat_window_TUI import ChatWindowTUI
+                self.tui_window = ChatWindowTUI(self.controller)
+            if not self.tui_window.isVisible():
+                self.tui_window.show()
+            else:
+                self.tui_window.hide()
+        else:
+            if self.chat_window is None:
+                self.chat_window = ChatWindow(self.controller)
+            if not self.chat_window.isVisible():
+                self.chat_window.show()
+                self.chat_window.raise_()
+                self.chat_window.activateWindow()
+            else:
+                self.chat_window.hide()
+
+    def toggle_tui_mode(self):
+        """Switch between PyQt6 chat window and terminal TUI."""
+        self.use_tui = not self.use_tui
+        self.settings['use_tui'] = self.use_tui
+        self.save_settings()
+
+        # Close whichever window is currently open
+        if self.chat_window and self.chat_window.isVisible():
+            self.chat_window.hide()
+        if self.tui_window and self.tui_window.isVisible():
+            self.tui_window.hide()
+
+        # Also update controller's _chat reference awareness
+        # (controller uses self.ui.chat_window — point it to correct instance)
+        if self.use_tui:
+            if self.tui_window is None:
+                from ui.chat_window_TUI import ChatWindowTUI
+                self.tui_window = ChatWindowTUI(self.controller)
+            self.chat_window = self.tui_window  # ← controller's self._chat will resolve here
+            self.tui_window.show()
+        else:
+            # Restore real ChatWindow
+            if self._real_chat_window is None:
+                self._real_chat_window = ChatWindow(self.controller)
+            self.chat_window = self._real_chat_window
             self.chat_window.show()
             self.chat_window.raise_()
             self.chat_window.activateWindow()
-        else:
-            self.chat_window.hide()
+            # Clear first so we don't double-stack, then reload from live history
+            self.chat_window._load_session_clicked(self.controller.current_session_id)
 
     def open_settings(self):
         """Open settings window"""
@@ -529,16 +584,18 @@ class FloatingWindow(QWidget):
             self.chat_window.add_system_message("Python interpreter reset")
 
     def create_tray_icon(self):
-        """Create system tray icon"""
-        image = Image.new('RGB', (64, 64), color=(100, 100, 255))
+        """Create system tray icon with RGBA image (required on Windows)."""
+        # RGBA required — RGB silently fails to show on Windows tray
+        image = Image.new('RGBA', (64, 64), color=(0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
-        draw.ellipse([8, 8, 56, 56], fill='white')
+        draw.ellipse([4, 4, 60, 60], fill=(100, 100, 255, 255))
+        draw.ellipse([18, 18, 46, 46], fill=(255, 255, 255, 255))
 
         menu_items = [
-            pystray.MenuItem("Show as Floating Window", self.show_from_tray),
-            pystray.MenuItem("Open Chat", self.open_chat),
-            pystray.MenuItem("Appearance", self.open_appearance_settings),
-            pystray.MenuItem("Settings", self.open_settings),
+            pystray.MenuItem("Show floating window", self._tray_show_floating),
+            pystray.MenuItem("Open Chat",            self._tray_open_chat),
+            pystray.MenuItem("Appearance",           self._tray_open_appearance),
+            pystray.MenuItem("Settings",             self._tray_open_settings),
         ]
 
         menu_items.append(
@@ -549,51 +606,102 @@ class FloatingWindow(QWidget):
             )
         )
 
-        def should_show_debug_window():
-            return self.controller.get_debug_mode()
-
         menu_items.append(
             pystray.MenuItem(
                 "Open Debug Window",
-                self.open_debug_window,
-                visible=should_show_debug_window
+                self._tray_open_debug,
+                visible=lambda item: self.controller.get_debug_mode()
             )
         )
 
         menu_items.extend([
-            pystray.MenuItem("Reset Python", self.reset_python),
-            pystray.MenuItem("Shutdown", self.shutdown_app)
+            pystray.MenuItem("Reset Python", self._tray_reset_python),
+            pystray.MenuItem("Shutdown",     self._tray_shutdown),
         ])
 
         menu = pystray.Menu(*menu_items)
-        self.tray_icon = pystray.Icon("System AI Assistant", image, "System AI Assistant", menu)
+        self.tray_icon = pystray.Icon(
+            "Systema Auxilium", image, "Systema Auxilium", menu
+        )
+
+    # ── Thread-safe tray callbacks ─────────────────────────────────────────────
+    # pystray calls these from its own thread; Qt UI work must be marshalled
+    # back to the main thread via QTimer.singleShot(0, fn).
+
+    def _tray_show_floating(self, icon=None, item=None):
+        QTimer.singleShot(0, self._do_show_from_tray)
+
+    def _do_show_from_tray(self):
+        if self.tray_icon:
+            self.tray_icon.stop()
+            self.tray_icon = None
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _tray_open_chat(self, icon=None, item=None):
+        QTimer.singleShot(0, self._do_open_chat_from_tray)
+
+    def _do_open_chat_from_tray(self):
+        if self.chat_window is None:
+            self.chat_window = ChatWindow(self.controller)
+        self.chat_window.show()
+        self.chat_window.raise_()
+        self.chat_window.activateWindow()
+
+    def _tray_open_settings(self, icon=None, item=None):
+        QTimer.singleShot(0, self.open_settings)
+
+    def _tray_open_appearance(self, icon=None, item=None):
+        QTimer.singleShot(0, self.open_appearance_settings)
+
+    def _tray_open_debug(self, icon=None, item=None):
+        QTimer.singleShot(0, self.open_debug_window)
+
+    def _tray_reset_python(self, icon=None, item=None):
+        QTimer.singleShot(0, self.reset_python)
+
+    def _tray_shutdown(self, icon=None, item=None):
+        QTimer.singleShot(0, self.shutdown_app)
 
     def toggle_debug_from_tray(self, icon, item):
         """Toggle debug mode from tray icon"""
         self.toggle_debug()
 
     def put_to_tray(self):
-        """Hide floating icon and show in system tray"""
-        self.hide()
+        """Hide floating icon and show in system tray."""
         if self.tray_icon is None:
             self.create_tray_icon()
-
+        self.hide()
         import threading
         tray_thread = threading.Thread(target=self.tray_icon.run, daemon=True)
         tray_thread.start()
 
-    def show_from_tray(self):
-        """Show floating icon and hide from tray"""
-        self.show()
+    def show_from_tray(self, icon=None, item=None):
+        """Legacy — prefer _tray_show_floating for tray callbacks."""
+        QTimer.singleShot(0, self._do_show_from_tray)
+
+    def shutdown_app(self):
+        """Properly shutdown the application — close all child windows first."""
+        self.save_settings()
+        # Forcibly destroy child windows that use event.ignore() in closeEvent
+        for attr in ('chat_window', 'settings_window', 'debug_window', 'appearance_window'):
+            w = getattr(self, attr, None)
+            if w is not None:
+                try:
+                    if hasattr(w, 'setAttribute'):
+                        w.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+                    if hasattr(w, 'deleteLater'):
+                        w.close()
+                        w.deleteLater()
+                    else:
+                        w.hide()
+                except (RuntimeError, Exception):
+                    pass
+                setattr(self, attr, None)
         if self.tray_icon:
             self.tray_icon.stop()
             self.tray_icon = None
-
-    def shutdown_app(self):
-        """Properly shutdown the application"""
-        self.save_settings()
-        if self.tray_icon:
-            self.tray_icon.stop()
         from PyQt6.QtWidgets import QApplication
         QApplication.quit()
 

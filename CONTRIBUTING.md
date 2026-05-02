@@ -51,4 +51,4 @@ rights of the project — see the LICENSE file for details.
 
 ---
 
-*This is a first project, built with care. Thanks for being kind about it.* :)
+*This is hobby project. Thanks for being kind about it.* :)

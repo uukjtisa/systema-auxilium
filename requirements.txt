@@ -8,12 +8,25 @@
 
 # GUI Framework
 PyQt6>=6.4.0
+textual[dev] # for terminal chat window
 
-# HTTP Requests & Web
+# HTTP Requests & Web (For Puter.js API Bridge)
 requests>=2.28.0
 Flask>=2.3.0
 Flask-CORS>=4.0.0
 flask-socketio>=5.3.0
+
+# AI Provider SDKs
+anthropic>=0.40.0          # Anthropic Claude API (official SDK)
+google-genai>=1.0.0        # Google Gemini API (new unified SDK, replaces google-generativeai)
+openai                     # For Scripted Providers that use REST API
+
+# Memory Recall
+fastembed
+numpy>=2.0.0
+# ⚠ onnxruntime 1.20+ has DLL initialization issues on Windows.
+# Pin to 1.19.2 for stability. Do NOT upgrade without testing.
+onnxruntime==1.19.2
 
 # Browser Automation (for Puter.js)
 selenium>=4.15.0
@@ -27,7 +40,7 @@ psutil>=5.9.0
 # matplotlib>=3.9.0 is required to support numpy 2.x (3.7.x was compiled against numpy 1.x).
 numpy>=2.0.0
 sounddevice>=0.4.6
-webrtcvad-wheels #Changed from webrtcvad to webrtcvad-wheels to skip compiling in installing dependencies.
+webrtcvad-wheels  # Changed from webrtcvad to webrtcvad-wheels to skip compiling in installing dependencies.
 SpeechRecognition>=3.10.0
 edge-tts>=6.1.0
 pygame>=2.5.0
@@ -43,16 +56,27 @@ Pillow>=10.0.0
 
 
 # ============================================================================
-# OPTIONAL DEPENDENCIES (Enhanced Features)
+# OPTIONAL
 # ============================================================================
 
-# --- Computer Vision (OpenCV) ---
-# Uncomment to enable the AI's visual/camera capabilities
-# Requires numpy>=2.0.0 (already satisfied above)
-# opencv-python>=4.8.0
+# --- web-browser (skill) --- 
+# Recommended
+beautifulsoup4
+duckduckgo_search
+trafilatura
+
+# --- data-viz (skill) --- 
+# Recommended
+pandas
+
+# --- Local AI Models (LLaMA) ---
+# Uncomment to enable offline AI with LLaMA models (Only for capable hardware)
+# llama-cpp-python>=0.2.0
 
 # --- Advanced Voice Activity Detection (Silero VAD) ---
 # Uncomment to enable ML-based voice detection
+# ⚠ Install torch separately — DO NOT add to this file.
+# Run: pip install torch --index-url https://download.pytorch.org/whl/cpu
 # torch>=2.0.0
 # torchaudio>=2.0.0
 
@@ -81,15 +105,27 @@ Pillow>=10.0.0
 #   pip install -r requirements.txt
 #   NOTE: numpy>=2.0.0 is already enforced above so no conflict will occur.
 #
-# Silero VAD (requires PyTorch):
-#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+# LLaMA Setup (Windows users may need specific build):
+#   pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
 #
+# Silero VAD (requires PyTorch — install separately, NOT via requirements.txt):
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+#   ⚠ Do NOT add torch to requirements.txt — it conflicts with onnxruntime
+#     and causes DLL failures on Windows.
+#
+# Chrome/ChromeDriver for Selenium:
+#   - Download from: https://chromedriver.chromium.org/
+#   - Or install via: pip install webdriver-manager
+
+
 # ============================================================================
 # PLATFORM-SPECIFIC NOTES
 # ============================================================================
 
 # Windows:
-#   - All dependencies should work out of the box
+#   - Requires Visual C++ Redistributable 2015-2022 (x64):
+#     https://aka.ms/vs/17/release/vc_redist.x64.exe
+#   - onnxruntime must stay at ==1.19.2 (1.20+ has DLL init failures on Windows)
 #   - For audio, ensure you have working audio drivers
 #
 # Linux:
@@ -99,5 +135,5 @@ Pillow>=10.0.0
 # macOS:
 #   - May need: brew install portaudio
 #   - For PyQt6: brew install pyqt6
-#
+
 # ============================================================================
