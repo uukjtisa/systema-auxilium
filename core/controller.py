@@ -38,13 +38,19 @@ class AssistantController(QObject):
     """Main controller for the AI assistant with voice support"""
 
     log_signal = pyqtSignal(str, str)
-
-    # NEW SIGNALS FOR VOICE
     voice_message_signal = pyqtSignal(str)
 
     # Manual provider — fires on the main thread to show the response popup
     # Only carries display data; result_holder + done_event live on self
     manual_response_signal = pyqtSignal(str, bool, str)
+
+    tui_send_signal = pyqtSignal(str)  # text message from TUI
+    tui_interrupt_signal = pyqtSignal()  # interrupt from TUI
+    tui_load_session_signal = pyqtSignal(str)
+    tui_new_session_signal = pyqtSignal()
+    tui_open_memory_signal = pyqtSignal()
+    tui_open_instructions_signal = pyqtSignal()
+    tui_open_names_signal = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -201,6 +207,15 @@ class AssistantController(QObject):
         self.current_session_id = None
         self.session_has_messages = False
 
+        # Connect TUI signals — safe to emit from any thread
+        self.tui_send_signal.connect(self.send_message)
+        self.tui_interrupt_signal.connect(self.interrupt_request)
+        self.tui_load_session_signal.connect(self.load_session)
+        self.tui_new_session_signal.connect(self._tui_new_session)
+        self.tui_open_memory_signal.connect(self._tui_open_memory)
+        self.tui_open_instructions_signal.connect(self._tui_open_instructions)
+        self.tui_open_names_signal.connect(self._tui_open_names)
+
         # Create initial session
         self._create_new_session()
         log.debug(f"[AssistantController.__init__] Initial session created: '{self.current_session_id}'")
@@ -335,6 +350,67 @@ class AssistantController(QObject):
     def log(self, message, level="INFO"):
         """Emit message to UI log panel."""
         self.log_signal.emit(message, level)
+
+    def _tui_new_session(self):
+        self._create_new_session()
+        self.ai.clear_history()
+        if self._chat:
+            self._chat.clear_chat_silent()
+            self._chat.refresh_session_list()
+            self._chat.add_system_message("🆕 **New session started**")
+
+    def _tui_open_memory(self):
+        try:
+            from ui.memory_window import MemoryWindow
+            from PyQt6.QtCore import Qt
+            if not hasattr(self, '_tui_mem_win') or not self._tui_mem_win:
+                self._tui_mem_win = MemoryWindow(self)
+                self._tui_mem_win.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
+            self._tui_mem_win.show()
+            self._tui_mem_win.raise_()
+            self._tui_mem_win.activateWindow()
+        except Exception as e:
+            log.error(f"[_tui_open_memory] {e}")
+
+    def _tui_open_instructions(self):
+        from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QTextEdit,
+                                     QDialogButtonBox, QLabel)
+        dlg = QDialog(self.ui)
+        dlg.setWindowTitle("Custom Instructions")
+        dlg.resize(500, 350)
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel("Custom instructions added to every prompt:"))
+        te = QTextEdit()
+        te.setPlainText(self.get_custom_instructions())
+        lay.addWidget(te)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                                QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        lay.addWidget(btns)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.set_custom_instructions(te.toPlainText())
+
+    def _tui_open_names(self):
+        from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QLineEdit,
+                                     QDialogButtonBox, QFormLayout, QLabel)
+        dlg = QDialog(self.ui)
+        dlg.setWindowTitle("Names")
+        lay = QVBoxLayout(dlg)
+        form = QFormLayout()
+        user_edit = QLineEdit(self.get_user_name())
+        asst_edit = QLineEdit(self.get_assistant_name())
+        form.addRow(QLabel("Your name:"), user_edit)
+        form.addRow(QLabel("Assistant name:"), asst_edit)
+        lay.addLayout(form)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                                QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        lay.addWidget(btns)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.set_user_name(user_edit.text().strip())
+            self.set_assistant_name(asst_edit.text().strip())
 
     def load_settings(self):
         log.debug(f"[AssistantController.load_settings] Loading from '{self.settings_file}'")
@@ -581,9 +657,9 @@ class AssistantController(QObject):
         log.debug(f"[AssistantController._handle_voice_message_on_main_thread] text='{text[:80]}'")
         # FIXED: Ensure chat window exists (create it if needed)
         if not hasattr(self.ui, 'chat_window') or self.ui.chat_window is None:
-            # Create chat window but don't show it
-            from ui.chat_window import ChatWindow
-            self.ui.chat_window = ChatWindow(self)
+            if not getattr(self.ui, 'use_tui', False):
+                from ui.chat_window import ChatWindow
+                self.ui.chat_window = ChatWindow(self)
             log.debug("[AssistantController._handle_voice_message_on_main_thread] "
                       "Chat window created for voice message buffering")
             self.log("Chat window created for voice message buffering")
@@ -1389,6 +1465,14 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
 
         log.info(f"[AssistantController.interrupt_request] ✓ Interrupt complete | "
                  f"interrupted={interrupted}")
+
+        # Always clean up UI regardless of whether anything was interrupted
+        try:
+            self._chat.hide_thinking()
+            self._chat.set_input_enabled(True)
+        except Exception:
+            pass
+
         return interrupted
 
     # ═══════════════════════════════════════════════════════════

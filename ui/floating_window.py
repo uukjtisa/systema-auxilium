@@ -70,9 +70,13 @@ class FloatingWindow(QWidget):
         self.appearance_window = None
         self.tray_icon = None
         self.debug_window = None
+        self.use_tui = False  # toggle: True = TUI mode, False = PyQt6 ChatWindow
+        self.tui_window = None  # ChatWindowTUI proxy instance (lazy)
+        self._real_chat_window = None  # preserved PyQt6 window when TUI is active
 
         # Load settings
         self.settings = self.load_settings()
+        self.use_tui = self.settings.get('use_tui', False)
 
         # Window settings
         self.setWindowFlags(
@@ -438,6 +442,10 @@ class FloatingWindow(QWidget):
         """Show right-click menu"""
         menu = QMenu()
         menu.addAction(QAction("💬 Open Chat", self, triggered=self.open_chat))
+        tui_action = QAction(">_ Toggle TUI Chat Mode", self, checkable=True,
+                             triggered=self.toggle_tui_mode)
+        tui_action.setChecked(self.use_tui)
+        menu.addAction(tui_action)
         menu.addAction(QAction("🎨 Appearance", self, triggered=self.open_appearance_settings))
         menu.addAction(QAction("⚙️ Settings", self, triggered=self.open_settings))
 
@@ -511,15 +519,55 @@ class FloatingWindow(QWidget):
             self.chat_window.show_ai_message(message)
 
     def open_chat(self):
-        """Open chat window"""
-        if self.chat_window is None:
-            self.chat_window = ChatWindow(self.controller)
-        if not self.chat_window.isVisible():
+        """Open chat window (PyQt6 or TUI depending on mode)"""
+        if self.use_tui:
+            if self.tui_window is None:
+                from ui.chat_window_TUI import ChatWindowTUI
+                self.tui_window = ChatWindowTUI(self.controller)
+            if not self.tui_window.isVisible():
+                self.tui_window.show()
+            else:
+                self.tui_window.hide()
+        else:
+            if self.chat_window is None:
+                self.chat_window = ChatWindow(self.controller)
+            if not self.chat_window.isVisible():
+                self.chat_window.show()
+                self.chat_window.raise_()
+                self.chat_window.activateWindow()
+            else:
+                self.chat_window.hide()
+
+    def toggle_tui_mode(self):
+        """Switch between PyQt6 chat window and terminal TUI."""
+        self.use_tui = not self.use_tui
+        self.settings['use_tui'] = self.use_tui
+        self.save_settings()
+
+        # Close whichever window is currently open
+        if self.chat_window and self.chat_window.isVisible():
+            self.chat_window.hide()
+        if self.tui_window and self.tui_window.isVisible():
+            self.tui_window.hide()
+
+        # Also update controller's _chat reference awareness
+        # (controller uses self.ui.chat_window — point it to correct instance)
+        if self.use_tui:
+            if self.tui_window is None:
+                from ui.chat_window_TUI import ChatWindowTUI
+                self.tui_window = ChatWindowTUI(self.controller)
+            self.chat_window = self.tui_window  # ← controller's self._chat will resolve here
+            self.tui_window.show()
+        else:
+            # Restore real ChatWindow
+            if self._real_chat_window is None:
+                self._real_chat_window = ChatWindow(self.controller)
+            self.chat_window = self._real_chat_window
             self.chat_window.show()
             self.chat_window.raise_()
             self.chat_window.activateWindow()
-        else:
-            self.chat_window.hide()
+            # Clear first so we don't double-stack, then reload from live history
+            self.chat_window._load_session_clicked(self.controller.current_session_id)
 
     def open_settings(self):
         """Open settings window"""
@@ -641,10 +689,14 @@ class FloatingWindow(QWidget):
             w = getattr(self, attr, None)
             if w is not None:
                 try:
-                    w.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-                    w.close()
-                    w.deleteLater()
-                except RuntimeError:
+                    if hasattr(w, 'setAttribute'):
+                        w.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+                    if hasattr(w, 'deleteLater'):
+                        w.close()
+                        w.deleteLater()
+                    else:
+                        w.hide()
+                except (RuntimeError, Exception):
                     pass
                 setattr(self, attr, None)
         if self.tray_icon:
