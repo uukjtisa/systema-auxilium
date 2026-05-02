@@ -78,6 +78,11 @@ class FloatingWindow(QWidget):
         self.settings = self.load_settings()
         self.use_tui = self.settings.get('use_tui', False)
 
+        # If TUI mode is active on startup, show real ChatWindow first so the
+        # controller fully initialises, then switch to TUI after 500ms
+        if self.use_tui:
+            QTimer.singleShot(0, self._startup_with_tui)
+
         # Window settings
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
@@ -517,6 +522,28 @@ class FloatingWindow(QWidget):
         """Show AI message in chat window"""
         if self.chat_window:
             self.chat_window.show_ai_message(message)
+
+    def _startup_with_tui(self):
+        """On TUI-mode startup: show real ChatWindow first so controller fully
+        initialises, then swap to TUI after a short delay."""
+        if self._real_chat_window is None:
+            self._real_chat_window = ChatWindow(self.controller)
+        self.chat_window = self._real_chat_window
+        self._real_chat_window.show()
+        self._real_chat_window.raise_()
+        self._real_chat_window.activateWindow()
+        # Hand off to TUI after the Qt window has had time to fully render
+        QTimer.singleShot(500, self._switch_to_tui)
+
+    def _switch_to_tui(self):
+        """Hide the real ChatWindow and hand control to the TUI proxy."""
+        if self._real_chat_window:
+            self._real_chat_window.hide()
+        if self.tui_window is None:
+            from ui.chat_window_TUI import ChatWindowTUI
+            self.tui_window = ChatWindowTUI(self.controller)
+        self.chat_window = self.tui_window   # controller._chat now points to TUI
+        self.tui_window.show()
 
     def open_chat(self):
         """Open chat window (PyQt6 or TUI depending on mode)"""
