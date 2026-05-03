@@ -1345,6 +1345,10 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         if result.get('exited_work_mode'):
             self.log("AI exited tool mode")
             self.work_mode_timer.stop()
+            # SESSION SAVE: Persist the completed work session
+            if not self.session_has_messages:
+                self.session_has_messages = True
+            self._auto_save_session()
             return
 
         if result['thinking']:
@@ -1353,6 +1357,10 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         else:
             # Done with tool mode
             self.work_mode_timer.stop()
+            # SESSION SAVE: Persist session when work mode finishes
+            if not self.session_has_messages:
+                self.session_has_messages = True
+            self._auto_save_session()
 
     def handle_ai_error(self, error_message):
         """Handle AI error from worker thread"""

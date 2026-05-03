@@ -132,6 +132,7 @@ class ManualResponseWindow(BaseWindow):
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint |
                             Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
         self.setStyleSheet(_WINDOW_SS)
 
         if work_mode:
