@@ -636,6 +636,7 @@ class CodeApprovalDialog(QDialog):
             tuple: (approved: bool, modified_code: str)
         """
         dialog = CodeApprovalDialog(code, execution_type, ai_engine, parent)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
 
         # Ensure it shows on top
         dialog.show()
