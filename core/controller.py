@@ -1214,6 +1214,10 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
                  f"has_work_call={result.get('has_work_call', False)} | "
                  f"exited_work_mode={result.get('exited_work_mode', False)} | "
                  f"thinking={result.get('thinking', False)} ──")
+        if getattr(self, '_interrupt_flag', False):
+            log.warning("[AssistantController.handle_ai_response] Stale signal after interrupt — discarding")
+            self._interrupt_flag = False
+            return
         self.ui.hide_thinking()
         self.is_processing = False
         log.debug("[AssistantController.handle_ai_response] is_processing=False | thinking hidden")
@@ -1304,6 +1308,10 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
                  f"exited_work_mode={result.get('exited_work_mode', False)} | "
                  f"has_work_call={result.get('has_work_call', False)} | "
                  f"thinking={result.get('thinking', False)} ──")
+        if getattr(self, '_interrupt_flag', False):
+            log.warning("[AssistantController.handle_work_mode_response] Stale signal after interrupt — discarding")
+            self._interrupt_flag = False
+            return
         self.is_processing = False
         log.debug("[AssistantController.handle_work_mode_response] is_processing=False")
 
@@ -1476,6 +1484,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
 
         # Always clean up UI regardless of whether anything was interrupted
         try:
+            self._interrupt_flag = True  # discard any stale response_ready signals in queue
             self._chat.hide_thinking()
             self._chat.set_input_enabled(True)
         except Exception:
