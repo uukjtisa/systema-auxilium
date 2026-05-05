@@ -12,6 +12,7 @@
 - [Things to take into consideration](#things-to-take-into-consideration)
 - [What is Systema Auxilium](#what-is-systema-auxilium)
 - [What Can It Do](#what-can-it-do)
+- [Android Bridge App](#android-bridge-app)
 - [About AI System Control](#about-ai-system-control)
 - [Recommended Python Environment](#recommended-python-environment)
 - [How to Install](#how-to-install)
@@ -100,6 +101,15 @@ def chat(system_prompt: str, messages: list[dict]) -> str:
 ```
 
 Point the app at it in Settings → AI → Custom Script Provider. The script is reloaded on every request, so live edits take effect immediately. A full template and instructions are included in `custom_provider_template.py` at the repo root, including a ready-made prompt you can give to any AI to generate a working provider script for you.
+
+---
+
+## Android Bridge App
+
+Added: May 5, 2026
+Mobile PC Assistant Access - Talk to your assistant from anywhere in your house.
+Github repo: [systema-auxilium-android-module](https://github.com/uukjtisa/systema-auxilium-android-module)
+Release: [First Build](https://github.com/uukjtisa/systema-auxilium-android-module/releases/tag/unstable)
 
 ---
 
