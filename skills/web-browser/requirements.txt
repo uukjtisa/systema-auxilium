@@ -1,0 +1,7 @@
+# web-browser requirements
+# Install with: pip install -r requirements.txt
+
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+trafilatura>=1.8.0
+duckduckgo-search>=6.0.0
