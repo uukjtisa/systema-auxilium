@@ -3,8 +3,9 @@ ui/floating_window.py
 Floating Window - Main chat interface with configurable appearance
 Based on the prototype test_accessing_app.py
 """
+import threading
 
-from PyQt6.QtWidgets import QWidget, QPushButton, QVBoxLayout, QMenu
+from PyQt6.QtWidgets import QWidget, QPushButton, QVBoxLayout, QMenu, QLabel, QApplication, QMessageBox
 from PyQt6.QtGui import QAction, QCursor, QPainter, QColor, QPen, QLinearGradient, QBrush
 from PyQt6.QtCore import Qt, QTimer, QPoint, QRect, QRectF
 from ui.chat_window import ChatWindow
@@ -70,18 +71,10 @@ class FloatingWindow(QWidget):
         self.appearance_window = None
         self.tray_icon = None
         self.debug_window = None
-        self.use_tui = False  # toggle: True = TUI mode, False = PyQt6 ChatWindow
-        self.tui_window = None  # ChatWindowTUI proxy instance (lazy)
-        self._real_chat_window = None  # preserved PyQt6 window when TUI is active
+        self.android_bridge = None  # AndroidBridge instance for phone remote
 
         # Load settings
         self.settings = self.load_settings()
-        self.use_tui = self.settings.get('use_tui', False)
-
-        # If TUI mode is active on startup, show real ChatWindow first so the
-        # controller fully initialises, then switch to TUI after 500ms
-        if self.use_tui:
-            QTimer.singleShot(0, self._startup_with_tui)
 
         # Window settings
         self.setWindowFlags(
@@ -123,6 +116,9 @@ class FloatingWindow(QWidget):
         self.raise_timer = QTimer(self)
         self.raise_timer.timeout.connect(self.ensure_on_top)
         self.raise_timer.start(50)  # Check every 50ms
+
+        # Pre-initialize chat window at startup (warms up the widget)
+        QTimer.singleShot(600, self._startup_chat_init)
 
     # ── helpers ──────────────────────────────────────────────────────────
 
@@ -447,10 +443,13 @@ class FloatingWindow(QWidget):
         """Show right-click menu"""
         menu = QMenu()
         menu.addAction(QAction("💬 Open Chat", self, triggered=self.open_chat))
-        tui_action = QAction(">_ Toggle TUI Chat Mode", self, checkable=True,
-                             triggered=self.toggle_tui_mode)
-        tui_action.setChecked(self.use_tui)
-        menu.addAction(tui_action)
+        # Android bridge toggle — label changes to show IP:port when active
+        _bridge_on = self.android_bridge is not None and self.android_bridge.isVisible()
+        if _bridge_on:
+            _phone_label = f"📱 Close Packet ({self.android_bridge.get_connection_info()})"
+        else:
+            _phone_label = "📱 Open Packet"
+        menu.addAction(QAction(_phone_label, self, triggered=self.toggle_android_bridge))
         menu.addAction(QAction("🎨 Appearance", self, triggered=self.open_appearance_settings))
         menu.addAction(QAction("⚙️ Settings", self, triggered=self.open_settings))
 
@@ -512,89 +511,65 @@ class FloatingWindow(QWidget):
         """Show thinking in chat window"""
         if self.chat_window:
             self.chat_window.show_thinking()
+        if self.android_bridge and self.android_bridge.isVisible():
+            self.android_bridge.show_thinking()
 
     def hide_thinking(self):
         """Hide thinking in chat window"""
         if self.chat_window:
             self.chat_window.hide_thinking()
+        if self.android_bridge and self.android_bridge.isVisible():
+            self.android_bridge.hide_thinking()
 
     def show_ai_message(self, message):
         """Show AI message in chat window"""
         if self.chat_window:
             self.chat_window.show_ai_message(message)
+        if self.android_bridge and self.android_bridge.isVisible():
+            self.android_bridge.show_ai_message(message)
 
-    def _startup_with_tui(self):
-        """On TUI-mode startup: show real ChatWindow first so controller fully
-        initialises, then swap to TUI after a short delay."""
-        if self._real_chat_window is None:
-            self._real_chat_window = ChatWindow(self.controller)
-        self.chat_window = self._real_chat_window
-        self._real_chat_window.show()
-        self._real_chat_window.raise_()
-        self._real_chat_window.activateWindow()
-        # Hand off to TUI after the Qt window has had time to fully render
-        QTimer.singleShot(500, self._switch_to_tui)
+    def _startup_chat_init(self):
+        """Pre-initialize and briefly show the chat window at startup."""
+        if self.chat_window is None:
+            self.chat_window = ChatWindow(self.controller)
+        self.chat_window.show()
+        self.chat_window.raise_()
+        open_on_startup = self.controller.settings.get('open_chat_on_startup', False)
+        if not open_on_startup:
+            QTimer.singleShot(500, self.chat_window.hide)
 
-    def _switch_to_tui(self):
-        """Hide the real ChatWindow and hand control to the TUI proxy."""
-        if self._real_chat_window:
-            self._real_chat_window.hide()
-        if self.tui_window is None:
-            from ui.chat_window_TUI import ChatWindowTUI
-            self.tui_window = ChatWindowTUI(self.controller)
-        self.chat_window = self.tui_window   # controller._chat now points to TUI
-        self.tui_window.show()
+        # Auto-open Android Bridge if setting is enabled
+        open_packet_on_startup = self.controller.settings.get('open_packet_on_startup', False)
+        if open_packet_on_startup and (self.android_bridge is None or not self.android_bridge.isVisible()):
+            from ui.android_bridge import AndroidBridge
+            if self.android_bridge is None:
+                self.android_bridge = AndroidBridge(self.controller)
+            self.android_bridge.show()
+            print("[FloatingWindow] Android Bridge auto-started on startup")
 
     def open_chat(self):
-        """Open chat window (PyQt6 or TUI depending on mode)"""
-        if self.use_tui:
-            if self.tui_window is None:
-                from ui.chat_window_TUI import ChatWindowTUI
-                self.tui_window = ChatWindowTUI(self.controller)
-            if not self.tui_window.isVisible():
-                self.tui_window.show()
-            else:
-                self.tui_window.hide()
-        else:
-            if self.chat_window is None:
-                self.chat_window = ChatWindow(self.controller)
-            if not self.chat_window.isVisible():
-                self.chat_window.show()
-                self.chat_window.raise_()
-                self.chat_window.activateWindow()
-            else:
-                self.chat_window.hide()
-
-    def toggle_tui_mode(self):
-        """Switch between PyQt6 chat window and terminal TUI."""
-        self.use_tui = not self.use_tui
-        self.settings['use_tui'] = self.use_tui
-        self.save_settings()
-
-        # Close whichever window is currently open
-        if self.chat_window and self.chat_window.isVisible():
-            self.chat_window.hide()
-        if self.tui_window and self.tui_window.isVisible():
-            self.tui_window.hide()
-
-        # Also update controller's _chat reference awareness
-        # (controller uses self.ui.chat_window — point it to correct instance)
-        if self.use_tui:
-            if self.tui_window is None:
-                from ui.chat_window_TUI import ChatWindowTUI
-                self.tui_window = ChatWindowTUI(self.controller)
-            self.chat_window = self.tui_window  # ← controller's self._chat will resolve here
-            self.tui_window.show()
-        else:
-            # Restore real ChatWindow
-            if self._real_chat_window is None:
-                self._real_chat_window = ChatWindow(self.controller)
-            self.chat_window = self._real_chat_window
+        """Open chat window"""
+        if self.chat_window is None:
+            self.chat_window = ChatWindow(self.controller)
+        if not self.chat_window.isVisible():
             self.chat_window.show()
             self.chat_window.raise_()
             self.chat_window.activateWindow()
-            # Clear first so we don't double-stack, then reload from live history
-            self.chat_window._load_session_clicked(self.controller.current_session_id)
+        else:
+            self.chat_window.hide()
+
+    def show_toast(self, message, duration=2000):
+        QApplication.setQuitOnLastWindowClosed(False)  # 👈 key fix
+
+        msg = QMessageBox()
+        msg.setWindowTitle("Info")
+        msg.setText(message)
+        msg.setStandardButtons(QMessageBox.StandardButton.Close)
+        msg.show()
+
+        self._toast = msg
+
+        QTimer.singleShot(duration, msg.close)
 
     def open_settings(self):
         """Open settings window"""
@@ -736,3 +711,17 @@ class FloatingWindow(QWidget):
         """Handle tool mode updates"""
         if self.chat_window:
             self.chat_window.handle_ai_response(result)
+        if self.android_bridge and self.android_bridge.isVisible():
+            self.android_bridge.handle_ai_response(result)
+
+    def toggle_android_bridge(self):
+        """Start or stop the Android phone bridge. Called from context menu."""
+        if self.android_bridge is not None and self.android_bridge.isVisible():
+            self.android_bridge.hide()
+            self.android_bridge = None
+        else:
+            from ui.android_bridge import AndroidBridge
+            if self.android_bridge is None:
+                self.android_bridge = AndroidBridge(self.controller)
+            self.android_bridge.show()
+            self.show_toast(f"Packet opened - {self.android_bridge.get_connection_info()}", 1500)

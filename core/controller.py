@@ -43,14 +43,10 @@ class AssistantController(QObject):
     # Manual provider — fires on the main thread to show the response popup
     # Only carries display data; result_holder + done_event live on self
     manual_response_signal = pyqtSignal(str, bool, str)
-
-    tui_send_signal = pyqtSignal(str)  # text message from TUI
-    tui_interrupt_signal = pyqtSignal()  # interrupt from TUI
-    tui_load_session_signal = pyqtSignal(str)
-    tui_new_session_signal = pyqtSignal()
-    tui_open_memory_signal = pyqtSignal()
-    tui_open_instructions_signal = pyqtSignal()
-    tui_open_names_signal = pyqtSignal()
+    bridge_send_signal = pyqtSignal(str)  # thread-safe: send message from bridge
+    bridge_user_bubble_signal = pyqtSignal(str)  # thread-safe: add user bubble from bridge
+    bridge_load_session_signal = pyqtSignal(str)  # thread-safe: load session from bridge
+    bridge_new_session_signal = pyqtSignal()  # thread-safe: new session from bridge
 
     def __init__(self):
         super().__init__()
@@ -139,12 +135,14 @@ class AssistantController(QObject):
             voice_mode=False,  # Start with voice off
             elevenlabs_enabled=self.settings.get('elevenlabs_enabled', False),
             settings_callback=lambda: self.settings,  # Pass settings getter
-            skill_manager=self.skill_manager
+            skill_manager=self.skill_manager,
+            controller = self
         )
         log.info("[AssistantController.__init__] AIEngine created")
 
         # Wire chat window bridge into tool_manager so it can call add_system_message etc.
         self.ai.tool_manager._get_chat = lambda: self._chat
+        self.ai.tool_manager._get_android_bridge = lambda: getattr(getattr(self, 'ui', None), 'android_bridge', None)
 
         # Apply settings
         log.debug("[AssistantController.__init__] Applying AI provider settings...")
@@ -197,7 +195,10 @@ class AssistantController(QObject):
         log.debug("[AssistantController.__init__] voice_message_signal connected to main thread handler")
 
         # Connect manual response signal — shows popup on main thread
-        self.manual_response_signal.connect(self._show_manual_response_window)
+        self.bridge_send_signal.connect(self.send_message)
+        self.bridge_user_bubble_signal.connect(self._add_user_bubble_to_chat)
+        self.bridge_load_session_signal.connect(self.load_session)
+        self.bridge_new_session_signal.connect(self.create_new_session)
         self.ai.manual_response_fn = self._request_manual_response
         log.debug("[AssistantController.__init__] manual_response_signal connected")
 
@@ -206,15 +207,6 @@ class AssistantController(QObject):
         self.session_manager = SessionManager()
         self.current_session_id = None
         self.session_has_messages = False
-
-        # Connect TUI signals — safe to emit from any thread
-        self.tui_send_signal.connect(self.send_message)
-        self.tui_interrupt_signal.connect(self.interrupt_request)
-        self.tui_load_session_signal.connect(self.load_session)
-        self.tui_new_session_signal.connect(self._tui_new_session)
-        self.tui_open_memory_signal.connect(self._tui_open_memory)
-        self.tui_open_instructions_signal.connect(self._tui_open_instructions)
-        self.tui_open_names_signal.connect(self._tui_open_names)
 
         # Create initial session
         self._create_new_session()
@@ -351,66 +343,10 @@ class AssistantController(QObject):
         """Emit message to UI log panel."""
         self.log_signal.emit(message, level)
 
-    def _tui_new_session(self):
-        self._create_new_session()
-        self.ai.clear_history()
+    def _add_user_bubble_to_chat(self, text):
+        """Thread-safe slot: add user bubble to PC chat window from Android."""
         if self._chat:
-            self._chat.clear_chat_silent()
-            self._chat.refresh_session_list()
-            self._chat.add_system_message("🆕 **New session started**")
-
-    def _tui_open_memory(self):
-        try:
-            from ui.memory_window import MemoryWindow
-            from PyQt6.QtCore import Qt
-            if not hasattr(self, '_tui_mem_win') or not self._tui_mem_win:
-                self._tui_mem_win = MemoryWindow(self)
-                self._tui_mem_win.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
-            self._tui_mem_win.show()
-            self._tui_mem_win.raise_()
-            self._tui_mem_win.activateWindow()
-        except Exception as e:
-            log.error(f"[_tui_open_memory] {e}")
-
-    def _tui_open_instructions(self):
-        from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QTextEdit,
-                                     QDialogButtonBox, QLabel)
-        dlg = QDialog(self.ui)
-        dlg.setWindowTitle("Custom Instructions")
-        dlg.resize(500, 350)
-        lay = QVBoxLayout(dlg)
-        lay.addWidget(QLabel("Custom instructions added to every prompt:"))
-        te = QTextEdit()
-        te.setPlainText(self.get_custom_instructions())
-        lay.addWidget(te)
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
-                                QDialogButtonBox.StandardButton.Cancel)
-        btns.accepted.connect(dlg.accept)
-        btns.rejected.connect(dlg.reject)
-        lay.addWidget(btns)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            self.set_custom_instructions(te.toPlainText())
-
-    def _tui_open_names(self):
-        from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QLineEdit,
-                                     QDialogButtonBox, QFormLayout, QLabel)
-        dlg = QDialog(self.ui)
-        dlg.setWindowTitle("Names")
-        lay = QVBoxLayout(dlg)
-        form = QFormLayout()
-        user_edit = QLineEdit(self.get_user_name())
-        asst_edit = QLineEdit(self.get_assistant_name())
-        form.addRow(QLabel("Your name:"), user_edit)
-        form.addRow(QLabel("Assistant name:"), asst_edit)
-        lay.addLayout(form)
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
-                                QDialogButtonBox.StandardButton.Cancel)
-        btns.accepted.connect(dlg.accept)
-        btns.rejected.connect(dlg.reject)
-        lay.addWidget(btns)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            self.set_user_name(user_edit.text().strip())
-            self.set_assistant_name(asst_edit.text().strip())
+            self._chat.add_user_message(text)
 
     def load_settings(self):
         log.debug(f"[AssistantController.load_settings] Loading from '{self.settings_file}'")
@@ -628,11 +564,14 @@ class AssistantController(QObject):
         self._manual_done_event = threading.Event()
         # Emit only display data — the window will read result_holder from self
         self.manual_response_signal.emit(context, work_mode, work_output)
-        # Block the worker thread until the window is dismissed
+        # Block the worker thread until the window is dismissed (by PC or Android)
         self._manual_done_event.wait()
         result = self._manual_result_holder[0] if self._manual_result_holder else None
+        # Dismiss Android's dialog regardless of who responded first
+        ab = getattr(getattr(self, 'ui', None), 'android_bridge', None)
+        if ab and ab.isVisible():
+            ab.dismiss_manual_response()
         return result
-
     def _show_manual_response_window(self, context, work_mode, work_output):
         """Slot — always runs on the main thread.  Creates and shows the popup."""
         from ui.manual_response_window import ManualResponseWindow
@@ -644,6 +583,21 @@ class AssistantController(QObject):
         win.show()
         win.raise_()
         win.activateWindow()
+
+        # ── Also show on Android if a phone is connected ──────────────────────
+        ab = getattr(getattr(self, 'ui', None), 'android_bridge', None)
+        if ab and ab.isVisible() and getattr(ab, '_conn', None) is not None:
+            def on_android_manual_response(text):
+                """Called from recv_loop thread when Android submits or cancels."""
+                if not self._manual_done_event.is_set():
+                    self._manual_result_holder.append(text if text else None)
+                    self._manual_done_event.set()
+                    # Close the PC window from the main thread
+                    from PyQt6.QtCore import QTimer
+                    close_win = getattr(self, '_manual_response_win', None)
+                    if close_win:
+                        QTimer.singleShot(0, close_win.close)
+            ab.request_manual_response(context, work_mode, work_output, on_android_manual_response)
 
     def handle_voice_transcription(self, text):
         """Handle transcribed voice input - SIGNAL VERSION"""
@@ -657,9 +611,8 @@ class AssistantController(QObject):
         log.debug(f"[AssistantController._handle_voice_message_on_main_thread] text='{text[:80]}'")
         # FIXED: Ensure chat window exists (create it if needed)
         if not hasattr(self.ui, 'chat_window') or self.ui.chat_window is None:
-            if not getattr(self.ui, 'use_tui', False):
-                from ui.chat_window import ChatWindow
-                self.ui.chat_window = ChatWindow(self)
+            from ui.chat_window import ChatWindow
+            self.ui.chat_window = ChatWindow(self)
             log.debug("[AssistantController._handle_voice_message_on_main_thread] "
                       "Chat window created for voice message buffering")
             self.log("Chat window created for voice message buffering")
@@ -1568,6 +1521,9 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             self._chat.add_system_message("🆕 **New Session Created**")
             self._chat.warn_loaded_skills_if_any()
         log.info(f"[AssistantController.create_new_session] ✓ New session ready: '{self.current_session_id}'")
+        ab = getattr(getattr(self, 'ui', None), 'android_bridge', None)
+        if ab and ab.isVisible():
+            ab.render_loaded_messages()
 
     def load_session(self, session_id):
         """Load a session"""
@@ -1609,18 +1565,11 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
 
         # Render messages in UI — strip tool call JSON from assistant messages
         if self._chat:
-            display_history = []
-            for msg in session_data['chat_history']:
-                if msg.get('role') == 'assistant':
-                    cleaned_content = self.ai.tool_manager.strip_tool_calls(
-                        msg.get('content', '')
-                    )
-                    display_history.append({**msg, 'content': cleaned_content})
-                else:
-                    display_history.append(msg)
-            if self._chat:
-                self._chat.render_loaded_messages(display_history)
-            log.debug("[AssistantController.load_session] Messages rendered in UI (tool calls stripped)")
+            self._chat.render_loaded_messages()
+        log.debug("[AssistantController.load_session] Messages rendered in UI (tool calls stripped)")
+        ab = getattr(getattr(self, 'ui', None), 'android_bridge', None)
+        if ab and ab.isVisible():
+            ab.render_loaded_messages()
 
         # Update current session
         self.current_session_id = session_id

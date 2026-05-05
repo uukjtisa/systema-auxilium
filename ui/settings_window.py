@@ -708,7 +708,92 @@ class SettingsWindow(BaseWindow):
         cs_lay.addLayout(_cs_btn_row)
         ai_lay.addWidget(self.custom_script_group)
 
+        # ── Conversation Prefilling ──────────────────────────────────────────
+        pf_group = QGroupBox("Conversation Prefilling")
+        pf_group.setStyleSheet(_GROUP)
+        pf_lay = QVBoxLayout(pf_group)
+
+        self.prefilling_checkbox = QCheckBox(
+            "Enable Conversation Prefilling (reinforces tool format via fake history)")
+        self.prefilling_checkbox.setStyleSheet(f"color:{_TEXT}; font-size:10pt;")
+        self.prefilling_checkbox.setChecked(True)
+        pf_lay.addWidget(self.prefilling_checkbox)
+
+        # Source radios
+        from PyQt6.QtWidgets import QRadioButton, QButtonGroup
+        self.pf_source_group = QButtonGroup(self)
+        self.pf_radio_premade = QRadioButton("Use premade script  (PREFILLING in global_instructions.py)")
+        self.pf_radio_session = QRadioButton("Use a saved session as prefilling history")
+        for rb in (self.pf_radio_premade, self.pf_radio_session):
+            rb.setStyleSheet(f"color:{_TEXT}; font-size:10pt; margin-left:16px;")
+        self.pf_source_group.addButton(self.pf_radio_premade, 0)
+        self.pf_source_group.addButton(self.pf_radio_session, 1)
+        self.pf_radio_premade.setChecked(True)
+        pf_lay.addWidget(self.pf_radio_premade)
+        pf_lay.addWidget(self.pf_radio_session)
+
+        # Session picker (visible only when session radio is selected)
+        self.pf_session_widget = QWidget()
+        _pf_sess_row = QHBoxLayout(self.pf_session_widget)
+        _pf_sess_row.setContentsMargins(32, 0, 0, 0)
+        self.pf_session_combo = QComboBox()
+        self.pf_session_combo.setStyleSheet(_COMBO)
+        self.pf_session_combo.setMinimumWidth(260)
+        _pf_refresh_btn = QPushButton("🔄")
+        _pf_refresh_btn.setStyleSheet(_BTN)
+        _pf_refresh_btn.setFixedWidth(36)
+        _pf_refresh_btn.setToolTip("Refresh session list")
+        _pf_refresh_btn.clicked.connect(self._refresh_prefilling_sessions)
+        _pf_sess_row.addWidget(QLabel("Session:"))
+        _pf_sess_row.addWidget(self.pf_session_combo)
+        _pf_sess_row.addWidget(_pf_refresh_btn)
+        _pf_sess_row.addStretch()
+        self.pf_session_widget.setVisible(False)
+        pf_lay.addWidget(self.pf_session_widget)
+
+        # Wire visibility + enable/disable
+        self.pf_radio_session.toggled.connect(self.pf_session_widget.setVisible)
+        self.prefilling_checkbox.toggled.connect(self.pf_radio_premade.setEnabled)
+        self.prefilling_checkbox.toggled.connect(self.pf_radio_session.setEnabled)
+        self.prefilling_checkbox.toggled.connect(
+            lambda checked: self.pf_session_widget.setVisible(
+                checked and self.pf_radio_session.isChecked()))
+
+        pf_lay.addWidget(_label(
+            "💡 Premade: edit PREFILLING in global_instructions.py.  "
+            "Session: the full chat history of the chosen session is injected "
+            "before every request — the AI \"remembers\" doing things that way.",
+            muted=True))
+        ai_lay.addWidget(pf_group)
+        # ────────────────────────────────────────────────────────────────────
+
         ai_lay.addStretch()
+
+        # ════════════════════════════════════════════════════════════════════
+        # TAB 0 — General
+        # ════════════════════════════════════════════════════════════════════
+        gen_scroll, gen_lay = _make_scroll_tab()
+
+        gen_startup_group = QGroupBox("Startup")
+        gen_startup_group.setStyleSheet(_GROUP)
+        gen_s_lay = QVBoxLayout(gen_startup_group)
+        self.open_chat_on_startup_checkbox = QCheckBox("Open chat window on startup")
+        self.open_chat_on_startup_checkbox.setStyleSheet(_CHECK)
+        gen_s_lay.addWidget(self.open_chat_on_startup_checkbox)
+        gen_s_lay.addWidget(_info_box(
+            "When enabled, the chat window will automatically open when the app starts.\n"
+            "When disabled, it still pre-loads in the background for a faster first open."))
+        self.open_packet_on_startup_checkbox = QCheckBox(
+            "Open packet automatically on startup  (Android Bridge — Systema Auxilium Android Module)")
+        self.open_packet_on_startup_checkbox.setStyleSheet(_CHECK)
+        gen_s_lay.addWidget(self.open_packet_on_startup_checkbox)
+        gen_s_lay.addWidget(_info_box(
+            "When enabled, the Android Bridge TCP server starts automatically on launch.\n"
+            "Connect the Systema Auxilium Android app over Wi-Fi LAN to remote-control the assistant."))
+        gen_lay.addWidget(gen_startup_group)
+        gen_lay.addStretch()
+        tabs.addTab(gen_scroll, "⚙️  General")
+
         tabs.addTab(ai_scroll, "🤖  AI")
 
         # ════════════════════════════════════════════════════════════════════
@@ -1399,6 +1484,22 @@ class SettingsWindow(BaseWindow):
         else:
             self.show_status_message("✗ Quota reset failed")
 
+    def _refresh_prefilling_sessions(self):
+        """Populate the prefilling session combo with all saved sessions.
+        The currently active session is excluded — if it's selected as the prefill
+        source, the engine falls back to the premade PREFILLING automatically."""
+        self.pf_session_combo.clear()
+        try:
+            active_id = getattr(self.controller, 'current_session_id', None)
+            sessions = self.controller.get_session_list()
+            for s in sessions:
+                if s.get('id') == active_id:
+                    continue
+                label = s.get('name') or s.get('id', '?')
+                self.pf_session_combo.addItem(label, s.get('id', ''))
+        except Exception as e:
+            self.pf_session_combo.addItem(f"(error: {e})", "")
+
     def refresh_audio_devices(self):
         """Refresh audio device lists"""
         try:
@@ -1433,6 +1534,14 @@ class SettingsWindow(BaseWindow):
 
     def load_settings(self):
         """Load settings from controller"""
+        # Load General settings
+        self.open_chat_on_startup_checkbox.setChecked(
+            self.controller.settings.get('open_chat_on_startup', False)
+        )
+        self.open_packet_on_startup_checkbox.setChecked(
+            self.controller.settings.get('open_packet_on_startup', False)
+        )
+
         # Load provider and trigger visibility update
         provider = self.controller.get_ai_provider()
         self.provider_combo.setCurrentText(provider)
@@ -1555,7 +1664,23 @@ class SettingsWindow(BaseWindow):
         puter_tts_model = self.controller.get_puter_tts_model()
         puter_tts_voice = self.controller.get_puter_tts_voice()
 
-        #Load memory engine settings
+        # Load prefilling settings
+        self.prefilling_checkbox.setChecked(
+            self.controller.settings.get('prefilling_enabled', True)
+        )
+        _pf_mode = self.controller.settings.get('prefilling_mode', 'premade')
+        if _pf_mode == 'session':
+            self.pf_radio_session.setChecked(True)
+        else:
+            self.pf_radio_premade.setChecked(True)
+        self._refresh_prefilling_sessions()
+        _pf_sid = self.controller.settings.get('prefilling_session_id', '')
+        for i in range(self.pf_session_combo.count()):
+            if self.pf_session_combo.itemData(i) == _pf_sid:
+                self.pf_session_combo.setCurrentIndex(i)
+                break
+
+        # Load memory engine settings
         self.memory_enabled_checkbox.setChecked(
             self.controller.settings.get('memory_enabled', True)
         )
@@ -1657,7 +1782,11 @@ class SettingsWindow(BaseWindow):
         self.on_vad_settings_changed()
 
     def save_settings(self):
-        """Save settings to controller - FIXED: Actually applies voice settings!"""
+        """Save settings to controller"""
+        # Save General settings
+        self.controller.settings['open_chat_on_startup'] = self.open_chat_on_startup_checkbox.isChecked()
+        self.controller.settings['open_packet_on_startup'] = self.open_packet_on_startup_checkbox.isChecked()
+
         # Save provider
         provider = self.provider_combo.currentText()
         self.controller.set_ai_provider(provider)
@@ -1773,6 +1902,11 @@ class SettingsWindow(BaseWindow):
             self.controller.set_elevenlabs_voice_id(elevenlabs_voice)
 
         # Save memory engine settings
+        self.controller.settings['prefilling_enabled'] = self.prefilling_checkbox.isChecked()
+        self.controller.settings['prefilling_mode'] = (
+            'session' if self.pf_radio_session.isChecked() else 'premade')
+        self.controller.settings['prefilling_session_id'] = (
+                self.pf_session_combo.currentData() or '')
         self.controller.settings['memory_enabled'] = self.memory_enabled_checkbox.isChecked()
         self.controller.settings['memory_threshold'] = self.memory_threshold_combo.currentData()
         self.controller.settings['memory_max_results'] = self.memory_max_combo.currentData()

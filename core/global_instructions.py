@@ -107,10 +107,21 @@ Use these sparingly and naturally.
             f'  exec(open(rf"{_skls}\\\\data-viz\\\\scripts\\\\setup.py").read())\n'
             f'  exec(open(rf"{_skls}\\\\data-viz\\\\scripts\\\\chart.py").read())\n'
             "\n"
+            "  When running skill scripts via subprocess, ALWAYS use sys.executable\n"
+            "  so the correct Python environment (with all packages) is used:\n"
+            "\n"
+            "  import subprocess, sys\n"
+            f'  subprocess.run(\n'
+            f'      [sys.executable, rf"{_skls}\\\\<skill-name>\\\\scripts\\\\<script.py>",\n'
+            f'       "arg1", "arg2"],\n'
+            f'      capture_output=True, text=True, encoding="utf-8"\n'
+            f'  )\n'
+            "\n"
             "❌ WRONG — WILL BREAK:\n"
             '  exec(open("scripts/setup.py").read())\n'
             '  exec(open("chart.py").read())\n'
             '  exec(open("data-viz/scripts/chart.py").read())\n'
+            '  subprocess.run(["python", "script.py", ...])  # Risk of using the wrong Python version!\n'
             "\n"
             "THIS RULE APPLIES TO EVERY SKILL, EVERY SCRIPT, EVERY TIME. NO EXCEPTIONS.\n"
             "RELATIVE PATHS FOR SKILL SCRIPTS WILL ALWAYS FAIL. USE FULL PATHS."
@@ -516,6 +527,53 @@ You are in normal chat mode. Respond to the user naturally.
 # The AI engine appends this to conversation history (role: "system") after
 # stripping the extra tool calls and incrementing exec_violations.
 # ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Conversation Prefilling — fake history injected at the START of every API
+# call to reinforce instruction following.  These turns are NEVER saved to the
+# session JSON; they exist only inside _build_messages() per-request.
+#
+# Add as many {user, assistant} pairs as you like.
+# The user turn primes the topic; the assistant turn locks in the behaviour.
+# ─────────────────────────────────────────────────────────────────────────────
+PREFILLING = {
+    # Each entry is {"role": "system"|"user"|"assistant", "content": "..."}
+    # They are injected in order at the start of every API call.
+    # system  → strong rule reminders (treated as user-wrapped for Anthropic/Gemini)
+    # user    → fake question to prime a topic
+    # assistant → fake answer that locks in the behaviour
+    # Mix and stack as many as you like.
+    "messages": [
+        {
+            "role": "system",
+            "content": (
+                "REMINDER: You must ALWAYS use code-fence tool calls. "
+                "NEVER use JSON. NEVER roleplay execution. "
+                "ONE code tool per response maximum. "
+                "If you say you will do something, do it in that SAME response."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "Before we start, can you confirm how you handle tool calls and "
+                "how you execute code?"
+            ),
+        },
+        {
+            "role": "assistant",
+            "content": (
+                "Of course. I always use code-fence tool calls — never JSON, never "
+                "plain text. I use ```work_environment``` when I need to see output "
+                "and chain executions until the task is fully complete. I use "
+                "```execute_code``` when I don't need to see output, and I ask the "
+                "user to confirm it worked. I only emit ONE code tool per response "
+                "and I never roleplay execution — if I say I'll do something, I do "
+                "it in that same response with the actual fence."
+            ),
+        },
+    ]
+}
 
 EXEC_CODE_TOOLCALL_VIOLATION_PROMPT = """<SYSTEM_MESSAGE type="policy_violation">
 TOOL CALL POLICY VIOLATION DETECTED
