@@ -7,51 +7,51 @@
 # ============================================================================
 
 # GUI Framework
-PyQt6>=6.4.0
+PyQt6
 
 # HTTP Requests & Web (For Puter.js API Bridge)
-requests>=2.28.0
-Flask>=2.3.0
-Flask-CORS>=4.0.0
-flask-socketio>=5.3.0
+requests
+Flask
+Flask-CORS
+flask-socketio
 
 # AI Provider SDKs
-anthropic>=0.40.0          # Anthropic Claude API (official SDK)
-google-genai>=1.0.0        # Google Gemini API (new unified SDK, replaces google-generativeai)
-openai                     # For Scripted Providers that use REST API
+anthropic          # Anthropic Claude API (official SDK)
+google-genai       # Google Gemini API (new unified SDK, replaces google-generativeai)
+openai             # For Scripted Providers that use REST API
 
 # Memory Recall
 fastembed
-numpy>=2.0.0
+numpy
 # ⚠ onnxruntime 1.20+ has DLL initialization issues on Windows.
 # Pin to 1.19.2 for stability. Do NOT upgrade without testing.
 onnxruntime==1.19.2
 
 # Browser Automation (for Puter.js)
-selenium>=4.15.0
-webdriver_manager>=4.0.2
+selenium
+webdriver_manager
 
 # System Information
-psutil>=5.9.0
+psutil
 
 # Voice Input/Output
 # numpy>=2.0.0 is required for opencv-python compatibility if the user installs it later.
 # matplotlib>=3.9.0 is required to support numpy 2.x (3.7.x was compiled against numpy 1.x).
-numpy>=2.0.0
-sounddevice>=0.4.6
+numpy
+sounddevice
 webrtcvad-wheels  # Changed from webrtcvad to webrtcvad-wheels to skip compiling in installing dependencies.
-SpeechRecognition>=3.10.0
-edge-tts>=6.1.0
-pygame>=2.5.0
+SpeechRecognition
+edge-tts
+pygame
 
 # Text Processing & Rendering
-markdown2>=2.4.0
-matplotlib>=3.9.0
-pyparsing>=3.0.0
+markdown2
+matplotlib
+pyparsing
 
 # System Tray Icons
-pystray>=0.19.0
-Pillow>=10.0.0
+pystray
+Pillow
 
 
 # ============================================================================
@@ -70,22 +70,22 @@ pandas
 
 # --- Local AI Models (LLaMA) ---
 # Uncomment to enable offline AI with LLaMA models (Only for capable hardware)
-# llama-cpp-python>=0.2.0
+# llama-cpp-python
 
 # --- Advanced Voice Activity Detection (Silero VAD) ---
 # Uncomment to enable ML-based voice detection
 # ⚠ Install torch separately — DO NOT add to this file.
 # Run: pip install torch --index-url https://download.pytorch.org/whl/cpu
-# torch>=2.0.0
-# torchaudio>=2.0.0
+# torch
+# torchaudio
 
 # --- Offline Speech Recognition (Vosk) ---
 # Uncomment for offline STT alternative
-# vosk>=0.3.45
+# vosk
 
 # --- Offline Text-to-Speech (pyttsx3) ---
 # Uncomment for offline TTS
-# pyttsx3>=2.90
+# pyttsx3
 
 
 # ============================================================================
