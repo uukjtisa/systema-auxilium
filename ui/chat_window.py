@@ -1170,6 +1170,10 @@ class ChatWindow(BaseWindow):
         self.thinking_timer = None
         self.thinking_dots = 0
         self.thinking_label_shown = False
+        self._thinking_bubble_widget = None
+        self._thinking_bubble_label = None
+        self._thinking_bubble_timer = None
+        self._thinking_bubble_dots = 0
         self.sidebar_visible = False
         # Sidebar resize state (drag handle on right edge)
         self._sidebar_w = SIDEBAR_DEFAULT_W        # current width (persists across open/close)
@@ -3271,19 +3275,27 @@ class ChatWindow(BaseWindow):
 
         self.message_widgets = []
 
-    def render_loaded_messages(self, messages):
+    def render_loaded_messages(self):
         """Render messages from loaded session"""
-        for msg in messages:
-            role = msg['role']
-            content = msg['content']
-
-            if role == 'user':
-                self.add_user_message(content)
-            elif role == 'assistant':
-                #EXTRA CLEANER IF ANYTHIN LEAKS THE FIRST TIME
-                cleaned_content = self._remove_tool_usage_format(content)
-                if not cleaned_content.strip() == "":
-                    self.add_ai_message(cleaned_content)
+        try:
+            self.clear_chat_silent()
+            history = self.controller.ai.conversation_history
+            for msg in history:
+                role = msg.get("role", "")
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    content = " ".join(
+                        block.get("text", "") for block in content
+                        if isinstance(block, dict) and block.get("type") == "text"
+                    )
+                content = self.controller.ai.tool_manager.strip_tool_calls(content)
+                if content:
+                    if role == "user":
+                        self.add_user_message(content)
+                    elif role == "assistant":
+                        self.add_ai_message(content)
+        except Exception as e:
+            print(f"[ChatWindow.render_loaded_messages] render_loaded_messages error: {e}")
 
     def _remove_tool_usage_format(self, content):
         """Remove tool usage JSON blocks from AI message"""
@@ -4917,6 +4929,11 @@ class ChatWindow(BaseWindow):
 
         self.add_user_message(display_message)
 
+        # Mirror user bubble to Android if connected
+        ab = getattr(getattr(self.controller, 'ui', None), 'android_bridge', None)
+        if ab and ab.isVisible():
+            ab.add_user_message(display_message)
+
         self.input_field.clear()
         self.attached_image = None
 
@@ -5045,7 +5062,7 @@ class ChatWindow(BaseWindow):
         """Update thinking animation"""
         self.thinking_dots = (self.thinking_dots + 1) % 4
         dots = "●" * self.thinking_dots + "○" * (3 - self.thinking_dots)
-        self.status_label.setText(f"AI is thinking {dots}")
+        self.status_label.setText(f"{dots}")
 
     def interrupt_response(self):
         """Interrupt current AI response and restore message to input"""
@@ -5062,6 +5079,7 @@ class ChatWindow(BaseWindow):
 
             if self.last_sent_message:
                 current_text = self.input_field.toPlainText()
+                # Return old message for easy editing
                 if current_text:
                     self.input_field.text_input.setPlainText(self.last_sent_message + "\n\n" + current_text)
                 else:
@@ -5072,8 +5090,7 @@ class ChatWindow(BaseWindow):
             self.send_btn.show()
 
             self.hide_thinking()
-
-            self.add_system_message("⚡️ **Response interrupted - message returned to input**")
+            self.hide_thinking_bubble()
 
     def interrupt_work_mode(self):
         """Legacy method - now redirects to interrupt_response"""
@@ -5091,6 +5108,7 @@ class ChatWindow(BaseWindow):
         self.set_input_enabled(False)
         self.send_btn.hide()
         self.interrupt_btn.show()
+        self.show_thinking_bubble()
 
     def hide_thinking(self):
         """Hide thinking animation"""
@@ -5099,6 +5117,89 @@ class ChatWindow(BaseWindow):
         self.set_input_enabled(True)
         self.interrupt_btn.hide()
         self.send_btn.show()
+        self.hide_thinking_bubble()
+
+    def show_thinking_bubble(self):
+        """Show an animated three-dot typing indicator as an AI chat bubble."""
+        if self._thinking_bubble_widget is not None:
+            return  # Already showing
+
+        bubble = QFrame()
+        bubble.setStyleSheet("""
+            QFrame {
+                background-color: transparent;
+                padding: 12px 16px;
+            }
+        """)
+
+        layout = QHBoxLayout(bubble)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        # Avatar — left side, same as AI messages
+        avatar = self._make_chat_avatar('bot', getattr(self, '_bot_avatar_size', 32))
+        layout.addWidget(avatar, alignment=Qt.AlignmentFlag.AlignTop)
+
+        # Dot bubble
+        _tc = self._t()
+        content = QFrame()
+        content.setStyleSheet(f"""
+                    QFrame {{
+                        background-color: {_tc['elevated']};
+                        border: 1px solid {_tc['border']};
+                        border-radius: 12px;
+                    }}
+                """)
+        content_layout = QHBoxLayout(content)
+        content_layout.setContentsMargins(16, 12, 16, 12)
+
+        dot_label = QLabel("● ○ ○")
+        dot_label.setStyleSheet(
+            "color: #8B949E; font-size: 15px; background: transparent; letter-spacing: 6px;"
+        )
+        content_layout.addWidget(dot_label)
+
+        layout.addWidget(content)
+        layout.addStretch()
+
+        self._thinking_bubble_widget = bubble
+        self._thinking_bubble_label = dot_label
+        self._thinking_bubble_dots = 0
+
+        self.chat_layout.insertWidget(self.chat_layout.count() - 1, bubble)
+        self.scroll_to_bottom()
+
+        # Animate
+        self._thinking_bubble_timer = QTimer()
+        self._thinking_bubble_timer.timeout.connect(self._update_thinking_bubble)
+        self._thinking_bubble_timer.start(420)
+
+    def _update_thinking_bubble(self):
+        """Cycle the three dots animation inside the typing bubble."""
+        if self._thinking_bubble_label is None:
+            return
+        self._thinking_bubble_dots = (self._thinking_bubble_dots + 1) % 4
+        states = ["● ○ ○", "● ● ○", "● ● ●", "○ ● ●"]
+        try:
+            self._thinking_bubble_label.setText(states[self._thinking_bubble_dots])
+        except RuntimeError:
+            pass
+
+    def hide_thinking_bubble(self):
+        """Remove the animated three-dot typing indicator bubble."""
+        if self._thinking_bubble_timer is not None:
+            self._thinking_bubble_timer.stop()
+            self._thinking_bubble_timer = None
+
+        if self._thinking_bubble_widget is not None:
+            widget = self._thinking_bubble_widget
+            self._thinking_bubble_widget = None
+            self._thinking_bubble_label = None
+            try:
+                self.chat_layout.removeWidget(widget)
+                widget.deleteLater()
+            except RuntimeError:
+                pass
 
     def resizeEvent(self, event):
         """Handle window resize."""

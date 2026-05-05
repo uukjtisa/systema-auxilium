@@ -34,6 +34,7 @@ class ApprovalSignal(QObject):
     """Signal object for requesting code approval on main thread"""
     request_approval = pyqtSignal(str, str, object)  # code, execution_type, callback
     system_message   = pyqtSignal(str)               # text → chat window, main thread only
+    close_approval_dialog = pyqtSignal(bool, str)  # approved, modified_code — closes active dialog
 
 
 class ToolManager:
@@ -96,6 +97,9 @@ class ToolManager:
         self.approval_signal = ApprovalSignal()
         self.approval_signal.request_approval.connect(self._show_approval_dialog_on_main_thread)
         self.approval_signal.system_message.connect(self._deliver_system_message)
+        self.approval_signal.close_approval_dialog.connect(self._close_active_approval_dialog)
+        self._active_approval_dialog = None
+        self._get_android_bridge = None
         log.debug("[ToolManager.__init__] ApprovalSignal connected")
 
         # Setup .generated folder (relative to working directory)
@@ -423,6 +427,18 @@ class ToolManager:
             # If dialog fails, approve by default (but log error)
             return True, code
 
+    def _close_active_approval_dialog(self, approved: bool, modified_code: str):
+        """Slot — always runs on main thread. Closes PC dialog when Android decides first."""
+        dialog = self._active_approval_dialog
+        if dialog and dialog.isVisible():
+            if approved:
+                dialog.result = 'accept'
+                dialog.modified_code = modified_code if modified_code else dialog.code_edit.toPlainText().strip()
+                dialog.accept()
+            else:
+                dialog.result = 'reject'
+                dialog.close()
+
     def _show_approval_dialog_on_main_thread(self, code, execution_type, callback):
         """
         Show approval dialog on main thread (called via signal).
@@ -445,10 +461,35 @@ class ToolManager:
                 return
 
             log.debug("[ToolManager._show_approval_dialog_on_main_thread] Showing CodeApprovalDialog...")
-            # Show dialog on main thread
-            approved, modified_code = CodeApprovalDialog.get_approval(
-                code, execution_type, self.ai_engine
-            )
+            from PyQt6.QtCore import Qt
+
+            # ── Notify Android if connected ───────────────────────────────────
+            android_bridge = None
+            if callable(self._get_android_bridge):
+                android_bridge = self._get_android_bridge()
+            if android_bridge and getattr(android_bridge, '_conn', None) is not None:
+                android_bridge._dispatch({
+                    "cmd": "show_code_approval",
+                    "code": code,
+                    "execution_type": execution_type
+                })
+
+            # Show dialog manually so we keep a ref for Android to close it
+            dialog = CodeApprovalDialog(code, execution_type, self.ai_engine)
+            self._active_approval_dialog = dialog
+            dialog.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+            dialog.exec()
+            self._active_approval_dialog = None
+
+            # ── Dismiss Android dialog (sync close regardless of who decided) ─
+            if android_bridge and getattr(android_bridge, '_conn', None) is not None:
+                android_bridge._dispatch({"cmd": "dismiss_code_approval"})
+
+            approved = dialog.result == 'accept'
+            modified_code = dialog.modified_code if approved else code
             log.info(f"[ToolManager._show_approval_dialog_on_main_thread] Dialog closed | "
                      f"approved={approved} | code_was_modified={modified_code != code}")
 

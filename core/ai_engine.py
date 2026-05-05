@@ -13,8 +13,8 @@ from core.memory_manager import get_memory_manager
 from core.global_instructions import (
     get_system_prompt,
     EMPTY_EXIT_SUMMARY_PROMPT,
+    PREFILLING,
 )
-
 
 # ─────────────────────────── Colored Logger Setup ────────────────────────────
 _verbose = True
@@ -32,7 +32,8 @@ class AIEngine:
     """AI conversation engine"""
 
     def __init__(self, log_callback=None, api_key='', puter_server=None, gemini_api_key='', system_info='',
-                 voice_mode=False, elevenlabs_enabled=False, settings_callback=None, skill_manager=None):
+                 voice_mode=False, elevenlabs_enabled=False, settings_callback=None, skill_manager=None,
+                 controller=None):
         log.info("[AIEngine.__init__] ── Initializing AI Engine ──────────────────────────────")
         log.debug(f"[AIEngine.__init__] Parameters: voice_mode={voice_mode} | "
                   f"elevenlabs_enabled={elevenlabs_enabled} | "
@@ -42,6 +43,9 @@ class AIEngine:
 
         self.log_callback = log_callback
         self.settings_callback = settings_callback
+        if controller:
+            self.controller = controller
+            log.debug(f"[AIEngine.__init__] Controller passed successfully! | {self.controller}")
         self.conversation_history = []
         log.debug("[AIEngine.__init__] conversation_history initialized (empty)")
 
@@ -89,16 +93,16 @@ class AIEngine:
         self.gemini_model = 'gemini-2.5-flash'
 
         # Anthropic generation params
-        self.anthropic_temperature = 1.0     # 0.0-1.0 (Anthropic range)
-        self.anthropic_max_tokens  = 8192    # manual value when auto is off
-        self.anthropic_auto_tokens = True    # auto-scale max_tokens
+        self.anthropic_temperature = 1.0  # 0.0-1.0 (Anthropic range)
+        self.anthropic_max_tokens = 8192  # manual value when auto is off
+        self.anthropic_auto_tokens = True  # auto-scale max_tokens
 
         # Gemini generation params
-        self.gemini_temperature  = 1.0       # 0.0-2.0 (Gemini range)
-        self.gemini_max_tokens   = 8192
-        self.gemini_auto_tokens  = True
-        self.gemini_top_p        = None      # None = use API default
-        self.gemini_top_k        = None      # None = use API default
+        self.gemini_temperature = 1.0  # 0.0-2.0 (Gemini range)
+        self.gemini_max_tokens = 8192
+        self.gemini_auto_tokens = True
+        self.gemini_top_p = None  # None = use API default
+        self.gemini_top_k = None  # None = use API default
 
         self.tts_provider = 'edge-tts'
         self.puter_tts_model = 'tts-1'
@@ -329,6 +333,39 @@ class AIEngine:
     # Each _http_* helper converts this standard format to its own API shape.
     # ═══════════════════════════════════════════════════════════════════════════
 
+    def _load_session_prefilling(self, session_id: str) -> list:
+        """Load a saved session file and return its chat history as prefilling messages.
+        Only user and assistant turns are kept — system messages (work mode prompts,
+        memory injections, etc.) are stripped so they don't pollute the prefill."""
+        import json
+        from pathlib import Path
+        _APP_ROOT = Path(__file__).resolve().parent.parent
+        sessions_dir = _APP_ROOT / "data" / "sessions"
+        session_file = None
+        for f in sessions_dir.glob(f"*{session_id}.json"):
+            session_file = f
+            break
+        if not session_file or not session_file.exists():
+            log.warning(f"[AIEngine._load_session_prefilling] File not found for id='{session_id}'")
+            return []
+        try:
+            with open(session_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            history = data.get('chat_history', [])
+            msgs = [
+                {'role': m['role'], 'content': m['content']}
+                for m in history
+                if m.get('role') in ('user', 'assistant')
+                   and isinstance(m.get('content'), str)
+                   and m['content'].strip()
+            ]
+            log.info(f"[AIEngine._load_session_prefilling] ✓ Loaded {len(msgs)} messages "
+                     f"from '{session_file.name}'")
+            return msgs
+        except Exception as e:
+            log.error(f"[AIEngine._load_session_prefilling] ✗ Failed: {type(e).__name__}: {e}")
+            return []
+
     def _get_history_with_memory(self) -> list:
         """Return conversation_history with pending memory context injected
         immediately before the most recent user message (if any)."""
@@ -349,13 +386,56 @@ class AIEngine:
     def _build_messages(self):
         """Build unified standard message list (OpenAI-compatible format).
         Structure: [{role: system/assistant/user, content: str}, ...]
-        All three provider http-helpers consume this and convert as needed."""
+        All three provider http-helpers consume this and convert as needed.
+
+        Prefilling pairs from PREFILLING are injected here as fake history to
+        reinforce instruction-following.  They are NEVER appended to
+        conversation_history, so session_manager.py never sees them."""
         log.debug(f"[AIEngine._build_messages] Building message list | "
                   f"history_len={len(self.conversation_history)}")
+
         messages = [
-            {'role': 'system',    'content': self._get_effective_system_prompt()},
-            {'role': 'assistant', 'content': _ASSISTANT_PRIMING}
+            {'role': 'system', 'content': self._get_effective_system_prompt()},
         ]
+
+        # ── Conversation prefilling (fake prior turns) ─────────────────────
+        prefilling_enabled = True
+        prefilling_mode = 'premade'
+        prefilling_session_id = ''
+        if self.settings_callback:
+            _s = self.settings_callback()
+            prefilling_enabled = _s.get('prefilling_enabled', True)
+            prefilling_mode = _s.get('prefilling_mode', 'premade')
+            prefilling_session_id = _s.get('prefilling_session_id', '')
+
+        if prefilling_enabled:
+            _active_id = self.controller.current_session_id if self.controller else None
+
+            if prefilling_mode == 'session' and prefilling_session_id and prefilling_session_id != _active_id:
+                prefill_msgs = self._load_session_prefilling(prefilling_session_id)
+                log.debug(f"[AIEngine._build_messages] Session prefilling: "
+                          f"{len(prefill_msgs)} messages from '{prefilling_session_id[:8]}'")
+            else:
+                if prefilling_mode == 'session' and prefilling_session_id == _active_id:
+                    log.warning("[AIEngine._build_messages] Seed session is active — "
+                                "falling back to premade PREFILLING to avoid self-reference")
+                prefill_msgs = [
+                    {'role': m['role'], 'content': m['content']}
+                    for m in PREFILLING.get('messages', [])
+                ]
+                log.debug(f"[AIEngine._build_messages] Premade prefilling: "
+                          f"{len(prefill_msgs)} messages")
+            for msg in prefill_msgs:
+                messages.append(msg)
+            messages.append({"role": "system", "content": "[SYSTEM NOTICE]\nTHE MESSAGES FROM ABOVE ARE PRIMERS, NOT "
+                                                          "REAL MESSAGES, DO NOT MENTION ANY OF THIS TO THE USER IN THE "
+                                                          "INCOMING MESSAGES TO COME!\n\nTHE NEXT MESSAGE TO THIS IS "
+                                                          "THE STARTING POINT FOR THE REAL MESSAGES."})
+        else:
+            messages.append({'role': 'assistant', 'content': _ASSISTANT_PRIMING})
+            log.debug("[AIEngine._build_messages] Prefilling disabled — using legacy priming")
+        # ──────────────────────────────────────────────────────────────────
+
         messages.extend(self._get_history_with_memory())
         log.debug(f"[AIEngine._build_messages] Built {len(messages)} total messages")
         return messages
@@ -420,9 +500,9 @@ class AIEngine:
             log.debug(f"[AIEngine._http_anthropic] max_tokens={max_tokens} | ")
 
             kwargs = {
-                'model':       self.anthropic_model,
-                'max_tokens':  max_tokens,
-                'messages':    convo,
+                'model': self.anthropic_model,
+                'max_tokens': max_tokens,
+                'messages': convo,
                 'temperature': self.anthropic_temperature,
             }
             if system_prompt:
@@ -461,7 +541,7 @@ class AIEngine:
             for msg in convo:
                 gemini_role = 'model' if msg['role'] == 'assistant' else 'user'
                 contents.append({
-                    'role':  gemini_role,
+                    'role': gemini_role,
                     'parts': [{'text': msg['content']}]
                 })
 
@@ -474,7 +554,7 @@ class AIEngine:
 
             config_kwargs = {
                 'max_output_tokens': max_out,
-                'temperature':       self.gemini_temperature,
+                'temperature': self.gemini_temperature,
             }
             if system_prompt:
                 config_kwargs['system_instruction'] = system_prompt
@@ -816,7 +896,7 @@ class AIEngine:
                 })
             return {
                 'response': remaining_text.strip() if remaining_text and remaining_text.strip()
-                            else (f"✅ Skill '{skill_name}' loaded." if success else f"⚠ {msg}"),
+                else (f"✅ Skill '{skill_name}' loaded." if success else f"⚠ {msg}"),
                 'has_work_call': False,
                 'in_work_mode': False,
                 'thinking': False,
@@ -847,7 +927,7 @@ class AIEngine:
                 })
             return {
                 'response': remaining_text.strip() if remaining_text and remaining_text.strip()
-                            else (f"🗑 Skill '{skill_name}' unloaded." if success else f"⚠ {msg}"),
+                else (f"🗑 Skill '{skill_name}' unloaded." if success else f"⚠ {msg}"),
                 'has_work_call': False,
                 'in_work_mode': False,
                 'thinking': False,
