@@ -575,10 +575,10 @@ PREFILLING = {
     ]
 }
 
-EXEC_CODE_TOOLCALL_VIOLATION_PROMPT = """<SYSTEM_MESSAGE type="policy_violation">
+EXEC_CODE_TOOLCALL_VIOLATION_PROMPT = """<SYSTEM_MESSAGE>
 TOOL CALL POLICY VIOLATION DETECTED
 
-Your previous response contained MORE THAN ONE code-execution tool call
+Your previous response contained MORE THAN ONE code-execution type tool call
 (work_environment or execute_code).  Only the FIRST call was executed.
 All subsequent code-execution calls were SILENTLY DISCARDED — they did
 NOT run.
@@ -594,8 +594,8 @@ WHY this rule exists:
   the next.
 
 WHAT YOU MUST DO NOW:
-  If you still need to run the discarded code, include it in your NEXT
-  response as a single tool call.  Do not combine code tools again.
+  If you still need to run the discarded code, recall it in the next repsonse,
+  strictly only one code-execution tool call per response!
 
 Reminder of the correct format:
 ```work_environment: [Brief Description]
