@@ -63,6 +63,7 @@ class AIEngine:
 
         self.memory_manager = get_memory_manager()
         self._pending_memory_context = ""
+        self._pending_exec_violation_prompt = None
         log.info(f"[AIEngine.__init__] MemoryManager attached | ready={self.memory_manager.is_ready}")
 
         self.system_info = system_info
@@ -381,6 +382,14 @@ class AIEngine:
                     'role': 'system',
                     'content': self._pending_memory_context
                 })
+        # ── Inject exec-violation reminder at end of history ──────────────────
+        if self._pending_exec_violation_prompt:
+            history_copy.append({
+                'role': 'system',
+                'content': self._pending_exec_violation_prompt
+            })
+            self._pending_exec_violation_prompt = None
+        # ─────────────────────────────────────────────────────────────────────
         return history_copy
 
     def _build_messages(self):
@@ -842,7 +851,10 @@ class AIEngine:
         self.last_raw_response = ai_text
 
         # ── Single-exec guardrail ──────────────────────────────────────────────────
-        self.tool_manager.enforce_single_exec_policy(ai_text)
+        ai_text, _violated, _ = self.tool_manager.enforce_single_exec_policy(ai_text)
+        if _violated:
+            from core.global_instructions import EXEC_CODE_TOOLCALL_VIOLATION_PROMPT
+            self._pending_exec_violation_prompt = EXEC_CODE_TOOLCALL_VIOLATION_PROMPT
         # ──────────────────────────────────────────────────────────────────────────
 
         if self.tool_execution_lockout:
@@ -866,14 +878,21 @@ class AIEngine:
             self.log(f"Set session name call detected: {session_name}")
             ai_text = remaining_text
 
-        memorize_result = self.tool_manager.parse_memorize(ai_text)
-        if memorize_result:
-            memory_text, ai_text = memorize_result
-            self.memory_manager.memorize(memory_text)
-            log.info(f"[AIEngine] Memory stored: '{memory_text[:60]}'")
+        # Process ALL memorize fences — keep ai_text intact so fences stay in history
+        _display_text = ai_text
+        while True:
+            _mem_result = self.tool_manager.parse_memorize(_display_text)
+            if not _mem_result:
+                break
+            _mem_text, _display_text = _mem_result
+            self.memory_manager.memorize(_mem_text)
+            log.info(f"[AIEngine] Memory stored: '{_mem_text[:60]}'")
+        # ai_text = original (memorize fences kept) → goes to conversation history
+        # _display_text = memorize-stripped version → used for all tool parsing below
 
         # ── Check for load_skill call (now valid anywhere) ────────────────────
-        load_skill_result = self.tool_manager.parse_load_skill(ai_text)
+        load_skill_result = self.tool_manager.parse_load_skill(_display_text)
+
         if load_skill_result:
             from core.global_instructions import SKILL_LOADED_CHAT_PROMPT, SKILL_ALREADY_LOADED_PROMPT
             skill_name, remaining_text = load_skill_result
@@ -894,6 +913,12 @@ class AIEngine:
                     'role': 'system',
                     'content': SKILL_LOADED_CHAT_PROMPT.format(skill_name=skill_name)
                 })
+            # Auto-follow-up: call AI immediately so user doesn't have to prompt first
+            _followup = self._call_provider()
+            if _followup:
+                _r = self._process_ai_response(_followup)
+                _r['skill_loaded'] = skill_name if success else None
+                return _r
             return {
                 'response': remaining_text.strip() if remaining_text and remaining_text.strip()
                 else (f"✅ Skill '{skill_name}' loaded." if success else f"⚠ {msg}"),
@@ -904,7 +929,7 @@ class AIEngine:
             }
 
         # ── Check for unload_skill call (valid anywhere) ──────────────────────
-        unload_skill_result = self.tool_manager.parse_unload_skill(ai_text)
+        unload_skill_result = self.tool_manager.parse_unload_skill(_display_text)
         if unload_skill_result:
             from core.global_instructions import SKILL_UNLOADED_CHAT_PROMPT, SKILL_NOT_LOADED_PROMPT
             skill_name, remaining_text = unload_skill_result
@@ -925,6 +950,12 @@ class AIEngine:
                     'role': 'system',
                     'content': SKILL_UNLOADED_CHAT_PROMPT.format(skill_name=skill_name)
                 })
+            # Auto-follow-up: call AI immediately so user doesn't have to prompt first
+            _followup = self._call_provider()
+            if _followup:
+                _r = self._process_ai_response(_followup)
+                _r['skill_unloaded'] = skill_name if success else None
+                return _r
             return {
                 'response': remaining_text.strip() if remaining_text and remaining_text.strip()
                 else (f"🗑 Skill '{skill_name}' unloaded." if success else f"⚠ {msg}"),
@@ -936,7 +967,8 @@ class AIEngine:
 
         # Check for work_environment call
         log.debug("[AIEngine._process_ai_response] Checking for work_environment call...")
-        work_call = self.tool_manager.parse_work_environment(ai_text)
+        work_call = self.tool_manager.parse_work_environment(_display_text)
+
         if work_call:
             code, visible_text = work_call
             log.info(f"[AIEngine._process_ai_response] work_environment detected | "
@@ -981,7 +1013,8 @@ class AIEngine:
 
         # Check for execute_code call
         log.debug("[AIEngine._process_ai_response] Checking for execute_code call...")
-        execute_call = self.tool_manager.parse_execute_code(ai_text)
+        execute_call = self.tool_manager.parse_execute_code(_display_text)
+
         if execute_call:
             code, visible_text = execute_call
             log.info(f"[AIEngine._process_ai_response] execute_code detected | "
@@ -1047,7 +1080,10 @@ class AIEngine:
         self.last_raw_response = ai_text
 
         # ── Single-exec guardrail ──────────────────────────────────────────────────
-        self.tool_manager.enforce_single_exec_policy(ai_text)
+        ai_text, _violated, _ = self.tool_manager.enforce_single_exec_policy(ai_text)
+        if _violated:
+            from core.global_instructions import EXEC_CODE_TOOLCALL_VIOLATION_PROMPT
+            self._pending_exec_violation_prompt = EXEC_CODE_TOOLCALL_VIOLATION_PROMPT
         # ──────────────────────────────────────────────────────────────────────────
 
         log.debug("[AIEngine._process_work_mode_response] Checking for consecutive work_environment call...")

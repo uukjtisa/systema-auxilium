@@ -144,6 +144,10 @@ class AssistantController(QObject):
         self.ai.tool_manager._get_chat = lambda: self._chat
         self.ai.tool_manager._get_android_bridge = lambda: getattr(getattr(self, 'ui', None), 'android_bridge', None)
 
+        # META CONTROL: Inject controller reference into Python interpreter namespace
+        # so the AI can do: controller.current_session_id, controller.settings, etc.
+        self.ai.tool_manager.tools['python'].namespace['controller'] = self
+
         # Apply settings
         log.debug("[AssistantController.__init__] Applying AI provider settings...")
         self.ai.set_provider(self.settings.get('ai_provider', 'anthropic'))
