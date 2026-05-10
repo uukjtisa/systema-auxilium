@@ -422,15 +422,11 @@ class MultiLineInput(QTextEdit):
                     if chat_window:
                         cleaned_path = chat_window.clean_file_path(file_path)
 
-                        # Check if Puter + image
-                        if chat_window.controller.get_ai_provider() == 'puter':
-                            valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif']
-                            if any(cleaned_path.lower().endswith(ext) for ext in valid_extensions):
-                                chat_window.attached_image = cleaned_path
-                                chat_window.add_system_message(
-                                    f"📎 **Image Ready:** {cleaned_path}\n\nType your message and press Enter."
-                                )
-                                return
+                        # Check if image — prompt user via dialog
+                        valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif']
+                        if any(cleaned_path.lower().endswith(ext) for ext in valid_extensions):
+                            QTimer.singleShot(0, lambda p=cleaned_path: chat_window._handle_image_file_drop(p))
+                            return
 
                         # Quote non-image paths
                         if chat_window.should_quote_path(cleaned_path):
@@ -451,15 +447,11 @@ class MultiLineInput(QTextEdit):
 
                 # Check if it's a valid file path
                 if os.path.exists(cleaned_path):
-                    # Check if Puter + image
-                    if chat_window.controller.get_ai_provider() == 'puter':
-                        valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif']
-                        if any(cleaned_path.lower().endswith(ext) for ext in valid_extensions):
-                            chat_window.attached_image = cleaned_path
-                            chat_window.add_system_message(
-                                f"📎 **Image Ready:** {cleaned_path}\n\nType your message and press Enter."
-                            )
-                            return
+                    # Check if image — prompt user via dialog
+                    valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif']
+                    if any(cleaned_path.lower().endswith(ext) for ext in valid_extensions):
+                        QTimer.singleShot(0, lambda p=cleaned_path: chat_window._handle_image_file_drop(p))
+                        return
 
                     # Quote non-image paths
                     if chat_window.should_quote_path(cleaned_path):
@@ -1219,8 +1211,10 @@ class ChatWindow(BaseWindow):
         # Force mode settings
         self.force_mode = None
 
-        # Image attachment
-        self.attached_image = None
+        # Image attachment (multi-image + persistent pinned images)
+        self.attached_image = None  # backward compat — last added image
+        self.attached_images = []  # list of paths queued in input bar
+        self.pinned_images = []  # list of {path, widget, row_wrapper, auto_detach}
 
         # Interrupt tracking
         self.last_sent_message = None  # Track last message for interrupt
@@ -2243,10 +2237,100 @@ class ChatWindow(BaseWindow):
         self.send_btn.clicked.connect(self.send_message)
         bottom_row_layout.addWidget(self.send_btn)
 
+        # ── Image preview bar — multi-image scrollable strip ─────────────────
+        self._img_preview_bar = QFrame()
+        self._img_preview_bar.setObjectName("imgPreviewBar")
+        self._img_preview_bar.setFixedHeight(44)
+        self._img_preview_bar.setStyleSheet(
+            "QFrame#imgPreviewBar { background: transparent; border-top: 1px solid #2D333B; }")
+        _img_bar_outer = QHBoxLayout(self._img_preview_bar)
+        _img_bar_outer.setContentsMargins(10, 6, 10, 6)
+        _img_bar_outer.setSpacing(6)
+
+        from PyQt6.QtWidgets import QScrollArea as _SA
+        _thumb_scroll = _SA()
+        _thumb_scroll.setFixedHeight(38)
+        _thumb_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        _thumb_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        _thumb_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        _thumb_scroll.setWidgetResizable(True)
+
+        self._img_thumbs_widget = QWidget()
+        self._img_thumbs_widget.setStyleSheet("background: transparent;")
+        self._img_thumbs_layout = QHBoxLayout(self._img_thumbs_widget)
+        self._img_thumbs_layout.setContentsMargins(0, 0, 0, 0)
+        self._img_thumbs_layout.setSpacing(6)
+        self._img_thumbs_layout.addStretch()
+        _thumb_scroll.setWidget(self._img_thumbs_widget)
+        _img_bar_outer.addWidget(_thumb_scroll, stretch=1)
+
+        _img_clear_all_btn = QPushButton("✕ Clear all")
+        _img_clear_all_btn.setFixedHeight(24)
+        _img_clear_all_btn.setToolTip("Remove all image attachments")
+        _img_clear_all_btn.setStyleSheet("""
+                    QPushButton {
+                        background: rgba(255,255,255,0.06);
+                        border: 1px solid rgba(255,255,255,0.12);
+                        border-radius: 6px;
+                        color: #8B949E; font-size: 10px; padding: 0 8px;
+                    }
+                    QPushButton:hover {
+                        background: rgba(234,67,53,0.25);
+                        color: #EA4335; border-color: rgba(234,67,53,0.5);
+                    }
+                """)
+        _img_clear_all_btn.clicked.connect(self._clear_image_preview)
+        _img_bar_outer.addWidget(_img_clear_all_btn)
+
+        self._img_preview_bar.hide()
+        combined_layout.addWidget(self._img_preview_bar)
+        # ─────────────────────────────────────────────────────────────────────
+
         combined_layout.addWidget(bottom_row)
         input_layout.addWidget(combined_container)
 
+        # ── Pinned images area: floating overlay, horizontal scrolling strip ──
+        self._pinned_area = QWidget(self.container)
+        self._pinned_area.setObjectName("pinnedArea")
+        self._pinned_area.setStyleSheet("QWidget#pinnedArea { background: transparent; }")
+        self._pinned_area.setFixedHeight(80)
+
+        _pa_outer_lay = QVBoxLayout(self._pinned_area)
+        _pa_outer_lay.setContentsMargins(0, 0, 0, 0)
+        _pa_outer_lay.setSpacing(0)
+
+        from PyQt6.QtWidgets import QScrollArea as _PinnedSA
+        self._pinned_scroll = _PinnedSA()
+        self._pinned_scroll.setWidgetResizable(True)
+        self._pinned_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._pinned_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._pinned_scroll.setStyleSheet("""
+                    QScrollArea { background: transparent; border: none; }
+                    QScrollBar:horizontal {
+                        background: rgba(255,255,255,0.04); height: 6px;
+                        border: none; border-radius: 3px; margin: 0;
+                    }
+                    QScrollBar::handle:horizontal {
+                        background: rgba(168,199,250,0.3); border-radius: 3px; min-width: 20px;
+                    }
+                    QScrollBar::handle:horizontal:hover { background: rgba(168,199,250,0.55); }
+                    QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+                """)
+
+        _pinned_inner = QWidget()
+        _pinned_inner.setStyleSheet("background: transparent;")
+        self._pinned_area_layout = QHBoxLayout(_pinned_inner)
+        self._pinned_area_layout.setContentsMargins(14, 6, 14, 6)
+        self._pinned_area_layout.setSpacing(8)
+        self._pinned_area_layout.addStretch()  # trailing stretch keeps cards left-aligned
+
+        self._pinned_scroll.setWidget(_pinned_inner)
+        _pa_outer_lay.addWidget(self._pinned_scroll)
+        self._pinned_area.hide()
+        # ─────────────────────────────────────────────────────────────────────
+
         self.input_container = input_container  # stored for glass background toggle
+        self.input_container.installEventFilter(self)
         chat_layout.addWidget(input_container)
 
         main_layout.addWidget(chat_container)
@@ -4900,23 +4984,27 @@ class ChatWindow(BaseWindow):
                 return i
         return -1
 
+
     def send_message(self):
-        """Send message"""
+        """Send message — supports multi-image and persistent pinned images."""
         message = self.input_field.toPlainText().strip()
         if not message:
             return
 
-        # Sending is an explicit user action — always scroll to the new bubble
-        # regardless of whether the user was scrolling up to read older messages.
         self._user_scrolling = False
 
         was_manually_resized = self.input_field.text_input.manual_resize
         stored_height = self.input_field.text_input.height() if was_manually_resized else None
 
-        image_path = None
-        if self.controller.get_ai_provider() == 'puter' and self.attached_image:
-            image_path = self.attached_image
-            self.add_system_message(f"📎 Image attached: {image_path}")
+        # ── Collect all images for this send ─────────────────────────────────
+        # pinned first (persistent context), then newly attached from input bar
+        provider = self.controller.get_ai_provider()
+        images_for_send = []
+        if provider in ('puter', 'custom_script'):
+            images_for_send = (
+                    [pi['path'] for pi in self.pinned_images] + list(self.attached_images)
+            )
+        # ─────────────────────────────────────────────────────────────────────
 
         if self.force_mode == 'work_environment':
             message = "[VERY CRITICAL THE USER HAS ENFORCED: work_environment ONLY and FULFILL THIS TASK EFFICIENTLY (ignore if the message of the user doesn't request of anything)] " + message
@@ -4924,27 +5012,236 @@ class ChatWindow(BaseWindow):
             message = "[VERY CRITICAL THE USER HAS ENFORCED: execute_code ONLY and RUN a SINGLE PYTHON CODE TO DO THIS REQUEST(ignore if the message of the user doesn't request of anything)] " + message
 
         display_message = self.input_field.toPlainText().strip()
-
         self.last_sent_message = display_message
-
         self.add_user_message(display_message)
 
-        # Mirror user bubble to Android if connected
         ab = getattr(getattr(self.controller, 'ui', None), 'android_bridge', None)
         if ab and ab.isVisible():
             ab.add_user_message(display_message)
 
+        # ── Pin newly attached images, then clear input bar ───────────────────
+        newly_attached = list(self.attached_images)  # snapshot before clear
         self.input_field.clear()
-        self.attached_image = None
+        self._clear_image_preview()
 
         if was_manually_resized and stored_height:
             self.input_field.text_input.manual_resize = True
             self.input_field.text_input.setFixedHeight(stored_height)
 
-        if image_path:
-            self.controller.send_message_with_image(message, image_path)
+        # Add newly attached images as persistent pinned widgets
+        if provider in ('puter', 'custom_script'):
+            for p in newly_attached:
+                self._add_pinned_image_widget(p, auto_detach=False)
+
+        # Remove any pinned images that were set to send-once (auto_detach=True)
+        # We already captured them in images_for_send above, so it's safe to remove now
+        for pi in list(self.pinned_images):
+            if pi.get('auto_detach', False):
+                self._remove_pinned_image(pi)
+        # ─────────────────────────────────────────────────────────────────────
+
+        if images_for_send:
+            self.controller.send_message_with_image(message, images_for_send)
         else:
             self.controller.send_message(message)
+
+
+    # ── Image preview helpers ─────────────────────────────────────────────────
+
+    def _show_image_preview(self, path):
+        """Attach an image — goes straight to the pinned card overlay above the input."""
+        self._add_pinned_image_widget(path, auto_detach=False)
+
+    def _remove_one_image_preview(self, path, card_widget):
+        """Remove a single image card from the input-bar strip."""
+        if path in self.attached_images:
+            self.attached_images.remove(path)
+        self.attached_image = self.attached_images[-1] if self.attached_images else None
+        self._img_thumbs_layout.removeWidget(card_widget)
+        card_widget.deleteLater()
+        if not self.attached_images:
+            self._img_preview_bar.hide()
+
+    def _clear_image_preview(self):
+        """Remove ALL images from the input-bar strip."""
+        self.attached_images.clear()
+        self.attached_image = None
+        while self._img_thumbs_layout.count() > 1:  # keep trailing stretch
+            item = self._img_thumbs_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._img_preview_bar.hide()
+
+    def _add_pinned_image_widget(self, path, auto_detach=False):
+        """Add a persistent pinned-image card above the input area.
+
+        The card shows a thumbnail, filename, a 🔁 toggle (persistent vs send-once),
+        and an ✕ button to manually detach the image from context.
+        As long as the card is visible the image is re-sent with every message.
+        """
+        import os
+        # No duplicates
+        for pi in self.pinned_images:
+            if pi['path'] == path:
+                return
+
+        _tc = self._t()
+        outer = QFrame()
+        outer.setObjectName("pinnedImgCard")
+        outer.setStyleSheet(f"""
+                        QFrame#pinnedImgCard {{
+                            background: {_tc['input_card']};
+                            border: 1px solid {_tc['input_card_border']};
+                            border-radius: 10px;
+                        }}
+                    """)
+        outer.setMaximumWidth(300)
+
+        row = QHBoxLayout(outer)
+        row.setContentsMargins(8, 6, 8, 6)
+        row.setSpacing(8)
+
+        # Thumbnail
+        thumb = QLabel()
+        thumb.setFixedSize(40, 40)
+        thumb.setStyleSheet(f"border-radius: 5px; background: {_tc['input_card_border']};")
+        thumb.setScaledContents(True)
+        pm = QPixmap(path)
+        if not pm.isNull():
+            thumb.setPixmap(pm.scaled(40, 40,
+                                      Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                      Qt.TransformationMode.SmoothTransformation))
+        row.addWidget(thumb)
+
+        # Name + status
+        info_col = QVBoxLayout()
+        info_col.setSpacing(2)
+        name_lbl = QLabel(os.path.basename(path))
+        name_lbl.setStyleSheet("color: #C9D1D9; font-size: 10px; background: transparent;")
+        name_lbl.setWordWrap(True)
+        info_col.addWidget(name_lbl)
+        status_lbl = QLabel("🔁 Sending with every message")
+        status_lbl.setStyleSheet(f"color: {_tc['accent']}; font-size: 9px; background: transparent;")
+        info_col.addWidget(status_lbl)
+        row.addLayout(info_col, stretch=1)
+
+        pin_info = {'path': path, 'widget': outer, 'auto_detach': auto_detach}
+
+        # 🔁 toggle button
+        toggle_btn = QPushButton("🔁")
+        toggle_btn.setFixedSize(26, 26)
+        toggle_btn.setToolTip("Toggle: send every message / send once then detach")
+        toggle_btn.setCheckable(True)
+        toggle_btn.setChecked(not auto_detach)
+        toggle_btn.setStyleSheet(f"""
+                        QPushButton {{ background: {_tc['elevated']}; border: 1px solid {_tc['input_card_border']};
+                            border-radius: 6px; font-size: 11px; color: {_tc['accent']}; }}
+                        QPushButton:checked {{ background: {_tc['input_card_border']}; }}
+                        QPushButton:hover   {{ background: {_tc['elevated']}; border-color: {_tc['accent']}; }}
+                    """)
+
+        def _on_toggle(checked, pi=pin_info, sl=status_lbl):
+            pi['auto_detach'] = not checked
+            sl.setText("🔁 Sending with every message" if checked
+                       else "1️⃣ Sending once (then detach)")
+
+        toggle_btn.toggled.connect(_on_toggle)
+        row.addWidget(toggle_btn)
+
+        # ✕ detach button
+        x_btn = QPushButton("✕")
+        x_btn.setFixedSize(22, 22)
+        x_btn.setToolTip("Detach image from context")
+        x_btn.setStyleSheet("""
+                QPushButton { background: rgba(255,255,255,0.05);
+                    border: 1px solid rgba(255,255,255,0.1);
+                    border-radius: 6px; color: #8B949E; font-size: 10px; }
+                QPushButton:hover { background: rgba(234,67,53,0.25); color: #EA4335;
+                    border-color: rgba(234,67,53,0.5); }
+            """)
+        x_btn.clicked.connect(lambda _, pi=pin_info: self._remove_pinned_image(pi))
+        row.addWidget(x_btn)
+
+        pin_info['row_wrapper'] = outer
+        self.pinned_images.append(pin_info)
+
+        # Insert before the trailing stretch so cards stay left-aligned
+        count = self._pinned_area_layout.count()
+        self._pinned_area_layout.insertWidget(count - 1, outer)
+        self._pinned_area.show()
+        QTimer.singleShot(10, self._update_pinned_overlay)
+
+    def _update_pinned_overlay(self):
+        """Reposition the pinned-image overlay to float just above the input container."""
+        if not hasattr(self, '_pinned_area') or not hasattr(self, 'input_container'):
+            return
+        if not hasattr(self, 'container'):
+            return
+        if not self._pinned_area.isVisible():
+            return
+        try:
+            ic_pos = self.input_container.mapTo(
+                self.container, self.input_container.rect().topLeft()
+            )
+            pinned_h = self._pinned_area.height()
+            self._pinned_area.setGeometry(
+                0,
+                ic_pos.y() - pinned_h,
+                self.container.width(),
+                pinned_h,
+            )
+            self._pinned_area.raise_()
+        except Exception:
+            pass
+
+    def _remove_pinned_image(self, pin_info):
+        """Remove a single pinned image card."""
+        if pin_info in self.pinned_images:
+            self.pinned_images.remove(pin_info)
+        wrapper = pin_info.get('row_wrapper')
+        if wrapper:
+            self._pinned_area_layout.removeWidget(wrapper)
+            wrapper.deleteLater()
+        if not self.pinned_images:
+            self._pinned_area.hide()
+        else:
+            QTimer.singleShot(10, self._update_pinned_overlay)
+
+    def clear_pinned_images(self):
+        """Remove ALL pinned image cards. Called on session switch or load."""
+        for pi in list(self.pinned_images):
+            wrapper = pi.get('row_wrapper')
+            if wrapper:
+                self._pinned_area_layout.removeWidget(wrapper)
+                wrapper.deleteLater()
+        self.pinned_images.clear()
+        self._pinned_area.hide()
+
+    def _handle_image_file_drop(self, path):
+        """Prompt the user to attach an image file or insert its path as text."""
+        from PyQt6.QtWidgets import QMessageBox
+        import os
+        file_name = os.path.basename(path)
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Attach as Image?")
+        msg.setText(f'Attach "{file_name}" as an image?')
+        msg.setInformativeText(
+            "Yes — send as image to the AI\n"
+            "No — insert file path as text instead")
+        msg.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        msg.setDefaultButton(QMessageBox.StandardButton.Yes)
+        if msg.exec() == QMessageBox.StandardButton.Yes:
+            self._show_image_preview(path)
+        else:
+            quoted = f'"{path}"' if self.should_quote_path(path) else path
+            current = self.input_field.toPlainText()
+            if current:
+                self.input_field.text_input.setPlainText(current + "\n" + quoted)
+            else:
+                self.input_field.text_input.setPlainText(quoted)
+
+    # ─────────────────────────────────────────────────────────────────────────
 
     def browse_for_file(self):
         """Alternative to drag & drop - works in admin mode"""
@@ -4960,14 +5257,10 @@ class ChatWindow(BaseWindow):
         if file_path:
             file_path = self.clean_file_path(file_path)
 
-            if self.controller.get_ai_provider() == 'puter':
-                valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif']
-                if any(file_path.lower().endswith(ext) for ext in valid_extensions):
-                    self.attached_image = file_path
-                    self.add_system_message(
-                        f"📎 **Image Ready:** {file_path}\n\nType your message and press Enter."
-                    )
-                    return
+            valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif']
+            if any(file_path.lower().endswith(ext) for ext in valid_extensions):
+                self._handle_image_file_drop(file_path)
+                return
 
             if self.should_quote_path(file_path):
                 file_path = f'"{file_path}"'
@@ -5218,6 +5511,8 @@ class ChatWindow(BaseWindow):
         if hasattr(self, 'toggle_sidebar_btn'):
             self.toggle_sidebar_btn.raise_()
 
+        self._update_pinned_overlay()
+
     def save_window_geometry(self):
         """Save window size and position to config"""
         try:
@@ -5258,6 +5553,11 @@ class ChatWindow(BaseWindow):
     def eventFilter(self, obj, event):
         """Handle resize handle events and smooth scroll viewport events."""
         from PyQt6.QtCore import QEvent
+
+        # ── Reposition pinned overlay when input_container height changes ──
+        if hasattr(self, 'input_container') and obj is self.input_container:
+            if event.type() == QEvent.Type.Resize:
+                self._update_pinned_overlay()
 
         # ── Smooth inertia scroll — SIDEBAR viewport ───────────────────────
         if hasattr(self, 'sidebar_scroll') and obj is self.sidebar_scroll.viewport():
@@ -5355,13 +5655,10 @@ class ChatWindow(BaseWindow):
 
         file_path = self.clean_file_path(file_path)
 
-        if self.controller.get_ai_provider() == 'puter':
-            valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif']
-            if any(file_path.lower().endswith(ext) for ext in valid_extensions):
-                self.attached_image = file_path
-                self.add_system_message(
-                    f"📎 **Image Ready:** {file_path}\n\nType your message and press Enter to send with image.")
-                return
+        valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif']
+        if any(file_path.lower().endswith(ext) for ext in valid_extensions):
+            self._handle_image_file_drop(file_path)
+            return
 
         if self.should_quote_path(file_path):
             file_path = f'"{file_path}"'
@@ -5414,15 +5711,11 @@ class ChatWindow(BaseWindow):
             cleaned_path = self.clean_file_path(text)
 
             if os.path.exists(cleaned_path):
-                if self.controller.get_ai_provider() == 'puter':
-                    valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif']
-                    if any(cleaned_path.lower().endswith(ext) for ext in valid_extensions):
-                        self.attached_image = cleaned_path
-                        self.add_system_message(
-                            f"📎 **Image Ready:** {cleaned_path}\n\nType your message and press Enter."
-                        )
-                        event.accept()
-                        return
+                valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif']
+                if any(cleaned_path.lower().endswith(ext) for ext in valid_extensions):
+                    self._handle_image_file_drop(cleaned_path)
+                    event.accept()
+                    return
 
                 if self.should_quote_path(cleaned_path):
                     cleaned_path = f'"{cleaned_path}"'
