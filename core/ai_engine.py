@@ -660,9 +660,10 @@ class AIEngine:
         log.info(f"[AIEngine._http_manual] Got manual response | length={len(result)}")
         return result
 
-    def _http_custom_script(self, messages) -> str | None:
+    def _http_custom_script(self, messages, images=None) -> str | None:
         """Custom script provider — reimports the user's .py file on every call
-        and invokes its chat(system_prompt, messages) function."""
+        and invokes its chat(system_prompt, messages) function.
+        If images (list) is provided and the script defines chat_image(), that is called instead."""
         import importlib.util, traceback
 
         if not self.custom_script_path:
@@ -693,9 +694,13 @@ class AIEngine:
         system_prompt, convo = self._extract_system_and_convo(messages)
 
         try:
-            result = module.chat(system_prompt or "", convo)
+            if images and hasattr(module, 'chat_image') and callable(module.chat_image):
+                log.debug(f"[AIEngine._http_custom_script] Calling chat_image() | images={images}")
+                result = module.chat_image(system_prompt or "", convo, images)
+            else:
+                result = module.chat(system_prompt or "", convo)
         except Exception as e:
-            log.error(f"[AIEngine._http_custom_script] ✗ chat() raised: {e}\n{traceback.format_exc()}")
+            log.error(f"[AIEngine._http_custom_script] ✗ chat/chat_image() raised: {e}\n{traceback.format_exc()}")
             self.log(f"Custom script error: {e}", "ERROR")
             return None
 
@@ -707,21 +712,31 @@ class AIEngine:
         log.info(f"[AIEngine._http_custom_script] ✓ Response | length={len(result)} chars")
         return result
 
-    def _call_provider(self, image=None) -> str | None:
+    def _call_provider(self, image=None, images=None) -> str | None:
         """Build the unified message list, dispatch to the active provider.
-        Returns raw AI text, or None on failure."""
-        log.debug(f"[AIEngine._call_provider] provider='{self.ai_provider}' | has_image={image is not None}")
+        Returns raw AI text, or None on failure.
+
+        images: list of paths (custom_script multi-image).
+        image:  single path, backward-compat for puter.
+        'images' takes priority; puter always uses only the first image.
+        """
+        if images is None and image is not None:
+            images = [image]
+        puter_image = images[0] if images else None
+
+        log.debug(f"[AIEngine._call_provider] provider='{self.ai_provider}' | "
+                  f"images={len(images) if images else 0}")
         messages = self._build_messages()
         if self.ai_provider == 'anthropic':
             return self._http_anthropic(messages)
         elif self.ai_provider == 'gemini':
             return self._http_gemini(messages)
         elif self.ai_provider == 'puter':
-            return self._http_puter(messages, image=image)
+            return self._http_puter(messages, image=puter_image)
         elif self.ai_provider == 'manual':
             return self._http_manual()
         elif self.ai_provider == 'custom_script':
-            return self._http_custom_script(messages)
+            return self._http_custom_script(messages, images=images)
         else:
             log.error(f"[AIEngine._call_provider] Unknown provider: '{self.ai_provider}'")
             return None
@@ -759,23 +774,34 @@ class AIEngine:
                  f"→ _process_ai_response()")
         return self._process_ai_response(ai_text)
 
-    def generate_response_with_image(self, user_message, image_path):
-        """Generate response with image attachment (Puter only)."""
-        log.info(f"[AIEngine.generate_response_with_image] provider='{self.ai_provider}' | "
-                 f"image='{image_path}' | msg_len={len(user_message)}")
-        if self.ai_provider != 'puter':
-            log.warning(f"[AIEngine.generate_response_with_image] Image attachment requires Puter, "
-                        f"current provider='{self.ai_provider}' — returning error")
-            return self._make_error_result("Error: Image attachment only supported with Puter")
+    def generate_response_with_image(self, user_message, image_paths):
+        """Generate response with one or more image attachments (Puter / custom_script).
 
+        image_paths: str (single, backward compat) or list[str] (multi-image).
+        Puter only uses the first image; custom_script receives all of them.
+        """
+        if isinstance(image_paths, str):
+            image_paths = [image_paths]
+        image_paths = [p for p in image_paths if p]
+
+        log.info(f"[AIEngine.generate_response_with_image] provider='{self.ai_provider}' | "
+                 f"images={len(image_paths)} | msg_len={len(user_message)}")
+
+        if self.ai_provider not in ('puter', 'custom_script'):
+            log.warning(f"[AIEngine.generate_response_with_image] Image attachment requires Puter or custom_script, "
+                        f"current provider='{self.ai_provider}' — returning error")
+            return self._make_error_result(
+                "Error: Image attachment only supported with Puter or Custom Script provider")
+
+        self._inject_memories(user_message)
         self.conversation_history.append({'role': 'user', 'content': user_message})
         log.debug(f"[AIEngine.generate_response_with_image] User message appended | "
                   f"history_len={len(self.conversation_history)}")
 
-        ai_text = self._call_provider(image=image_path)
+        ai_text = self._call_provider(images=image_paths)
         if not ai_text:
             log.error("[AIEngine.generate_response_with_image] ✗ No AI text returned")
-            return self._make_error_result("Error: No response from Puter server")
+            return self._make_error_result("Error: No response from provider")
 
         log.info(f"[AIEngine.generate_response_with_image] ✓ Got response | "
                  f"length={len(ai_text)} chars | → _process_ai_response()")

@@ -1123,21 +1123,27 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         self.current_worker.start()
         log.debug("[AssistantController.send_message] AIWorker started")
 
-    def send_message_with_image(self, user_message, image_path):
-        """Send user message with image attachment to AI (Puter only)"""
+    def send_message_with_image(self, user_message, image_paths):
+        """Send user message with one or more image attachments (Puter / custom_script)."""
+        # Normalize: accept a single path string or a list
+        if isinstance(image_paths, str):
+            image_paths = [image_paths]
+        image_paths = [p for p in image_paths if p]
+
         log.info(f"[AssistantController.send_message_with_image] ── Incoming image message | "
-                 f"image_path='{image_path}' | msg_preview='{user_message[:60].replace(chr(10), '↵')}' ──")
+                 f"images={len(image_paths)} | msg_preview='{user_message[:60].replace(chr(10), '↵')}' ──")
 
         if not user_message.strip():
             log.debug("[AssistantController.send_message_with_image] Empty message — ignoring")
             return
 
-        if self.get_ai_provider() != 'puter':
-            log.warning("[AssistantController.send_message_with_image] Non-Puter provider — image not supported")
-            self.log("Image attachment only supported with Puter provider", "ERROR")
+        if self.get_ai_provider() not in ('puter', 'custom_script'):
+            log.warning(
+                "[AssistantController.send_message_with_image] Non-Puter/custom-script provider — image not supported")
+            self.log("Image attachment only supported with Puter or Custom Script provider", "ERROR")
             return
 
-        # Prevent overlapping requests
+            # Prevent overlapping requests
         if self.is_processing:
             log.warning("[AssistantController.send_message_with_image] Already processing — ignoring request")
             self.log("Already processing a request - ignoring")
@@ -1147,18 +1153,18 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         log.debug(f"[AssistantController.send_message_with_image] is_processing=True | "
                   f"provider='{self.ai.ai_provider}'")
 
-        self.log(f"User (with image): {user_message}")
+        self.log(f"User (with {len(image_paths)} image(s)): {user_message}")
 
         # Debug: Show user message
         if self.settings.get('debug_mode'):
-            self.ui.show_debug_message("user", f"{user_message}\n[Image: {image_path}]")
+            self.ui.show_debug_message("user", f"{user_message}\n[Images: {', '.join(image_paths)}]")
 
         # Show thinking in UI
         self.ui.show_thinking()
 
-        # Create worker thread with image
+        # Create worker thread with image list
         log.debug("[AssistantController.send_message_with_image] Creating AIWorker for 'generate_with_image'...")
-        self.current_worker = AIWorker(self.ai, 'generate_with_image', user_message, image_path)
+        self.current_worker = AIWorker(self.ai, 'generate_with_image', user_message, image_paths)
         self.current_worker.response_ready.connect(self.handle_ai_response)
         self.current_worker.error_occurred.connect(self.handle_ai_error)
         self.current_worker.start()
@@ -1518,6 +1524,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
 
         if self._chat:
             self._chat.clear_chat_silent()
+            self._chat.clear_pinned_images()  # detach all pinned images on new session
 
         # Refresh UI
         if self._chat:
@@ -1555,9 +1562,10 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         log.debug(f"[AssistantController.load_session] Session data loaded | "
                   f"name='{session_data.get('session_name')}' | history={history_len} entries")
 
-        # Clear chat UI
+        # Clear chat UI and detach any pinned images from the previous session
         if self._chat:
             self._chat.clear_chat_silent()
+            self._chat.clear_pinned_images()
 
         # Clear AI history
         self.ai.clear_history()
