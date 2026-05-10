@@ -38,13 +38,14 @@ class AIWorker(QThread):
                 log.debug("[AIWorker.run] Dispatching → ai_engine.generate_response(*args)")
                 result = self.ai_engine.generate_response(*self.args)
 
+
             elif self.operation == 'generate_with_image':
-                # New operation for image messages
-                user_message, image_path = self.args
+                # Accepts single path (str) or list of paths (multi-image)
+                user_message, image_paths = self.args
                 log.debug(f"[AIWorker.run] Dispatching → ai_engine.generate_response_with_image | "
-                          f"image_path='{image_path}' | "
+                          f"images='{image_paths}' | "
                           f"message_preview='{str(user_message)[:60]}'")
-                result = self.ai_engine.generate_response_with_image(user_message, image_path)
+                result = self.ai_engine.generate_response_with_image(user_message, image_paths)
 
             elif self.operation == 'continue_tool':
                 log.debug("[AIWorker.run] Dispatching → ai_engine.continue_work_mode()")

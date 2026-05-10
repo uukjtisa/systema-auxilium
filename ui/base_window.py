@@ -175,13 +175,13 @@ class BaseWindow(QWidget):
         cs = 16  # corner_size
         hh = self._header_height
 
-        self.resize_handles['top'].setGeometry(cs, hh, w - 2 * cs, hs)
+        self.resize_handles['top'].setGeometry(cs, 0, w - 2 * cs, hs)
         self.resize_handles['bottom'].setGeometry(cs, h - hs, w - 2 * cs, hs)
         self.resize_handles['left'].setGeometry(0, cs, hs, h - 2 * cs)
         self.resize_handles['right'].setGeometry(w - hs, cs, hs, h - 2 * cs)
 
-        self.resize_handles['top-left'].setGeometry(0, hh, cs, cs)
-        self.resize_handles['top-right'].setGeometry(w - cs, hh, cs, cs)
+        self.resize_handles['top-left'].setGeometry(0, 0, cs, cs)
+        self.resize_handles['top-right'].setGeometry(w - cs, 0, cs, cs)
         self.resize_handles['bottom-left'].setGeometry(0, h - cs, cs, cs)
         self.resize_handles['bottom-right'].setGeometry(w - cs, h - cs, cs, cs)
 

@@ -98,3 +98,68 @@ def chat(system_prompt: str, messages: list[dict]) -> str:
 
     data = response.json()
     return data["choices"][0]["message"]["content"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OPTIONAL: Image / vision support
+#
+# Define chat_image() if your provider supports image input.
+# When the user attaches an image, the app calls chat_image() instead of chat().
+# If chat_image() is NOT defined here, image attachments silently fall back to
+# chat() with the text only — so this function is purely opt-in.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def chat_image(system_prompt: str, messages: list[dict], image_paths: list[str]) -> str:
+    """Send a request with one or more images to the configured provider.
+
+    Parameters:
+        system_prompt  -- Same as chat().
+        messages       -- Same as chat(). The latest user message is last.
+        image_paths    -- List of absolute paths to image files on disk.
+                          Supports JPEG, PNG, GIF, WEBP.
+
+    Return:
+        A non-empty string containing the assistant's reply.
+
+    Uses the OpenAI-compatible vision format (base64 inline images).
+    Works with GPT-4o, Mistral-vision, Kimi K2.6, and most modern vision APIs.
+    """
+    import base64
+    import mimetypes
+
+    last_user_text = messages[-1]["content"] if messages else ""
+    prior_messages = messages[:-1] if len(messages) > 1 else []
+
+    # One image_url block per image, then the text prompt at the end
+    content_blocks = []
+    for image_path in image_paths:
+        mime_type, _ = mimetypes.guess_type(image_path)
+        mime_type = mime_type or "image/jpeg"
+        with open(image_path, "rb") as f:
+            image_b64 = base64.b64encode(f.read()).decode()
+        content_blocks.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:{mime_type};base64,{image_b64}"},
+        })
+
+    content_blocks.append({"type": "text", "text": last_user_text})
+
+    vision_message = {"role": "user", "content": content_blocks}
+
+    payload = {
+        "model": MODEL,
+        "messages": (
+            [{"role": "system", "content": system_prompt}] if system_prompt else []
+        ) + prior_messages + [vision_message],
+    }
+
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    response = requests.post(API_URL, json=payload, headers=headers, timeout=60)
+    response.raise_for_status()
+
+    data = response.json()
+    return data["choices"][0]["message"]["content"]
