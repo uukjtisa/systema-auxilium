@@ -29,6 +29,12 @@ class AndroidBridge:
         self._send_lock  = threading.Lock()
         self._stop_event = threading.Event()
         self._pending_manual_response_cb = None
+        self._pending_image_paths: list = []   # images queued for next send
+        # Ensure received-files directory exists
+        from pathlib import Path
+        self._received_dir = Path(__file__).resolve().parent.parent / "data" / "received"
+        self._received_dir.mkdir(parents=True, exist_ok=True)
+        self._browse_root = Path.home()
 
     # ── Start / Stop ──────────────────────────────────────────────────────────
 
@@ -116,6 +122,31 @@ class AndroidBridge:
                 self.add_user_message(text)
                 self.controller.bridge_user_bubble_signal.emit(text)
                 self.controller.bridge_send_signal.emit(text)
+        elif cmd == "attach_image_path":
+            paths = msg.get("paths", [])
+            if isinstance(paths, str):
+                paths = [paths] if paths else []
+            chat = self.controller._chat
+            for _p in paths:
+                if chat:
+                    try:
+                        from PyQt6.QtCore import QTimer
+                        QTimer.singleShot(0, lambda p=_p: chat._show_image_preview(p))
+                    except Exception as e:
+                        print(f"[AndroidBridge] attach_image_path error: {e}")
+                        self._pending_image_paths.append(_p)
+                else:
+                    self._pending_image_paths.append(_p)
+        elif cmd == "remove_image_path" or cmd == "detach_image_path":
+            path = msg.get("path", "")
+            if path:
+                chat = self.controller._chat
+                if chat:
+                    try:
+                        from PyQt6.QtCore import QTimer
+                        QTimer.singleShot(0, lambda p=path: self._remove_pinned_by_path(chat, p))
+                    except Exception as e:
+                        print(f"[AndroidBridge] remove_image_path error: {e}")
         elif cmd == "interrupt":
             self.controller.interrupt_request()
         elif cmd == "closed":
@@ -174,6 +205,14 @@ class AndroidBridge:
                 self.render_loaded_messages()
             except Exception as e:
                 print(f"[AndroidBridge] set_names error: {e}")
+        elif cmd == "upload_file":
+            self._handle_file_upload(msg)
+        elif cmd == "browse_files":
+            self._send_file_list(msg.get("path", ""))
+        elif cmd == "upload_file":
+            self._handle_file_upload(msg)
+        elif cmd == "browse_files":
+            self._send_file_list(msg.get("path", ""))
 
     def _dispatch(self, cmd: dict):
         """Send a JSON command to Android (thread-safe). Identical to ChatWindowTUI._dispatch."""
@@ -209,6 +248,15 @@ class AndroidBridge:
         except Exception as e:
             print(f"[AndroidBridge] _send_sessions_page error: {e}")
 
+    def _remove_pinned_by_path(self, chat, path: str):
+        """Remove a pinned image card from the PC chat window by path."""
+        try:
+            for pi in list(getattr(chat, 'pinned_images', [])):
+                if pi.get('path') == path:
+                    chat._remove_pinned_image(pi)
+                    return
+        except Exception as e:
+            print(f"[AndroidBridge] _remove_pinned_by_path error: {e}")
     def _send_skills(self):
         try:
             sm = self.controller.skill_manager
@@ -234,6 +282,153 @@ class AndroidBridge:
             user_name, asst_name = "", ""
         self._dispatch({"cmd": "names_data", "user_name": user_name, "asst_name": asst_name})
 
+    def _handle_file_upload(self, msg: dict):
+        """Receive a base64-encoded file from Android, save to data/received/, reply with path."""
+        import base64, os
+        filename = msg.get("filename", "received_file")
+        data_b64 = msg.get("data", "")
+        try:
+            raw = base64.b64decode(data_b64)
+            # Avoid collisions by prefixing with timestamp
+            from datetime import datetime
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S_")
+            safe_name = ts + os.path.basename(filename)
+            dest = self._received_dir / safe_name
+            dest.write_bytes(raw)
+            abs_path = str(dest.resolve())
+            print(f"[AndroidBridge] File received → {abs_path}")
+            self._dispatch({
+                "cmd": "file_received",
+                "filename": safe_name,
+                "path": abs_path,
+            })
+        except Exception as e:
+            print(f"[AndroidBridge] _handle_file_upload error: {e}")
+            self._dispatch({"cmd": "file_upload_error", "error": str(e)})
+
+    def _send_file_list(self, path_str: str):
+        """Send directory listing of a host path to the Android file browser."""
+        from pathlib import Path
+        import os
+        try:
+            if path_str:
+                target = Path(path_str)
+            else:
+                target = self._browse_root
+            if not target.exists() or not target.is_dir():
+                target = self._browse_root
+            entries = []
+            # Parent entry (go up)
+            parent = str(target.parent) if target != target.parent else ""
+            for item in sorted(target.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
+                try:
+                    entries.append({
+                        "name": item.name,
+                        "path": str(item.resolve()),
+                        "type": "dir" if item.is_dir() else "file",
+                        "size": item.stat().st_size if item.is_file() else 0,
+                    })
+                except PermissionError:
+                    pass
+            self._dispatch({
+                "cmd": "file_list",
+                "current_path": str(target.resolve()),
+                "parent_path": parent,
+                "entries": entries,
+            })
+        except Exception as e:
+            print(f"[AndroidBridge] _send_file_list error: {e}")
+            self._dispatch({"cmd": "file_list_error", "error": str(e)})
+
+    def _handle_file_upload(self, msg: dict):
+        """Receive a base64-encoded file from Android, save to data/received/, reply with path."""
+        import base64, os
+        filename = msg.get("filename", "received_file")
+        data_b64 = msg.get("data", "")
+        try:
+            raw = base64.b64decode(data_b64)
+            from datetime import datetime
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S_")
+            safe_name = ts + os.path.basename(filename)
+            dest = self._received_dir / safe_name
+            dest.write_bytes(raw)
+            abs_path = str(dest.resolve())
+            print(f"[AndroidBridge] File received → {abs_path}")
+            _img_exts = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif')
+            if any(safe_name.lower().endswith(ext) for ext in _img_exts):
+                try:
+                    from PyQt6.QtCore import QTimer
+                    chat = self.controller._chat
+                    if chat:
+                        QTimer.singleShot(0, lambda p=abs_path: chat._handle_image_file_drop(p))
+                except Exception as e:
+                    print(f"[AndroidBridge] image routing error: {e}")
+                # Also notify Android so the attach dialog appears on phone too
+                self._dispatch({"cmd": "file_received", "filename": safe_name, "path": abs_path})
+                return
+            self._dispatch({"cmd": "file_received", "filename": safe_name, "path": abs_path})
+        except Exception as e:
+            print(f"[AndroidBridge] _handle_file_upload error: {e}")
+            self._dispatch({"cmd": "file_upload_error", "error": str(e)})
+
+    def _send_file_list(self, path_str: str):
+        """Send directory listing of a host path to the Android file browser."""
+        from pathlib import Path
+        import sys
+        try:
+            # Empty path → show drive list on Windows, filesystem root on Unix
+            if not path_str:
+                if sys.platform == "win32":
+                    import string
+                    entries = []
+                    for letter in string.ascii_uppercase:
+                        drive = Path(f"{letter}:\\")
+                        if drive.exists():
+                            entries.append({
+                                "name": f"{letter}:\\",
+                                "path": str(drive),
+                                "type": "dir",
+                                "size": 0,
+                            })
+                    self._dispatch({
+                        "cmd": "file_list",
+                        "current_path": "",
+                        "parent_path": "",
+                        "entries": entries,
+                    })
+                else:
+                    self._dispatch({
+                        "cmd": "file_list",
+                        "current_path": "/",
+                        "parent_path": "",
+                        "entries": [{"name": "/", "path": "/", "type": "dir", "size": 0}],
+                    })
+                return
+            target = Path(path_str)
+            if not target.exists() or not target.is_dir():
+                target = self._browse_root
+            parent = str(target.parent) if target != target.parent else ""
+            entries = []
+            for item in sorted(target.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
+                try:
+                    entries.append({
+                        "name": item.name,
+                        "path": str(item.resolve()),
+                        "type": "dir" if item.is_dir() else "file",
+                        "size": item.stat().st_size if item.is_file() else 0,
+                    })
+                except PermissionError:
+                    pass
+            self._dispatch({
+                "cmd": "file_list",
+                "current_path": str(target.resolve()),
+                "parent_path": parent,
+                "entries": entries,
+            })
+        except Exception as e:
+            print(f"[AndroidBridge] _send_file_list error: {e}")
+            self._dispatch({"cmd": "file_list_error", "error": str(e)})
+
     def _send_memories(self):
         try:
             mm = self.controller.memory_manager
@@ -251,9 +446,48 @@ class AndroidBridge:
         """Returns 'IP:PORT' string for display on the floating window button."""
         return f"{self._local_ip}:{self._port}"
 
-    def add_user_message(self, text: str):
+    # ── Thumbnail helper ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _make_thumb_b64(path: str, size: int = 80) -> str:
+        """Generate a small base64 JPEG thumbnail from an image path."""
+        try:
+            from PyQt6.QtGui import QImage
+            from PyQt6.QtCore import QByteArray, QBuffer
+            import base64
+            img = QImage(path)
+            if img.isNull():
+                return ""
+            small = img.scaled(size, size)
+            ba = QByteArray()
+            buf = QBuffer(ba)
+            buf.open(QBuffer.OpenModeFlag.WriteOnly)
+            small.save(buf, "JPEG", 70)
+            buf.close()
+            return base64.b64encode(ba.data()).decode("ascii")
+        except Exception:
+            return ""
+
+    def notify_image_attached(self, path: str, send_every: bool = True):
+        """Tell Android a new image card was pinned on the PC side."""
+        self._dispatch({
+            "cmd": "image_attached",
+            "path": path,
+            "send_every": send_every,
+            "thumb_b64": self._make_thumb_b64(path),
+        })
+
+    def notify_image_detached(self, path: str):
+        """Tell Android an image card was removed on the PC side."""
+        self._dispatch({"cmd": "image_detached", "path": path})
+
+    def add_user_message(self, text: str, image_paths: list | None = None):
         if text.strip():
-            self._dispatch({"cmd": "add_user", "text": text})
+            if image_paths:
+                thumbs = [t for t in (self._make_thumb_b64(p) for p in image_paths) if t]
+                self._dispatch({"cmd": "add_user", "text": text, "images": thumbs})
+            else:
+                self._dispatch({"cmd": "add_user", "text": text})
 
     def add_ai_message(self, text: str):
         if text.strip():
@@ -270,6 +504,7 @@ class AndroidBridge:
 
     def hide_thinking(self):
         self._dispatch({"cmd": "hide_thinking"})
+        self.hide_work_banner()
 
     def start_thinking_animation(self):
         self.show_thinking()
@@ -282,6 +517,7 @@ class AndroidBridge:
 
     def clear_chat_silent(self):
         self._dispatch({"cmd": "clear"})
+        self.hide_work_banner()
 
     def handle_ai_response(self, result: dict):
         if not result.get("thinking") and result.get("response"):
@@ -301,7 +537,13 @@ class AndroidBridge:
                         if isinstance(block, dict) and block.get("type") == "text"
                     )
                 content = self.controller.ai.tool_manager.strip_tool_calls(content)
-                if content:
+                if role == "ui_event":
+                    self._dispatch({
+                        "cmd": "add_work_execution",
+                        "code": msg.get("_code", ""),
+                        "output": msg.get("_output", ""),
+                    })
+                elif content:
                     if role == "user":
                         self._dispatch({"cmd": "add_user", "text": content})
                     elif role == "assistant":
@@ -326,6 +568,26 @@ class AndroidBridge:
         """Tell Android to close its manual response dialog."""
         self._pending_manual_response_cb = None
         self._dispatch({"cmd": "dismiss_manual_response"})
+
+    def show_work_banner(self, annotation: str = ""):
+        """Tell Android to show the work-mode banner with optional annotation text."""
+        self._dispatch({"cmd": "show_work_banner", "text": annotation or "Working…"})
+
+    def hide_work_banner(self):
+        """Tell Android to hide the work-mode banner."""
+        self._dispatch({"cmd": "hide_work_banner"})
+
+    def add_work_execution(self, code: str, output: str, annotation: str = ""):
+        """Send a code-block + its stdout/stderr output to the Android client."""
+        self._dispatch({"cmd": "add_work_execution", "code": code, "output": output, "annotation": annotation})
+
+    def show_work_banner(self, annotation: str = ""):
+        """Tell Android to show the work-mode banner with optional annotation text."""
+        self._dispatch({"cmd": "show_work_banner", "text": annotation or "Working…"})
+
+    def hide_work_banner(self):
+        """Tell Android to hide the work-mode banner."""
+        self._dispatch({"cmd": "hide_work_banner"})
 
     def update_voice_status(self, status: str):
         self._dispatch({"cmd": "voice_status", "status": status})

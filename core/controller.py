@@ -1261,6 +1261,14 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
 
         if result['thinking']:
             log.debug("[AssistantController.handle_ai_response] thinking=True — starting work_mode_timer")
+            # Show code execution widget for the FIRST work_environment call
+            if result.get('has_work_call') and result.get('code'):
+                try:
+                    tm_output = self.ai.tool_manager.last_work_output or ''
+                    if tm_output and self._chat:
+                        self._chat.add_code_execution_note(result['code'], tm_output)
+                except Exception:
+                    pass
             # Start tool mode timer
             self.work_mode_timer.start()
 
