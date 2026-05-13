@@ -370,7 +370,7 @@ class AIEngine:
     def _get_history_with_memory(self) -> list:
         """Return conversation_history with pending memory context injected
         immediately before the most recent user message (if any)."""
-        history_copy = list(self.conversation_history)
+        history_copy = [m for m in self.conversation_history if m.get('role') != 'ui_event']
         if self._pending_memory_context and history_copy:
             insert_at = None
             for i in range(len(history_copy) - 1, -1, -1):

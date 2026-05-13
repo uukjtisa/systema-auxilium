@@ -153,11 +153,35 @@ class ToolManager:
     def _deliver_system_message(self, text: str):
         """
         Slot — always runs on the main thread (connected via signal).
-        Forwards a system message to the chat window safely.
+        Forwards a system message to the chat window and Android bridge.
+        Working: annotations only update the banner — they are NOT added as chat messages
+        (the annotation is shown inside the code execution note instead).
         """
+        import re as _re
+        is_working_annotation = "**Working:**" in text or text.startswith("Working:")
+
         chat = self._chat
-        if chat:
+        if chat and not is_working_annotation:
+            # Normal system messages go to chat as usual
             chat.add_system_message(text)
+        elif chat and is_working_annotation:
+            # Only update the work banner — no chat widget
+            clean = _re.sub(r'\*+', '', text).replace("Working:", "").strip()
+            if hasattr(chat, '_work_banner'):
+                chat._work_banner.setText(f"⚙ Working: {clean}")
+                chat._work_banner.show()
+
+        # Mirror to Android bridge
+        try:
+            ab = self._get_android_bridge() if callable(self._get_android_bridge) else None
+            if ab and ab.isVisible():
+                if is_working_annotation:
+                    clean = _re.sub(r'\*+', '', text).replace("Working:", "").strip()
+                    ab.show_work_banner(clean)
+                else:
+                    ab.add_system_message(text)
+        except Exception:
+            pass
 
     # ─────────────────────────────────────────────────────────────────────────
     # Directory helpers
@@ -571,6 +595,16 @@ class ToolManager:
         combined = "\n\n".join(output_parts)
         log.info(f"[ToolManager.run_work_environment] ✓ Work environment output ready | "
                  f"parts={len(output_parts)} | total_len={len(combined)}")
+
+        # ── Mirror code + output to Android bridge ────────────────────────
+        try:
+            ab = self._get_android_bridge() if callable(self._get_android_bridge) else None
+            if ab and ab.isVisible():
+                ab.add_work_execution(code, combined, annotation=self.last_work_annotation or "")
+        except Exception:
+            pass
+        # ─────────────────────────────────────────────────────────────────
+
         return combined
 
     def run_execute_code(self, code, log_callback=None):

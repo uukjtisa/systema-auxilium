@@ -926,6 +926,15 @@ class CodeBlockWidget(QWidget):
         self.toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         header_layout.addWidget(self.toggle_btn)
 
+        self.wrap_btn = QPushButton("↵  Wrap")
+        self.wrap_btn.setObjectName("codeWrapBtn")
+        self.wrap_btn.setStyleSheet(_btn_style)
+        self.wrap_btn.setCheckable(True)
+        self.wrap_btn.setChecked(False)
+        self.wrap_btn.clicked.connect(self._toggle_wrap)
+        self.wrap_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        header_layout.addWidget(self.wrap_btn)
+
         self.copy_btn = QPushButton("📋  Copy")
         self.copy_btn.setObjectName("codeCopyBtn")
         self.copy_btn.setStyleSheet(_btn_style)
@@ -1109,6 +1118,17 @@ class CodeBlockWidget(QWidget):
         event.accept()
 
     # ── Copy ─────────────────────────────────────────────────────────────────
+
+    def _toggle_wrap(self):
+        """Toggle word-wrap on this code block's editor."""
+        if self.wrap_btn.isChecked():
+            self.code_editor.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+            self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.wrap_btn.setText("↵  Wrap ✓")
+        else:
+            self.code_editor.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+            self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            self.wrap_btn.setText("↵  Wrap")
 
     def copy_code(self):
         clipboard = QApplication.clipboard()
@@ -2035,6 +2055,26 @@ class ChatWindow(BaseWindow):
         """)
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         chat_layout.addWidget(self.status_label)
+
+        # ── Work Mode Banner ─────────────────────────────────────────────────
+        self._work_banner = QLabel("")
+        self._work_banner.setObjectName("workBanner")
+        self._work_banner.setWordWrap(True)
+        self._work_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._work_banner.setStyleSheet("""
+                    QLabel#workBanner {
+                        background-color: #1A1F2E;
+                        border-top: 1px solid #2D3A5C;
+                        border-bottom: 1px solid #2D3A5C;
+                        color: #7EB8F7;
+                        font-size: 11px;
+                        font-style: italic;
+                        padding: 6px 14px;
+                    }
+                """)
+        self._work_banner.hide()
+        chat_layout.addWidget(self._work_banner)
+        # ─────────────────────────────────────────────────────────────────────
 
         # Input area
         input_container = QFrame()
@@ -3373,7 +3413,14 @@ class ChatWindow(BaseWindow):
                         if isinstance(block, dict) and block.get("type") == "text"
                     )
                 content = self.controller.ai.tool_manager.strip_tool_calls(content)
-                if content:
+                if role == "ui_event":
+                    self.add_code_execution_note(
+                        msg.get("_code", ""),
+                        msg.get("_output", ""),
+                        save_to_history=False,
+                        annotation=msg.get("_annotation", ""),
+                    )
+                elif content:
                     if role == "user":
                         self.add_user_message(content)
                     elif role == "assistant":
@@ -3885,7 +3932,7 @@ class ChatWindow(BaseWindow):
             """)
         return av
 
-    def add_user_message(self, message):
+    def add_user_message(self, message, image_paths=None):
         """Add user message with three-dot menu"""
         message_widget = QFrame()
         message_widget.setStyleSheet("""
@@ -3916,16 +3963,36 @@ class ChatWindow(BaseWindow):
         content_wrapper = QFrame()
         _tc = self._t()
         content_wrapper.setStyleSheet(f"""
-            QFrame {{
-                background-color: {_tc['surface']};
-                border: 1px solid {_tc['border']};
-                border-radius: 12px;
-            }}
-        """)
+                    QFrame {{
+                        background-color: {_tc['surface']};
+                        border: none;
+                        border-radius: 12px;
+                    }}
+                """)
 
         content_wrapper_layout = QVBoxLayout(content_wrapper)
         content_wrapper_layout.setContentsMargins(12, 12, 12, 8)
         content_wrapper_layout.setSpacing(8)
+
+        # ── Image thumbnails (shown above text when images were attached) ─────
+        if image_paths:
+            img_row = QHBoxLayout()
+            img_row.setSpacing(6)
+            img_row.setContentsMargins(0, 0, 0, 4)
+            for img_path in image_paths:
+                thumb = QLabel()
+                thumb.setFixedSize(64, 64)
+                thumb.setStyleSheet("border-radius: 6px; background: rgba(255,255,255,0.06);")
+                thumb.setScaledContents(True)
+                pm = QPixmap(img_path)
+                if not pm.isNull():
+                    thumb.setPixmap(pm.scaled(64, 64,
+                                              Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                              Qt.TransformationMode.SmoothTransformation))
+                img_row.addWidget(thumb)
+            img_row.addStretch()
+            content_wrapper_layout.addLayout(img_row)
+        # ─────────────────────────────────────────────────────────────────────
 
         fsize = self._get_msg_font_size()
         text_label = QLabel()
@@ -3934,14 +4001,14 @@ class ChatWindow(BaseWindow):
         text_label.setWordWrap(True)
         text_label.setOpenExternalLinks(True)
         text_label.setStyleSheet(f"""
-            QLabel {{
-                color: #E8EAED;
-                font-size: {fsize}px;
-                line-height: 1.5;
-                background: transparent;
-                border: none;
-            }}
-        """)
+                    QLabel {{
+                        color: #E8EAED;
+                        font-size: {fsize}px;
+                        line-height: 1.5;
+                        background: transparent;
+                        border: none;
+                    }}
+                """)
         text_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse |
             Qt.TextInteractionFlag.LinksAccessibleByMouse
@@ -4217,6 +4284,15 @@ class ChatWindow(BaseWindow):
 
     def add_system_message(self, message):
         """Add system message"""
+        # ── Update work mode banner if this is a Working: annotation ─────────
+        import re as _re
+        if "**Working:**" in message or message.startswith("Working:"):
+            # Extract the annotation text (strip markdown bold/italic markers)
+            clean = _re.sub(r'\*+', '', message).replace("Working:", "").strip()
+            if hasattr(self, '_work_banner'):
+                self._work_banner.setText(f"⚙ Working: {clean}")
+                self._work_banner.show()
+        # ─────────────────────────────────────────────────────────────────────
         message_widget = QFrame()
         message_widget.setStyleSheet("""
             QFrame {
@@ -5013,11 +5089,11 @@ class ChatWindow(BaseWindow):
 
         display_message = self.input_field.toPlainText().strip()
         self.last_sent_message = display_message
-        self.add_user_message(display_message)
+        self.add_user_message(display_message, image_paths=images_for_send if images_for_send else None)
 
         ab = getattr(getattr(self.controller, 'ui', None), 'android_bridge', None)
         if ab and ab.isVisible():
-            ab.add_user_message(display_message)
+            ab.add_user_message(display_message, image_paths=images_for_send if images_for_send else None)
 
         # ── Pin newly attached images, then clear input bar ───────────────────
         newly_attached = list(self.attached_images)  # snapshot before clear
@@ -5170,6 +5246,10 @@ class ChatWindow(BaseWindow):
         self._pinned_area_layout.insertWidget(count - 1, outer)
         self._pinned_area.show()
         QTimer.singleShot(10, self._update_pinned_overlay)
+        # ── Sync to Android ──────────────────────────────────────────────────
+        _ab = getattr(getattr(self.controller, 'ui', None), 'android_bridge', None)
+        if _ab and _ab.isVisible():
+            _ab.notify_image_attached(path, send_every=not auto_detach)
 
     def _update_pinned_overlay(self):
         """Reposition the pinned-image overlay to float just above the input container."""
@@ -5196,6 +5276,7 @@ class ChatWindow(BaseWindow):
 
     def _remove_pinned_image(self, pin_info):
         """Remove a single pinned image card."""
+        _detached_path = pin_info.get('path', '')
         if pin_info in self.pinned_images:
             self.pinned_images.remove(pin_info)
         wrapper = pin_info.get('row_wrapper')
@@ -5206,6 +5287,11 @@ class ChatWindow(BaseWindow):
             self._pinned_area.hide()
         else:
             QTimer.singleShot(10, self._update_pinned_overlay)
+        # ── Sync to Android ──────────────────────────────────────────────────
+        if _detached_path:
+            _ab = getattr(getattr(self.controller, 'ui', None), 'android_bridge', None)
+            if _ab and _ab.isVisible():
+                _ab.notify_image_detached(_detached_path)
 
     def clear_pinned_images(self):
         """Remove ALL pinned image cards. Called on session switch or load."""
@@ -5244,32 +5330,143 @@ class ChatWindow(BaseWindow):
     # ─────────────────────────────────────────────────────────────────────────
 
     def browse_for_file(self):
-        """Alternative to drag & drop - works in admin mode"""
+        """Alternative to drag & drop - supports multiple files"""
         from PyQt6.QtWidgets import QFileDialog
 
-        file_path, _ = QFileDialog.getOpenFileName(
+        file_paths, _ = QFileDialog.getOpenFileNames(
             self,
-            "Select File",
+            "Select File(s)",
             "",
             "All Files (*.*)"
         )
 
-        if file_path:
-            file_path = self.clean_file_path(file_path)
+        if not file_paths:
+            return
 
-            valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif']
-            if any(file_path.lower().endswith(ext) for ext in valid_extensions):
-                self._handle_image_file_drop(file_path)
-                return
+        valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif']
+        image_files = [self.clean_file_path(p) for p in file_paths
+                       if any(p.lower().endswith(ext) for ext in valid_extensions)]
+        non_images  = [self.clean_file_path(p) for p in file_paths
+                       if not any(p.lower().endswith(ext) for ext in valid_extensions)]
 
+        if image_files:
+            if len(image_files) == 1:
+                self._handle_image_file_drop(image_files[0])
+            else:
+                self._handle_multiple_image_files_dialog(image_files)
+
+        for file_path in non_images:
             if self.should_quote_path(file_path):
                 file_path = f'"{file_path}"'
-
             current_text = self.input_field.toPlainText()
             if current_text:
                 self.input_field.text_input.setPlainText(current_text + "\n" + file_path)
             else:
                 self.input_field.text_input.setPlainText(file_path)
+
+    def _handle_multiple_image_files_dialog(self, image_paths):
+        """Show a checkbox dialog for multiple image files — attach as image or path."""
+        from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
+                                     QCheckBox, QPushButton, QLabel, QScrollArea, QWidget)
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Attach Images")
+        dlg.setMinimumWidth(480)
+        dlg.setStyleSheet("""
+            QDialog { background: #0D1117; color: #E6EDF3; }
+            QLabel  { color: #E6EDF3; font-size: 12px; }
+            QCheckBox { color: #E6EDF3; font-size: 12px; padding: 3px 0; }
+            QPushButton {
+                background: #21262D; border: 1px solid #30363D;
+                border-radius: 6px; color: #E6EDF3;
+                padding: 6px 14px; font-size: 12px;
+            }
+            QPushButton:hover { background: #30363D; }
+            QPushButton#primaryBtn {
+                background: #1F6FEB; border-color: #388BFD;
+            }
+            QPushButton#primaryBtn:hover { background: #388BFD; }
+        """)
+        lay = QVBoxLayout(dlg)
+        lay.setSpacing(10)
+        lay.setContentsMargins(16, 14, 16, 14)
+
+        lay.addWidget(QLabel(f"Found {len(image_paths)} image file(s). Choose how to attach:"))
+
+        # Scroll area with checkboxes
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMaximumHeight(280)
+        scroll.setStyleSheet("QScrollArea { border: 1px solid #21262D; border-radius: 6px; background: #161B22; }")
+        inner = QWidget()
+        inner.setStyleSheet("background: transparent;")
+        inner_lay = QVBoxLayout(inner)
+        inner_lay.setContentsMargins(10, 8, 10, 8)
+        inner_lay.setSpacing(4)
+        scroll.setWidget(inner)
+
+        import os
+        checkboxes = []
+        for p in image_paths:
+            cb = QCheckBox(os.path.basename(p))
+            cb.setChecked(True)
+            cb.setProperty("filepath", p)
+            checkboxes.append(cb)
+            inner_lay.addWidget(cb)
+
+        lay.addWidget(scroll)
+
+        # Select all / none row
+        sel_row = QHBoxLayout()
+        sel_all_btn  = QPushButton("Select All")
+        sel_none_btn = QPushButton("Unselect All")
+        sel_all_btn.clicked.connect(lambda: [cb.setChecked(True)  for cb in checkboxes])
+        sel_none_btn.clicked.connect(lambda: [cb.setChecked(False) for cb in checkboxes])
+        sel_row.addWidget(sel_all_btn)
+        sel_row.addWidget(sel_none_btn)
+        sel_row.addStretch()
+        lay.addLayout(sel_row)
+
+        lay.addWidget(QLabel("For checked files, attach as:"))
+
+        # Action buttons
+        btn_row = QHBoxLayout()
+        img_btn  = QPushButton("🖼 Attach as Image(s)")
+        img_btn.setObjectName("primaryBtn")
+        path_btn = QPushButton("📄 Insert Path(s)")
+        cancel_btn = QPushButton("Cancel")
+
+        btn_row.addWidget(img_btn)
+        btn_row.addWidget(path_btn)
+        btn_row.addWidget(cancel_btn)
+        lay.addLayout(btn_row)
+
+        result = {"action": None}
+
+        img_btn.clicked.connect(lambda: (result.__setitem__("action", "image"),  dlg.accept()))
+        path_btn.clicked.connect(lambda: (result.__setitem__("action", "path"),   dlg.accept()))
+        cancel_btn.clicked.connect(dlg.reject)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        selected = [cb.property("filepath") for cb in checkboxes if cb.isChecked()]
+        if not selected:
+            return
+
+        if result["action"] == "image":
+            for p in selected:
+                self._show_image_preview(p)
+        else:
+            lines = []
+            for p in selected:
+                lines.append(f'"{p}"' if self.should_quote_path(p) else p)
+            combined = "\n".join(lines)
+            current = self.input_field.toPlainText()
+            if current:
+                self.input_field.text_input.setPlainText(current + "\n" + combined)
+            else:
+                self.input_field.text_input.setPlainText(combined)
 
     def set_input_enabled(self, enabled):
         """Enable/disable input"""
@@ -5335,6 +5532,262 @@ class ChatWindow(BaseWindow):
         """Handle AI response"""
         if not result['thinking'] and result.get('response'):
             self.add_ai_message(result['response'])
+
+    def add_work_execution_widget(self, code: str, output: str):
+        """Add a collapsible code+output block to the chat for work environment execution."""
+        from PyQt6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QScrollArea, QWidget, QSizePolicy
+        from PyQt6.QtGui import QFont
+
+        _tc = self._t()
+        outer = QFrame()
+        outer.setStyleSheet(f"""
+                    QFrame {{
+                        background: {_tc['base']};
+                        border: 1px solid {_tc['border']};
+                        border-radius: 10px;
+                        margin: 2px 0;
+                    }}
+                """)
+        outer_lay = QVBoxLayout(outer)
+        outer_lay.setContentsMargins(0, 0, 0, 0)
+        outer_lay.setSpacing(0)
+
+        # Header row
+        header = QFrame()
+        header.setStyleSheet(f"""
+                    QFrame {{
+                        background: {_tc['surface']};
+                        border-top-left-radius: 10px;
+                        border-top-right-radius: 10px;
+                        border-bottom: 1px solid {_tc['border']};
+                    }}
+                """)
+        header_lay = QHBoxLayout(header)
+        header_lay.setContentsMargins(14, 8, 12, 8)
+        header_lay.setSpacing(8)
+
+        lbl = QLabel("⚙  Code executed")
+        lbl.setStyleSheet(
+            f"color: {_tc['accent']}; font-size: 12px; font-weight: 600; background: transparent; border: none;")
+        header_lay.addWidget(lbl)
+        header_lay.addStretch()
+
+        toggle_btn = QPushButton("▶  Show")
+        toggle_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent; border: 1px solid transparent;
+                border-radius: 5px; padding: 3px 10px;
+                font-size: 11px; color: #8B949E;
+            }
+            QPushButton:hover { background: rgba(88,166,255,0.12); color: #58A6FF; border-color: rgba(88,166,255,0.28); }
+        """)
+        toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        header_lay.addWidget(toggle_btn)
+        outer_lay.addWidget(header)
+
+        # Body (hidden by default)
+        body = QWidget()
+        body.setStyleSheet("background: transparent; border: none;")
+        body_lay = QVBoxLayout(body)
+        body_lay.setContentsMargins(0, 0, 0, 0)
+        body_lay.setSpacing(0)
+        body.hide()
+
+        mono_font = QFont('Consolas', 10)
+        if not mono_font.exactMatch():
+            mono_font = QFont('Courier New', 10)
+
+        # Code section
+        if code.strip():
+            code_lbl = QLabel("CODE")
+            code_lbl.setStyleSheet("color: #8B949E; font-size: 10px; font-weight: 700; padding: 6px 14px 2px 14px; background: transparent; border: none;")
+            body_lay.addWidget(code_lbl)
+            from PyQt6.QtWidgets import QTextEdit
+            code_edit = QTextEdit()
+            code_edit.setPlainText(code)
+            code_edit.setReadOnly(True)
+            code_edit.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+            code_edit.setFont(mono_font)
+            code_edit.setStyleSheet(f"QTextEdit {{ background: {_tc['base']}; color: #E6EDF3; border: none; padding: 8px 14px; }}")
+            code_edit.setFrameShape(QTextEdit.Shape.NoFrame)
+            code_edit.setFixedHeight(min(max(len(code.splitlines()) * 17 + 24, 60), 300))
+            body_lay.addWidget(code_edit)
+
+        # Output section
+        if output.strip():
+            sep = QFrame()
+            sep.setStyleSheet("background: rgba(88,166,255,0.10); border: none;")
+            sep.setFixedHeight(1)
+            body_lay.addWidget(sep)
+            out_lbl = QLabel("STDOUT / STDERR")
+            out_lbl.setStyleSheet("color: #8B949E; font-size: 10px; font-weight: 700; padding: 6px 14px 2px 14px; background: transparent; border: none;")
+            body_lay.addWidget(out_lbl)
+            from PyQt6.QtWidgets import QTextEdit
+            out_edit = QTextEdit()
+            out_edit.setPlainText(output)
+            out_edit.setReadOnly(True)
+            out_edit.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+            out_edit.setFont(mono_font)
+            out_edit.setStyleSheet(f"QTextEdit {{ background: {_tc['deep']}; color: #8FBC8F; border: none; padding: 8px 14px; border-bottom-left-radius: 10px; border-bottom-right-radius: 10px; }}")
+            out_edit.setFrameShape(QTextEdit.Shape.NoFrame)
+            out_edit.setFixedHeight(min(max(len(output.splitlines()) * 17 + 24, 60), 200))
+            body_lay.addWidget(out_edit)
+
+        outer_lay.addWidget(body)
+
+        def _toggle():
+            if body.isHidden():
+                body.show()
+                toggle_btn.setText("▼  Hide")
+            else:
+                body.hide()
+                toggle_btn.setText("▶  Show")
+
+        toggle_btn.clicked.connect(_toggle)
+
+        self.chat_layout.insertWidget(self.chat_layout.count() - 1, outer)
+        self.scroll_to_bottom()
+
+    def add_code_execution_note(self, code: str, output: str, save_to_history: bool = True, annotation: str = None):
+        """Compact inline code-execution note — styled like a system message.
+        Saves itself to conversation_history as a ui_event so it persists across reloads."""
+        from PyQt6.QtWidgets import QFrame, QHBoxLayout, QVBoxLayout, QPushButton, QLabel, QTextEdit
+        from PyQt6.QtGui import QFont
+
+        _tc = self._t()
+
+        # ── Outer wrapper ─────────────────────────────────────────────────────
+        message_widget = QFrame()
+        message_widget.setStyleSheet("QFrame { background-color: transparent; padding: 4px 16px; }")
+        outer_lay = QVBoxLayout(message_widget)
+        outer_lay.setContentsMargins(0, 0, 0, 0)
+        outer_lay.setSpacing(0)
+
+        # ── Header row (always visible) ───────────────────────────────────────
+        header = QFrame()
+        header.setStyleSheet(f"""
+                    QFrame {{
+                        background-color: {_tc['elevated']};
+                        border: 1px solid {_tc['border']};
+                        border-radius: 8px;
+                    }}
+                """)
+        header_lay = QHBoxLayout(header)
+        header_lay.setContentsMargins(12, 6, 10, 6)
+        header_lay.setSpacing(8)
+
+        icon_lbl = QLabel("⚙")
+        icon_lbl.setStyleSheet(
+            f"color: {_tc['accent']}; font-size: 11px; background: transparent; border: none;")
+        icon_lbl.setFixedWidth(14)
+        header_lay.addWidget(icon_lbl)
+
+        # Use the Working: annotation as the label if available
+        if annotation is None:
+            try:
+                annotation = self.controller.ai.tool_manager.last_work_annotation or ""
+            except Exception:
+                annotation = ""
+        header_label = f"{annotation}" if annotation else "Code executed"
+        first_line = (code.strip().splitlines()[0] if code.strip() else "no code")
+        preview = first_line[:60] + ("…" if len(first_line) > 60 else "")
+        summary_lbl = QLabel(
+            f"<span style='color:{_tc['accent']};font-size:11px;'>{header_label}</span>"
+            f"&nbsp;&nbsp;<span style='color:#5F6368;'>·</span>&nbsp;&nbsp;"
+            f"<span style='font-family:monospace;font-size:10px;color:#8B949E;'>{preview}</span>")
+        summary_lbl.setTextFormat(Qt.TextFormat.RichText)
+        summary_lbl.setStyleSheet("background: transparent; border: none;")
+        header_lay.addWidget(summary_lbl, stretch=1)
+
+        toggle_btn = QPushButton("▶ Show")
+        toggle_btn.setFixedSize(58, 20)
+        toggle_btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: transparent; border: 1px solid {_tc['border']};
+                        border-radius: 4px; font-size: 10px; color: #8B949E; padding: 0 6px;
+                    }}
+                    QPushButton:hover {{ color: {_tc['accent']}; border-color: {_tc['accent']}; }}
+                """)
+        toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        header_lay.addWidget(toggle_btn)
+        outer_lay.addWidget(header)
+
+        # ── Expandable detail (hidden by default) ─────────────────────────────
+        detail = QFrame()
+        detail.setStyleSheet("background: transparent; border: none;")
+        detail.hide()
+        detail_lay = QVBoxLayout(detail)
+        detail_lay.setContentsMargins(0, 4, 0, 0)
+        detail_lay.setSpacing(4)
+
+        mono = QFont('Consolas', 9)
+        if not mono.exactMatch():
+            mono = QFont('Courier New', 9)
+
+        if code.strip():
+            from PyQt6.QtWidgets import QTextEdit as _QTE
+            code_edit = _QTE()
+            code_edit.setPlainText(code.strip())
+            code_edit.setReadOnly(True)
+            code_edit.setLineWrapMode(_QTE.LineWrapMode.NoWrap)
+            code_edit.setFont(mono)
+            code_edit.setStyleSheet(
+                f"QTextEdit {{ background: {_tc['base']}; color: #E6EDF3; "
+                f"border: 1px solid {_tc['border']}; border-radius: 6px; padding: 6px 10px; }}")
+            code_edit.setFrameShape(_QTE.Shape.NoFrame)
+            code_edit.setFixedHeight(min(max(len(code.strip().splitlines()) * 16 + 20, 50), 200))
+            detail_lay.addWidget(code_edit)
+
+        if output.strip():
+            from PyQt6.QtWidgets import QTextEdit as _QTE2
+            out_edit = _QTE2()
+            out_edit.setPlainText(output.strip())
+            out_edit.setReadOnly(True)
+            out_edit.setLineWrapMode(_QTE2.LineWrapMode.WidgetWidth)
+            out_edit.setFont(mono)
+            out_edit.setStyleSheet(
+                f"QTextEdit {{ background: {_tc['deep']}; color: #8FBC8F; "
+                f"border: 1px solid {_tc['border']}; border-radius: 6px; padding: 6px 10px; }}")
+            out_edit.setFrameShape(_QTE2.Shape.NoFrame)
+            out_edit.setFixedHeight(min(max(len(output.strip().splitlines()) * 16 + 20, 50), 150))
+            detail_lay.addWidget(out_edit)
+
+        outer_lay.addWidget(detail)
+
+        def _toggle():
+            if detail.isHidden():
+                detail.show()
+                toggle_btn.setText("▼ Hide")
+            else:
+                detail.hide()
+                toggle_btn.setText("▶ Show")
+
+        toggle_btn.clicked.connect(_toggle)
+
+        # ── Insert at correct position (before _work_banner) ──────────────────
+        self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
+        self._animate_message_in(message_widget,
+                                 on_settled=lambda: self.scroll_to_widget(message_widget))
+
+        # ── Track in message_widgets ──────────────────────────────────────────
+        self.message_widgets.append({
+            'widget': message_widget,
+            'role': 'code_exec',
+            'content_wrapper': header,
+        })
+
+        # ── Persist to conversation_history so session save/load works ────────
+        if save_to_history:
+            try:
+                self.controller.ai.conversation_history.append({
+                    'role': 'ui_event',
+                    'content': '⚙ Code executed',
+                    '_code': code,
+                    '_output': output,
+                    '_annotation': annotation,
+                })
+            except Exception:
+                pass
 
     def start_thinking_animation(self):
         """Start thinking animation"""
@@ -5402,6 +5855,11 @@ class ChatWindow(BaseWindow):
         self.send_btn.hide()
         self.interrupt_btn.show()
         self.show_thinking_bubble()
+        # Show work banner if already in work mode
+        if hasattr(self, '_work_banner') and self.controller.ai.tool_manager.in_work_mode:
+            if not self._work_banner.text():
+                self._work_banner.setText("⚙ Working…")
+            self._work_banner.show()
 
     def hide_thinking(self):
         """Hide thinking animation"""
@@ -5411,6 +5869,10 @@ class ChatWindow(BaseWindow):
         self.interrupt_btn.hide()
         self.send_btn.show()
         self.hide_thinking_bubble()
+        # Clear and hide the work mode banner
+        if hasattr(self, '_work_banner'):
+            self._work_banner.setText("")
+            self._work_banner.hide()
 
     def show_thinking_bubble(self):
         """Show an animated three-dot typing indicator as an AI chat bubble."""
@@ -5646,28 +6108,31 @@ class ChatWindow(BaseWindow):
             event.acceptProposedAction()
 
     def dropEvent(self, event):
-        """Handle file drop"""
-        files = [u.toLocalFile() for u in event.mimeData().urls()]
-        if not files:
+        """Handle file drop — supports multiple files"""
+        raw_files = [u.toLocalFile() for u in event.mimeData().urls()]
+        if not raw_files:
             return
-
-        file_path = files[0]
-
-        file_path = self.clean_file_path(file_path)
 
         valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif']
-        if any(file_path.lower().endswith(ext) for ext in valid_extensions):
-            self._handle_image_file_drop(file_path)
-            return
+        image_files = [self.clean_file_path(p) for p in raw_files
+                       if any(p.lower().endswith(ext) for ext in valid_extensions)]
+        non_images  = [self.clean_file_path(p) for p in raw_files
+                       if not any(p.lower().endswith(ext) for ext in valid_extensions)]
 
-        if self.should_quote_path(file_path):
-            file_path = f'"{file_path}"'
+        if image_files:
+            if len(image_files) == 1:
+                self._handle_image_file_drop(image_files[0])
+            else:
+                self._handle_multiple_image_files_dialog(image_files)
 
-        current_text = self.input_field.toPlainText()
-        if current_text:
-            self.input_field.text_input.setPlainText(current_text + "\n" + file_path)
-        else:
-            self.input_field.text_input.setPlainText(file_path)
+        for file_path in non_images:
+            if self.should_quote_path(file_path):
+                file_path = f'"{file_path}"'
+            current_text = self.input_field.toPlainText()
+            if current_text:
+                self.input_field.text_input.setPlainText(current_text + "\n" + file_path)
+            else:
+                self.input_field.text_input.setPlainText(file_path)
 
     def clean_file_path(self, path):
         """Clean file path by removing file:/// prefix and normalizing"""
@@ -5708,10 +6173,27 @@ class ChatWindow(BaseWindow):
             clipboard = QApplication.clipboard()
             text = clipboard.text().strip()
 
+            # ── Multi-path support: clipboard may contain multiple lines ─────
+            valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif']
+            lines = [l.strip() for l in text.splitlines() if l.strip()]
+            existing_paths = [self.clean_file_path(l) for l in lines if os.path.exists(self.clean_file_path(l))]
+
+            if len(existing_paths) > 1:
+                image_files = [p for p in existing_paths if any(p.lower().endswith(e) for e in valid_extensions)]
+                non_images = [p for p in existing_paths if p not in image_files]
+                if image_files:
+                    self._handle_multiple_image_files_dialog(image_files)
+                for file_path in non_images:
+                    if self.should_quote_path(file_path):
+                        file_path = f'"{file_path}"'
+                    self.input_field.text_input.insertPlainText(file_path + "\n")
+                event.accept()
+                return
+
+            # ── Single path fallback ──────────────────────────────────────────
             cleaned_path = self.clean_file_path(text)
 
             if os.path.exists(cleaned_path):
-                valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif']
                 if any(cleaned_path.lower().endswith(ext) for ext in valid_extensions):
                     self._handle_image_file_drop(cleaned_path)
                     event.accept()
@@ -5939,13 +6421,26 @@ class ChatWindow(BaseWindow):
                     border-top: 1px solid {t['border']};
                 }}
             """)
+            # Work mode banner — recolour with active theme
+            if hasattr(self, '_work_banner'):
+                self._work_banner.setStyleSheet(f"""
+                                QLabel#workBanner {{
+                                    background-color: {t['elevated']};
+                                    border-top: 1px solid {t['border']};
+                                    border-bottom: 1px solid {t['border']};
+                                    color: {t['accent']};
+                                    font-size: 11px;
+                                    font-style: italic;
+                                    padding: 6px 14px;
+                                }}
+                            """)
             # Input container
             self.input_container.setStyleSheet(f"""
-                QFrame#inputContainer {{
-                    background-color: {t['deep']};
-                    border-top: 1px solid {t['border']};
-                }}
-            """)
+                            QFrame#inputContainer {{
+                                background-color: {t['deep']};
+                                border-top: 1px solid {t['border']};
+                            }}
+                        """)
             # Sidebar
             if hasattr(self, 'sidebar'):
                 self.sidebar.setStyleSheet(f"""
