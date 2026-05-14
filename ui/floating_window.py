@@ -709,10 +709,36 @@ class FloatingWindow(QWidget):
 
     def handle_work_mode_update(self, result):
         """Handle tool mode updates"""
+        # ── Show code + output block in chat window when code ran ──────────────
+        code   = result.get('code', '')
+        output = getattr(getattr(self, '_controller_ref', None), '_last_work_output_snapshot', '') \
+                 if not code else ''
+        # Grab output from the tool_manager directly
+        try:
+            tm_output = self.controller.ai.tool_manager.last_work_output or ''
+        except Exception:
+            tm_output = ''
+
+        if code and tm_output:
+            if self.chat_window:
+                self.chat_window.add_code_execution_note(code, tm_output)
+            if self.android_bridge and self.android_bridge.isVisible():
+                self.android_bridge.add_work_execution(code, tm_output)
+
         if self.chat_window:
             self.chat_window.handle_ai_response(result)
         if self.android_bridge and self.android_bridge.isVisible():
             self.android_bridge.handle_ai_response(result)
+
+        # ── Clear work banner when work mode finishes ──────────────────────────
+        exited   = result.get('exited_work_mode', False)
+        thinking = result.get('thinking', False)
+        if exited or not thinking:
+            if self.chat_window and hasattr(self.chat_window, '_work_banner'):
+                self.chat_window._work_banner.setText("")
+                self.chat_window._work_banner.hide()
+            if self.android_bridge and self.android_bridge.isVisible():
+                self.android_bridge.hide_work_banner()
 
     def toggle_android_bridge(self):
         """Start or stop the Android phone bridge. Called from context menu."""

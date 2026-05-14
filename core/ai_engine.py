@@ -370,7 +370,7 @@ class AIEngine:
     def _get_history_with_memory(self) -> list:
         """Return conversation_history with pending memory context injected
         immediately before the most recent user message (if any)."""
-        history_copy = list(self.conversation_history)
+        history_copy = [m for m in self.conversation_history if m.get('role') != 'ui_event']
         if self._pending_memory_context and history_copy:
             insert_at = None
             for i in range(len(history_copy) - 1, -1, -1):
@@ -382,14 +382,8 @@ class AIEngine:
                     'role': 'system',
                     'content': self._pending_memory_context
                 })
-        # ── Inject exec-violation reminder at end of history ──────────────────
-        if self._pending_exec_violation_prompt:
-            history_copy.append({
-                'role': 'system',
-                'content': self._pending_exec_violation_prompt
-            })
-            self._pending_exec_violation_prompt = None
-        # ─────────────────────────────────────────────────────────────────────
+        # (exec-violation prompt is now appended directly to conversation_history
+        #  inside _process_ai_response, so no temporary injection needed here.)
         return history_copy
 
     def _build_messages(self):
@@ -880,7 +874,12 @@ class AIEngine:
         ai_text, _violated, _ = self.tool_manager.enforce_single_exec_policy(ai_text)
         if _violated:
             from core.global_instructions import EXEC_CODE_TOOLCALL_VIOLATION_PROMPT
-            self._pending_exec_violation_prompt = EXEC_CODE_TOOLCALL_VIOLATION_PROMPT
+            # Append directly to conversation_history so the AI carries this
+            # correction forward in ALL future turns, not just the next one.
+            self.conversation_history.append({
+                'role': 'system',
+                'content': EXEC_CODE_TOOLCALL_VIOLATION_PROMPT
+            })
         # ──────────────────────────────────────────────────────────────────────────
 
         if self.tool_execution_lockout:
