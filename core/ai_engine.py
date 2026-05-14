@@ -368,22 +368,19 @@ class AIEngine:
             return []
 
     def _get_history_with_memory(self) -> list:
-        """Return conversation_history with pending memory context injected
-        immediately before the most recent user message (if any)."""
-        history_copy = [m for m in self.conversation_history if m.get('role') != 'ui_event']
-        if self._pending_memory_context and history_copy:
-            insert_at = None
-            for i in range(len(history_copy) - 1, -1, -1):
-                if history_copy[i]['role'] == 'user':
-                    insert_at = i
-                    break
-            if insert_at is not None:
-                history_copy.insert(insert_at, {
-                    'role': 'system',
-                    'content': self._pending_memory_context
-                })
-        # (exec-violation prompt is now appended directly to conversation_history
-        #  inside _process_ai_response, so no temporary injection needed here.)
+        """Return conversation_history ready for the API.
+        memory_context ui_events are promoted to system messages at their natural
+        position (right before the user message they belong to).
+        All other ui_event entries are stripped out."""
+        history_copy = []
+        for m in self.conversation_history:
+            if m.get('role') == 'ui_event':
+                if m.get('_type') == 'memory_context' and m.get('content'):
+                    # Promote to a system message at this exact position
+                    history_copy.append({'role': 'system', 'content': m['content']})
+                # All other ui_event subtypes are silently dropped
+            else:
+                history_copy.append(m)
         return history_copy
 
     def _build_messages(self):
@@ -1088,12 +1085,15 @@ class AIEngine:
                     log.info(f"[AIEngine._process_ai_response] Safety net recovered session_name: "
                              f"'{session_name}'")
 
+        _mc = getattr(self, '_pending_memory_widget', None)
+        self._pending_memory_widget = None  # consume — prevent stale reuse in recursive calls
         return {
             'response': display_text,
             'has_work_call': False,
             'in_work_mode': False,
             'thinking': False,
-            'session_name': session_name
+            'session_name': session_name,
+            'memory_context': _mc,
         }
 
     def _process_work_mode_response(self, ai_text):
@@ -1298,8 +1298,8 @@ class AIEngine:
     # ═══════════════════════════════════════════════════════════════════════════
 
     def _inject_memories(self, user_message: str):
-        """Perform semantic recall and stage memory context for the next API call."""
-        self._pending_memory_context = ""
+        """Perform semantic recall and store memory context as a persistent ui_event in history."""
+        self._pending_memory_context = ""  # no longer used, cleared for safety
 
         if not self.memory_manager or not self.memory_manager.is_ready:
             return
@@ -1323,21 +1323,60 @@ class AIEngine:
             max_results=memory_max
         )
 
+        self._pending_memory_widget = None  # reset every call, not just when recalled
         if recalled:
+            import uuid as _uuid
             lines = "\n".join(f"- {m['text']}" for m in recalled)
-            self._pending_memory_context = (
+            context_text = (
                 f"<SYSTEM_MEM_RECALL>\n"
                 f"MEMORIES DETECTED:\n"
                 f"{lines}\n"
                 f"<SYSTEM_MEM_RECALL/>"
             )
-            log.info(f"[AIEngine._inject_memories] Staged {len(recalled)} memories as system message")
+            context_id = str(_uuid.uuid4())[:8]
+            # Append as a persistent ui_event — saved with session, filtered from API
+            # by _get_history_with_memory which promotes it to a system message inline
+            self.conversation_history.append({
+                'role': 'ui_event',
+                '_type': 'memory_context',
+                '_memory_context_id': context_id,
+                'content': context_text,
+                '_memories_preview': [m['text'] for m in recalled],
+            })
+            log.info(f"[AIEngine._inject_memories] Stored {len(recalled)} memories as "
+                     f"persistent ui_event | id={context_id}")
+            # Store for result dict so controller can show the widget on the main thread
+            self._pending_memory_widget = (context_id, [m['text'] for m in recalled])
+            # Notify Android bridge if a phone is connected (thread-safe via _dispatch lock)
+            try:
+                ab = getattr(getattr(getattr(self, 'controller', None), 'ui', None),
+                             'android_bridge', None)
+                if ab and ab.isVisible():
+                    ab.add_memory_context_card(context_id, [m['text'] for m in recalled])
+            except Exception:
+                pass
         else:
             log.debug("[AIEngine._inject_memories] No memories passed threshold — skipping injection")
 
     def _clear_memory_context(self):
-        """Call after the API response is received to remove temporary memory context."""
-        self._pending_memory_context = ""
+        """No-op — memory context is now stored as persistent ui_event entries."""
+        self._pending_memory_context = ""  # kept for safety
+
+    def detach_memory_context(self, context_id: str) -> bool:
+        """Remove a memory_context ui_event from conversation history by its ID."""
+        before = len(self.conversation_history)
+        self.conversation_history = [
+            m for m in self.conversation_history
+            if not (m.get('role') == 'ui_event'
+                    and m.get('_type') == 'memory_context'
+                    and m.get('_memory_context_id') == context_id)
+        ]
+        removed = len(self.conversation_history) < before
+        if removed:
+            log.info(f"[AIEngine.detach_memory_context] ✓ Detached id={context_id}")
+        else:
+            log.warning(f"[AIEngine.detach_memory_context] id={context_id} not found")
+        return removed
 
     # ═══════════════════════════════════════════════════════════════════════════
     # CONVERSATION MANAGEMENT

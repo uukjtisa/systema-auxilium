@@ -196,10 +196,13 @@ class AndroidBridge:
             self._handle_file_upload(msg)
         elif cmd == "browse_files":
             self._send_file_list(msg.get("path", ""))
-        elif cmd == "upload_file":
-            self._handle_file_upload(msg)
-        elif cmd == "browse_files":
-            self._send_file_list(msg.get("path", ""))
+        elif cmd == "detach_memory_context":
+            context_id = msg.get("context_id", "")
+            if context_id:
+                try:
+                    self.controller.detach_memory_context(context_id)
+                except Exception as e:
+                    print(f"[AndroidBridge] detach_memory_context error: {e}")
 
     def _dispatch(self, cmd: dict):
         """Send a JSON command to Android (thread-safe). Identical to ChatWindowTUI._dispatch."""
@@ -529,11 +532,18 @@ class AndroidBridge:
                     )
                 content = self.controller.ai.tool_manager.strip_tool_calls(content)
                 if role == "ui_event":
-                    self._dispatch({
-                        "cmd": "add_work_execution",
-                        "code": msg.get("_code", ""),
-                        "output": msg.get("_output", ""),
-                    })
+                    if msg.get("_type") == "memory_context":
+                        self._dispatch({
+                            "cmd": "add_memory_context",
+                            "context_id": msg.get("_memory_context_id", ""),
+                            "memories": msg.get("_memories_preview", []),
+                        })
+                    else:
+                        self._dispatch({
+                            "cmd": "add_work_execution",
+                            "code": msg.get("_code", ""),
+                            "output": msg.get("_output", ""),
+                        })
                 elif content:
                     if role == "user":
                         self._dispatch({"cmd": "add_user", "text": content})
@@ -582,3 +592,18 @@ class AndroidBridge:
 
     def update_voice_status(self, status: str):
         self._dispatch({"cmd": "voice_status", "status": status})
+
+    def add_memory_context_card(self, context_id: str, memories: list):
+        """Send a memory context card to the Android client."""
+        self._dispatch({
+            "cmd": "add_memory_context",
+            "context_id": context_id,
+            "memories": memories,
+        })
+
+    def remove_memory_context_card(self, context_id: str):
+        """Tell Android to remove a memory context card by ID."""
+        self._dispatch({
+            "cmd": "remove_memory_context",
+            "context_id": context_id,
+        })
