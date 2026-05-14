@@ -43,10 +43,12 @@ class AssistantController(QObject):
     # Manual provider — fires on the main thread to show the response popup
     # Only carries display data; result_holder + done_event live on self
     manual_response_signal = pyqtSignal(str, bool, str)
-    bridge_send_signal = pyqtSignal(str)  # thread-safe: send message from bridge
-    bridge_user_bubble_signal = pyqtSignal(str)  # thread-safe: add user bubble from bridge
-    bridge_load_session_signal = pyqtSignal(str)  # thread-safe: load session from bridge
-    bridge_new_session_signal = pyqtSignal()  # thread-safe: new session from bridge
+    bridge_send_signal = pyqtSignal(str)
+    bridge_user_bubble_signal = pyqtSignal(str)
+    bridge_load_session_signal = pyqtSignal(str)
+    bridge_new_session_signal = pyqtSignal()
+    bridge_attach_image_signal = pyqtSignal(object)  # list[str] — paths to pin on main thread
+    bridge_detach_image_signal = pyqtSignal(str)  # path to unpin on main thread
 
     def __init__(self):
         super().__init__()
@@ -198,11 +200,13 @@ class AssistantController(QObject):
         self.voice_message_signal.connect(self._handle_voice_message_on_main_thread)
         log.debug("[AssistantController.__init__] voice_message_signal connected to main thread handler")
 
-        # Connect manual response signal — shows popup on main thread
+        # Connect
         self.bridge_send_signal.connect(self.send_message)
         self.bridge_user_bubble_signal.connect(self._add_user_bubble_to_chat)
         self.bridge_load_session_signal.connect(self.load_session)
         self.bridge_new_session_signal.connect(self.create_new_session)
+        self.bridge_attach_image_signal.connect(self._handle_bridge_attach_image)
+        self.bridge_detach_image_signal.connect(self._handle_bridge_detach_image)
         self.ai.manual_response_fn = self._request_manual_response
         log.debug("[AssistantController.__init__] manual_response_signal connected")
 
@@ -602,6 +606,28 @@ class AssistantController(QObject):
                     if close_win:
                         QTimer.singleShot(0, close_win.close)
             ab.request_manual_response(context, work_mode, work_output, on_android_manual_response)
+
+    def _handle_bridge_attach_image(self, paths):
+        """Slot — always runs on main thread. Pins images sent from the Android app."""
+        if not self._chat:
+            return
+        for p in (paths or []):
+            try:
+                self._chat._show_image_preview(p)
+            except Exception as e:
+                log.error(f"[AssistantController._handle_bridge_attach_image] ✗ {e}")
+
+    def _handle_bridge_detach_image(self, path):
+        """Slot — always runs on main thread. Removes a pinned image the Android app detached."""
+        if not self._chat or not path:
+            return
+        try:
+            for pi in list(getattr(self._chat, 'pinned_images', [])):
+                if pi.get('path') == path:
+                    self._chat._remove_pinned_image(pi, notify=False)
+                    break
+        except Exception as e:
+            log.error(f"[AssistantController._handle_bridge_detach_image] ✗ {e}")
 
     def handle_voice_transcription(self, text):
         """Handle transcribed voice input - SIGNAL VERSION"""
@@ -1115,9 +1141,21 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         # Show thinking in UI
         self.ui.show_thinking()
 
+        # Collect pinned images so Android-sent messages also reach the AI with images
+        image_paths = []
+        if self.get_ai_provider() in ('puter', 'custom_script') and self._chat:
+            image_paths = [pi['path'] for pi in getattr(self._chat, 'pinned_images', [])]
+            if image_paths:
+                log.debug(f"[AssistantController.send_message] Found {len(image_paths)} pinned image(s) — "
+                          f"upgrading to generate_with_image")
+
         # Create worker thread
-        log.debug("[AssistantController.send_message] Creating AIWorker for 'generate'...")
-        self.current_worker = AIWorker(self.ai, 'generate', user_message)
+        if image_paths:
+            log.debug("[AssistantController.send_message] Creating AIWorker for 'generate_with_image'...")
+            self.current_worker = AIWorker(self.ai, 'generate_with_image', user_message, image_paths)
+        else:
+            log.debug("[AssistantController.send_message] Creating AIWorker for 'generate'...")
+            self.current_worker = AIWorker(self.ai, 'generate', user_message)
         self.current_worker.response_ready.connect(self.handle_ai_response)
         self.current_worker.error_occurred.connect(self.handle_ai_error)
         self.current_worker.start()

@@ -5274,8 +5274,12 @@ class ChatWindow(BaseWindow):
         except Exception:
             pass
 
-    def _remove_pinned_image(self, pin_info):
-        """Remove a single pinned image card."""
+    def _remove_pinned_image(self, pin_info, notify=True):
+        """Remove a single pinned image card.
+
+        notify=False when called from the Android bridge (detach initiated by
+        Android) so we don't echo image_detached back to the phone.
+        """
         _detached_path = pin_info.get('path', '')
         if pin_info in self.pinned_images:
             self.pinned_images.remove(pin_info)
@@ -5287,8 +5291,8 @@ class ChatWindow(BaseWindow):
             self._pinned_area.hide()
         else:
             QTimer.singleShot(10, self._update_pinned_overlay)
-        # ── Sync to Android ──────────────────────────────────────────────────
-        if _detached_path:
+        # ── Sync to Android (only when host initiated the removal) ───────────
+        if notify and _detached_path:
             _ab = getattr(getattr(self.controller, 'ui', None), 'android_bridge', None)
             if _ab and _ab.isVisible():
                 _ab.notify_image_detached(_detached_path)
