@@ -126,27 +126,14 @@ class AndroidBridge:
             paths = msg.get("paths", [])
             if isinstance(paths, str):
                 paths = [paths] if paths else []
-            chat = self.controller._chat
-            for _p in paths:
-                if chat:
-                    try:
-                        from PyQt6.QtCore import QTimer
-                        QTimer.singleShot(0, lambda p=_p: chat._show_image_preview(p))
-                    except Exception as e:
-                        print(f"[AndroidBridge] attach_image_path error: {e}")
-                        self._pending_image_paths.append(_p)
-                else:
-                    self._pending_image_paths.append(_p)
+            if paths:
+                # Use signal so the UI call is marshalled safely to the main thread
+                self.controller.bridge_attach_image_signal.emit(paths)
         elif cmd == "remove_image_path" or cmd == "detach_image_path":
             path = msg.get("path", "")
             if path:
-                chat = self.controller._chat
-                if chat:
-                    try:
-                        from PyQt6.QtCore import QTimer
-                        QTimer.singleShot(0, lambda p=path: self._remove_pinned_by_path(chat, p))
-                    except Exception as e:
-                        print(f"[AndroidBridge] remove_image_path error: {e}")
+                # Use signal so the UI call is marshalled safely to the main thread
+                self.controller.bridge_detach_image_signal.emit(path)
         elif cmd == "interrupt":
             self.controller.interrupt_request()
         elif cmd == "closed":
@@ -249,14 +236,18 @@ class AndroidBridge:
             print(f"[AndroidBridge] _send_sessions_page error: {e}")
 
     def _remove_pinned_by_path(self, chat, path: str):
-        """Remove a pinned image card from the PC chat window by path."""
+        """Remove a pinned image card from the PC chat window by path.
+        Passes notify=False so the removal is not echoed back to Android
+        (Android already removed the card locally before sending detach_image_path).
+        """
         try:
             for pi in list(getattr(chat, 'pinned_images', [])):
                 if pi.get('path') == path:
-                    chat._remove_pinned_image(pi)
+                    chat._remove_pinned_image(pi, notify=False)
                     return
         except Exception as e:
             print(f"[AndroidBridge] _remove_pinned_by_path error: {e}")
+
     def _send_skills(self):
         try:
             sm = self.controller.skill_manager
