@@ -8,12 +8,8 @@ import threading
 from PyQt6.QtWidgets import QWidget, QPushButton, QVBoxLayout, QMenu, QLabel, QApplication, QMessageBox
 from PyQt6.QtGui import QAction, QCursor, QPainter, QColor, QPen, QLinearGradient, QBrush
 from PyQt6.QtCore import Qt, QTimer, QPoint, QRect, QRectF
-from ui.chat_window import ChatWindow
-from ui.settings_window import SettingsWindow
 from ui.floating_window_settings import AppearanceSettingsWindow
-import pystray
 from ui.debug_window import DebugWindow
-from PIL import Image, ImageDraw
 import json
 import os
 import math
@@ -531,6 +527,7 @@ class FloatingWindow(QWidget):
     def _startup_chat_init(self):
         """Pre-initialize and briefly show the chat window at startup."""
         if self.chat_window is None:
+            from ui.chat_window import ChatWindow
             self.chat_window = ChatWindow(self.controller)
         self.chat_window.show()
         self.chat_window.raise_()
@@ -550,6 +547,7 @@ class FloatingWindow(QWidget):
     def open_chat(self):
         """Open chat window"""
         if self.chat_window is None:
+            from ui.chat_window import ChatWindow
             self.chat_window = ChatWindow(self.controller)
         if not self.chat_window.isVisible():
             self.chat_window.show()
@@ -574,6 +572,7 @@ class FloatingWindow(QWidget):
     def open_settings(self):
         """Open settings window"""
         if self.settings_window is None:
+            from ui.settings_window import SettingsWindow
             self.settings_window = SettingsWindow(self.controller)
         self.settings_window.show()
         self.settings_window.raise_()
@@ -587,34 +586,26 @@ class FloatingWindow(QWidget):
 
     def create_tray_icon(self):
         """Create system tray icon with RGBA image (required on Windows)."""
+        from PIL import Image, ImageDraw
+        import pystray
         # RGBA required — RGB silently fails to show on Windows tray
         image = Image.new('RGBA', (64, 64), color=(0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
         draw.ellipse([4, 4, 60, 60], fill=(100, 100, 255, 255))
         draw.ellipse([18, 18, 46, 46], fill=(255, 255, 255, 255))
 
-        menu_items = [
-            pystray.MenuItem("Show floating window", self._tray_show_floating),
-            pystray.MenuItem("Open Chat",            self._tray_open_chat),
-            pystray.MenuItem("Appearance",           self._tray_open_appearance),
-            pystray.MenuItem("Settings",             self._tray_open_settings),
-        ]
-
-        menu_items.append(
-            pystray.MenuItem(
+        menu_items = [pystray.MenuItem("Show floating window", self._tray_show_floating),
+                      pystray.MenuItem("Open Chat", self._tray_open_chat),
+                      pystray.MenuItem("Appearance", self._tray_open_appearance),
+                      pystray.MenuItem("Settings", self._tray_open_settings), pystray.MenuItem(
                 "Debug Mode",
                 self.toggle_debug_from_tray,
                 checked=lambda item: self.controller.get_debug_mode()
-            )
-        )
-
-        menu_items.append(
-            pystray.MenuItem(
+            ), pystray.MenuItem(
                 "Open Debug Window",
                 self._tray_open_debug,
                 visible=lambda item: self.controller.get_debug_mode()
-            )
-        )
+            )]
 
         menu_items.extend([
             pystray.MenuItem("Reset Python", self._tray_reset_python),
@@ -646,6 +637,7 @@ class FloatingWindow(QWidget):
 
     def _do_open_chat_from_tray(self):
         if self.chat_window is None:
+            from ui.chat_window import ChatWindow
             self.chat_window = ChatWindow(self.controller)
         self.chat_window.show()
         self.chat_window.raise_()

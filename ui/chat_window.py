@@ -3414,12 +3414,24 @@ class ChatWindow(BaseWindow):
                     )
                 content = self.controller.ai.tool_manager.strip_tool_calls(content)
                 if role == "ui_event":
-                    self.add_code_execution_note(
-                        msg.get("_code", ""),
-                        msg.get("_output", ""),
-                        save_to_history=False,
-                        annotation=msg.get("_annotation", ""),
-                    )
+                    if msg.get("_type") == "memory_context":
+                        _ctx_id = msg.get("_memory_context_id", "")
+                        if not _ctx_id or not isinstance(_ctx_id, str):
+                            print(
+                                f"[ChatWindow.render_loaded_messages] Skipping memory_context with invalid id: {_ctx_id!r}")
+                        else:
+                            self.add_memory_context_widget(
+                                context_id=_ctx_id,
+                                memories=msg.get("_memories_preview", []),
+                                save_to_history=False,
+                            )
+                    else:
+                        self.add_code_execution_note(
+                            msg.get("_code", ""),
+                            msg.get("_output", ""),
+                            save_to_history=False,
+                            annotation=msg.get("_annotation", ""),
+                        )
                 elif content:
                     if role == "user":
                         self.add_user_message(content)
@@ -5793,6 +5805,192 @@ class ChatWindow(BaseWindow):
             except Exception:
                 pass
 
+    def add_memory_context_widget(self, context_id: str, memories: list,
+                                   save_to_history: bool = True):
+        """Render a memory-context card with a Detach button.
+
+        Visually distinct from code execution notes — uses a brain icon and
+        amber/gold accent so users know it's memory, not code.
+        When Detach is clicked the widget animates out AND the corresponding
+        ui_event is removed from conversation_history via the controller.
+
+        Parameters
+        ----------
+        context_id  : short UUID-derived string stored on the ui_event
+        memories    : list of raw memory strings shown in the card
+        save_to_history : False when replaying from a loaded session (entry
+                          already exists in conversation_history)
+        """
+        if not context_id or not isinstance(context_id, str):
+            return
+
+        from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QVBoxLayout,
+                                     QPushButton, QLabel)
+
+        _tc = self._t()
+
+        # Follow the active theme
+        _mem_accent = _tc['accent']
+        _mem_bg = _tc['elevated']
+        _mem_border = _tc['border']
+
+        # ── Outer wrapper ──────────────────────────────────────────────────
+        message_widget = QFrame()
+        message_widget.setStyleSheet(
+            "QFrame { background-color: transparent; padding: 4px 16px; }")
+        outer_lay = QVBoxLayout(message_widget)
+        outer_lay.setContentsMargins(0, 0, 0, 0)
+        outer_lay.setSpacing(0)
+
+        # ── Header row (always visible) ────────────────────────────────────
+        header = QFrame()
+        header.setStyleSheet(f"""
+                    QFrame {{
+                        background-color: {_mem_bg};
+                        border: 1px solid {_mem_border};
+                        border-radius: 8px;
+                    }}
+                """)
+        header_lay = QHBoxLayout(header)
+        header_lay.setContentsMargins(12, 6, 10, 6)
+        header_lay.setSpacing(8)
+
+        icon_lbl = QLabel("🧠")
+        icon_lbl.setStyleSheet(
+            "font-size: 13px; background: transparent; border: none;")
+        icon_lbl.setFixedWidth(18)
+        header_lay.addWidget(icon_lbl)
+
+        # Preview: first memory title, trimmed
+        preview_text = memories[0][:72] + ("…" if memories and len(memories[0]) > 72 else "") \
+            if memories else "Memory recalled"
+        count_label = f" +{len(memories) - 1} more" if len(memories) > 1 else ""
+
+        summary_lbl = QLabel(
+            f"<span style='color:{_mem_accent};font-size:11px;font-weight:600;'>"
+            f"Memory recalled</span>"
+            f"&nbsp;&nbsp;<span style='color:#5F6368;'>·</span>&nbsp;&nbsp;"
+            f"<span style='font-size:10px;color:#8B949E;'>{preview_text}</span>"
+            f"<span style='font-size:10px;color:{_mem_accent};'>{count_label}</span>")
+        summary_lbl.setTextFormat(Qt.TextFormat.RichText)
+        summary_lbl.setStyleSheet("background: transparent; border: none;")
+        header_lay.addWidget(summary_lbl, stretch=1)
+
+        # ── Show / Hide toggle ─────────────────────────────────────────────
+        toggle_btn = QPushButton("▶ Show")
+        toggle_btn.setFixedSize(58, 20)
+        toggle_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; border: 1px solid {_tc['border']};
+                border-radius: 4px; font-size: 10px; color: #8B949E; padding: 0 6px;
+            }}
+            QPushButton:hover {{ color: {_mem_accent}; border-color: {_mem_accent}; }}
+        """)
+        toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        header_lay.addWidget(toggle_btn)
+
+        # ── Detach button ──────────────────────────────────────────────────
+        detach_btn = QPushButton("⊗ Detach")
+        detach_btn.setFixedSize(62, 20)
+        detach_btn.setToolTip(
+            "Remove this memory from the conversation context.\n"
+            "The AI will no longer see it in this session.")
+        detach_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; border: 1px solid #6B3030;
+                border-radius: 4px; font-size: 10px; color: #8B6060; padding: 0 6px;
+            }}
+            QPushButton:hover {{ color: #E06060; border-color: #E06060; }}
+        """)
+        detach_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        header_lay.addWidget(detach_btn)
+
+        outer_lay.addWidget(header)
+
+        # ── Expandable memory list ─────────────────────────────────────────
+        detail = QFrame()
+        detail.setStyleSheet("background: transparent; border: none;")
+        detail.hide()
+        detail_lay = QVBoxLayout(detail)
+        detail_lay.setContentsMargins(4, 4, 4, 0)
+        detail_lay.setSpacing(4)
+
+        for mem_text in memories:
+            row = QFrame()
+            row.setStyleSheet(f"""
+                QFrame {{
+                    background: {_mem_bg};
+                    border: 1px solid {_mem_accent}33;
+                    border-radius: 6px;
+                    padding: 0px;
+                }}
+            """)
+            row_lay = QHBoxLayout(row)
+            row_lay.setContentsMargins(10, 6, 10, 6)
+            lbl = QLabel(mem_text)
+            lbl.setWordWrap(True)
+            lbl.setStyleSheet(
+                f"font-size: 11px; color: {_mem_accent}; background: transparent; border: none;")
+            row_lay.addWidget(lbl)
+            detail_lay.addWidget(row)
+
+        outer_lay.addWidget(detail)
+
+        # ── Toggle logic ───────────────────────────────────────────────────
+        def _toggle():
+            if detail.isHidden():
+                detail.show()
+                toggle_btn.setText("▼ Hide")
+            else:
+                detail.hide()
+                toggle_btn.setText("▶ Show")
+
+        toggle_btn.clicked.connect(_toggle)
+
+        # ── Detach logic ───────────────────────────────────────────────────
+        def _detach(_cid=context_id, _w=message_widget):
+            try:
+                self.controller.detach_memory_context(_cid)
+            except Exception as e:
+                print(f"[ChatWindow._detach] Error calling detach_memory_context: {e}")
+            # Remove widget from message_widgets tracking list
+            self.message_widgets[:] = [
+                mw for mw in self.message_widgets if mw.get('widget') is not _w
+            ]
+            # Animate out and destroy
+            self._animate_message_out(_w, callback=_w.deleteLater)
+
+        detach_btn.clicked.connect(lambda: _detach())
+
+        # ── Insert before the trailing spacer ─────────────────────────────
+        self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
+        self._animate_message_in(
+            message_widget,
+            on_settled=lambda: self.scroll_to_widget(message_widget))
+
+        # ── Track in message_widgets ───────────────────────────────────────
+        self.message_widgets.append({
+            'widget': message_widget,
+            'role': 'memory_context',
+            'context_id': context_id,
+            'content_wrapper': header,
+            '_toggle_btn': toggle_btn,
+        })
+
+        # ── Persist to history (only on first insertion, not on reload) ────
+        if save_to_history:
+            try:
+                import uuid as _uuid
+                self.controller.ai.conversation_history.append({
+                    'role': 'ui_event',
+                    '_type': 'memory_context',
+                    '_memory_context_id': context_id,
+                    'content': '',          # content is stored per-memory
+                    '_memories_preview': memories,
+                })
+            except Exception:
+                pass
+
     def start_thinking_animation(self):
         """Start thinking animation"""
         if self.thinking_timer is None:
@@ -6510,15 +6708,35 @@ class ChatWindow(BaseWindow):
                                     line-height: 1.4;
                                 }}
                             """)
+                        elif role == 'memory_context':
+                            try:
+                                cw.setStyleSheet(f"""
+                                                                QFrame {{
+                                                                    background-color: {t['elevated']};
+                                                                    border: 1px solid {t['border']};
+                                                                    border-radius: 8px;
+                                                                }}
+                                                            """)
+                                tb = md.get('_toggle_btn')
+                                if tb:
+                                    tb.setStyleSheet(f"""
+                                                                    QPushButton {{
+                                                                        background: transparent; border: 1px solid {t['border']};
+                                                                        border-radius: 4px; font-size: 10px; color: #8B949E; padding: 0 6px;
+                                                                    }}
+                                                                    QPushButton:hover {{ color: {t['accent']}; border-color: {t['accent']}; }}
+                                                                """)
+                            except RuntimeError:
+                                pass
                         else:
                             bg = t['elevated'] if role != 'user' else t['surface']
                             cw.setStyleSheet(f"""
-                                QFrame {{
-                                    background-color: {bg};
-                                    border: 1px solid {t['border']};
-                                    border-radius: 12px;
-                                }}
-                            """)
+                                                            QFrame {{
+                                                                background-color: {bg};
+                                                                border: 1px solid {t['border']};
+                                                                border-radius: 12px;
+                                                            }}
+                                                        """)
                     except RuntimeError:
                         pass
         except Exception as e:
@@ -6690,6 +6908,5 @@ class ChatWindow(BaseWindow):
                     "Some Windows security features (UIPI) may restrict drag-and-drop behavior in some instances.\n"
                     "If drag & drop does not work, please use the 📁 file browser button instead."
                 )
-
         except:
             pass

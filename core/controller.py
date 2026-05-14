@@ -9,7 +9,6 @@ from PyQt6.QtCore import QObject, pyqtSignal, QTimer
 from core.ai_engine import AIEngine
 from core.puter_server import PuterServer
 from core.system_info import get_system_info, format_system_info_for_prompt
-from core.voice_handler import VoiceHandler
 from core.skill_manager import SkillManager
 from ui.floating_window import FloatingWindow
 from core.ai_worker import AIWorker
@@ -101,8 +100,10 @@ class AssistantController(QObject):
         self.puter_server = PuterServer(port=self.free_port, log_callback=self.log)
         log.debug("[AssistantController.__init__] PuterServer instance created")
 
-        # Voice handler
+        # Voice handler — import deferred so numpy/sounddevice/pygame don't
+        # block the Qt app from starting while controller.py is being imported
         log.debug("[AssistantController.__init__] Creating VoiceHandler...")
+        from core.voice_handler import VoiceHandler
         self.voice_handler = VoiceHandler(log_callback=self.log)
         self.voice_mode_active = False
         log.debug("[AssistantController.__init__] VoiceHandler created | voice_mode_active=False")
@@ -123,8 +124,10 @@ class AssistantController(QObject):
         log.debug("[AssistantController.__init__] Creating SkillManager...")
         _skills_dir = _APP_ROOT / "skills"
         self.skill_manager = SkillManager(_skills_dir)
-        self.skill_manager.start_watching()
-        log.info(f"[AssistantController.__init__] SkillManager started | dir='{_skills_dir}'")
+        # Delay file-system watcher so it doesn't compete with startup I/O
+        QTimer.singleShot(500, self.skill_manager.start_watching)
+        log.info(f"[AssistantController.__init__] SkillManager created | dir='{_skills_dir}' | "
+                 f"watcher deferred 500ms")
 
         # Initialize AI engine
         log.debug("[AssistantController.__init__] Creating AIEngine...")
@@ -220,30 +223,40 @@ class AssistantController(QObject):
         self._create_new_session()
         log.debug(f"[AssistantController.__init__] Initial session created: '{self.current_session_id}'")
 
-        # PATH SYNCER - Start background environment sync tick
-        log.debug("[AssistantController.__init__] Starting PathSyncer background tick...")
-        try:
-            from core.path_syncer import get_syncer
-            get_syncer().start()
-            log.info("[AssistantController.__init__] ✓ PathSyncer started (initial merge + 20s tick)")
-        except Exception as e:
-            log.warning(f"[AssistantController.__init__] PathSyncer start failed (non-fatal): {e}")
-
-        # MEMORY MANAGER - Persistent RAG memory
-        log.debug("[AssistantController.__init__] Initializing MemoryManager...")
-        try:
-            from core.memory_manager import get_memory_manager
-            self.memory_manager = get_memory_manager()
-            log.info(f"[AssistantController.__init__] ✓ MemoryManager ready | "
-                     f"count={self.memory_manager.count()} | is_ready={self.memory_manager.is_ready}")
-        except Exception as e:
-            log.error(f"[AssistantController.__init__] ✗ MemoryManager failed: {type(e).__name__}: {e}")
-            self.memory_manager = None
-
+        # PATH SYNCER + MEMORY MANAGER — deferred until after the UI is painted
+        # so the floating window appears immediately at startup
+        self.memory_manager = None  # will be set by _deferred_bg_init
+        QTimer.singleShot(300, self._deferred_bg_init)
         self.log("System AI Assistant initialized", "SUCCESS")
         log.info(f"[AssistantController.__init__] ✓ AssistantController ready | "
                  f"provider='{self.ai.ai_provider}' | port={self.free_port} | "
                  f"session='{self.current_session_id}' ──")
+
+    # ── EXTRA INIT METHODS (Separated to load the UI faster) ───────────────────────────────────────────────────
+
+    def _deferred_bg_init(self):
+        """Heavy background services — runs after the UI is visible."""
+        log.info("[AssistantController._deferred_bg_init] Starting deferred background init...")
+
+        # PATH SYNCER
+        try:
+            from core.path_syncer import get_syncer
+            get_syncer().start()
+            log.info("[AssistantController._deferred_bg_init] ✓ PathSyncer started")
+        except Exception as e:
+            log.warning(f"[AssistantController._deferred_bg_init] PathSyncer failed (non-fatal): {e}")
+
+        # MEMORY MANAGER
+        try:
+            from core.memory_manager import get_memory_manager
+            self.memory_manager = get_memory_manager()
+            log.info(f"[AssistantController._deferred_bg_init] ✓ MemoryManager ready | "
+                     f"count={self.memory_manager.count()} | is_ready={self.memory_manager.is_ready}")
+        except Exception as e:
+            log.error(f"[AssistantController._deferred_bg_init] ✗ MemoryManager failed: {e}")
+            self.memory_manager = None
+
+        log.info("[AssistantController._deferred_bg_init] ✓ Deferred init complete")
 
     # ── Convenience property ───────────────────────────────────────────────────
 
@@ -1261,6 +1274,20 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             self.log("Execute_code completed")
             return
 
+        # Show memory context card BEFORE the AI message so it appears above it
+        if result.get('memory_context') and self._chat:
+            try:
+                ctx_id, memories = result['memory_context']
+                # save_to_history=False: _inject_memories already added the ui_event entry
+                if ctx_id and isinstance(ctx_id, str):
+                    self._chat.add_memory_context_widget(ctx_id, memories, save_to_history=False)
+                else:
+                    log.warning(
+                        f"[AssistantController.handle_ai_response] Skipping memory widget — invalid ctx_id={ctx_id!r}")
+                log.info(f"[AssistantController.handle_ai_response] Memory context widget shown | id={ctx_id}")
+            except Exception as e:
+                log.error(f"[AssistantController.handle_ai_response] Failed to show memory widget: {e}")
+
         # Show visible text immediately (only if not empty) - NORMAL MODE or TOOL MODE
         if result.get('response'):
             log.debug(f"[AssistantController.handle_ai_response] Showing AI message | "
@@ -1709,6 +1736,20 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         self.ai.tool_manager.reset_python()
         log.info("[AssistantController.reset_python_interpreter] ✓ Reset complete")
         self.log("Python interpreter reset", "SUCCESS")
+
+    def detach_memory_context(self, context_id: str):
+        """Remove a memory context ui_event from history, save session, and sync Android."""
+        log.info(f"[AssistantController.detach_memory_context] id='{context_id}'")
+        removed = self.ai.detach_memory_context(context_id)
+        # Always save — even if the entry wasn't found, a stale session file is worse
+        self._auto_save_session()
+        if removed:
+            ab = getattr(getattr(self, 'ui', None), 'android_bridge', None)
+            if ab and ab.isVisible():
+                ab.remove_memory_context_card(context_id)
+            log.info(f"[AssistantController.detach_memory_context] ✓ Done")
+        else:
+            log.warning(f"[AssistantController.detach_memory_context] Entry id='{context_id}' not found in history — session saved anyway")
 
     # ═══════════════════════════════════════════════════════════════════════════
     # UNIFIED MODEL MANAGEMENT  (all providers read from core/models.json)

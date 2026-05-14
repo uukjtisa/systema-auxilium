@@ -19,9 +19,6 @@ import os
 import re
 from core.logger import _make_logger, _NoOpLogger
 
-# STT imports
-import speech_recognition as sr
-
 # Vosk import (offline, free alternative)
 try:
     from vosk import Model, KaldiRecognizer
@@ -155,8 +152,10 @@ class VoiceHandler:
         self.processing_thread = None
         log.debug("[VoiceHandler.__init__] Thread handles: capture_thread=None | processing_thread=None")
 
-        # Speech recognition
-        log.debug("[VoiceHandler.__init__] Initializing speech_recognition.Recognizer...")
+        # Speech recognition — import here so it doesn't block module load time
+        log.debug("[VoiceHandler.__init__] Importing + initializing speech_recognition.Recognizer...")
+        import speech_recognition as sr
+        self.sr = sr  # store so methods can use self.sr.AudioData etc.
         self.recognizer = sr.Recognizer()
         log.info("[VoiceHandler.__init__] ✓ Speech recognizer initialized")
 
@@ -179,14 +178,9 @@ class VoiceHandler:
         self.on_state_change = None
         log.debug("[VoiceHandler.__init__] Callbacks: on_transcription=None | on_state_change=None")
 
-        # Initialize pygame for audio playback
-        log.debug("[VoiceHandler.__init__] Initializing pygame mixer (freq=22050, size=-16, "
-                  "channels=1, buffer=512)...")
-        try:
-            pygame.mixer.init(frequency=22050, size=-16, channels=1, buffer=512)
-            log.info("[VoiceHandler.__init__] ✓ pygame mixer initialized")
-        except Exception as e:
-            log.warning(f"[VoiceHandler.__init__] pygame mixer init failed: {type(e).__name__}: {e}")
+        # pygame mixer is initialized lazily on first TTS playback, not at startup
+        self._pygame_mixer_ready = False
+        log.debug("[VoiceHandler.__init__] pygame mixer deferred — will init on first TTS use")
 
         # Vosk model (if available)
         self.vosk_model = None
@@ -731,7 +725,7 @@ class VoiceHandler:
             log.debug(f"[VoiceHandler._process_audio_segment] Audio assembled: "
                       f"bytes={total_bytes} | duration≈{duration_s:.2f}s")
 
-            audio_sr = sr.AudioData(audio_data, self.sample_rate, 2)
+            audio_sr = self.sr.AudioData(audio_data, self.sample_rate, 2)
             log.debug("[VoiceHandler._process_audio_segment] sr.AudioData created — "
                       "sending to Google STT...")
             self._emit_log_callback("Transcribing with Google Speech Recognition...")
@@ -750,11 +744,11 @@ class VoiceHandler:
                               f"has_callback={self.on_transcription is not None} | "
                               f"text_empty={not bool(text and text.strip())}")
 
-            except sr.UnknownValueError:
+            except self.sr.UnknownValueError:
                 log.warning("[VoiceHandler._process_audio_segment] ✗ Could not understand audio "
                             "(UnknownValueError)")
                 self._emit_log_callback("Could not understand audio", "WARNING")
-            except sr.RequestError as e:
+            except self.sr.RequestError as e:
                 log.error(f"[VoiceHandler._process_audio_segment] ✗ STT request error: "
                           f"{type(e).__name__}: {e}")
                 self._emit_log_callback(f"Speech recognition error: {e}", "ERROR")
@@ -834,6 +828,16 @@ class VoiceHandler:
             log.info(f"[VoiceHandler.speak_text] ✓ TTS complete | is_speaking=False | "
                      f"new_state='{new_state}'")
 
+    def _ensure_pygame_mixer(self):
+        """Lazy-init pygame mixer on first TTS use instead of at startup."""
+        if not self._pygame_mixer_ready:
+            try:
+                pygame.mixer.init(frequency=22050, size=-16, channels=1, buffer=512)
+                self._pygame_mixer_ready = True
+                log.info("[VoiceHandler] ✓ pygame mixer initialized (lazy)")
+            except Exception as e:
+                log.warning(f"[VoiceHandler] pygame mixer lazy init failed: {e}")
+
     async def _speak_pyttsx3(self, text):
         """Speak using pyttsx3 (offline TTS)"""
         log.info(f"[VoiceHandler._speak_pyttsx3] ── pyttsx3 TTS | text_len={len(text)} ──────")
@@ -880,6 +884,7 @@ class VoiceHandler:
 
     async def _speak_puter_tts(self, text):
         """Speak using Puter.js TTS"""
+        self._ensure_pygame_mixer()
         log.info(f"[VoiceHandler._speak_puter_tts] ── Puter TTS | text_len={len(text)} | "
                  f"model='{self.puter_tts_model}' | voice='{self.puter_tts_voice}' ──────")
         try:
@@ -949,6 +954,7 @@ class VoiceHandler:
             self._emit_log_callback(f"Puter TTS error: {e}", "ERROR")
 
     async def _speak_puter_elevenlabs(self, text):
+        self._ensure_pygame_mixer()
         """Speak using Puter.js with ElevenLabs"""
         voice_id = getattr(self, 'elevenlabs_voice_id', None)
         log.info(f"[VoiceHandler._speak_puter_elevenlabs] ── Puter+ElevenLabs TTS | "
@@ -1025,6 +1031,7 @@ class VoiceHandler:
 
     async def _speak_edge_tts(self, text):
         """Speak using Edge TTS (FREE)"""
+        self._ensure_pygame_mixer()
         log.info(f"[VoiceHandler._speak_edge_tts] ── Edge TTS | text_len={len(text)} | "
                  f"voice='{self.tts_voice}' | rate='{self.tts_rate}' | "
                  f"volume='{self.tts_volume}' ──────")
