@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QFrame, QLineEdit, QTextEdit, QCheckBox,
     QSpinBox, QStackedWidget, QSizePolicy, QApplication,
-    QTimeEdit,
+    QTimeEdit, QRadioButton,
 )
 from PyQt6.QtCore import Qt, QTime, QPoint
 from PyQt6.QtGui import QFont
@@ -260,8 +260,9 @@ class ManageTasksWindow(BaseWindow):
     def _build_task_row(self, task: dict) -> QWidget:
         task_id = task['id']
         container = QWidget()
+        container.setObjectName("taskRowCard")
         container.setStyleSheet(f"""
-                    QWidget {{
+                    QWidget#taskRowCard {{
                         background: {_SURFACE};
                         border-radius: 8px;
                         border: 1px solid rgba(88, 166, 255, 0.18);
@@ -482,8 +483,9 @@ class ManageTasksWindow(BaseWindow):
         # ── Helper: section card ──────────────────────────────────────────────
         def _card(*inner_widgets):
             card = QWidget()
+            card.setObjectName("editorCard")
             card.setStyleSheet(
-                f"QWidget {{ background: {_SURFACE}; border-radius: 8px;"
+                f"QWidget#editorCard {{ background: {_SURFACE}; border-radius: 8px;"
                 f" border: 1px solid {_BORDER}; }}"
             )
             cl = QVBoxLayout(card)
@@ -539,15 +541,15 @@ class ManageTasksWindow(BaseWindow):
         tr.setSpacing(10)
         tr.addWidget(QLabel("Start"))
         self._f_start = QTimeEdit()
-        self._f_start.setDisplayFormat("HH:mm")
+        self._f_start.setDisplayFormat("hh:mm AP")
         self._f_start.setStyleSheet(_INPUT)
-        self._f_start.setFixedWidth(90)
+        self._f_start.setFixedWidth(115)
         tr.addWidget(self._f_start)
         tr.addWidget(QLabel("  End"))
         self._f_end = QTimeEdit()
-        self._f_end.setDisplayFormat("HH:mm")
+        self._f_end.setDisplayFormat("hh:mm AP")
         self._f_end.setStyleSheet(_INPUT)
-        self._f_end.setFixedWidth(90)
+        self._f_end.setFixedWidth(115)
         self._f_end.setTime(QTime(21, 0))
         tr.addWidget(self._f_end)
         tr.addStretch()
@@ -560,6 +562,40 @@ class ManageTasksWindow(BaseWindow):
         self._f_interval.setValue(30)
         self._f_interval.setSuffix("  minutes")
         self._f_interval.setStyleSheet(_INPUT)
+
+        # ── Ping mode: Startup Relative vs Schedule Relative ──────────────────
+        ping_mode_row = QWidget()
+        ping_mode_row.setStyleSheet("background: transparent;")
+        pmr = QHBoxLayout(ping_mode_row)
+        pmr.setContentsMargins(0, 0, 0, 0)
+        pmr.setSpacing(20)
+
+        _RADIO = (
+            f"QRadioButton {{ color: {_TEXT}; font-size: 12px; spacing: 6px; }}"
+            f"QRadioButton::indicator {{ width: 14px; height: 14px; border-radius: 7px;"
+            f" border: 1px solid {_BORDER}; background: {_SURFACE2}; }}"
+            f"QRadioButton::indicator:checked {{ background: {_ACCENT}; border-color: {_ACCENT}; }}"
+        )
+
+        self._f_mode_startup = QRadioButton("Startup Relative")
+        self._f_mode_startup.setChecked(True)
+        self._f_mode_startup.setStyleSheet(_RADIO)
+        self._f_mode_startup.setToolTip(
+            "Interval counts down from when the app/thread starts.\n"
+            "Example: app opens at 4:31 PM, interval 30 min → next ping at 5:01 PM."
+        )
+
+        self._f_mode_schedule = QRadioButton("Schedule Relative")
+        self._f_mode_schedule.setStyleSheet(_RADIO)
+        self._f_mode_schedule.setToolTip(
+            "Interval aligns to the schedule window's start time.\n"
+            "Example: window is 4:00 AM – 7:00 PM, interval 2 h → pings at 4:00, 6:00, 8:00 … 18:00.\n"
+            "If you open the app at 4:31 PM, the next aligned ping is 6:00 PM — not 6:31 PM."
+        )
+
+        pmr.addWidget(self._f_mode_startup)
+        pmr.addWidget(self._f_mode_schedule)
+        pmr.addStretch()
 
         # Specific ping toggle
         self._f_specific_ping = QCheckBox("Use Specific Ping Times  (disables the interval above)")
@@ -583,9 +619,9 @@ class ManageTasksWindow(BaseWindow):
         ar.setContentsMargins(0, 0, 0, 0)
         ar.setSpacing(8)
         self._f_ping_time_picker = QTimeEdit()
-        self._f_ping_time_picker.setDisplayFormat("HH:mm")
+        self._f_ping_time_picker.setDisplayFormat("hh:mm AP")
         self._f_ping_time_picker.setStyleSheet(_INPUT)
-        self._f_ping_time_picker.setFixedWidth(90)
+        self._f_ping_time_picker.setFixedWidth(115)
         ar.addWidget(self._f_ping_time_picker)
         add_ping_btn = QPushButton("＋ Add Time")
         add_ping_btn.setStyleSheet(_BTN_ACCENT)
@@ -600,6 +636,7 @@ class ManageTasksWindow(BaseWindow):
 
         self._f_specific_ping.toggled.connect(lambda on: (
             self._f_interval.setEnabled(not on),
+            ping_mode_row.setEnabled(not on),
             self._ping_times_panel.setVisible(on),
         ))
 
@@ -607,6 +644,8 @@ class ManageTasksWindow(BaseWindow):
         schedule_lbl.setStyleSheet(_SEC)
         interval_lbl = QLabel("PING INTERVAL / TIMES")
         interval_lbl.setStyleSheet(_SEC)
+        mode_lbl = QLabel("INTERVAL MODE")
+        mode_lbl.setStyleSheet(_SEC)
 
         fl.addWidget(_card(
             schedule_lbl,
@@ -614,6 +653,8 @@ class ManageTasksWindow(BaseWindow):
             time_row,
             interval_lbl,
             _field("", self._f_interval),
+            mode_lbl,
+            ping_mode_row,
             self._f_specific_ping,
             self._ping_times_panel,
         ))
@@ -627,6 +668,25 @@ class ManageTasksWindow(BaseWindow):
         self._f_perm_workmode   = QCheckBox("Allow Work Mode  (can use work_environment to run code & see output)")
         self._f_perm_exec_code  = QCheckBox("Allow Execute Code  (can run fire-and-forget Python)")
         self._f_perm_skill_mgmt = QCheckBox("Allow Skill Load / Unload  (can modify its own skill context)")
+
+        self._f_perm_workmode.setToolTip(
+            "Lets the agent use the work_environment tool to write and execute code\n"
+            "in an isolated workspace and observe its full output.\n\n"
+            "⚠  Bypasses the 'Supervised Execution' setting.\n"
+            "Code runs automatically in the background — no approval prompt."
+        )
+        self._f_perm_exec_code.setToolTip(
+            "Lets the agent call execute_code to fire-and-forget Python snippets\n"
+            "(e.g. launch a process, write a file, send a notification).\n\n"
+            "⚠  Bypasses the 'Supervised Execution' setting.\n"
+            "Code runs automatically in the background — no approval prompt."
+        )
+        self._f_perm_skill_mgmt.setToolTip(
+            "Lets the agent call load_skill / unload_skill during a ping session,\n"
+            "dynamically swapping which skills are active in its context.\n\n"
+            "The skill changes only last for that session and do not affect your main window."
+        )
+
         for cb in (self._f_perm_workmode, self._f_perm_exec_code, self._f_perm_skill_mgmt):
             cb.setStyleSheet(_CHECK)
 
@@ -917,6 +977,7 @@ class ManageTasksWindow(BaseWindow):
         self._f_perm_workmode.setChecked(False)
         self._f_perm_exec_code.setChecked(False)
         self._f_perm_skill_mgmt.setChecked(False)
+        self._f_mode_startup.setChecked(True)
         self._f_specific_ping.setChecked(False)
         self._clear_ping_times_list()
         self._ping_hint_lbl.setText("⏰  Add ping times within your active schedule window.")
@@ -935,6 +996,10 @@ class ManageTasksWindow(BaseWindow):
         self._f_active_editor.setChecked(task.get('active', True))
 
         self._f_interval.setValue(task.get('interval_minutes', 30))
+
+        ping_mode = task.get('ping_mode', 'startup_relative')
+        self._f_mode_schedule.setChecked(ping_mode == 'schedule_relative')
+        self._f_mode_startup.setChecked(ping_mode != 'schedule_relative')
 
         use_specific = task.get('use_specific_ping_times', False)
         self._f_specific_ping.setChecked(use_specific)
@@ -988,11 +1053,13 @@ class ManageTasksWindow(BaseWindow):
         use_specific = self._f_specific_ping.isChecked()
         specific_times = sorted(self._get_current_ping_times()) if use_specific else []
 
+        ping_mode = 'schedule_relative' if self._f_mode_schedule.isChecked() else 'startup_relative'
         task_dict = {
             "name": name,
             "active": self._f_active_editor.isChecked(),
             "instruction": self._f_instruction.toPlainText(),
             "interval_minutes": self._f_interval.value(),
+            "ping_mode": ping_mode,
             "use_specific_ping_times": use_specific,
             "specific_ping_times": specific_times,
             "daily_schedule": {
