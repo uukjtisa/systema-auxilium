@@ -1627,6 +1627,7 @@ class ChatWindow(BaseWindow):
             return row
 
         sidebar_layout.addWidget(_side_row("🧠", "Manage Memories", self._open_memory_window))
+        sidebar_layout.addWidget(_side_row("⚙", "Manage Tasks", self._open_manage_tasks_window))
 
         # ── Skills — inline collapsible, matching _side_row style ────────────
         skill_manager = getattr(self.controller, 'skill_manager', None)
@@ -6883,6 +6884,18 @@ class ChatWindow(BaseWindow):
                 self.apply_glass_background(enabled, opacity)
         except Exception as e:
             print(f"[ChatWindow._apply_glass_from_settings] Error: {e}")
+
+    def _open_manage_tasks_window(self):
+        """Open the task management window."""
+        try:
+            from ui.manage_tasks_window import ManageTasksWindow
+            if not hasattr(self, '_tasks_window') or self._tasks_window is None:
+                self._tasks_window = ManageTasksWindow(self.controller)
+            self._tasks_window.show()
+            self._tasks_window.raise_()
+            self._tasks_window.activateWindow()
+        except Exception as e:
+            self.add_system_message(f"⚠️ Could not open Manage Tasks window: {e}")
 
     def _open_memory_window(self):
         """Open the memory management window."""

@@ -8,6 +8,8 @@ import platform
 import os
 from core.logger import _make_logger, _NoOpLogger
 import psutil
+import requests
+from datetime import datetime
 
 
 # ─────────────────────────── Colored Logger Setup ────────────────────────────
@@ -15,6 +17,33 @@ _verbose = False
 log = _make_logger("SystemInfo") if _verbose else _NoOpLogger()
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+def _get_location_info() -> dict:
+    """
+    Attempt to get approximate location from IP geolocation.
+    Returns a dict with location data or an error message.
+    NOTE: This is IP-based and can be inaccurate or spoofed by VPN/proxy.
+    """
+    try:
+        r = requests.get("http://ip-api.com/json/", timeout=5)
+        if r.status_code == 200:
+            d = r.json()
+            return {
+                "city":        d.get("city", "Unknown"),
+                "region":      d.get("regionName", "Unknown"),
+                "country":     d.get("country", "Unknown"),
+                "country_code": d.get("countryCode", "??"),
+                "zip":         d.get("zip", ""),
+                "latitude":    d.get("lat", 0.0),
+                "longitude":   d.get("lon", 0.0),
+                "timezone":    d.get("timezone", "Unknown"),
+                "isp":         d.get("isp", "Unknown"),
+                "ip":          d.get("query", "Unknown"),
+                "status":      "ok",
+            }
+    except Exception as e:
+        pass
+    return {"status": "unavailable", "reason": "Could not reach IP geolocation service."}
 
 def get_system_info():
     """
@@ -104,6 +133,21 @@ def get_system_info():
         log.debug(f"[get_system_info] Path '{path_name}': '{path_val}' | exists={exists}")
 
     info['common_paths'] = common_paths
+
+    # ── Date / Time ────────────────────────────────────────────────────────────
+    log.debug("[get_system_info] Recording current date and time")
+    info['current_datetime'] = datetime.now().strftime("%A, %B %d, %Y – %I:%M %p")
+    log.info(f"[get_system_info] Current datetime: {info['current_datetime']}")
+
+    # ── IP-based Location ─────────────────────────────────────────────────────
+    log.debug("[get_system_info] Fetching IP-based location info")
+    info['location'] = _get_location_info()
+    if info['location'].get('status') == 'ok':
+        log.info(f"[get_system_info] Location: {info['location']['city']}, "
+                 f"{info['location']['region']}, {info['location']['country']}")
+    else:
+        log.warning("[get_system_info] Location unavailable")
+
     log.info(f"[get_system_info] ── Collection complete — {len(info)} top-level keys gathered ──")
     return info
 
@@ -135,33 +179,58 @@ def format_system_info_for_prompt(info):
     for name, path in info['common_paths'].items():
         paths_text.append(f"  - {name.capitalize()}: {path}")
 
-    formatted = f"""
-=== SYSTEM INFORMATION ===
+        # Format location
+        loc = info.get('location', {})
+        if loc.get('status') == 'ok':
+            location_text = (
+                f"  - City: {loc['city']}, {loc['region']}, {loc['country']} ({loc['country_code']})\n"
+                f"  - Coordinates: {loc['latitude']}, {loc['longitude']}\n"
+                f"  - Timezone: {loc['timezone']}\n"
+                f"  - IP Address: {loc['ip']}  |  ISP: {loc['isp']}"
+            )
+        else:
+            location_text = "  - Location data unavailable."
 
-**Operating System:**
-- OS: {info['os']} {info['os_release']}
-- Machine: {info['machine']}
-- Hostname: {info['hostname']}
-- Username: {info['username']}
+        formatted = f"""
+    === SYSTEM INFORMATION AS OF SYSTEM INITIALIZATION ===
 
-**Hardware:**
-- CPU Cores: {info['cpu_count']} logical ({info['cpu_count_physical']} physical)
-- RAM: {info['ram_total_gb']} GB total
-- Processor: {info['processor']}
+    Operating System:
+    - OS: {info['os']} {info['os_release']}
+    - Machine: {info['machine']}
+    - Hostname: {info['hostname']}
+    - Username: {info['username']}
 
-**Python Environment:**
-- Python Version: {info['python_version']}
-- Working Directory: {info['current_dir']}
-- Home Directory: {info['home_dir']}
+    Hardware:
+    - CPU Cores: {info['cpu_count']} logical ({info['cpu_count_physical']} physical)
+    - RAM: {info['ram_total_gb']} GB total
+    - Processor: {info['processor']}
 
-**Disk Partitions:**
-{chr(10).join(partitions_text)}
+    Python Environment:
+    - Python Version: {info['python_version']}
+    - Working Directory: {info['current_dir']}
+    - Home Directory: {info['home_dir']}
 
-**Common Paths:**
-{chr(10).join(paths_text)}
+    Disk Partitions:
+    {chr(10).join(partitions_text)}
 
-=== END SYSTEM INFORMATION ===
-"""
+    Common Paths:
+    {chr(10).join(paths_text)}
+
+    Date & Time of System Initialization:
+    - {info.get('current_datetime', 'Unavailable')}
+
+    Active Location (IP-based):
+    {location_text}
+    ⚠ NOTE: The location above is derived from the user's IP address and may be imprecise or
+       intentionally set via VPN/proxy. Treat it as the "active location" the user has set.
+       If the user asks about their location, refer to the values above.
+       Do not claim certainty — acknowledge it reflects the detected network location.
+       
+       More over, these values are the values at system initialization, so never treat this as
+       the current state of the system.
+
+    === END SYSTEM INFORMATION ===
+    """
 
     log.info(f"[format_system_info_for_prompt] ✓ Formatted — output length: {len(formatted)} chars")
     return formatted.strip()

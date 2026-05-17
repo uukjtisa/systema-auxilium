@@ -732,6 +732,37 @@ class AIEngine:
             log.error(f"[AIEngine._call_provider] Unknown provider: '{self.ai_provider}'")
             return None
 
+    def raw_call(self, system_prompt: str, history: list) -> str | None:
+        """
+        Stateless one-shot call for external callers (e.g. task engine).
+        Uses the current provider + model settings on THIS engine instance.
+        Does NOT read or touch self.conversation_history.
+
+        history: [{role: 'user'|'assistant', content: str}, ...]
+        """
+        log.info(f"[AIEngine.raw_call] provider='{self.ai_provider}' | history={len(history)} msgs")
+        messages = [{'role': 'system', 'content': system_prompt}]
+        messages.extend(
+            {'role': m['role'], 'content': m['content']}
+            for m in history
+            if m.get('role') in ('system', 'assistant')
+        )
+        if self.ai_provider == 'anthropic':
+            return self._http_anthropic(messages)
+        elif self.ai_provider == 'gemini':
+            return self._http_gemini(messages)
+        elif self.ai_provider == 'puter':
+            return self._http_puter(messages)
+        elif self.ai_provider == 'manual':
+            # Manual provider requires live UI interaction — not usable in background tasks
+            log.warning("[AIEngine.raw_call] 'manual' provider cannot be used in background tasks — returning None")
+            return None
+        elif self.ai_provider == 'custom_script':
+            return self._http_custom_script(messages)
+        else:
+            log.error(f"[AIEngine.raw_call] Unknown provider: '{self.ai_provider}'")
+            return None
+
     def _make_error_result(self, message="Error: No response from AI") -> dict:
         """Return a standard error result dict."""
         return {
@@ -1073,10 +1104,10 @@ class AIEngine:
         log.debug("assistant response appended to history | "
                   f"total history entries={len(self.conversation_history)}")
 
-        # Safety net: strip any remaining tool JSON from display text
+        # Safety net: strip any remaining tool call from display text
         display_text = self.tool_manager.strip_tool_calls(ai_text)
         if display_text != ai_text:
-            log.warning(f"[AIEngine._process_ai_response] Safety net stripped residual tool JSON | "
+            log.warning(f"[AIEngine._process_ai_response] Safety net stripped residual tool call | "
                         f"before={len(ai_text)} → after={len(display_text)} chars")
             if not session_name:
                 missed_call = self.tool_manager.parse_set_session_name(ai_text)

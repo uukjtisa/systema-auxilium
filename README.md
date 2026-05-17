@@ -83,8 +83,12 @@ Switch between AI backends with ease:
 - **Manual Provider** — type responses by hand, useful for testing and debugging
 - **Custom Script Provider** — point to any `.py` file and use it as your AI backend. No need to touch the main codebase. Think of it like modding — write a script, plug it in, done. See `custom_provider_template.py` for instructions.
 
+**Scheduled Tasks**
+Set up persistent background agents that ping the AI on a schedule — even while you're doing something else. Each task has its own instruction, active time window, and ping interval (or specific ping times within that window). Tasks can be paused or activated without deletion, and each runs in its own session context. You can pre-load skills into a task agent so it has specialized knowledge from the moment it starts, and set per-task permissions to control exactly what the agent is allowed to do — like whether it can run code, use work mode, or manage skills. Task agents can send messages directly into your main chat when they have something to report.
+IMPORTANT NOTE: Within the scheduled task, code execution calls are approved immediately, so be very careful with your instructions and permissions you allow!
+
 **Session Naming**
-The assistant automatically names each conversation session so you can easily navigate back to previous tasks.
+The assistant automatically names each conversation session so you can easily navigate back to previous conversations.
 
 **Safe Execution Settings** *(Functional but still being refined — edge cases exist. Suggestions welcome.)*
 A safety-first mode that shows you the generated Python code *before* it runs, so you can review, approve, or reject every action.
@@ -109,7 +113,7 @@ Point the app at it in Settings → AI → Custom Script Provider. The script is
 Added: May 5, 2026
 Mobile PC Assistant Access - Talk to your assistant from anywhere in your house.
 Github repo: [systema-auxilium-android-module](https://github.com/uukjtisa/systema-auxilium-android-module)
-Release: [First Build](https://github.com/uukjtisa/systema-auxilium-android-module/releases/tag/unstable)
+Release: [Open](https://github.com/uukjtisa/systema-auxilium-android-module/releases)
 
 ---
 
