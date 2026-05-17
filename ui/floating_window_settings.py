@@ -502,6 +502,7 @@ class AppearanceSettingsWindow(BaseWindow):
             Qt.WindowType.WindowStaysOnTopHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         self.setMinimumSize(700, 550)
         self.resize(900, 800)
 
@@ -661,6 +662,14 @@ class AppearanceSettingsWindow(BaseWindow):
         self.apply_rounded_mask()
         self.create_resize_handles()
 
+    # ── Windows 10 transparent background fix ────────────────────────────
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+        painter.fillRect(self.rect(), Qt.GlobalColor.transparent)
+        painter.end()
+
     # ── UI construction ──────────────────────────────────────────────────
 
     def init_ui(self):
@@ -734,6 +743,7 @@ class AppearanceSettingsWindow(BaseWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("background-color: #161B22; border: none;")
         scroll.viewport().setStyleSheet("background-color: #161B22;")
 
         container = QWidget()

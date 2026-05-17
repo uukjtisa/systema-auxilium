@@ -1740,7 +1740,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         Renders the message as an AI bubble in the chat window.
         """
         if self._chat:
-            self._chat.add_ai_message(f"**[Task Agent]:** {message}")
+            self._chat.add_ai_message(f"**[Task Notification]:** {message}")
         log.info(f"[AssistantController._handle_task_message] Rendered task message | "
                  f"preview='{message[:60]}'")
 

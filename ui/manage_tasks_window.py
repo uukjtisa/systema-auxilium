@@ -7,9 +7,9 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QFrame, QLineEdit, QTextEdit, QCheckBox,
     QSpinBox, QStackedWidget, QSizePolicy, QApplication,
-    QTimeEdit, QRadioButton,
+    QTimeEdit, QRadioButton, QDateTimeEdit,
 )
-from PyQt6.QtCore import Qt, QTime, QPoint
+from PyQt6.QtCore import Qt, QTime, QDateTime, QPoint
 from PyQt6.QtGui import QFont
 from ui.base_window import BaseWindow
 
@@ -90,7 +90,7 @@ class ManageTasksWindow(BaseWindow):
         self._sessions_expanded = {}   # task_id → bool
 
         self.setWindowTitle("Manage Tasks")
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.resize(720, 600)
         self.setStyleSheet("background: transparent;")
@@ -282,10 +282,23 @@ class ManageTasksWindow(BaseWindow):
             f"color: {_TEXT}; font-size: 14px; font-weight: 700; background: transparent; border: none;")
         name_col.addWidget(name_lbl)
 
-        interval = task.get('interval_minutes', 30)
-        sched = task.get('daily_schedule', {})
-        sched_text = "Whole day" if sched.get('whole_day') else f"{sched.get('start', '?')} – {sched.get('end', '?')}"
-        info_lbl = QLabel(f"Every {interval} min  ·  {sched_text}")
+        one_time = task.get('one_time_schedule', {})
+        if one_time.get('enabled'):
+            dts = one_time.get('datetimes', [])
+            fired = not task.get('active', True)
+            if fired:
+                info_lbl = QLabel(f"One-time: {dts[0] if dts else '?'}  ·  fired ✓")
+            else:
+                count = len(dts)
+                label = dts[0] if dts else '?'
+                if count > 1:
+                    label += f"  +{count - 1} backup{'s' if count > 2 else ''}"
+                info_lbl = QLabel(f"One-time: {label}")
+        else:
+            interval = task.get('interval_minutes', 30)
+            sched = task.get('daily_schedule', {})
+            sched_text = "Whole day" if sched.get('whole_day') else f"{sched.get('start', '?')} – {sched.get('end', '?')}"
+            info_lbl = QLabel(f"Every {interval} min  ·  {sched_text}")
         info_lbl.setStyleSheet(f"color: {_MUTED}; font-size: 10px; background: transparent; border: none;")
         name_col.addWidget(info_lbl)
         top.addLayout(name_col, stretch=1)
@@ -647,7 +660,7 @@ class ManageTasksWindow(BaseWindow):
         mode_lbl = QLabel("INTERVAL MODE")
         mode_lbl.setStyleSheet(_SEC)
 
-        fl.addWidget(_card(
+        self._daily_schedule_card = _card(
             schedule_lbl,
             self._f_whole_day,
             time_row,
@@ -657,6 +670,72 @@ class ManageTasksWindow(BaseWindow):
             ping_mode_row,
             self._f_specific_ping,
             self._ping_times_panel,
+        )
+        fl.addWidget(self._daily_schedule_card)
+
+        # ══ CARD 3b: One-Time Schedule ════════════════════════════════════════
+        one_time_lbl = QLabel("ONE TIME SCHEDULE")
+        one_time_lbl.setStyleSheet(_SEC)
+        one_time_hint = QLabel(
+            "Fire once at a specific date and time. Add backup times in case the primary is missed — "
+            "whichever time fires and completes first will immediately deactivate this task. "
+            "All earlier times that were already past are skipped automatically."
+        )
+        one_time_hint.setStyleSheet(f"color: {_MUTED}; font-size: 10px;")
+        one_time_hint.setWordWrap(True)
+
+        self._f_one_time_enabled = QCheckBox("Use One-Time Schedule  (overrides Daily Schedule above)")
+        self._f_one_time_enabled.setStyleSheet(_CHECK)
+
+        self._one_time_dt_panel = QWidget()
+        self._one_time_dt_panel.setStyleSheet(
+            f"background: {_BG}; border-radius: 6px; border: 1px solid {_BORDER};"
+        )
+        self._one_time_dt_panel.setVisible(False)
+        ot_vl = QVBoxLayout(self._one_time_dt_panel)
+        ot_vl.setContentsMargins(12, 10, 12, 10)
+        ot_vl.setSpacing(6)
+
+        self._one_time_status_lbl = QLabel("⚠  Any completed ping immediately deactivates this task.")
+        self._one_time_status_lbl.setStyleSheet(
+            "color: #FEBC2E; font-size: 10px; background: transparent;"
+        )
+        self._one_time_status_lbl.setWordWrap(True)
+        ot_vl.addWidget(self._one_time_status_lbl)
+
+        add_ot_row = QWidget()
+        add_ot_row.setStyleSheet("background: transparent;")
+        aot = QHBoxLayout(add_ot_row)
+        aot.setContentsMargins(0, 0, 0, 0)
+        aot.setSpacing(8)
+        self._one_time_dt_picker = QDateTimeEdit()
+        self._one_time_dt_picker.setDisplayFormat("MM/dd/yyyy  hh:mm AP")
+        self._one_time_dt_picker.setDateTime(QDateTime.currentDateTime().addSecs(3600))
+        self._one_time_dt_picker.setCalendarPopup(True)
+        self._one_time_dt_picker.setStyleSheet(_INPUT)
+        aot.addWidget(self._one_time_dt_picker)
+        add_ot_btn = QPushButton("＋ Add Time")
+        add_ot_btn.setStyleSheet(_BTN_ACCENT)
+        add_ot_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_ot_btn.clicked.connect(self._add_one_time_dt)
+        aot.addWidget(add_ot_btn)
+        aot.addStretch()
+        ot_vl.addWidget(add_ot_row)
+
+        self._one_time_dt_list_layout = QVBoxLayout()
+        self._one_time_dt_list_layout.setSpacing(4)
+        ot_vl.addLayout(self._one_time_dt_list_layout)
+
+        self._f_one_time_enabled.toggled.connect(self._one_time_dt_panel.setVisible)
+        self._f_one_time_enabled.toggled.connect(
+            lambda on: self._daily_schedule_card.setEnabled(not on)
+        )
+
+        fl.addWidget(_card(
+            one_time_lbl,
+            one_time_hint,
+            self._f_one_time_enabled,
+            self._one_time_dt_panel,
         ))
 
         # ══ CARD 4: Permissions ═══════════════════════════════════════════════
@@ -963,6 +1042,65 @@ class ManageTasksWindow(BaseWindow):
             if item.widget():
                 item.widget().deleteLater()
 
+    def _add_one_time_dt(self):
+        dt = self._one_time_dt_picker.dateTime()
+        dt_str = dt.toString("yyyy-MM-ddTHH:mm")
+        if dt_str in self._get_one_time_datetimes():
+            self._one_time_status_lbl.setText(
+                f"⚠  {dt.toString('MM/dd/yyyy hh:mm AP')} is already in the list."
+            )
+            return
+        self._one_time_status_lbl.setText("⚠  Any completed ping immediately deactivates this task.")
+        self._render_one_time_dt_row(dt_str)
+
+    def _get_one_time_datetimes(self) -> list:
+        result = []
+        for i in range(self._one_time_dt_list_layout.count()):
+            item = self._one_time_dt_list_layout.itemAt(i)
+            if item and item.widget():
+                result.append(item.widget().objectName())
+        return result
+
+    def _collect_one_time_datetimes(self) -> list:
+        """Return the one-time datetime list, auto-adding the picker value if the list is empty."""
+        if not self._f_one_time_enabled.isChecked():
+            return []
+        dts = self._get_one_time_datetimes()
+        if not dts:
+            # User set the picker but forgot to click ＋ Add Time — grab it automatically
+            dt_str = self._one_time_dt_picker.dateTime().toString("yyyy-MM-ddTHH:mm")
+            dts = [dt_str]
+        return sorted(dts)
+
+    def _render_one_time_dt_row(self, dt_str: str):
+        try:
+            dt = QDateTime.fromString(dt_str, "yyyy-MM-ddTHH:mm")
+            display = dt.toString("MM/dd/yyyy  hh:mm AP") if dt.isValid() else dt_str
+        except Exception:
+            display = dt_str
+        row = QWidget()
+        row.setObjectName(dt_str)   # stores ISO string for _get_one_time_datetimes()
+        row.setStyleSheet("background: transparent;")
+        rl = QHBoxLayout(row)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(6)
+        lbl = QLabel(display)
+        lbl.setStyleSheet(f"color: {_TEXT}; font-size: 12px; background: transparent;")
+        rl.addWidget(lbl, stretch=1)
+        rm_btn = QPushButton("✕")
+        rm_btn.setFixedSize(24, 24)
+        rm_btn.setStyleSheet(_BTN_RED)
+        rm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        rm_btn.clicked.connect(row.deleteLater)
+        rl.addWidget(rm_btn)
+        self._one_time_dt_list_layout.addWidget(row)
+
+    def _clear_one_time_dt_list(self):
+        while self._one_time_dt_list_layout.count():
+            item = self._one_time_dt_list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
     def _new_task(self):
         self._editing_task_id = None
         self._editor_title.setText("New Task")
@@ -986,6 +1124,11 @@ class ManageTasksWindow(BaseWindow):
         self._update_skill_toggle_label()
         self._f_limit_enabled.setChecked(False)
         self._f_limit_max.setValue(5)
+        self._f_one_time_enabled.setChecked(False)
+        self._one_time_dt_panel.setVisible(False)
+        self._clear_one_time_dt_list()
+        self._one_time_dt_picker.setDateTime(QDateTime.currentDateTime().addSecs(3600))
+        self._daily_schedule_card.setEnabled(True)
         self._stack.setCurrentIndex(1)
 
     def _edit_task(self, task: dict):
@@ -1036,6 +1179,16 @@ class ManageTasksWindow(BaseWindow):
         self._f_limit_enabled.setChecked(limit.get('enabled', False))
         self._f_limit_max.setValue(limit.get('max_messages', 5))
 
+        one_time = task.get('one_time_schedule', {})
+        one_time_on = one_time.get('enabled', False)
+        self._f_one_time_enabled.setChecked(one_time_on)
+        self._one_time_dt_panel.setVisible(one_time_on)
+        self._daily_schedule_card.setEnabled(not one_time_on)
+        self._clear_one_time_dt_list()
+        for dt_str in one_time.get('datetimes', []):
+            self._render_one_time_dt_row(dt_str)
+        self._one_time_dt_picker.setDateTime(QDateTime.currentDateTime().addSecs(3600))
+
         self._stack.setCurrentIndex(1)
 
     def _save_task(self):
@@ -1076,6 +1229,10 @@ class ManageTasksWindow(BaseWindow):
             "limit_session_messages": {
                 "enabled": self._f_limit_enabled.isChecked(),
                 "max_messages": self._f_limit_max.value(),
+            },
+            "one_time_schedule": {
+                "enabled": self._f_one_time_enabled.isChecked(),
+                "datetimes": self._collect_one_time_datetimes(),
             },
         }
 

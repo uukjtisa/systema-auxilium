@@ -245,13 +245,14 @@ class TaskAIEngine:
 class TaskThread(threading.Thread):
     """One daemon thread per task — runs the scheduled ping loop independently."""
 
-    def __init__(self, task: dict, controller, skill_manager, send_main_callback):
+    def __init__(self, task: dict, controller, skill_manager, send_main_callback, set_inactive_callback=None):
         super().__init__(daemon=True, name=f"Task-{task['id'][:8]}")
         self._task = task
         self._controller = controller
         self._settings = lambda: controller.settings   # kept for any internal use
         self._skill_manager = skill_manager
         self._send_main = send_main_callback   # fn(str) → appends to main session
+        self._set_inactive = set_inactive_callback   # fn(task_id) → marks task inactive after one-shot
         self._stop_event = threading.Event()
         self._ai = TaskAIEngine(controller)
         self._sessions_root = _APP_ROOT / "data" / "task-sessions"
@@ -512,6 +513,87 @@ class TaskThread(threading.Thread):
         interval_sec = task.get('interval_minutes', 30) * 60
         log.info(f"[TaskThread.run] Starting | task='{task['name']}' interval={interval_sec}s")
 
+        # ── One-shot task handling ────────────────────────────────────────────
+        one_time = task.get('one_time_schedule', {})
+        if one_time.get('enabled'):
+            datetimes = sorted(one_time.get('datetimes', []))
+            if not datetimes:
+                log.warning(f"[TaskThread.run] One-shot: no datetimes configured for '{task['name']}' — marking inactive")
+                if self._set_inactive:
+                    self._set_inactive(task_id)
+                return
+
+            # Find the earliest datetime that hasn't passed yet
+            now = datetime.now()
+            target_dt = None
+            for dt_str in datetimes:
+                try:
+                    candidate = datetime.strptime(dt_str, '%Y-%m-%dT%H:%M')
+                    if candidate > now:
+                        target_dt = candidate
+                        break
+                    else:
+                        log.info(f"[TaskThread.run] One-shot: '{dt_str}' already passed — trying next backup")
+                except Exception:
+                    log.warning(f"[TaskThread.run] One-shot: invalid datetime '{dt_str}' — skipping")
+
+            if target_dt is None:
+                log.info(f"[TaskThread.run] One-shot: all times passed for '{task['name']}' — marking inactive")
+                if self._set_inactive:
+                    self._set_inactive(task_id)
+                return
+
+            wait_sec = (target_dt - now).total_seconds()
+            target_str = target_dt.strftime('%Y-%m-%dT%H:%M')
+            log.info(f"[TaskThread.run] One-shot: waiting {wait_sec:.0f}s until '{target_str}'")
+            self._stop_event.wait(wait_sec)
+            if self._stop_event.is_set():
+                return
+
+            # ── Fire the ping ─────────────────────────────────────────────────
+            today = date.today().isoformat()
+            session = self._load_session(task_id, today) or self._new_session()
+            self._save_session(session, task_id, today)
+            instruction = task.get('instruction', '')
+            resolved, error = _resolve_instruction(instruction)
+            if error:
+                log.error(f"[TaskThread.run] One-shot code block error: {error[:200]}")
+                try:
+                    self._send_main(
+                        f"⚠️ **Task '{task['name']}' one-shot — code block error.**\n\n```\n{error}\n```"
+                    )
+                except Exception:
+                    pass
+            else:
+                system_prompt = self._build_system_prompt()
+                api_history = self._build_api_history(session)
+                ping_content = (
+                    f"<SYSTEM_AUTOMATED_TASK_PING>\nTHIS IS AN AUTOMATED "
+                    f"SYSTEM MESSAGE, YOUR TASK IS STATED BELOW:\n\n{resolved}\n{_now_stamp()}\n\n"
+                    f"</SYSTEM_AUTOMATED_TASK_PING>"
+                )
+                session['chat_history'].append({'role': 'system', 'content': ping_content})
+                response_text, send_main_calls, _ = self._ai.run_full_ping(
+                    ping_content, api_history, system_prompt
+                )
+                # Dispatch all messages — run_full_ping is fully done by this point
+                for msg in send_main_calls:
+                    try:
+                        self._send_main(msg)
+                    except Exception as e:
+                        log.error(f"[TaskThread.run] One-shot send_main failed: {e}")
+                if response_text:
+                    session['chat_history'].append({
+                        'role': 'assistant',
+                        'content': f"{response_text}\n{_now_stamp()}"
+                    })
+                self._save_session(session, task_id, today)
+                log.info(f"[TaskThread.run] One-shot ping complete for task='{task['name']}'")
+            # ── AI is fully done — NOW mark inactive ──────────────────────────
+            if self._set_inactive:
+                self._set_inactive(task_id)
+            return
+
         while not self._stop_event.is_set():
 
             # ── Wait until inside schedule window ────────────────────────────
@@ -702,6 +784,15 @@ class TaskManager:
 
     # ── Thread management ─────────────────────────────────────────────────────
 
+    def set_task_inactive(self, task_id: str):
+        """Mark a task as inactive in storage. Called by TaskThread after a one-shot fires."""
+        for task in self._tasks:
+            if task['id'] == task_id:
+                task['active'] = False
+                self._save_tasks()
+                log.info(f"[TaskManager.set_task_inactive] Task '{task['name']}' set to inactive")
+                return
+
     def _start_thread(self, task: dict):
         if not task.get('active', True):
             log.info(f"[TaskManager._start_thread] Skipping inactive task '{task['name']}'")
@@ -711,6 +802,7 @@ class TaskManager:
             controller=self._controller,
             skill_manager=getattr(self._controller, 'skill_manager', None),
             send_main_callback=self._send_to_main,
+            set_inactive_callback=self.set_task_inactive,
         )
         t.start()
         self._threads[task['id']] = t
