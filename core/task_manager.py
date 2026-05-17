@@ -11,7 +11,8 @@ import io
 import sys
 import traceback
 import uuid
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
+import math
 from pathlib import Path
 from core.logger import _make_logger, _NoOpLogger
 
@@ -471,6 +472,40 @@ class TaskThread(threading.Thread):
             return None
         return (min(future_pings) - now).total_seconds()
 
+    def _next_schedule_relative_seconds(self) -> float:
+        """
+        Returns seconds until the next interval-aligned ping, anchored to the
+        schedule window's start time (or midnight for whole-day tasks).
+
+        Example: window 04:00–19:00, interval 120 min, current time 16:31
+          elapsed since 04:00 = 751 min
+          next slot = floor(751/120)+1 = 7 → 7×120 = 840 min after 04:00 = 18:00
+          wait = 18:00 − 16:31 = 89 min = 5340 s
+        """
+        task = self._task
+        interval_sec = task.get('interval_minutes', 30) * 60
+        sched = task.get('daily_schedule', {})
+        now = datetime.now()
+
+        if sched.get('whole_day', False):
+            start_h, start_m = 0, 0
+        else:
+            try:
+                start_h, start_m = map(int, sched.get('start', '00:00').split(':'))
+            except Exception:
+                start_h, start_m = 0, 0
+
+        start_today = now.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
+
+        if now <= start_today:
+            # Haven't reached window start yet — first ping fires at window open
+            return max(0.0, (start_today - now).total_seconds())
+
+        elapsed_sec = (now - start_today).total_seconds()
+        slots_passed = math.floor(elapsed_sec / interval_sec)
+        next_ping = start_today + timedelta(seconds=(slots_passed + 1) * interval_sec)
+        return max(0.0, (next_ping - now).total_seconds())
+
     def run(self):
         task = self._task
         task_id = task['id']
@@ -511,8 +546,14 @@ class TaskThread(threading.Thread):
                 log.info(f"[TaskThread.run] Next specific ping in {wait_sec:.0f}s")
                 self._stop_event.wait(wait_sec)
             else:
-                log.info(f"[TaskThread.run] Waiting {interval_sec}s before next ping")
-                self._stop_event.wait(interval_sec)
+                use_sched_rel = task.get('ping_mode', 'startup_relative') == 'schedule_relative'
+                if use_sched_rel:
+                    wait_sec = self._next_schedule_relative_seconds()
+                    log.info(f"[TaskThread.run] Schedule-relative: next ping in {wait_sec:.0f}s")
+                else:
+                    wait_sec = interval_sec
+                    log.info(f"[TaskThread.run] Startup-relative: waiting {interval_sec}s before next ping")
+                self._stop_event.wait(wait_sec)
             if self._stop_event.is_set():
                 break
 
