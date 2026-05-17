@@ -47,6 +47,7 @@ class AssistantController(QObject):
     bridge_load_session_signal = pyqtSignal(str)
     bridge_new_session_signal = pyqtSignal()
     bridge_attach_image_signal = pyqtSignal(object)  # list[str] — paths to pin on main thread
+    task_message_signal = pyqtSignal(str)  # fires when a task sends a message to main
     bridge_detach_image_signal = pyqtSignal(str)  # path to unpin on main thread
 
     def __init__(self):
@@ -210,6 +211,7 @@ class AssistantController(QObject):
         self.bridge_new_session_signal.connect(self.create_new_session)
         self.bridge_attach_image_signal.connect(self._handle_bridge_attach_image)
         self.bridge_detach_image_signal.connect(self._handle_bridge_detach_image)
+        self.task_message_signal.connect(self._handle_task_message)
         self.ai.manual_response_fn = self._request_manual_response
         log.debug("[AssistantController.__init__] manual_response_signal connected")
 
@@ -255,6 +257,16 @@ class AssistantController(QObject):
         except Exception as e:
             log.error(f"[AssistantController._deferred_bg_init] ✗ MemoryManager failed: {e}")
             self.memory_manager = None
+
+        # TASK MANAGER — start after memory manager so settings are ready
+        try:
+            from core.task_manager import TaskManager
+            self.task_manager = TaskManager(self)
+            self.task_manager.start()
+            log.info("[AssistantController._deferred_bg_init] ✓ TaskManager started")
+        except Exception as e:
+            log.error(f"[AssistantController._deferred_bg_init] ✗ TaskManager failed: {e}")
+            self.task_manager = None
 
         log.info("[AssistantController._deferred_bg_init] ✓ Deferred init complete")
 
@@ -1721,6 +1733,16 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         else:
             log.error(f"[AssistantController.set_session_name] ✗ Failed to rename to '{name}'")
             self.log(f"Failed to rename session", "ERROR")
+
+    def _handle_task_message(self, message: str):
+        """
+        Slot — called on the main thread when a task sends a message to main session.
+        Renders the message as an AI bubble in the chat window.
+        """
+        if self._chat:
+            self._chat.add_ai_message(f"**[Task Agent]:** {message}")
+        log.info(f"[AssistantController._handle_task_message] Rendered task message | "
+                 f"preview='{message[:60]}'")
 
     def get_session_list(self):
         """Get list of all sessions"""
