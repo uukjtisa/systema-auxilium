@@ -1,0 +1,107 @@
+E-MAILMAN SKILL — SETUP INSTRUCTIONS
+======================================
+
+e-mailman handles both reading and sending emails from a single script.
+You only need to configure it once.
+
+
+STEP 1: Get Your Gmail App Password
+-------------------------------------
+1. Go to myaccount.google.com → Security
+2. Search "App Passwords" in the search bar
+3. Click App Passwords → name it anything (e.g. "e-mailman") → Create
+4. Copy the 16-character code — this is your App Password
+
+   If you already have one from a previous setup (auto-email, email-monitor),
+   you can reuse the same App Password here.
+
+
+STEP 2: Enable IMAP in Gmail (required for reading emails)
+-----------------------------------------------------------
+1. Open Gmail → click the gear icon → See all settings
+2. Go to the "Forwarding and POP/IMAP" tab
+3. Under "IMAP access", select "Enable IMAP"
+4. Click "Save Changes"
+
+   Without this, the script's read commands will fail even with the correct password.
+   Sending does not require this step.
+
+
+STEP 3: Add Your Account to emails.json
+----------------------------------------
+The script stores credentials in `scripts/emails.json`, never inside the `.py` file.
+If `emails.json` doesn't exist yet, the script will auto-create an empty one on first run.
+
+Option A — Use the CLI (recommended):
+    python scripts/e_mailman.py account --add \
+        --name "gmail" \
+        --email "you@gmail.com" \
+        --password "xxxx xxxx xxxx xxxx" \
+        --smtp-host smtp.gmail.com \
+        --smtp-port 465 \
+        --imap-host imap.gmail.com \
+        --imap-port 993
+
+Option B — Edit the JSON manually:
+    Open `scripts/emails.json` and add your account to the `accounts` array:
+
+    {
+      "accounts": [
+        {
+          "name": "gmail",
+          "account": "you@gmail.com",
+          "password": "xxxx xxxx xxxx xxxx",
+          "smtp_host": "smtp.gmail.com",
+          "smtp_port": 465,
+          "imap_host": "imap.gmail.com",
+          "imap_port": 993
+        }
+      ]
+    }
+
+Save the file. That's it.
+
+FOR OTHER PROVIDERS, YOU MAY NEED TO ADJUST THE HOSTS AND PORTS.
+SEE SKILL.md FOR A QUICK REFERENCE TABLE.
+
+
+USAGE EXAMPLES
+---------------
+Check latest 5 emails:
+    python scripts/e_mailman.py read --latest
+
+Check latest 10 emails:
+    python scripts/e_mailman.py read --latest --count 10
+
+Search emails from a sender:
+    python scripts/e_mailman.py read --from "johndoe@gmail.com"
+
+Search by subject keyword:
+    python scripts/e_mailman.py read --search "invoice"
+
+Send an email:
+    python scripts/e_mailman.py send \
+        --to "someone@example.com" \
+        --subject "Hello" \
+        --body "Your message here"
+
+Send with attachments:
+    python scripts/e_mailman.py send \
+        --to "someone@example.com" \
+        --subject "Files" \
+        --body "See attached." \
+        --attachments "/path/to/file1.pdf" "/path/to/file2.png"
+
+Print current config:
+    python scripts/e_mailman.py --info
+
+
+NOTES
+------
+- Always use the App Password, NOT your regular Gmail password.
+- IMAP must be enabled in Gmail settings for read commands to work.
+- Keep `scripts/emails.json` private — it contains your credentials.
+- The script reads from your inbox only. To read another folder (e.g. Sent),
+  change mail.select("inbox") inside e_mailman.py.
+- When sending via the skill, the AI assistant will always show you a draft and ask for
+  your confirmation before the email is actually delivered.
