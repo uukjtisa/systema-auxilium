@@ -1,5 +1,5 @@
 """
-custom_provider_template.py
+_template.py
 ============================
 Copy this file, rename it, and point the Custom Script Provider at it in Settings.
 

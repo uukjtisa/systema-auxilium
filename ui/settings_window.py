@@ -10,7 +10,6 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QPlainTextEdit, QFileDialog)
 from PyQt6.QtCore import Qt, QPoint, QTimer, QRect
 from PyQt6.QtGui import QRegion
-from core.puter_server import DEBUG_MODE
 from ui.base_window import BaseWindow
 
 
@@ -291,331 +290,53 @@ class SettingsWindow(BaseWindow):
         # ════════════════════════════════════════════════════════════════════
         ai_scroll, ai_lay = _make_scroll_tab()
 
-        # Provider
+        # ── LLM Provider Script List ────────────────────────────────────────────
         provider_group = QGroupBox("AI Provider")
         provider_group.setStyleSheet(_GROUP)
         pg_lay = QVBoxLayout(provider_group)
-        pg_lay.addWidget(_label("Select AI Provider:"))
-        self.provider_combo = QComboBox()
-        self.provider_combo.addItems(["anthropic", "gemini", "puter", "manual", "custom_script"])
-        self.provider_combo.currentTextChanged.connect(self.on_provider_changed)
-        self.provider_combo.setStyleSheet(_COMBO)
-        pg_lay.addWidget(self.provider_combo)
-        pg_lay.addWidget(_info_box(
-            "💡 Anthropic: Claude API  |  Gemini: Google AI  |  Puter.js: Free browser-based AI"))
+        pg_lay.addWidget(_label("Active Provider Script:", bold=True, top_margin=3))
+        _prov_row = QHBoxLayout()
+        self.provider_script_combo = QComboBox()
+        self.provider_script_combo.setStyleSheet(_COMBO)
+        _prov_row.addWidget(self.provider_script_combo, stretch=1)
+        _prov_refresh_btn = QPushButton("⟳")
+        _prov_refresh_btn.setFixedWidth(48)
+        _prov_refresh_btn.setStyleSheet(_BTN)
+        _prov_refresh_btn.setToolTip("Refresh provider scripts list")
+        _prov_refresh_btn.clicked.connect(self._refresh_llm_provider_scripts)
+        _prov_row.addWidget(_prov_refresh_btn)
+        pg_lay.addLayout(_prov_row)
+        _open_prov_btn = QPushButton("📂  Open Providers Folder")
+        _open_prov_btn.setStyleSheet(_BTN)
+
+        def _open_llm_providers_folder():
+            import subprocess, sys as _sys
+            folder = self.controller.get_llm_providers_folder()
+            if _sys.platform == 'win32':
+                subprocess.Popen(['explorer', folder])
+            elif _sys.platform == 'darwin':
+                subprocess.Popen(['open', folder])
+            else:
+                subprocess.Popen(['xdg-open', folder])
+
+        _open_prov_btn.clicked.connect(_open_llm_providers_folder)
+        pg_lay.addWidget(_open_prov_btn)
+        self._refresh_llm_provider_scripts()
+        self.provider_script_combo.currentIndexChanged.connect(self._on_llm_provider_changed)
         ai_lay.addWidget(provider_group)
 
-        # Anthropic
-        self.anthropic_group = QGroupBox("Anthropic (Claude) API")
-        self.anthropic_group.setStyleSheet(_GROUP)
-        an_lay = QVBoxLayout(self.anthropic_group)
-        an_lay.addWidget(_label("API Key:"))
-        self.api_key_input = QLineEdit()
-        self.api_key_input.setPlaceholderText("sk-ant-...")
-        self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.api_key_input.setStyleSheet(_INPUT)
-        an_lay.addWidget(self.api_key_input)
-        _show_row = QHBoxLayout()
-        self.show_key_btn = QPushButton("👁️ Show")
-        self.show_key_btn.setMaximumWidth(80)
-        self.show_key_btn.setCheckable(True)
-        self.show_key_btn.setStyleSheet(_BTN)
-        self.show_key_btn.toggled.connect(self.toggle_api_key_visibility)
-        _show_row.addWidget(self.show_key_btn)
-        _show_row.addStretch()
-        an_lay.addLayout(_show_row)
-        # Model
-        an_lay.addWidget(_label("Model:", top_margin=6))
-        self.anthropic_model_combo = QComboBox()
-        self.anthropic_model_combo.setStyleSheet(_COMBO)
-        for model in self.controller.get_anthropic_models():
-            self.anthropic_model_combo.addItem(model["name"], model["id"])
-        an_lay.addWidget(self.anthropic_model_combo)
-        self.anthropic_model_desc = QLabel()
-        self.anthropic_model_desc.setWordWrap(True)
-        self.anthropic_model_desc.setStyleSheet(f"color:{_MUTED}; font-size:9pt; font-style:italic;")
-        self.anthropic_model_combo.currentIndexChanged.connect(self.update_anthropic_model_description)
-        an_lay.addWidget(self.anthropic_model_desc)
-        # Temperature
-        an_lay.addWidget(_label("Temperature  (0 = precise/deterministic · 1 = creative):", top_margin=6))
-        _an_temp_row = QHBoxLayout()
-        self.anthropic_temp_slider = QSlider(Qt.Orientation.Horizontal)
-        self.anthropic_temp_slider.setRange(0, 100)
-        self.anthropic_temp_slider.setValue(100)
-        self.anthropic_temp_slider.setTickInterval(10)
-        self.anthropic_temp_label = QLabel("1.00")
-        self.anthropic_temp_label.setFixedWidth(38)
-        self.anthropic_temp_label.setStyleSheet(f"color:{_ACCENT}; font-weight:bold;")
-        self.anthropic_temp_slider.valueChanged.connect(
-            lambda v: self.anthropic_temp_label.setText(f"{v/100:.2f}"))
-        _an_temp_row.addWidget(self.anthropic_temp_slider)
-        _an_temp_row.addWidget(self.anthropic_temp_label)
-        an_lay.addLayout(_an_temp_row)
-        # Auto tokens
-        self.anthropic_auto_tokens_cb = QCheckBox(
-            "🤖  Auto response length  (AI figures out a smart limit — recommended)")
-        self.anthropic_auto_tokens_cb.setChecked(True)
-        self.anthropic_auto_tokens_cb.setStyleSheet(f"color:{_TEXT}; font-size:10pt;")
-        an_lay.addWidget(self.anthropic_auto_tokens_cb)
-        # Manual max tokens (shown/hidden based on checkbox)
-        _an_tok_row = QHBoxLayout()
-        _an_tok_row.addWidget(_label("Max response tokens:"))
-        self.anthropic_max_tokens_spin = QSpinBox()
-        self.anthropic_max_tokens_spin.setRange(256, 64000)
-        self.anthropic_max_tokens_spin.setValue(8192)
-        self.anthropic_max_tokens_spin.setSingleStep(512)
-        self.anthropic_max_tokens_spin.setStyleSheet(_INPUT)
-        self.anthropic_max_tokens_spin.setFixedWidth(110)
-        _an_tok_row.addWidget(self.anthropic_max_tokens_spin)
-        _an_tok_row.addStretch()
-        self.anthropic_max_tokens_widget = QWidget()
-        self.anthropic_max_tokens_widget.setLayout(_an_tok_row)
-        self.anthropic_max_tokens_widget.setVisible(False)
-        an_lay.addWidget(self.anthropic_max_tokens_widget)
-        self.anthropic_auto_tokens_cb.toggled.connect(
-            lambda checked: self.anthropic_max_tokens_widget.setVisible(not checked))
-        an_lay.addWidget(_label(
-            "Get your key: console.anthropic.com", muted=True, top_margin=6))
-        ai_lay.addWidget(self.anthropic_group)
-
-        # Gemini
-        self.gemini_group = QGroupBox("Google Gemini (AI Studio)")
-        self.gemini_group.setStyleSheet(_GROUP)
-        gm_lay = QVBoxLayout(self.gemini_group)
-        gm_lay.addWidget(_info_box(
-            "🔸 Free tier available!\nGet your key from Google AI Studio."))
-        gm_lay.addWidget(_label("API Key:"))
-        self.gemini_key_input = QLineEdit()
-        self.gemini_key_input.setPlaceholderText("AIza...")
-        self.gemini_key_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.gemini_key_input.setStyleSheet(_INPUT)
-        gm_lay.addWidget(self.gemini_key_input)
-        _gshow_row = QHBoxLayout()
-        self.show_gemini_key_btn = QPushButton("👁️ Show")
-        self.show_gemini_key_btn.setMaximumWidth(80)
-        self.show_gemini_key_btn.setCheckable(True)
-        self.show_gemini_key_btn.setStyleSheet(_BTN)
-        self.show_gemini_key_btn.toggled.connect(self.toggle_gemini_key_visibility)
-        _gshow_row.addWidget(self.show_gemini_key_btn)
-        _gshow_row.addStretch()
-        gm_lay.addLayout(_gshow_row)
-        # Model
-        gm_lay.addWidget(_label("Model:", top_margin=6))
-        self.gemini_model_combo = QComboBox()
-        self.gemini_model_combo.setStyleSheet(_COMBO)
-        for model in self.controller.get_gemini_models():
-            self.gemini_model_combo.addItem(model["name"], model["id"])
-        gm_lay.addWidget(self.gemini_model_combo)
-        self.gemini_model_desc = QLabel()
-        self.gemini_model_desc.setWordWrap(True)
-        self.gemini_model_desc.setStyleSheet(f"color:{_MUTED}; font-size:9pt; font-style:italic;")
-        self.gemini_model_combo.currentIndexChanged.connect(self.update_gemini_model_description)
-        gm_lay.addWidget(self.gemini_model_desc)
-        # Temperature (Gemini supports 0–2)
-        gm_lay.addWidget(_label("Temperature  (0 = precise · 2 = very creative):", top_margin=6))
-        _gm_temp_row = QHBoxLayout()
-        self.gemini_temp_slider = QSlider(Qt.Orientation.Horizontal)
-        self.gemini_temp_slider.setRange(0, 200)
-        self.gemini_temp_slider.setValue(100)
-        self.gemini_temp_slider.setTickInterval(20)
-        self.gemini_temp_label = QLabel("1.00")
-        self.gemini_temp_label.setFixedWidth(38)
-        self.gemini_temp_label.setStyleSheet(f"color:{_ACCENT}; font-weight:bold;")
-        self.gemini_temp_slider.valueChanged.connect(
-            lambda v: self.gemini_temp_label.setText(f"{v/100:.2f}"))
-        _gm_temp_row.addWidget(self.gemini_temp_slider)
-        _gm_temp_row.addWidget(self.gemini_temp_label)
-        gm_lay.addLayout(_gm_temp_row)
-        # Auto tokens
-        self.gemini_auto_tokens_cb = QCheckBox(
-            "🤖  Auto response length  (AI figures out a smart limit — recommended)")
-        self.gemini_auto_tokens_cb.setChecked(True)
-        self.gemini_auto_tokens_cb.setStyleSheet(f"color:{_TEXT}; font-size:10pt;")
-        gm_lay.addWidget(self.gemini_auto_tokens_cb)
-        # Manual max tokens
-        _gm_tok_row = QHBoxLayout()
-        _gm_tok_row.addWidget(_label("Max response tokens:"))
-        self.gemini_max_tokens_spin = QSpinBox()
-        self.gemini_max_tokens_spin.setRange(256, 65536)
-        self.gemini_max_tokens_spin.setValue(8192)
-        self.gemini_max_tokens_spin.setSingleStep(512)
-        self.gemini_max_tokens_spin.setStyleSheet(_INPUT)
-        self.gemini_max_tokens_spin.setFixedWidth(110)
-        _gm_tok_row.addWidget(self.gemini_max_tokens_spin)
-        _gm_tok_row.addStretch()
-        self.gemini_max_tokens_widget = QWidget()
-        self.gemini_max_tokens_widget.setLayout(_gm_tok_row)
-        self.gemini_max_tokens_widget.setVisible(False)
-        gm_lay.addWidget(self.gemini_max_tokens_widget)
-        self.gemini_auto_tokens_cb.toggled.connect(
-            lambda checked: self.gemini_max_tokens_widget.setVisible(not checked))
-        # Advanced: top_p / top_k (Gemini-exclusive)
-        _gm_adv_header = QHBoxLayout()
-        self.gemini_adv_toggle_btn = QPushButton("▸  Advanced sampling (top_p / top_k)")
-        self.gemini_adv_toggle_btn.setCheckable(True)
-        self.gemini_adv_toggle_btn.setStyleSheet(
-            f"QPushButton{{background:transparent; border:none; color:{_MUTED}; "
-            f"font-size:9pt; text-align:left; padding:0;}}"
-            f"QPushButton:hover{{color:{_TEXT};}}")
-        _gm_adv_header.addWidget(self.gemini_adv_toggle_btn)
-        _gm_adv_header.addStretch()
-        gm_lay.addLayout(_gm_adv_header)
-        self.gemini_adv_widget = QWidget()
-        _gm_adv_lay = QVBoxLayout(self.gemini_adv_widget)
-        _gm_adv_lay.setContentsMargins(0, 0, 0, 0)
-        _gm_adv_lay.addWidget(_label(
-            "top_p  (nucleus sampling — 0 to 1, lower = more focused, None = API default):", muted=True))
-        _gm_top_p_row = QHBoxLayout()
-        self.gemini_top_p_enable = QCheckBox("Enable")
-        self.gemini_top_p_enable.setStyleSheet(f"color:{_TEXT};")
-        self.gemini_top_p_spin = QDoubleSpinBox()
-        self.gemini_top_p_spin.setRange(0.0, 1.0)
-        self.gemini_top_p_spin.setSingleStep(0.05)
-        self.gemini_top_p_spin.setValue(0.95)
-        self.gemini_top_p_spin.setDecimals(2)
-        self.gemini_top_p_spin.setStyleSheet(_INPUT)
-        self.gemini_top_p_spin.setFixedWidth(80)
-        self.gemini_top_p_spin.setEnabled(False)
-        self.gemini_top_p_enable.toggled.connect(self.gemini_top_p_spin.setEnabled)
-        _gm_top_p_row.addWidget(self.gemini_top_p_enable)
-        _gm_top_p_row.addWidget(self.gemini_top_p_spin)
-        _gm_top_p_row.addStretch()
-        _gm_adv_lay.addLayout(_gm_top_p_row)
-        _gm_adv_lay.addWidget(_label(
-            "top_k  (vocabulary sampling — integer, lower = stricter, None = API default):", muted=True))
-        _gm_top_k_row = QHBoxLayout()
-        self.gemini_top_k_enable = QCheckBox("Enable")
-        self.gemini_top_k_enable.setStyleSheet(f"color:{_TEXT};")
-        self.gemini_top_k_spin = QSpinBox()
-        self.gemini_top_k_spin.setRange(1, 200)
-        self.gemini_top_k_spin.setValue(40)
-        self.gemini_top_k_spin.setStyleSheet(_INPUT)
-        self.gemini_top_k_spin.setFixedWidth(80)
-        self.gemini_top_k_spin.setEnabled(False)
-        self.gemini_top_k_enable.toggled.connect(self.gemini_top_k_spin.setEnabled)
-        _gm_top_k_row.addWidget(self.gemini_top_k_enable)
-        _gm_top_k_row.addWidget(self.gemini_top_k_spin)
-        _gm_top_k_row.addStretch()
-        _gm_adv_lay.addLayout(_gm_top_k_row)
-        self.gemini_adv_widget.setVisible(False)
-        gm_lay.addWidget(self.gemini_adv_widget)
-        self.gemini_adv_toggle_btn.toggled.connect(lambda checked: (
-            self.gemini_adv_widget.setVisible(checked),
-            self.gemini_adv_toggle_btn.setText(
-                ("▾  Advanced sampling (top_p / top_k)" if checked
-                 else "▸  Advanced sampling (top_p / top_k)"))
-        ))
-        lnk = QLabel(f'<a href="https://aistudio.google.com/apikey" style="color:{_ACCENT};">Get key: aistudio.google.com</a>')
-        lnk.setOpenExternalLinks(True)
-        gm_lay.addWidget(lnk)
-        ai_lay.addWidget(self.gemini_group)
-
-        # Puter
-        self.puter_group = QGroupBox("Puter.js Configuration")
-        self.puter_group.setStyleSheet(_GROUP)
-        pt_lay = QVBoxLayout(self.puter_group)
-        pt_lay.addWidget(_info_box(
-            "Uses Puter.js free rate-limited API. [HIGHLY SUPPORTED]"))
-        pt_lay.addWidget(_label("Model:"))
-        self.puter_model_combo = QComboBox()
-        self.puter_model_combo.setStyleSheet(_COMBO)
-        for model in self.controller.get_puter_models():
-            self.puter_model_combo.addItem(model['name'], model['id'])
-        pt_lay.addWidget(self.puter_model_combo)
-        self.puter_model_desc = QLabel()
-        self.puter_model_desc.setWordWrap(True)
-        self.puter_model_desc.setStyleSheet(f"color:{_MUTED}; font-size:9pt; font-style:italic;")
-        self.puter_model_combo.currentIndexChanged.connect(self.update_model_description)
-        pt_lay.addWidget(self.puter_model_desc)
-        _pbt_row = QHBoxLayout()
-        start_puter_btn = QPushButton("▶  Start Server")
-        start_puter_btn.clicked.connect(self.start_puter_server)
-        start_puter_btn.setStyleSheet(f"""
-            QPushButton {{ background:#1A3A1A; border:1px solid #2a5a2a; border-radius:6px;
-                          color:#4CAF50; padding:7px 14px; font-size:11px; }}
-            QPushButton:hover {{ background:#223322; }}
-        """)
-        _pbt_row.addWidget(start_puter_btn)
-        open_puter_btn = QPushButton("🌐  Open Interface")
-        open_puter_btn.clicked.connect(self.open_puter_interface)
-        open_puter_btn.setStyleSheet(_BTN)
-        _pbt_row.addWidget(open_puter_btn)
-        _pbt_row.addStretch()
-        pt_lay.addLayout(_pbt_row)
-        ai_lay.addWidget(self.puter_group)
-
-        # Puter debug account group
-        from core.puter_server import DEBUG_MODE
-        if DEBUG_MODE:
-            self.puter_account_group = QGroupBox("Puter.js Account")
-            self.puter_account_group.setStyleSheet(_GROUP)
-            pa_lay = QVBoxLayout(self.puter_account_group)
-            pa_lay.addWidget(_label("Email:"))
-            self.puter_email_input = QLineEdit()
-            self.puter_email_input.setStyleSheet(_INPUT)
-            pa_lay.addWidget(self.puter_email_input)
-            pa_lay.addWidget(_label("Password:"))
-            self.puter_password_input = QLineEdit()
-            self.puter_password_input.setEchoMode(QLineEdit.EchoMode.Password)
-            self.puter_password_input.setStyleSheet(_INPUT)
-            pa_lay.addWidget(self.puter_password_input)
-            _ppw_row = QHBoxLayout()
-            self.show_puter_password_btn = QPushButton("👁️ Show")
-            self.show_puter_password_btn.setMaximumWidth(80)
-            self.show_puter_password_btn.setCheckable(True)
-            self.show_puter_password_btn.setStyleSheet(_BTN)
-            self.show_puter_password_btn.toggled.connect(self.toggle_puter_password_visibility)
-            _ppw_row.addWidget(self.show_puter_password_btn)
-            _ppw_row.addStretch()
-            pa_lay.addLayout(_ppw_row)
-            pa_lay.addWidget(_label("Response Timeout (seconds):", bold=True, top_margin=10))
-            _to_row = QHBoxLayout()
-            self.puter_timeout_input = QLineEdit()
-            self.puter_timeout_input.setPlaceholderText("30")
-            self.puter_timeout_input.setMaximumWidth(90)
-            self.puter_timeout_input.setStyleSheet(_INPUT)
-            _to_row.addWidget(self.puter_timeout_input)
-            _to_row.addWidget(_label("How long to wait for AI response", muted=True))
-            _to_row.addStretch()
-            pa_lay.addLayout(_to_row)
-            _pa_btns = QHBoxLayout()
-            setup_account_btn = QPushButton("🆕 Setup Account")
-            setup_account_btn.setStyleSheet(_BTN)
-            setup_account_btn.clicked.connect(self.setup_puter_account)
-            _pa_btns.addWidget(setup_account_btn)
-            reset_quota_btn = QPushButton("♻️ Reset Quota")
-            reset_quota_btn.setStyleSheet(f"""
-                QPushButton {{ background:#3A2000; border:1px solid #ff9900; border-radius:6px;
-                              color:#ff9900; padding:7px 14px; font-size:11px; }}
-                QPushButton:hover {{ background:#4A2800; }}
-            """)
-            reset_quota_btn.clicked.connect(self.reset_puter_quota)
-            _pa_btns.addWidget(reset_quota_btn)
-            _pa_btns.addStretch()
-            pa_lay.addLayout(_pa_btns)
-            ai_lay.addWidget(self.puter_account_group)
-
-        # Recommended
-        self.recommended_group = QGroupBox("💡 Recommended Free API")
-        self.recommended_group.setStyleSheet(_GROUP)
-        rec_lay = QVBoxLayout(self.recommended_group)
-        rec_text = (
-            "✅ Puter.js is the recommended provider.\n\n"
-            "Free rate-limited API — no account or API key required to get started."
-        )
-        rec_lay.addWidget(_info_box(rec_text))
-        ai_lay.addWidget(self.recommended_group)
-
-        # Manual provider group
-        self.manual_group = QGroupBox("Manual Provider")
+        # ── Manual provider copy-prompt helper ───────────────────────────────────
+        self.manual_group = QGroupBox("Manual Provider Helper")
         self.manual_group.setStyleSheet(_GROUP)
         mn_lay = QVBoxLayout(self.manual_group)
         mn_lay.addWidget(_info_box(
-            "Manual mode — responses are entered by hand in the manual response window."
+            "Set  self.ai_provider = 'manual'  in controller.py if you want to type responses by hand.\n"
+            "Use this button to copy the current system prompt to clipboard."
         ))
         copy_sys_btn = QPushButton("📋 Copy Current System Prompt")
         copy_sys_btn.setStyleSheet(_BTN)
         copy_sys_btn.setToolTip("Copy the full effective system prompt (base + loaded skills) to clipboard")
+
         def _copy_system_prompt():
             from PyQt6.QtWidgets import QApplication
             try:
@@ -626,87 +347,10 @@ class SettingsWindow(BaseWindow):
             copy_sys_btn.setText("✅ Copied!")
             from PyQt6.QtCore import QTimer
             QTimer.singleShot(2000, lambda: copy_sys_btn.setText("📋 Copy Current System Prompt"))
+
         copy_sys_btn.clicked.connect(_copy_system_prompt)
         mn_lay.addWidget(copy_sys_btn)
         ai_lay.addWidget(self.manual_group)
-
-        # ── Custom Script provider group ──────────────────────────────────────
-        self.custom_script_group = QGroupBox("Custom Script Provider")
-        self.custom_script_group.setStyleSheet(_GROUP)
-        cs_lay = QVBoxLayout(self.custom_script_group)
-
-        cs_lay.addWidget(_info_box(
-            "Runs your own Python script as the AI provider. "
-            "The script is reimported on every request so live edits take effect immediately."
-        ))
-
-        # Contract display — always visible when this provider is selected
-        _CONTRACT_TEXT = (
-            "Required function signature:\n"
-            "\n"
-            "  def chat(system_prompt: str, messages: list[dict]) -> str:\n"
-            "\n"
-            "Parameters:\n"
-            "  system_prompt  — full effective system prompt string (may be empty, never None)\n"
-            "  messages       — list of {\"role\": ..., \"content\": ...} dicts\n"
-            "                   roles are only \"user\" or \"assistant\", alternating\n"
-            "                   the latest user message is always the last entry\n"
-            "\n"
-            "Return:\n"
-            "  A non-empty string. Returning None or \"\" is treated as an error.\n"
-            "  Any exception raised will surface as an error in the chat window."
-        )
-        contract_box = QPlainTextEdit()
-        contract_box.setPlainText(_CONTRACT_TEXT)
-        contract_box.setReadOnly(True)
-        contract_box.setFixedHeight(200)
-        contract_box.setStyleSheet(f"""
-                    QPlainTextEdit {{
-                        background: #0d0d0d;
-                        color: #a0c8a0;
-                        border: 1px solid #333;
-                        border-radius: 6px;
-                        padding: 8px;
-                        font-family: monospace;
-                        font-size: 11px;
-                    }}
-                """)
-        cs_lay.addWidget(contract_box)
-
-        cs_lay.addWidget(_label("Script path:", top_margin=6))
-        self.custom_script_path_input = QLineEdit()
-        self.custom_script_path_input.setReadOnly(True)
-        self.custom_script_path_input.setPlaceholderText("No script selected")
-        self.custom_script_path_input.setStyleSheet(_INPUT)
-        cs_lay.addWidget(self.custom_script_path_input)
-
-        _cs_btn_row = QHBoxLayout()
-        browse_btn = QPushButton("📂 Browse…")
-        browse_btn.setStyleSheet(_BTN)
-
-        def _browse_script():
-            path, _ = QFileDialog.getOpenFileName(
-                self, "Select Python Script", "", "Python Files (*.py)"
-            )
-            if path:
-                self.custom_script_path_input.setText(path)
-                self.controller.set_custom_script_path(path)
-
-        browse_btn.clicked.connect(_browse_script)
-        _cs_btn_row.addWidget(browse_btn)
-
-        clear_btn = QPushButton("✖ Clear")
-        clear_btn.setStyleSheet(_BTN)
-
-        def _clear_script():
-            self.custom_script_path_input.clear()
-            self.controller.set_custom_script_path("")
-
-        clear_btn.clicked.connect(_clear_script)
-        _cs_btn_row.addWidget(clear_btn)
-
-        cs_lay.addLayout(_cs_btn_row)
-        ai_lay.addWidget(self.custom_script_group)
 
         # ── Conversation Prefilling ──────────────────────────────────────────
         pf_group = QGroupBox("Conversation Prefilling")
@@ -738,10 +382,11 @@ class SettingsWindow(BaseWindow):
         _pf_sess_row.setContentsMargins(32, 0, 0, 0)
         self.pf_session_combo = QComboBox()
         self.pf_session_combo.setStyleSheet(_COMBO)
+
         self.pf_session_combo.setMinimumWidth(260)
-        _pf_refresh_btn = QPushButton("🔄")
+        _pf_refresh_btn = QPushButton("⟳")
         _pf_refresh_btn.setStyleSheet(_BTN)
-        _pf_refresh_btn.setFixedWidth(36)
+        _pf_refresh_btn.setFixedWidth(48)
         _pf_refresh_btn.setToolTip("Refresh session list")
         _pf_refresh_btn.clicked.connect(self._refresh_prefilling_sessions)
         _pf_sess_row.addWidget(QLabel("Session:"))
@@ -813,7 +458,7 @@ class SettingsWindow(BaseWindow):
         self.output_device_combo = QComboBox()
         self.output_device_combo.setStyleSheet(_COMBO)
         dv_lay.addWidget(self.output_device_combo)
-        refresh_btn = QPushButton("🔄 Refresh Devices")
+        refresh_btn = QPushButton("⟳ Refresh Devices")
         refresh_btn.setStyleSheet(_BTN)
         refresh_btn.clicked.connect(self.refresh_audio_devices)
         dv_lay.addWidget(refresh_btn)
@@ -837,15 +482,29 @@ class SettingsWindow(BaseWindow):
         tts_group.setStyleSheet(_GROUP)
         tts_lay = QVBoxLayout(tts_group)
         tts_lay.addWidget(_label("TTS Provider:"))
+        _tts_combo_row = QHBoxLayout()
         self.tts_provider_combo = QComboBox()
-        self.tts_provider_combo.addItem("Puter.js TTS (Free)", "puter")
-        self.tts_provider_combo.addItem("Edge TTS (Microsoft, Free)", "edge-tts")
-        self.tts_provider_combo.addItem("pyttsx3 (Offline, Free)", "pyttsx3")
         self.tts_provider_combo.setStyleSheet(_COMBO)
+        # Edge TTS is always the first built-in option
+        self.tts_provider_combo.addItem("Edge TTS (Microsoft, Free)", "edge-tts")
+        # Custom script providers are added by _refresh_tts_provider_scripts()
         self.tts_provider_combo.currentIndexChanged.connect(self.on_tts_provider_changed)
-        tts_lay.addWidget(self.tts_provider_combo)
+        _tts_combo_row.addWidget(self.tts_provider_combo, stretch=1)
+        _tts_refresh_btn = QPushButton("⟳")
+        _tts_refresh_btn.setFixedWidth(48)
+        _tts_refresh_btn.setStyleSheet(_BTN)
+        _tts_refresh_btn.setToolTip("Refresh TTS provider scripts")
+        _tts_refresh_btn.clicked.connect(self._refresh_tts_provider_scripts)
+        _tts_combo_row.addWidget(_tts_refresh_btn)
+        tts_lay.addLayout(_tts_combo_row)
+        tts_lay.addWidget(_info_box(
+            "📁  Custom TTS scripts live in  providers/text-to-speech/\n"
+            "Each .py must define:  speak(text: str, save_to: str) -> bool\n"
+            "When a custom script is selected the voice dropdown below is hidden "
+            "(voice config lives inside the script)."
+        ))
 
-        # Edge TTS sub-group
+        # Edge TTS voice sub-group (hidden when a custom script is active)
         self.edge_tts_group = QWidget()
         etg_lay = QVBoxLayout(self.edge_tts_group)
         etg_lay.setContentsMargins(0, 6, 0, 0)
@@ -853,49 +512,45 @@ class SettingsWindow(BaseWindow):
         self.tts_voice_combo = QComboBox()
         self.tts_voice_combo.setStyleSheet(_COMBO)
         for vid, vname in [
-            ("en-US-GuyNeural","Male, American (Guy)"),("en-US-JennyNeural","Female, American (Jenny)"),
-            ("en-GB-RyanNeural","Male, British (Ryan)"),("en-GB-SoniaNeural","Female, British (Sonia)"),
-            ("en-AU-NatashaNeural","Female, Australian (Natasha)"),("en-AU-WilliamNeural","Male, Australian (William)"),
-            ("en-CA-LiamNeural","Male, Canadian (Liam)"),("en-CA-ClaraNeural","Female, Canadian (Clara)"),
-            ("en-IN-NeerjaNeural","Female, Indian (Neerja)"),("en-IN-PrabhatNeural","Male, Indian (Prabhat)"),
+            ("en-US-GuyNeural", "Male, American (Guy)"), ("en-US-JennyNeural", "Female, American (Jenny)"),
+            ("en-GB-RyanNeural", "Male, British (Ryan)"), ("en-GB-SoniaNeural", "Female, British (Sonia)"),
+            ("en-AU-NatashaNeural", "Female, Australian (Natasha)"),
+            ("en-AU-WilliamNeural", "Male, Australian (William)"),
+            ("en-CA-LiamNeural", "Male, Canadian (Liam)"), ("en-CA-ClaraNeural", "Female, Canadian (Clara)"),
+            ("en-IN-NeerjaNeural", "Female, Indian (Neerja)"), ("en-IN-PrabhatNeural", "Male, Indian (Prabhat)"),
         ]:
             self.tts_voice_combo.addItem(vname, vid)
         etg_lay.addWidget(self.tts_voice_combo)
         tts_lay.addWidget(self.edge_tts_group)
 
-        # Puter TTS sub-group
-        self.puter_tts_group = QWidget()
-        ptg_lay = QVBoxLayout(self.puter_tts_group)
-        ptg_lay.setContentsMargins(0, 6, 0, 0)
-        ptg_lay.addWidget(_label("Puter TTS Model:"))
-        self.puter_tts_model_combo = QComboBox()
-        self.puter_tts_model_combo.setStyleSheet(_COMBO)
-        ptg_lay.addWidget(self.puter_tts_model_combo)
-        ptg_lay.addWidget(_label("Puter Voice (optional):"))
-        self.puter_tts_voice_input = QLineEdit()
-        self.puter_tts_voice_input.setPlaceholderText("Leave empty for default")
-        self.puter_tts_voice_input.setStyleSheet(_INPUT)
-        ptg_lay.addWidget(self.puter_tts_voice_input)
+        _open_tts_btn = QPushButton("📂  Open TTS Providers Folder")
+        _open_tts_btn.setStyleSheet(_BTN)
 
-        self.elevenlabs_checkbox = QCheckBox("🎙️ Use ElevenLabs TTS (Premium)")
-        self.elevenlabs_checkbox.setStyleSheet(_CHECK)
-        self.elevenlabs_checkbox.stateChanged.connect(self.on_elevenlabs_toggled)
-        ptg_lay.addWidget(self.elevenlabs_checkbox)
+        def _open_tts_providers_folder():
+            import subprocess, sys as _sys
+            folder = self.controller.get_tts_providers_folder()
+            if _sys.platform == 'win32':
+                subprocess.Popen(['explorer', folder])
+            elif _sys.platform == 'darwin':
+                subprocess.Popen(['open', folder])
+            else:
+                subprocess.Popen(['xdg-open', folder])
 
-        self.elevenlabs_settings = QWidget()
-        el_lay = QVBoxLayout(self.elevenlabs_settings)
-        el_lay.setContentsMargins(16, 0, 0, 0)
-        el_lay.addWidget(_info_box(
-            "ElevenLabs: premium TTS with 70+ languages, emotional control with [brackets].\n"
-            "Get your voice ID from: https://elevenlabs.io"))
-        el_lay.addWidget(_label("Voice ID:"))
-        self.elevenlabs_voice_input = QLineEdit()
-        self.elevenlabs_voice_input.setPlaceholderText("e.g., 21m00Tcm4TlvDq8ikWAM")
-        self.elevenlabs_voice_input.setStyleSheet(_INPUT)
-        el_lay.addWidget(self.elevenlabs_voice_input)
-        self.elevenlabs_settings.hide()
-        ptg_lay.addWidget(self.elevenlabs_settings)
-        tts_lay.addWidget(self.puter_tts_group)
+        _open_tts_btn.clicked.connect(_open_tts_providers_folder)
+        tts_lay.addWidget(_open_tts_btn)
+
+        # ── ElevenLabs speech tag toggle ─────────────────────────────────────
+        self.elevenlabs_tags_checkbox = QCheckBox("Make Agent Use ElevenLabs Speech Tags")
+        self.elevenlabs_tags_checkbox.setStyleSheet(f"color:{_TEXT}; font-size:10pt;")
+        self.elevenlabs_tags_checkbox.setToolTip(
+            "Inserts an instruction into the Agent's system prompt to use expressive speech tags "
+            "like [laugh], [sigh], [gasp], etc.\n"
+            "Highly recommended when using an ElevenLabs-compatible TTS provider — "
+            "makes responses sound more natural and expressive."
+        )
+        tts_lay.addWidget(self.elevenlabs_tags_checkbox)
+        # ─────────────────────────────────────────────────────────────────────
+
         voice_lay.addWidget(tts_group)
 
         # VAD
@@ -1240,10 +895,6 @@ class SettingsWindow(BaseWindow):
 
         main_layout.addWidget(footer)
 
-        # Initial provider visibility
-        initial_provider = self.provider_combo.currentText()
-        self.on_provider_changed(initial_provider)
-
     def _on_theme_selected(self, checked, key, card):
         """Handle theme radio button toggle — update card borders."""
         if not checked:
@@ -1282,41 +933,6 @@ class SettingsWindow(BaseWindow):
         else:
             self.silero_settings_widget.hide()
 
-    def on_provider_changed(self, provider):
-        """Handle provider change - DYNAMIC VISIBILITY"""
-        # Hide all provider-specific groups first
-        self.anthropic_group.hide()
-        self.gemini_group.hide()
-        self.manual_group.hide()
-        self.puter_group.hide()
-        self.custom_script_group.hide()
-
-        # CRITICAL: Always hide Puter-specific sections first
-        if DEBUG_MODE:
-            self.puter_account_group.hide()
-        self.recommended_group.hide()
-        self.puter_tts_group.hide()
-
-        # Show relevant sections based on provider
-        if provider == 'puter':
-            self.puter_group.show()
-            if DEBUG_MODE:
-                self.puter_account_group.show()
-            self.recommended_group.show()
-            self.update_tts_provider_options(show_puter=True)
-        elif provider == 'gemini':
-            self.gemini_group.show()
-            self.update_tts_provider_options(show_puter=False)
-        elif provider == 'manual':
-            self.manual_group.show()
-            self.update_tts_provider_options(show_puter=False)
-        elif provider == 'custom_script':
-            self.custom_script_group.show()
-            self.update_tts_provider_options(show_puter=False)
-        else:  # anthropic
-            self.anthropic_group.show()
-            self.update_tts_provider_options(show_puter=False)
-
     def log_status(self, message):
         """Helper to log status messages"""
         print(f"[Settings] {message}")
@@ -1330,159 +946,18 @@ class SettingsWindow(BaseWindow):
         self._memory_window.raise_()
         self._memory_window.refresh_memories()
 
-    def on_elevenlabs_toggled(self, state):
-        """Handle ElevenLabs checkbox toggle"""
-        if state == 2:  # Checked
-            self.elevenlabs_settings.show()
-        else:
-            self.elevenlabs_settings.hide()
-
-    def update_anthropic_model_description(self):
-        """Update Anthropic model description"""
-        try:
-            models = self.controller.get_anthropic_models()
-            selected_id = self.anthropic_model_combo.currentData()
-            for model in models:
-                if model['id'] == selected_id:
-                    self.anthropic_model_desc.setText(f"ℹ️ {model['description']}")
-                    break
-        except Exception as e:
-            print(f"Error updating Anthropic description: {e}")
-
-    def update_model_description(self):
-        """Update Puter model description"""
-        try:
-            models = self.controller.get_puter_models()
-            selected_id = self.puter_model_combo.currentData()
-
-            for model in models:
-                if model['id'] == selected_id:
-                    self.puter_model_desc.setText(f"ℹ️ {model['description']}")
-                    break
-        except Exception as e:
-            print(f"Error updating description: {e}")
-
-    def update_tts_provider_options(self, show_puter):
-        """Update TTS provider dropdown based on AI provider"""
-        current_provider = self.tts_provider_combo.currentData()
-
-        # Block signals to prevent recursive calls
-        self.tts_provider_combo.blockSignals(True)
-
-        # Clear and rebuild
-        self.tts_provider_combo.clear()
-
-        if show_puter:
-            # Show all options when Puter is AI provider
-            self.tts_provider_combo.addItem("Puter.js TTS (Free)", "puter")
-            self.tts_provider_combo.addItem("Edge TTS (Microsoft, Free)", "edge-tts")
-
-            # Try to restore previous selection
-            index = self.tts_provider_combo.findData(current_provider)
-            if index >= 0:
-                self.tts_provider_combo.setCurrentIndex(index)
-            else:
-                # Default to Edge TTS
-                self.tts_provider_combo.setCurrentIndex(1)
-        else:
-            # ONLY show Edge TTS when Puter is NOT the AI provider
-            self.tts_provider_combo.addItem("Edge TTS (Microsoft, Free)", "edge-tts")
-
-            # FORCE selection to Edge TTS (only option)
-            self.tts_provider_combo.setCurrentIndex(0)
-
-        # Unblock signals and trigger update
-        self.tts_provider_combo.blockSignals(False)
-
-        # CRITICAL: Trigger visibility update for TTS settings
-        self.on_tts_provider_changed(self.tts_provider_combo.currentIndex())
-
-    def update_gemini_model_description(self):
-        """Update Gemini model description"""
-        try:
-            models = self.controller.get_gemini_models()
-            selected_id = self.gemini_model_combo.currentData()
-
-            for model in models:
-                if model['id'] == selected_id:
-                    self.gemini_model_desc.setText(f"ℹ️ {model['description']}")
-                    break
-        except Exception as e:
-            print(f"Error updating Gemini description: {e}")
-
-    def toggle_api_key_visibility(self, checked):
-        """Toggle API key visibility"""
-        if checked:
-            self.api_key_input.setEchoMode(QLineEdit.EchoMode.Normal)
-            self.show_key_btn.setText("🙈 Hide")
-        else:
-            self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
-            self.show_key_btn.setText("👁️ Show")
-
-    def toggle_gemini_key_visibility(self, checked):
-        """Toggle Gemini API key visibility"""
-        if checked:
-            self.gemini_key_input.setEchoMode(QLineEdit.EchoMode.Normal)
-            self.show_gemini_key_btn.setText("🙈 Hide")
-        else:
-            self.gemini_key_input.setEchoMode(QLineEdit.EchoMode.Password)
-            self.show_gemini_key_btn.setText("👁️ Show")
-
-    def toggle_puter_password_visibility(self, checked):
-        """Toggle Puter password visibility"""
-        if not DEBUG_MODE:
-            return
-        if checked:
-            self.puter_password_input.setEchoMode(QLineEdit.EchoMode.Normal)
-            self.show_puter_password_btn.setText("🙈 Hide")
-        else:
-            self.puter_password_input.setEchoMode(QLineEdit.EchoMode.Password)
-            self.show_puter_password_btn.setText("👁️ Show")
+    def _on_llm_provider_changed(self, index):
+        """Show the Manual Provider Helper only when Manual Response is selected."""
+        is_manual = self.provider_script_combo.currentData() == ""
+        self.manual_group.setVisible(is_manual)
 
     def on_tts_provider_changed(self, index):
-        """Handle TTS provider change - DYNAMIC VISIBILITY"""
-        provider = self.tts_provider_combo.currentData()
-
-        if provider == 'puter':
-            # Show Puter TTS settings (including ElevenLabs option)
-            self.puter_tts_group.show()
-            self.edge_tts_group.hide()
-
-            # Load Puter TTS models if not loaded
-            if self.puter_tts_model_combo.count() == 0:
-                models = self.controller.get_puter_tts_models()
-                self.puter_tts_model_combo.clear()
-                for model in models:
-                    self.puter_tts_model_combo.addItem(model['name'], model['id'])
-
-        elif provider == 'edge-tts':
-            # Show Edge TTS settings
-            self.puter_tts_group.hide()
+        """Show Edge TTS voice dropdown only when Edge TTS is selected."""
+        provider_data = self.tts_provider_combo.currentData()
+        if provider_data == 'edge-tts':
             self.edge_tts_group.show()
-
-    def setup_puter_account(self):
-        """Setup new Puter account"""
-        self.controller.setup_puter_account()
-        self.show_status_message("✓ Opening Puter for account setup...")
-
-    def reset_puter_quota(self):
-        """Reset Puter quota"""
-        # Save credentials first
-        email = self.puter_email_input.text().strip()
-        password = self.puter_password_input.text().strip()
-
-        if not email or not password:
-            self.show_status_message("✗ Please enter email and password first")
-            return
-
-        self.controller.set_puter_credentials(email, password)
-
-        # Reset quota
-        success = self.controller.reset_puter_quota()
-        if success:
-            self.show_status_message("✓ Quota reset successful!")
         else:
-            self.show_status_message("✗ Quota reset failed")
+            self.edge_tts_group.hide()
 
     def _refresh_prefilling_sessions(self):
         """Populate the prefilling session combo with all saved sessions.
@@ -1499,6 +974,41 @@ class SettingsWindow(BaseWindow):
                 self.pf_session_combo.addItem(label, s.get('id', ''))
         except Exception as e:
             self.pf_session_combo.addItem(f"(error: {e})", "")
+
+    def _refresh_llm_provider_scripts(self):
+        """Populate the LLM provider script combo from providers/large-language-models/."""
+        scripts = self.controller.get_llm_provider_scripts()
+        current = self.provider_script_combo.currentData() if self.provider_script_combo.count() else ''
+        self.provider_script_combo.blockSignals(True)
+        self.provider_script_combo.clear()
+        self.provider_script_combo.addItem("Manual Response (Debug)", "")
+        for s in scripts:
+            self.provider_script_combo.addItem(s['name'], s['path'])
+        for i in range(self.provider_script_combo.count()):
+            if self.provider_script_combo.itemData(i) == current:
+                self.provider_script_combo.setCurrentIndex(i)
+                break
+        self.provider_script_combo.blockSignals(False)
+
+    def _refresh_tts_provider_scripts(self):
+        """Populate TTS combo: built-in Edge TTS + scripts from providers/text-to-speech/."""
+        scripts = self.controller.get_tts_provider_scripts()
+        current = self.tts_provider_combo.currentData() if self.tts_provider_combo.count() else 'edge-tts'
+        self.tts_provider_combo.blockSignals(True)
+        self.tts_provider_combo.clear()
+        self.tts_provider_combo.addItem("Edge TTS (Microsoft, Free)", "edge-tts")
+        for s in scripts:
+            self.tts_provider_combo.addItem(f"📝  {s['name']}", s['path'])
+        restored = False
+        for i in range(self.tts_provider_combo.count()):
+            if self.tts_provider_combo.itemData(i) == current:
+                self.tts_provider_combo.setCurrentIndex(i)
+                restored = True
+                break
+        if not restored:
+            self.tts_provider_combo.setCurrentIndex(0)
+        self.tts_provider_combo.blockSignals(False)
+        self.on_tts_provider_changed(self.tts_provider_combo.currentIndex())
 
     def refresh_audio_devices(self):
         """Refresh audio device lists"""
@@ -1542,64 +1052,15 @@ class SettingsWindow(BaseWindow):
             self.controller.settings.get('open_packet_on_startup', False)
         )
 
-        # Load provider and trigger visibility update
-        provider = self.controller.get_ai_provider()
-        self.provider_combo.setCurrentText(provider)
-        # CRITICAL: Trigger visibility update on load
-        self.on_provider_changed(provider)
-
+        # Load active LLM provider script
+        self._refresh_llm_provider_scripts()
+        self._on_llm_provider_changed(self.provider_script_combo.currentIndex())
         saved_script_path = self.controller.get_custom_script_path()
         if saved_script_path:
-            self.custom_script_path_input.setText(saved_script_path)
-
-        # Load API key
-        api_key = self.controller.get_api_key()
-        if api_key:
-            self.api_key_input.setText(api_key)
-
-        # Load Anthropic model + generation params
-        anthropic_model = self.controller.get_anthropic_model()
-        index = self.anthropic_model_combo.findData(anthropic_model)
-        if index >= 0:
-            self.anthropic_model_combo.setCurrentIndex(index)
-        self.update_anthropic_model_description()
-        an_temp = self.controller.get_anthropic_temperature()
-        self.anthropic_temp_slider.setValue(int(round(an_temp * 100)))
-        an_auto = self.controller.get_anthropic_auto_tokens()
-        self.anthropic_auto_tokens_cb.setChecked(an_auto)
-        self.anthropic_max_tokens_widget.setVisible(not an_auto)
-        self.anthropic_max_tokens_spin.setValue(self.controller.get_anthropic_max_tokens())
-
-        # Load Gemini API key
-        gemini_key = self.controller.get_gemini_api_key()
-        if gemini_key:
-            self.gemini_key_input.setText(gemini_key)
-
-        # Load Puter model
-        puter_model = self.controller.get_puter_model()
-        index = self.puter_model_combo.findData(puter_model)
-        if index >= 0:
-            self.puter_model_combo.setCurrentIndex(index)
-
-        # Load Gemini model + generation params
-        gemini_model = self.controller.get_gemini_model()
-        index = self.gemini_model_combo.findData(gemini_model)
-        if index >= 0:
-            self.gemini_model_combo.setCurrentIndex(index)
-        gm_temp = self.controller.get_gemini_temperature()
-        self.gemini_temp_slider.setValue(int(round(gm_temp * 100)))
-        gm_auto = self.controller.get_gemini_auto_tokens()
-        self.gemini_auto_tokens_cb.setChecked(gm_auto)
-        self.gemini_max_tokens_widget.setVisible(not gm_auto)
-        self.gemini_max_tokens_spin.setValue(self.controller.get_gemini_max_tokens())
-        gm_top_p = self.controller.get_gemini_top_p()
-        if gm_top_p is not None:
-            self.gemini_top_p_enable.setChecked(True)
-            self.gemini_top_p_spin.setValue(gm_top_p)
-        gm_top_k = self.controller.get_gemini_top_k()
-        if gm_top_k is not None:
-            self.gemini_top_k_enable.setChecked(True)
-            self.gemini_top_k_spin.setValue(gm_top_k)
+            for i in range(self.provider_script_combo.count()):
+                if self.provider_script_combo.itemData(i) == saved_script_path:
+                    self.provider_script_combo.setCurrentIndex(i)
+                    break
 
         # Load debug mode
         debug_mode = self.controller.get_debug_mode()
@@ -1628,14 +1089,6 @@ class SettingsWindow(BaseWindow):
         if index >= 0:
             self.interrupt_mode_combo.setCurrentIndex(index)
 
-        # Load ElevenLabs settings
-        elevenlabs_enabled = self.controller.get_elevenlabs_enabled()
-        self.elevenlabs_checkbox.setChecked(elevenlabs_enabled)
-
-        elevenlabs_voice = self.controller.get_elevenlabs_voice_id()
-        if elevenlabs_voice:
-            self.elevenlabs_voice_input.setText(elevenlabs_voice)
-
         # Load voice devices
         self.refresh_audio_devices()
 
@@ -1643,26 +1096,20 @@ class SettingsWindow(BaseWindow):
         input_device = self.controller.settings.get('voice_input_device')
         output_device = self.controller.settings.get('voice_output_device')
 
-        # Load Puter credentials
-        creds = self.controller.get_puter_credentials()
-        if DEBUG_MODE:
-            self.puter_email_input.setText(creds['email'])
-            self.puter_password_input.setText(creds['password'])
+        # Load ElevenLabs speech tag toggle
+        self.elevenlabs_tags_checkbox.setChecked(
+            self.controller.settings.get('elevenlabs_enabled', False)
+        )
 
-        # Load Puter timeout
-        puter_timeout = self.controller.settings.get('puter_timeout', 30)
-        if DEBUG_MODE:
-            self.puter_timeout_input.setText(str(puter_timeout))
-
-        # Load TTS provider
+        # Load TTS provider/script
+        self._refresh_tts_provider_scripts()
         tts_provider = self.controller.get_tts_provider()
-        index = self.tts_provider_combo.findData(tts_provider)
-        if index >= 0:
-            self.tts_provider_combo.setCurrentIndex(index)
-
-        # Load Puter TTS settings
-        puter_tts_model = self.controller.get_puter_tts_model()
-        puter_tts_voice = self.controller.get_puter_tts_voice()
+        tts_script = self.controller.settings.get('tts_script_path', '')
+        restore_data = tts_script if (tts_provider == 'custom_script' and tts_script) else tts_provider
+        for i in range(self.tts_provider_combo.count()):
+            if self.tts_provider_combo.itemData(i) == restore_data:
+                self.tts_provider_combo.setCurrentIndex(i)
+                break
 
         # Load prefilling settings
         self.prefilling_checkbox.setChecked(
@@ -1721,19 +1168,6 @@ class SettingsWindow(BaseWindow):
         self.glass_opacity_slider.setValue(int(glass_opacity * 100))
         self.glass_opacity_value_label.setText(f"{int(glass_opacity * 100)}%")
 
-        # Load models
-        models = self.controller.get_puter_tts_models()
-        self.puter_tts_model_combo.clear()
-        for model in models:
-            self.puter_tts_model_combo.addItem(model['name'], model['id'])
-
-        index = self.puter_tts_model_combo.findData(puter_tts_model)
-        if index >= 0:
-            self.puter_tts_model_combo.setCurrentIndex(index)
-
-        if puter_tts_voice:
-            self.puter_tts_voice_input.setText(puter_tts_voice)
-
         if input_device is not None:
             index = self.input_device_combo.findData(input_device)
             if index >= 0:
@@ -1787,41 +1221,13 @@ class SettingsWindow(BaseWindow):
         self.controller.settings['open_chat_on_startup'] = self.open_chat_on_startup_checkbox.isChecked()
         self.controller.settings['open_packet_on_startup'] = self.open_packet_on_startup_checkbox.isChecked()
 
-        # Save provider
-        provider = self.provider_combo.currentText()
-        self.controller.set_ai_provider(provider)
-
-        # Save API key
-        api_key = self.api_key_input.text().strip()
-        self.controller.set_api_key(api_key)
-
-        # Save Anthropic model + generation params
-        anthropic_model = self.anthropic_model_combo.currentData()
-        if anthropic_model:
-            self.controller.set_anthropic_model(anthropic_model)
-        self.controller.set_anthropic_temperature(self.anthropic_temp_slider.value() / 100.0)
-        self.controller.set_anthropic_auto_tokens(self.anthropic_auto_tokens_cb.isChecked())
-        self.controller.set_anthropic_max_tokens(self.anthropic_max_tokens_spin.value())
-
-        # Save Gemini API key
-        gemini_key = self.gemini_key_input.text().strip()
-        self.controller.set_gemini_api_key(gemini_key)
-
-        # Save Puter model
-        puter_model = self.puter_model_combo.currentData()
-        self.controller.set_puter_model(puter_model)
-
-        # Save Gemini model + generation params
-        gemini_model = self.gemini_model_combo.currentData()
-        self.controller.set_gemini_model(gemini_model)
-        self.controller.set_gemini_temperature(self.gemini_temp_slider.value() / 100.0)
-        self.controller.set_gemini_auto_tokens(self.gemini_auto_tokens_cb.isChecked())
-        self.controller.set_gemini_max_tokens(self.gemini_max_tokens_spin.value())
-        # top_p / top_k: only save if enabled
-        top_p = self.gemini_top_p_spin.value() if self.gemini_top_p_enable.isChecked() else None
-        self.controller.set_gemini_top_p(top_p)
-        top_k = self.gemini_top_k_spin.value() if self.gemini_top_k_enable.isChecked() else None
-        self.controller.set_gemini_top_k(top_k)
+        # Save active LLM provider script
+        script_path = self.provider_script_combo.currentData() or ''
+        if not script_path:
+            self.controller.set_ai_provider('manual')
+        elif script_path:
+            self.controller.set_ai_provider('custom_script')
+            self.controller.set_custom_script_path(script_path)
 
         # Save debug mode
         debug_mode = self.debug_checkbox.isChecked()
@@ -1848,40 +1254,21 @@ class SettingsWindow(BaseWindow):
         output_device = self.output_device_combo.currentData()
         self.controller.set_voice_output_device(output_device)
 
-        # Save Puter credentials
-        if DEBUG_MODE:
-            email = self.puter_email_input.text().strip()
-            password = self.puter_password_input.text().strip()
-            self.controller.set_puter_credentials(email, password)
+        # Save TTS provider / script
+        tts_data = self.tts_provider_combo.currentData() or 'edge-tts'
+        if tts_data == 'edge-tts':
+            self.controller.set_tts_provider('edge-tts')
+        else:
+            # tts_data is a script path
+            self.controller.set_tts_provider('custom_script')
+            self.controller.set_tts_script_path(tts_data)
 
-        # Save Puter timeout
-        if DEBUG_MODE:
-            timeout_text = self.puter_timeout_input.text().strip()
-            if timeout_text:
-                try:
-                    timeout = int(timeout_text)
-                    if timeout > 0:
-                        self.controller.set_puter_timeout(timeout)
-                    else:
-                        self.controller.set_puter_timeout(30)
-                except ValueError:
-                    self.controller.set_puter_timeout(30)
-            else:
-                self.controller.set_puter_timeout(30)
+        # Save ElevenLabs speech tag toggle
+        elevenlabs_enabled = self.elevenlabs_tags_checkbox.isChecked()
+        self.controller.settings['elevenlabs_enabled'] = elevenlabs_enabled
+        self.controller.ai.update_voice_settings(self.controller.ai.voice_mode, elevenlabs_enabled)
 
-        # Save TTS provider
-        tts_provider = self.tts_provider_combo.currentData()
-        self.controller.set_tts_provider(tts_provider)
-
-        # Save Puter TTS settings
-        puter_tts_model = self.puter_tts_model_combo.currentData()
-        self.controller.set_puter_tts_model(puter_tts_model)
-
-        puter_tts_voice = self.puter_tts_voice_input.text().strip()
-        if puter_tts_voice:
-            self.controller.set_puter_tts_voice(puter_tts_voice)
-
-        # Save TTS voice
+        # Save TTS voice (edge-tts only)
         tts_voice = self.tts_voice_combo.currentData()
         self.controller.set_tts_voice(tts_voice)
 
@@ -1892,14 +1279,6 @@ class SettingsWindow(BaseWindow):
         # Save interrupt mode
         interrupt_mode = self.interrupt_mode_combo.currentData()
         self.controller.set_voice_interrupt_mode(interrupt_mode)
-
-        # Save ElevenLabs settings
-        elevenlabs_enabled = self.elevenlabs_checkbox.isChecked()
-        self.controller.set_elevenlabs_enabled(elevenlabs_enabled)
-
-        elevenlabs_voice = self.elevenlabs_voice_input.text().strip()
-        if elevenlabs_voice:
-            self.controller.set_elevenlabs_voice_id(elevenlabs_voice)
 
         # Save memory engine settings
         self.controller.settings['prefilling_enabled'] = self.prefilling_checkbox.isChecked()
@@ -1954,23 +1333,6 @@ class SettingsWindow(BaseWindow):
         # Show confirmation
         self.show_status_message("✓ Settings saved successfully!")
 
-    def start_puter_server(self):
-        """Start Puter server"""
-        success = self.controller.start_puter_server()
-        if success:
-            self.show_status_message("✓ Server started! Click PLAY, watch for 🔊 in tab!")
-        else:
-            self.show_status_message("✗ Failed to start Puter server")
-
-    def open_puter_interface(self):
-        """Open Puter interface in browser"""
-        try:
-            import webbrowser
-            webbrowser.open(f'http://127.0.0.1:8888')
-            self.show_status_message("✓ Opening Puter interface...")
-        except Exception as e:
-            self.show_status_message(f"✗ Error: {e}")
-
     def show_status_message(self, message):
         """Show a temporary status message in the footer."""
         print(f"[Settings] {message}")
@@ -2012,3 +1374,4 @@ class SettingsWindow(BaseWindow):
                 """)
         except Exception:
             pass
+
