@@ -126,11 +126,8 @@ The repo ships with several working scripts demonstrating the flexibility of the
 **LLM:**
 - `anthropic_provider.py` — Anthropic Claude API
 - `gemini_provider.py` — Google Gemini
-- `puter_server.py` — Puter.js (free, no API key required — needs a Puter account)
-- `llm7_io.py` / `llm7_io_anon.py` — LLM7.io (anonymous access available)
+- `llm7_io.py` — LLM7.io
 - `provider_cloudflare_kimi_k2_6.py` — Cloudflare Workers AI / Kimi K2.6
-- `provider_nvidia_deepseek_v4_flash.py` / `provider_nvidia_deepseek_v4_pro.py` — NVIDIA-hosted DeepSeek
-- `provider_nvidia_glm51.py` — NVIDIA-hosted GLM
 
 **TTS:**
 - `elevenlabs_tts.py` — Emotional, realistic voice synthesis with expression tags
