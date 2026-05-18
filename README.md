@@ -52,7 +52,7 @@ It serves as a personalized companion that helps with general automation, making
 
 ---
 
-## 🎬 See a Glimpse of It
+## See a Glimpse of It
 
 <p align="center">
   <img src="demos/1.png" width="45%" />
@@ -69,21 +69,6 @@ It serves as a personalized companion that helps with general automation, making
 <p align="center">
   <img src="demos/7.png" width="45%" />
   <img src="demos/8.png" width="45%" />
-</p>
-<p align="center">
-  <img src="demos/9.png" width="45%" />
-  <img src="demos/10.png" width="45%" />
-</p>
-<p align="center">
-  <img src="demos/11.png" width="45%" />
-  <img src="demos/12.png" width="45%" />
-</p>
-<p align="center">
-  <img src="demos/13.png" width="45%" />
-  <img src="demos/14.png" width="45%" />
-</p>
-<p align="center">
-  <img src="demos/15.png" width="45%" />
 </p>
 
 ---
