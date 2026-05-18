@@ -11,6 +11,7 @@
 # Table of Contents
 - [Things to take into consideration](#things-to-take-into-consideration)
 - [What is Systema Auxilium](#what-is-systema-auxilium)
+- [See a Glimpse of It](#see-a-glimpse-of-it)
 - [What Can It Do](#what-can-it-do)
 - [Modular Provider Architecture](#modular-provider-architecture)
 - [Android Bridge App](#android-bridge-app)
@@ -43,17 +44,47 @@ Development happens in whatever time I can spare. Updates may be slow, inconsist
 
 ---
 
-## 🎬 See It In Action
-
-[▶ Watch the Demo on Google Drive](https://drive.google.com/file/d/1RmdZhXz-lvwBVq2JGpx3q7bip8Jtmynm/view?usp=sharing)
-
----
-
 ## What is Systema Auxilium?
 
 **Systema Auxilium** (Latin for *"System Helper"*) is an AI-powered desktop assistant that lets you control your computer through plain natural language. Instead of writing scripts or memorizing commands, you simply describe what you want done — and the assistant figures out the Python code to make it happen.
 
 It serves as a personalized companion that helps with general automation, making powerful OS operations accessible to anyone.
+
+---
+
+## 🎬 See a Glimpse of It
+
+<p align="center">
+  <img src="demos/1.png" width="45%" />
+  <img src="demos/2.png" width="45%" />
+</p>
+<p align="center">
+  <img src="demos/3.png" width="45%" />
+  <img src="demos/4.png" width="45%" />
+</p>
+<p align="center">
+  <img src="demos/5.png" width="45%" />
+  <img src="demos/6.png" width="45%" />
+</p>
+<p align="center">
+  <img src="demos/7.png" width="45%" />
+  <img src="demos/8.png" width="45%" />
+</p>
+<p align="center">
+  <img src="demos/9.png" width="45%" />
+  <img src="demos/10.png" width="45%" />
+</p>
+<p align="center">
+  <img src="demos/11.png" width="45%" />
+  <img src="demos/12.png" width="45%" />
+</p>
+<p align="center">
+  <img src="demos/13.png" width="45%" />
+  <img src="demos/14.png" width="45%" />
+</p>
+<p align="center">
+  <img src="demos/15.png" width="45%" />
+</p>
 
 ---
 
