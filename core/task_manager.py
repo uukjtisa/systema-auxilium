@@ -117,9 +117,6 @@ class TaskAIEngine:
             from core.ai_engine import AIEngine
             s = self._controller.settings
             self._engine = AIEngine(
-                api_key=s.get('api_key', ''),
-                gemini_api_key=s.get('gemini_api_key', ''),
-                puter_server=getattr(self._controller, 'puter_server', None),
                 settings_callback=lambda: self._controller.settings,
             )
             # Background mode — no UI, no approval dialogs
