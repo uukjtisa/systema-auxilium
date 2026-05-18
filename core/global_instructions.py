@@ -279,6 +279,50 @@ import os; os.startfile(r'C:\\Users\\...\\Downloads')
 Use emojis to be friendly: ✨ 📁 🎵 😊 😁 etc.
 """
 
+_SECTION_IMAGE_TOOLS = """
+AGENT IMAGE TOOLS — ATTACH & SCREENSHOT
+
+You have two functions available in your Python execution namespace
+that let you attach images directly to the chat as pinned context.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  attach_image(path_or_paths)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Pins one or more images to the chat input so they are sent
+  with the next user-visible message. Thread-safe — works from
+  work_environment or execute_code.
+
+  Examples:
+    attach_image(r"C:\\Users\\user\\screenshot.png")
+    attach_image([r"C:\\img1.png", r"C:\\img2.png"])
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  take_screenshot(save_path=None, attach=True)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Captures the current screen, saves it to a temp file, and
+  optionally pins it to the chat automatically.
+  Returns the path to the saved PNG.
+
+  Examples:
+    path = take_screenshot()                  # capture + auto-attach
+    path = take_screenshot(attach=False)      # capture only, no attach
+    path = take_screenshot(r"C:\\shot.png")   # save to specific path
+
+WHEN TO USE THESE:
+  - User asks you to "look at the screen" or "see what's on the screen"
+  - You need to assess current system state during a task
+  - You want to show the user a visual result of something you just did
+  - Debugging a UI issue where a screenshot would help diagnosis
+
+FLOW EXAMPLE — assessing screen state:
+```work_environment: [Taking screenshot to assess system state]
+path = take_screenshot()
+print(f"Screenshot saved: {path}")
+attach_image(path)
+```
+  (System responds, then.. You should automatically see the image on your context window.)
+"""
+
 _SECTION_MUST_REMEMBER = """
 MUST REMEMBER:
 - DO NOT ROLEPLAY — Include TOOL USAGE when you say you'll do something
@@ -298,20 +342,22 @@ MUST REMEMBER:
 - Never skip session naming. If the topic is unclear, guess a title anyway. SESSION NAMING HAS HIGHER PRIORITY THAN STYLE PREFERENCES. It must not be skipped due to tone, humour, or conversational flow. set_session_name can appear ANYWHERE — before, after, or between other content. It can appear alongside any code tool. There are no ordering restrictions.
 """
 
+
 def get_system_prompt(
-    system_info: str = "",
-    voice_mode: bool = False,
-    elevenlabs_enabled: bool = False,
-    skills=None,
-    # ── Modular section flags — all True by default, existing callers unaffected ──
-    include_tool_format: bool = True,
-    include_session_naming: bool = True,
-    include_memory: bool = True,
-    include_execution_tools: bool = True,
-    include_fence_syntax: bool = True,
-    include_work_mode_rules: bool = True,
-    include_execute_code_rules: bool = True,
-    include_must_remember: bool = True,
+        system_info: str = "",
+        voice_mode: bool = False,
+        elevenlabs_enabled: bool = False,
+        skills=None,
+        # ── Modular section flags — all True by default, existing callers unaffected ──
+        include_tool_format: bool = True,
+        include_session_naming: bool = True,
+        include_memory: bool = True,
+        include_execution_tools: bool = True,
+        include_fence_syntax: bool = True,
+        include_work_mode_rules: bool = True,
+        include_execute_code_rules: bool = True,
+        include_must_remember: bool = True,
+        include_image_tools: bool = False,  # Hide the auto image attach feature from the Agent from the main chat for now...
 ):
     """
     Generate system prompt with optional modular sections.
@@ -396,7 +442,7 @@ Use these sparingly and naturally.
     from pathlib import Path as _P
     _any_loaded = skills and any(s.get('is_loaded') for s in skills)
     if _any_loaded:
-        _app  = str(_P(__file__).resolve().parent.parent)
+        _app = str(_P(__file__).resolve().parent.parent)
         _skls = str(_P(__file__).resolve().parent.parent / "skills")
         _skill_path_rule = (
             "╔═══════════════════════════════════════════════════════════════════╗\n"
@@ -453,28 +499,22 @@ Use these sparingly and naturally.
     if include_fence_syntax:      body_parts.append(_SECTION_FENCE_SYNTAX)
     if include_work_mode_rules:   body_parts.append(_SECTION_WORK_MODE)
     if include_execute_code_rules: body_parts.append(_SECTION_EXECUTE_CODE_MODE)
+    if include_image_tools:       body_parts.append(_SECTION_IMAGE_TOOLS)
     if include_must_remember:     body_parts.append(_SECTION_MUST_REMEMBER)
 
     preamble_parts = filter(None, [
-        "You are Systema Auxilium - An AI Assistant with Python code execution capabilities.",
+        "You a Systema Auxilium AI Agent - An Operating System Assistant with Python code execution capabilities.",
         system_info,
         _skill_path_rule,
         voice_instructions,
     ])
 
     return (
-        "\n\n".join(preamble_parts)
-        + "\n\n"
-        + "\n\n".join(body_parts)
-        + (f"\n\n{skills_block}" if skills_block else "")
+            "\n\n".join(preamble_parts)
+            + "\n\n"
+            + "\n\n".join(body_parts)
+            + (f"\n\n{skills_block}" if skills_block else "")
     )
-
-
-
-def get_gemini_system_prompt(system_info="", voice_mode=False, elevenlabs_enabled=False):
-    """DEPRECATED — Gemini now uses the unified get_system_prompt().
-    Kept for any external callers; delegates to get_system_prompt."""
-    return get_system_prompt(system_info, voice_mode, elevenlabs_enabled)
 
 
 # Shared work-continuation decision block used by WORK_MODE_PROMPT and
@@ -521,15 +561,13 @@ VERY CRITICAL: WHEN YOU ARE GONNA EXIT, IN YOUR RESPONSE, THERE MUST BE A REPORT
 
 WORK_MODE_PROMPT = "<SYSTEM_MESSAGE>\n" + _WORK_CONTINUATION_BLOCK + "</SYSTEM_MESSAGE>"
 
-
 SKILL_LOADED_WORK_PROMPT = (
-    "<SYSTEM_MESSAGE>\n"
-    "SKILL '{skill_name}' has been loaded into your system context.\n"
-    "You now have its full instructions available. Proceed with your task.\n\n"
-    + _WORK_CONTINUATION_BLOCK
-    + "</SYSTEM_MESSAGE>"
+        "<SYSTEM_MESSAGE>\n"
+        "SKILL '{skill_name}' has been loaded into your system context.\n"
+        "You now have its full instructions available. Proceed with your task.\n\n"
+        + _WORK_CONTINUATION_BLOCK
+        + "</SYSTEM_MESSAGE>"
 )
-
 
 SKILL_ALREADY_LOADED_PROMPT = """<SYSTEM_MESSAGE>
 SKILL LOAD REJECTED: '{skill_name}' — {reason}
@@ -537,22 +575,19 @@ The skill is already active in your context. Do NOT attempt to load it again.
 Continue with your current task using the already-loaded skill.
 </SYSTEM_MESSAGE>"""
 
-
 SKILL_NOT_LOADED_PROMPT = """<SYSTEM_MESSAGE>
 SKILL UNLOAD REJECTED: '{skill_name}' — {reason}
 The skill is not currently loaded. Do NOT attempt to unload it again.
 Continue with your current task.
 </SYSTEM_MESSAGE>"""
 
-
 SKILL_UNLOADED_WORK_PROMPT = (
-    "<SYSTEM_MESSAGE>\n"
-    "SKILL '{skill_name}' has been unloaded from your system context.\n"
-    "You now have its full instructions removed. Proceed with your task.\n\n"
-    + _WORK_CONTINUATION_BLOCK
-    + "</SYSTEM_MESSAGE>"
+        "<SYSTEM_MESSAGE>\n"
+        "SKILL '{skill_name}' has been unloaded from your system context.\n"
+        "You now have its full instructions removed. Proceed with your task.\n\n"
+        + _WORK_CONTINUATION_BLOCK
+        + "</SYSTEM_MESSAGE>"
 )
-
 
 SKILL_LOADED_CHAT_PROMPT = """<SYSTEM_MESSAGE>
 SKILL '{skill_name}' has been loaded into your system context.
@@ -560,12 +595,10 @@ You now have its full instructions available.
 You are in normal chat mode. Respond to the user naturally.
 </SYSTEM_MESSAGE>"""
 
-
 SKILL_UNLOADED_CHAT_PROMPT = """<SYSTEM_MESSAGE>
 SKILL '{skill_name}' has been unloaded from your system context.
 You are in normal chat mode. Respond to the user naturally.
 </SYSTEM_MESSAGE>"""
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Violation prompt — injected into conversation as a system message whenever

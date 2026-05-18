@@ -748,6 +748,38 @@ class ManageTasksWindow(BaseWindow):
         self._f_perm_exec_code  = QCheckBox("Allow Execute Code  (can run fire-and-forget Python)")
         self._f_perm_skill_mgmt = QCheckBox("Allow Skill Load / Unload  (can modify its own skill context)")
 
+        # ── Work iterations row (sits under the workmode checkbox) ────────────
+        _iter_row = QWidget()
+        _iter_row.setStyleSheet("background: transparent;")
+        _ir = QHBoxLayout(_iter_row)
+        _ir.setContentsMargins(22, 0, 0, 0)   # indent to align under checkbox text
+        _ir.setSpacing(8)
+        _iter_lbl = QLabel("Max iterations:")
+        _iter_lbl.setStyleSheet(f"color: {_MUTED}; font-size: 11px;")
+        _ir.addWidget(_iter_lbl)
+        self._f_max_iterations = QSpinBox()
+        self._f_max_iterations.setRange(1, 9999)
+        self._f_max_iterations.setValue(20)
+        self._f_max_iterations.setFixedWidth(72)
+        self._f_max_iterations.setStyleSheet(_INPUT)
+        _ir.addWidget(self._f_max_iterations)
+        self._f_unlimited_iterations = QCheckBox("Unlimited")
+        self._f_unlimited_iterations.setStyleSheet(_CHECK)
+        self._f_unlimited_iterations.setToolTip(
+            "Remove the iteration cap entirely.\n"
+            "⚠  Only enable this if your task instruction has a clear exit condition,\n"
+            "otherwise the ping loop may run indefinitely."
+        )
+        self._f_unlimited_iterations.toggled.connect(
+            lambda on: self._f_max_iterations.setDisabled(on)
+        )
+        _ir.addWidget(self._f_unlimited_iterations)
+        _ir.addStretch()
+        # disable the row when work mode is not allowed
+        self._f_perm_workmode.toggled.connect(_iter_row.setEnabled)
+        _iter_row.setEnabled(False)   # starts disabled until workmode is checked
+        # ─────────────────────────────────────────────────────────────────────
+
         self._f_perm_workmode.setToolTip(
             "Lets the agent use the work_environment tool to write and execute code\n"
             "in an isolated workspace and observe its full output.\n\n"
@@ -770,7 +802,8 @@ class ManageTasksWindow(BaseWindow):
             cb.setStyleSheet(_CHECK)
 
         fl.addWidget(_card(perm_lbl, perm_hint,
-                           self._f_perm_workmode, self._f_perm_exec_code, self._f_perm_skill_mgmt))
+                           self._f_perm_workmode, _iter_row,
+                           self._f_perm_exec_code, self._f_perm_skill_mgmt))
 
         # ══ CARD 5: Pre-loaded Skills ══════════════════════════════════════════
         skills_lbl = QLabel("PRE-LOADED SKILLS")
@@ -1115,6 +1148,9 @@ class ManageTasksWindow(BaseWindow):
         self._f_perm_workmode.setChecked(False)
         self._f_perm_exec_code.setChecked(False)
         self._f_perm_skill_mgmt.setChecked(False)
+        self._f_max_iterations.setValue(20)
+        self._f_max_iterations.setEnabled(True)
+        self._f_unlimited_iterations.setChecked(False)
         self._f_mode_startup.setChecked(True)
         self._f_specific_ping.setChecked(False)
         self._clear_ping_times_list()
@@ -1171,6 +1207,11 @@ class ManageTasksWindow(BaseWindow):
         self._f_perm_exec_code.setChecked(perms.get('allow_execute_code', False))
         self._f_perm_skill_mgmt.setChecked(perms.get('allow_skill_load_unload', False))
 
+        self._f_max_iterations.setValue(task.get('max_work_iterations', 20))
+        unlimited = task.get('unlimited_work_iterations', False)
+        self._f_unlimited_iterations.setChecked(unlimited)
+        self._f_max_iterations.setEnabled(not unlimited)
+
         self._populate_skill_checklist(task.get('loaded_skills', []))
         self._skill_checklist_panel.setVisible(False)
         self._update_skill_toggle_label()
@@ -1225,6 +1266,8 @@ class ManageTasksWindow(BaseWindow):
                 "allow_execute_code": self._f_perm_exec_code.isChecked(),
                 "allow_skill_load_unload": self._f_perm_skill_mgmt.isChecked(),
             },
+            "max_work_iterations": self._f_max_iterations.value(),
+            "unlimited_work_iterations": self._f_unlimited_iterations.isChecked(),
             "loaded_skills": self._get_checked_skills(),
             "limit_session_messages": {
                 "enabled": self._f_limit_enabled.isChecked(),

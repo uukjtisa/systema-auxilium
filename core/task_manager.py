@@ -108,6 +108,7 @@ class TaskAIEngine:
     def __init__(self, controller):
         self._controller = controller
         self._engine = None
+        self._pending_context_images = []  # image paths queued by agent, flushed each work step
         self._init_engine()
 
     def _init_engine(self):
@@ -126,6 +127,47 @@ class TaskAIEngine:
             self._engine.tool_manager._get_android_bridge = lambda: None
             self._engine.tool_manager.supervised_execution = False
             log.info("[TaskAIEngine._init_engine] ✓ Dedicated AIEngine instance created")
+            # ── Screen-capture tools for the task agent's Python namespace ────
+            _task_ai_ref = self
+
+            def _task_take_screenshot(save_path=None):
+                """Take a screenshot and queue it to be passed as an image to the
+                AI on the next work step via chat_image(). Returns the saved path."""
+                import os, time, tempfile
+                try:
+                    from PIL import ImageGrab
+                    if save_path is None:
+                        save_path = os.path.join(
+                            tempfile.gettempdir(), f"task_shot_{int(time.time())}.png"
+                        )
+                    ImageGrab.grab().save(save_path)
+                    _task_ai_ref._pending_context_images.append(save_path)
+                    return save_path
+                except Exception as _e1:
+                    try:
+                        import pyautogui
+                        if save_path is None:
+                            save_path = os.path.join(
+                                tempfile.gettempdir(), f"task_shot_{int(time.time())}.png"
+                            )
+                        pyautogui.screenshot(save_path)
+                        _task_ai_ref._pending_context_images.append(save_path)
+                        return save_path
+                    except Exception as _e2:
+                        return f"[take_screenshot ERROR] {_e2}"
+
+            def _attach_image_to_context(path):
+                """Queue an existing image file to be passed to chat_image() on the next work step."""
+                import os
+                if not os.path.isfile(path):
+                    return f"[attach_image_to_context] File not found: {path}"
+                _task_ai_ref._pending_context_images.append(path)
+                return f"[attach_image_to_context] Queued: {path}"
+
+            self._engine.tool_manager.tools['python'].namespace['take_screenshot'] = _task_take_screenshot
+            self._engine.tool_manager.tools['python'].namespace['attach_image_to_context'] = _attach_image_to_context
+            # ─────────────────────────────────────────────────────────────────
+
         except Exception as e:
             log.error(f"[TaskAIEngine._init_engine] ✗ {type(e).__name__}: {e}")
             self._engine = None
@@ -162,7 +204,7 @@ class TaskAIEngine:
             return None
         return self._engine.raw_call(system_prompt, history)
 
-    def run_full_ping(self, ping_content: str, history: list, task_system_prompt: str) -> tuple:
+    def run_full_ping(self, ping_content: str, history: list, task_system_prompt: str, max_iterations: int = 20) -> tuple:
         """
         Run a full ping using the same pipeline as the main session:
         generate_response + continue_work_mode loop.
@@ -202,12 +244,29 @@ class TaskAIEngine:
                 send_main_calls.append(send_msg)
 
         # Work mode continuation loop (mirrors controller.auto_continue_work_mode)
-        MAX_WORK_ITERATIONS = 20
         iteration = 0
-        while result.get('thinking') and iteration < MAX_WORK_ITERATIONS:
+        while result.get('thinking') and iteration < max_iterations:
             iteration += 1
             try:
-                result = self._engine.continue_work_mode()
+                if self._pending_context_images:
+                    # Agent queued images via take_screenshot() or attach_image_to_context().
+                    # Do this work step manually so we can pass them into chat_image().
+                    # _call_provider(images=...) → _http_custom_script → chat_image(sys, convo, images)
+                    import os as _os
+                    pending = list(self._pending_context_images)
+                    self._pending_context_images.clear()
+                    work_prompt = self._engine.tool_manager.get_work_mode_prompt()
+                    self._engine.conversation_history.append({'role': 'system', 'content': work_prompt})
+                    ai_text = self._engine._call_provider(images=pending)
+                    for _p in pending:
+                        try: _os.remove(_p)
+                        except Exception: pass
+                    if not ai_text:
+                        log.error("[TaskAIEngine.run_full_ping] No response during image work step")
+                        break
+                    result = self._engine._process_work_mode_response(ai_text)
+                else:
+                    result = self._engine.continue_work_mode()
             except Exception as e:
                 log.error(f"[TaskAIEngine.run_full_ping] continue_work_mode failed: {e}")
                 break
@@ -221,6 +280,14 @@ class TaskAIEngine:
             if result.get('exited_work_mode'):
                 log.info(f"[TaskAIEngine.run_full_ping] Work mode exited after {iteration} iteration(s)")
                 break
+
+        # Cleanup any leftover queued images that never got flushed (e.g. agent
+        # queued on the last step then exited before another iteration ran)
+        import os as _os
+        for _p in self._pending_context_images:
+            try: _os.remove(_p)
+            except Exception: pass
+        self._pending_context_images.clear()
 
         final_text = '\n'.join(r for r in all_responses if r)
         return final_text or None, send_main_calls, list(self._engine.conversation_history)
@@ -573,8 +640,10 @@ class TaskThread(threading.Thread):
                     f"</SYSTEM_AUTOMATED_TASK_PING>"
                 )
                 session['chat_history'].append({'role': 'system', 'content': ping_content})
+                _unlimited = task.get('unlimited_work_iterations', False)
+                _max_iter  = 999999 if _unlimited else task.get('max_work_iterations', 20)
                 response_text, send_main_calls, _ = self._ai.run_full_ping(
-                    ping_content, api_history, system_prompt
+                    ping_content, api_history, system_prompt, max_iterations=_max_iter
                 )
                 # Dispatch all messages — run_full_ping is fully done by this point
                 for msg in send_main_calls:
@@ -680,9 +749,13 @@ class TaskThread(threading.Thread):
                            f"</SYSTEM_AUTOMATED_TASK_PING>"
             session['chat_history'].append({'role': 'system', 'content': ping_content})
 
+            # ── Resolve configured iteration limit ────────────────────────────
+            _unlimited = task.get('unlimited_work_iterations', False)
+            _max_iter  = 999999 if _unlimited else task.get('max_work_iterations', 20)
+
             # ── Call AI with full tool support (work_environment, execute_code, etc.) ──
             response_text, send_main_calls, _ = self._ai.run_full_ping(
-                ping_content, api_history, system_prompt
+                ping_content, api_history, system_prompt, max_iterations=_max_iter
             )
 
             if response_text is None:

@@ -6916,10 +6916,9 @@ class ChatWindow(BaseWindow):
             is_admin = ctypes.windll.shell32.IsUserAnAdmin()
             if is_admin:
                 self.add_system_message(
-                    "⚠️ **Administrator Mode Enabled**\n\n"
-                    "This Agent is now running with elevated system privileges and can perform high-level system changes and tasks.\n\n"
-                    "Some Windows security features (UIPI) may restrict drag-and-drop behavior in some instances.\n"
-                    "If drag & drop does not work, please use the 📁 file browser button instead."
+                    "⚠️ **Administrator Privileges Granted**\n\n"
+                    "This Agent is now running with elevated system privileges and can perform high-level system "
+                    "changes and tasks."
                 )
         except:
             pass

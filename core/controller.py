@@ -7,7 +7,6 @@ UPDATED: work_environment and execute_code integration, voice mode, device manag
 
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer
 from core.ai_engine import AIEngine
-from core.puter_server import PuterServer
 from core.system_info import get_system_info, format_system_info_for_prompt
 from core.skill_manager import SkillManager
 from ui.floating_window import FloatingWindow
@@ -59,8 +58,7 @@ class AssistantController(QObject):
         log.debug(f"[AssistantController.__init__] Loading settings from '{self.settings_file}'")
         self.settings = self.load_settings()
         log.info(f"[AssistantController.__init__] Settings loaded | "
-                 f"provider='{self.settings.get('ai_provider')}' | "
-                 f"has_api_key={bool(self.settings.get('api_key'))}")
+                 f"provider='{self.settings.get('ai_provider')}' | ")
 
         # Detect system information
         self.log("Detecting system information...")
@@ -71,35 +69,6 @@ class AssistantController(QObject):
         log.info(f"[AssistantController.__init__] System info formatted | "
                  f"os='{system_info_dict['os']} {system_info_dict['os_release']}' | "
                  f"text_len={len(system_info_text)}")
-
-        # Puter server
-        _puter_port_file = _APP_ROOT / 'puter_port.txt'
-        log.debug("[AssistantController.__init__] Checking puter_port.txt...")
-        if not _puter_port_file.exists():
-            _puter_port_file.write_text(
-                '5555,8888,7777 #DO NOT DELETE THIS #ADD ANY PORT AS YOU WANT, IT WILL PRIORITIZE THE FIRST ON THE LEFT, SEPARATE WITH COMMAS. #ADD PORTS ON TOP ONLY. #CONTEXT IT IS BETTER IF THE PORT USED IS ONE THAT HAS BEEN USED BEFORE, SO IT WONT ASK FOR PUTER CONFIRMATION FOR THE FIRST MESSAGE.'
-                )
-            log.debug("[AssistantController.__init__] puter_port.txt created with defaults")
-
-        ports = self._parse_ports()
-        log.debug(f"[AssistantController.__init__] Parsed {len(ports)} port candidate(s): {ports}")
-
-        port = None
-        for p in ports:
-            if self._is_open_port(p):
-                if not p:
-                    continue
-                else:
-                    port = p
-                    break
-        if not port:
-            self.log("No available ports within puter_port.txt was available, resorting to random ports instead")
-            log.warning("[AssistantController.__init__] No configured port available — will use random port")
-
-        self.free_port = port if port else self.get_a_port()
-        log.info(f"[AssistantController.__init__] Selected port: {self.free_port}")
-        self.puter_server = PuterServer(port=self.free_port, log_callback=self.log)
-        log.debug("[AssistantController.__init__] PuterServer instance created")
 
         # Voice handler — import deferred so numpy/sounddevice/pygame don't
         # block the Qt app from starting while controller.py is being imported
@@ -134,9 +103,6 @@ class AssistantController(QObject):
         log.debug("[AssistantController.__init__] Creating AIEngine...")
         self.ai = AIEngine(
             log_callback=self.log,
-            api_key=self.settings.get('api_key', ''),
-            gemini_api_key=self.settings.get('gemini_api_key', ''),
-            puter_server=self.puter_server,
             system_info=system_info_text,
             voice_mode=False,  # Start with voice off
             elevenlabs_enabled=self.settings.get('elevenlabs_enabled', False),
@@ -154,37 +120,90 @@ class AssistantController(QObject):
         # so the AI can do: controller.current_session_id, controller.settings, etc.
         self.ai.tool_manager.tools['python'].namespace['controller'] = self
 
+        # ── Agent Image Attach Hijacker ───────────────────────────────────────
+        # Exposes attach_image() and take_screenshot() into the Python interpreter
+        # namespace so the AI can call them from code execution on any thread.
+        # Uses bridge_attach_image_signal to safely hop to the main Qt thread.
+
+        def _agent_attach_image(path_or_paths):
+            """Attach image(s) to the chat input as pinned context images.
+            Can be called from any thread (uses Qt signal for thread safety).
+
+            Usage inside code execution:
+                attach_image(r"C:\\path\\to\\image.png")
+                attach_image([r"C:\\img1.png", r"C:\\img2.png"])
+            """
+            if isinstance(path_or_paths, str):
+                paths = [path_or_paths]
+            else:
+                paths = list(path_or_paths)
+            self.bridge_attach_image_signal.emit(paths)
+            return f"[attach_image] Queued {len(paths)} image(s) for attachment."
+
+        def _agent_take_screenshot(save_path=None, attach=True):
+            """Take a screenshot of the current screen.
+            Saves to a temp file and optionally attaches it to the chat.
+
+            Args:
+                save_path: optional path to save screenshot (default: auto temp file)
+                attach: if True, automatically pins the screenshot to the chat
+
+            Returns:
+                str: path to the saved screenshot file
+
+            Usage inside code execution:
+                path = take_screenshot()              # auto-attach
+                path = take_screenshot(attach=False)  # just get the path
+                path = take_screenshot(r"C:\\my_shot.png")
+            """
+            import time, os, tempfile
+            try:
+                from PIL import ImageGrab
+                if save_path is None:
+                    ts = int(time.time())
+                    save_path = os.path.join(
+                        tempfile.gettempdir(), f"agent_screenshot_{ts}.png"
+                    )
+                img = ImageGrab.grab()
+                img.save(save_path)
+                if attach:
+                    _agent_attach_image(save_path)
+                return save_path
+            except ImportError:
+                # Fallback: use pyautogui if Pillow/ImageGrab unavailable
+                try:
+                    import pyautogui, os, time, tempfile
+                    if save_path is None:
+                        ts = int(time.time())
+                        save_path = os.path.join(
+                            tempfile.gettempdir(), f"agent_screenshot_{ts}.png"
+                        )
+                    pyautogui.screenshot(save_path)
+                    if attach:
+                        _agent_attach_image(save_path)
+                    return save_path
+                except Exception as e2:
+                    return f"[take_screenshot] ERROR: {e2}"
+            except Exception as e:
+                return f"[take_screenshot] ERROR: {e}"
+
+        self.ai.tool_manager.tools['python'].namespace['attach_image'] = _agent_attach_image
+        self.ai.tool_manager.tools['python'].namespace['take_screenshot'] = _agent_take_screenshot
+        # ─────────────────────────────────────────────────────────────────────
+
         # Apply settings
         log.debug("[AssistantController.__init__] Applying AI provider settings...")
-        self.ai.set_provider(self.settings.get('ai_provider', 'anthropic'))
+        self.ai.set_provider(self.settings.get('ai_provider', 'manual'))
         self.ai.set_tool_execution_lockout(self.settings.get('tool_execution_lockout', False))
         self.ai.set_system_prompt_hijack(
             self.settings.get('system_prompt_hijacked', False),
             self.settings.get('custom_system_prompt', '')
         )
-        self.ai.set_anthropic_model(self.settings.get('anthropic_model', 'claude-sonnet-4-5-20250929'))
-        self.ai.set_anthropic_temperature(self.settings.get('anthropic_temperature', 1.0))
-        self.ai.set_anthropic_max_tokens(self.settings.get('anthropic_max_tokens', 8192))
-        self.ai.set_anthropic_auto_tokens(self.settings.get('anthropic_auto_tokens', True))
-        self.ai.set_puter_model(self.settings.get('puter_model', 'gpt-4o-mini'))
-        self.ai.set_gemini_model(self.settings.get('gemini_model', 'gemini-2.5-flash'))
-        self.ai.set_gemini_temperature(self.settings.get('gemini_temperature', 1.0))
-        self.ai.set_gemini_max_tokens(self.settings.get('gemini_max_tokens', 8192))
-        self.ai.set_gemini_auto_tokens(self.settings.get('gemini_auto_tokens', True))
-        self.ai.set_gemini_top_p(self.settings.get('gemini_top_p', None))
-        self.ai.set_gemini_top_k(self.settings.get('gemini_top_k', None))
+
         self.ai.set_tts_provider(self.settings.get('tts_provider', 'edge-tts'))
-        self.ai.set_puter_tts_model(self.settings.get('puter_tts_model', 'tts-1'))
-        self.ai.set_puter_tts_voice(self.settings.get('puter_tts_voice'))
-        self.ai.set_puter_timeout(self.settings.get('puter_timeout', 30))
         self.ai.set_custom_script_path(self.settings.get('custom_script_path', ''))
         self._update_system_prompt()
         log.debug("[AssistantController.__init__] All AI settings applied")
-
-        # Auto-start Puter if selected
-        if self.settings.get('ai_provider') == 'puter':
-            log.info("[AssistantController.__init__] ai_provider='puter' — auto-starting Puter server")
-            self.start_puter_server()
 
         # Initialize UI
         log.debug("[AssistantController.__init__] Creating FloatingWindow UI...")
@@ -213,6 +232,7 @@ class AssistantController(QObject):
         self.bridge_detach_image_signal.connect(self._handle_bridge_detach_image)
         self.task_message_signal.connect(self._handle_task_message)
         self.ai.manual_response_fn = self._request_manual_response
+        self.manual_response_signal.connect(self._show_manual_response_window)
         log.debug("[AssistantController.__init__] manual_response_signal connected")
 
         # SESSION MANAGEMENT - Initialize session manager
@@ -231,7 +251,6 @@ class AssistantController(QObject):
         QTimer.singleShot(300, self._deferred_bg_init)
         self.log("System AI Assistant initialized", "SUCCESS")
         log.info(f"[AssistantController.__init__] ✓ AssistantController ready | "
-                 f"provider='{self.ai.ai_provider}' | port={self.free_port} | "
                  f"session='{self.current_session_id}' ──")
 
     # ── EXTRA INIT METHODS (Separated to load the UI faster) ───────────────────────────────────────────────────
@@ -285,93 +304,6 @@ class AssistantController(QObject):
         """
         return getattr(getattr(self, 'ui', None), 'chat_window', None) or None
 
-    def _parse_ports(self):
-        """
-        Parse port numbers from puter_port.txt file
-        """
-        filepath = _APP_ROOT / 'puter_port.txt'
-        ports = []
-        log.debug(f"[AssistantController._parse_ports] Reading port config from '{filepath}'")
-
-        try:
-            with open(filepath, 'r') as f:
-                f.seek(0)
-                for line in f:
-                    line = line.split('#')[0].strip()
-                    if not line:
-                        continue
-
-                    port_strings = line.split(',')
-                    for port_str in port_strings:
-                        port_str = port_str.strip()
-                        if port_str:
-                            try:
-                                port = int(port_str)
-                                ports.append(port)
-                            except ValueError:
-                                log.warning(f"[AssistantController._parse_ports] Skipping invalid "
-                                            f"port value: '{port_str}'")
-                                print(f"Warning: Skipping invalid port '{port_str}'")
-                                continue
-
-        except FileNotFoundError:
-            log.warning(f"[AssistantController._parse_ports] File not found: '{filepath}'")
-            print(f"Warning: {filepath} not found, returning empty list")
-            return []
-        except Exception as e:
-            log.error(f"[AssistantController._parse_ports] Error parsing ports: {type(e).__name__}: {e}")
-            print(f"Error parsing ports: {e}")
-            return []
-
-        self.log(f"CHECKING PORTS:  {ports}")
-        log.info(f"[AssistantController._parse_ports] Parsed {len(ports)} port(s): {ports}")
-        return ports
-
-    def _is_open_port(self, port):
-        log.debug(f"[AssistantController._is_open_port] Testing port {port}...")
-        # Check if port is actually available (not bound AND not in zombie state)
-        test = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        test.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
-        try:
-            # Try to bind - this checks if something is actively using the port
-            test.bind(("127.0.0.1", port))
-            test.close()
-
-            # Double check - try to connect to see if something is actually listening
-            test2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            test2.settimeout(0.1)
-            result = test2.connect_ex(("127.0.0.1", port))
-            test2.close()
-
-            if result == 0:
-                log.warning(f"[AssistantController._is_open_port] Port {port} — something is listening, NOT free")
-                self.log(f"-----Port {port} is not available-----", "WARNING")
-                return False
-            log.debug(f"[AssistantController._is_open_port] Port {port} — confirmed free")
-            self.log(f"-----Port {port} is available and will now be used-----", "SUCCESS")
-            return True
-
-        except OSError:
-            log.warning(f"[AssistantController._is_open_port] Port {port} — bind failed (in use)")
-            self.log(f"-----Port {port} is not available-----", "WARNING")
-            return False
-        finally:
-            try:
-                test.close()
-            except:
-                pass
-
-    def get_a_port(self):
-        log.debug("[AssistantController.get_a_port] Searching for a random free port...")
-        while True:
-            port = random.randint(1000, 9999)
-            if self._is_open_port(port):
-                log.info(f"[AssistantController.get_a_port] Found free random port: {port}")
-                return port
-            else:
-                continue
-
     def log(self, message, level="INFO"):
         """Emit message to UI log panel."""
         self.log_signal.emit(message, level)
@@ -398,38 +330,18 @@ class AssistantController(QObject):
 
         # FIRST-TIME LAUNCH DEFAULTS
         log.info("[AssistantController.load_settings] No settings file found — using first-time defaults")
-        default_provider = 'anthropic'
         default_tts = 'edge-tts'
 
         return {
-            'api_key': '',
-            'gemini_api_key': '',
-            'ai_provider': default_provider,
-            'anthropic_model': 'claude-sonnet-4-5-20250929',
-            'anthropic_temperature': 1.0,
-            'anthropic_max_tokens': 8192,
-            'anthropic_auto_tokens': True,
-            'puter_model': 'gpt-4o-mini',
-            'gemini_model': 'gemini-2.5-flash',
-            'gemini_temperature': 1.0,
-            'gemini_max_tokens': 8192,
-            'gemini_auto_tokens': True,
-            'gemini_top_p': None,
-            'gemini_top_k': None,
+            'ai_provider': None,
             'voice_input_device': None,
             'voice_output_device': None,
             'voice_tts_provider': default_tts,
             'voice_tts_voice': 'en-US-GuyNeural',
-            'tts_provider': default_tts,  # pyttsx3 if LLaMA, else edge-tts
-            'puter_tts_model': 'tts-1',
-            'puter_tts_voice': None,
-            'puter_email': '',
-            'puter_password': '',
-            'puter_timeout': 30,  # Default timeout in seconds for Puter.js server
+            'tts_provider': default_tts,
+            'tts_script_path': '',
             'voice_vad_aggressiveness': 3,
             'voice_interrupt_mode': 'manual',
-            'elevenlabs_enabled': False,
-            'elevenlabs_voice_id': '',
             'user_name': 'USER',
             'custom_instructions': '',
             'vad_webrtc_enabled': True,
@@ -510,22 +422,13 @@ class AssistantController(QObject):
                         output_name = dev['name']
                         break
 
-            if self.settings.get('tts_provider') == 'puter':
-                log.debug("[AssistantController.enable_voice_mode] TTS provider is 'puter' — configuring Puter TTS")
-                self.voice_handler.set_puter_server(self.puter_server)
-                self.voice_handler.set_tts_provider('puter')
-                self.voice_handler.set_puter_tts_settings(
-                    self.settings.get('puter_tts_model', 'tts-1'),
-                    self.settings.get('puter_tts_voice')
-                )
-
-                # Set ElevenLabs settings if enabled
-                elevenlabs_enabled = self.get_elevenlabs_enabled()
-                if elevenlabs_enabled:
-                    voice_id = self.get_elevenlabs_voice_id()
-                    self.voice_handler.set_elevenlabs_settings(True, voice_id)
-                    log.debug(f"[AssistantController.enable_voice_mode] ElevenLabs configured | "
-                              f"has_voice_id={bool(voice_id)}")
+            # Apply TTS provider settings
+            tts_provider = self.settings.get('tts_provider', 'edge-tts')
+            self.voice_handler.set_tts_provider(tts_provider)
+            if tts_provider == 'custom_script':
+                tts_script = self.settings.get('tts_script_path', '')
+                self.voice_handler.set_tts_script_path(tts_script)
+                log.debug(f"[AssistantController.enable_voice_mode] Custom TTS script: '{tts_script}'")
 
             # Set up playback callback with null check
             if self._chat:
@@ -541,8 +444,7 @@ class AssistantController(QObject):
                 self.voice_mode_active = True
 
                 # Update AI engine with voice settings
-                elevenlabs = self.get_elevenlabs_enabled()
-                self.ai.update_voice_settings(True, elevenlabs)
+                self.ai.update_voice_settings(True)
 
                 message = (
                     f"**Input Device:** {input_name}\n"
@@ -605,6 +507,7 @@ class AssistantController(QObject):
         if ab and ab.isVisible():
             ab.dismiss_manual_response()
         return result
+
     def _show_manual_response_window(self, context, work_mode, work_output):
         """Slot — always runs on the main thread.  Creates and shows the popup."""
         from ui.manual_response_window import ManualResponseWindow
@@ -820,38 +723,6 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         self.save_settings()
         self.log(f"Voice interrupt mode set to {mode}", "SUCCESS")
 
-    def get_elevenlabs_enabled(self):
-        """Get ElevenLabs enabled state"""
-        return self.settings.get('elevenlabs_enabled', False)
-
-    def set_elevenlabs_enabled(self, enabled):
-        """Set ElevenLabs enabled state"""
-        log.info(f"[AssistantController.set_elevenlabs_enabled] enabled={enabled}")
-        self.settings['elevenlabs_enabled'] = enabled
-        self.save_settings()
-
-        # CRITICAL: Update voice handler immediately
-        voice_id = self.get_elevenlabs_voice_id()
-        self.voice_handler.set_elevenlabs_settings(enabled, voice_id)
-
-        self.log(f"ElevenLabs {'enabled' if enabled else 'disabled'}", "SUCCESS")
-
-    def get_elevenlabs_voice_id(self):
-        """Get ElevenLabs voice ID"""
-        return self.settings.get('elevenlabs_voice_id', '')
-
-    def set_elevenlabs_voice_id(self, voice_id):
-        """Set ElevenLabs voice ID"""
-        log.info(f"[AssistantController.set_elevenlabs_voice_id] has_voice_id={bool(voice_id)}")
-        self.settings['elevenlabs_voice_id'] = voice_id
-        self.save_settings()
-
-        # CRITICAL: Update voice handler immediately
-        enabled = self.get_elevenlabs_enabled()
-        self.voice_handler.set_elevenlabs_settings(enabled, voice_id)
-
-        self.log(f"ElevenLabs voice ID set", "SUCCESS")
-
     def get_tts_provider(self):
         return self.settings.get('tts_provider', 'edge-tts')
 
@@ -862,91 +733,40 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         self.save_settings()
         self.log(f"TTS provider set to {provider}", "SUCCESS")
 
-    def get_puter_tts_model(self):
-        return self.settings.get('puter_tts_model', 'tts-1')
+    def get_llm_providers_folder(self):
+        """Return absolute path to LLM providers folder, creating it if needed."""
+        folder = _APP_ROOT / 'providers' / 'large-language-models'
+        folder.mkdir(parents=True, exist_ok=True)
+        return str(folder)
 
-    def set_puter_tts_model(self, model):
-        log.info(f"[AssistantController.set_puter_tts_model] model='{model}'")
-        self.settings['puter_tts_model'] = model
-        self.ai.set_puter_tts_model(model)
+    def get_tts_providers_folder(self):
+        """Return absolute path to TTS providers folder, creating it if needed."""
+        folder = _APP_ROOT / 'providers' / 'text-to-speech'
+        folder.mkdir(parents=True, exist_ok=True)
+        return str(folder)
+
+    def get_llm_provider_scripts(self):
+        """Return list of dicts {name, path} for .py scripts in LLM providers folder."""
+        import glob
+        folder = self.get_llm_providers_folder()
+        paths = sorted(glob.glob(os.path.join(folder, '*.py')))
+        return [{'name': os.path.splitext(os.path.basename(p))[0], 'path': p} for p in paths]
+
+    def get_tts_provider_scripts(self):
+        """Return list of dicts {name, path} for .py scripts in TTS providers folder."""
+        import glob
+        folder = self.get_tts_providers_folder()
+        paths = sorted(glob.glob(os.path.join(folder, '*.py')))
+        return [{'name': os.path.splitext(os.path.basename(p))[0], 'path': p} for p in paths]
+
+    def set_tts_script_path(self, path):
+        """Persist and apply a custom TTS provider script path."""
+        log.info(f"[AssistantController.set_tts_script_path] path='{path}'")
+        self.settings['tts_script_path'] = path
+        if hasattr(self, 'voice_handler') and self.voice_handler:
+            self.voice_handler.set_tts_script_path(path)
         self.save_settings()
-        self.log(f"Puter TTS model set to {model}", "SUCCESS")
-
-    def get_puter_tts_voice(self):
-        return self.settings.get('puter_tts_voice')
-
-    def set_puter_tts_voice(self, voice):
-        log.info(f"[AssistantController.set_puter_tts_voice] voice='{voice}'")
-        self.settings['puter_tts_voice'] = voice
-        self.ai.set_puter_tts_voice(voice)
-        self.save_settings()
-        self.log(f"Puter TTS voice set to {voice}", "SUCCESS")
-
-    def get_puter_credentials(self):
-        return {
-            'email': self.settings.get('puter_email', ''),
-            'password': self.settings.get('puter_password', '')
-        }
-
-    def set_puter_credentials(self, email, password):
-        log.info(f"[AssistantController.set_puter_credentials] email='{email}' | has_password={bool(password)}")
-        self.settings['puter_email'] = email
-        self.settings['puter_password'] = password
-        self.save_settings()
-        self.log("Puter credentials saved", "SUCCESS")
-
-    def set_puter_timeout(self, timeout):
-        """Set Puter.js server timeout in seconds"""
-        log.info(f"[AssistantController.set_puter_timeout] timeout={timeout}s")
-        self.settings['puter_timeout'] = timeout
-        self.ai.set_puter_timeout(timeout)
-        self.save_settings()
-        self.log(f"Puter timeout set to {timeout} seconds", "SUCCESS")
-
-    def reset_puter_quota(self):
-        """Reset Puter quota using saved credentials"""
-        log.info("[AssistantController.reset_puter_quota] Attempting quota reset...")
-        creds = self.get_puter_credentials()
-        if not creds['email'] or not creds['password']:
-            log.warning("[AssistantController.reset_puter_quota] No credentials set — aborting")
-            self.log("Puter credentials not set", "ERROR")
-            return False
-
-        if not self.puter_server or not self.puter_server.is_running:
-            log.warning("[AssistantController.reset_puter_quota] Puter server not running — aborting")
-            self.log("Puter server not running", "ERROR")
-            return False
-
-        self.log("Resetting Puter quota...", "INFO")
-        success = self.puter_server.reset_quota(creds['email'], creds['password'])
-        if success:
-            log.info("[AssistantController.reset_puter_quota] ✓ Quota reset successful")
-            self.log("✓ Quota reset successful!", "SUCCESS")
-        else:
-            log.error("[AssistantController.reset_puter_quota] ✗ Quota reset failed")
-            self.log("✗ Quota reset failed", "ERROR")
-        return success
-
-    def setup_puter_account(self):
-        """Open Puter for account setup"""
-        log.info("[AssistantController.setup_puter_account] Starting Puter account setup...")
-        if not self.puter_server or not self.puter_server.is_running:
-            log.info("[AssistantController.setup_puter_account] Puter server not running — starting it first")
-            self.log("Starting Puter server for account setup...", "INFO")
-            if not self.start_puter_server():
-                log.error("[AssistantController.setup_puter_account] ✗ Failed to start Puter server")
-                return False
-
-        log.debug("[AssistantController.setup_puter_account] → puter_server.setup_account()")
-        return self.puter_server.setup_account()
-
-    def get_puter_tts_models(self):
-        """Get available Puter TTS models"""
-        return [
-            {'id': 'tts-1', 'name': 'TTS-1 (Standard)', 'description': 'Standard quality, fast'},
-            {'id': 'tts-1-hd', 'name': 'TTS-1-HD (High Quality)', 'description': 'Higher quality, slower'},
-            {'id': 'gpt-4o-mini-tts', 'name': 'GPT-4o Mini TTS', 'description': 'Advanced neural TTS'}
-        ]
+        self.log(f"TTS script path set to: {path}", "SUCCESS")
 
     def get_voice_devices(self):
         """Get available audio devices"""
@@ -965,29 +785,13 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         self.save_settings()
         self.log(f"Voice output device SAVED", "SUCCESS")
 
-    def get_api_key(self):
-        """Get current API key"""
-        return self.settings.get('api_key', '')
-
-    def set_api_key(self, api_key):
-        """Set new API key"""
-        log.info(f"[AssistantController.set_api_key] has_key={bool(api_key)}")
-        self.settings['api_key'] = api_key
-        self.ai.set_api_key(api_key)
+    def set_ai_provider(self, provider):
+        """Set AI provider"""
+        log.info(f"[AssistantController.set_ai_provider] provider='{provider}'")
+        self.settings['ai_provider'] = provider
+        self.ai.set_provider(provider)
         self.save_settings()
-        self.log("API key updated", "SUCCESS")
-
-    def get_gemini_api_key(self):
-        """Get current Gemini API key"""
-        return self.settings.get('gemini_api_key', '')
-
-    def set_gemini_api_key(self, api_key):
-        """Set new Gemini API key"""
-        log.info(f"[AssistantController.set_gemini_api_key] has_key={bool(api_key)}")
-        self.settings['gemini_api_key'] = api_key
-        self.ai.set_gemini_api_key(api_key)
-        self.save_settings()
-        self.log("Gemini API key updated", "SUCCESS")
+        self.log(f"AI provider set to: {provider}", "SUCCESS")
 
     def get_custom_script_path(self):
         """Get custom script provider path"""
@@ -1001,10 +805,6 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         self.save_settings()
         self.log(f"Custom script path set to: {path}", "SUCCESS")
 
-    def get_ai_provider(self):
-        """Get current AI provider"""
-        return self.settings.get('ai_provider', 'anthropic')
-
     def set_tool_execution_lockout(self, value: bool):
         self.settings['tool_execution_lockout'] = value
         self.ai.set_tool_execution_lockout(value)
@@ -1015,38 +815,6 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         self.settings['custom_system_prompt'] = custom_prompt
         self.ai.set_system_prompt_hijack(enabled, custom_prompt)
         self.save_settings()
-
-    def set_ai_provider(self, provider):
-        """Set AI provider"""
-        log.info(f"[AssistantController.set_ai_provider] provider='{provider}'")
-        # Check if we're switching AWAY from Puter
-        current_provider = self.settings.get('ai_provider', 'anthropic')
-        if current_provider == 'puter' and provider != 'puter':
-            log.info(f"[AssistantController.set_ai_provider] Switching away from Puter — stopping server")
-            # Switching away from Puter - close the browser
-            self.log("Switching away from Puter - closing browser window...", "INFO")
-            self.stop_puter_server()
-
-        self.settings['ai_provider'] = provider
-        self.ai.set_provider(provider)
-        self.save_settings()
-        self.log(f"AI provider set to: {provider}", "SUCCESS")
-
-        # Auto-start Puter if selected
-        if provider == 'puter' and not self.puter_server.is_running:
-            self.start_puter_server()
-
-    def get_puter_model(self):
-        """Get current Puter model"""
-        return self.settings.get('puter_model', 'gpt-4o-mini')
-
-    def set_puter_model(self, model):
-        """Set Puter model"""
-        log.info(f"[AssistantController.set_puter_model] model='{model}'")
-        self.settings['puter_model'] = model
-        self.ai.set_puter_model(model)
-        self.save_settings()
-        self.log(f"Puter model set to: {model}", "SUCCESS")
 
     def get_debug_mode(self):
         """Get debug mode setting"""
@@ -1076,55 +844,6 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         self.voice_handler.set_vad_aggressiveness(level)
         self.save_settings()
         self.log(f"VAD aggressiveness set to {level}", "SUCCESS")
-
-    def start_puter_server(self):
-        """Start Puter.js server"""
-        log.info("[AssistantController.start_puter_server] ── Starting Puter.js server ──────────────")
-        try:
-            self.log("Starting Puter.js server...")
-
-            if self.puter_server.is_running:
-                log.debug("[AssistantController.start_puter_server] Server already running — checking health")
-                self.log("Puter server already running")
-                if self.puter_server.check_health():
-                    log.info("[AssistantController.start_puter_server] ✓ Already healthy — skipping start")
-                    return True
-                else:
-                    log.warning("[AssistantController.start_puter_server] Not responding — restarting...")
-                    self.log("Server not responding, restarting...")
-                    self.puter_server.stop()
-                    import time
-                    time.sleep(1)
-
-            if self.puter_server.start():
-                log.info(f"[AssistantController.start_puter_server] ✓ Started at http://127.0.0.1:{self.free_port}")
-                self.log(f"✓ Puter.js server started at http://127.0.0.1:{self.free_port}", "SUCCESS")
-
-                # Wait a moment
-                import time
-                time.sleep(2)
-
-                return True
-            else:
-                log.error("[AssistantController.start_puter_server] ✗ puter_server.start() returned False")
-                self.log("✗ Failed to start Puter server", "ERROR")
-                return False
-
-        except Exception as e:
-            log.error(f"[AssistantController.start_puter_server] ✗ Exception: {type(e).__name__}: {e}")
-            self.log(f"Error starting Puter server: {e}", "ERROR")
-            return False
-
-    def stop_puter_server(self):
-        """Stop Puter.js server"""
-        log.info("[AssistantController.stop_puter_server] Stopping Puter.js server...")
-        try:
-            self.puter_server.stop()
-            log.info("[AssistantController.stop_puter_server] ✓ Server stopped")
-            self.log("Puter.js server stopped", "SUCCESS")
-        except Exception as e:
-            log.error(f"[AssistantController.stop_puter_server] ✗ Exception: {type(e).__name__}: {e}")
-            self.log(f"Error stopping Puter server: {e}", "ERROR")
 
     def send_message(self, user_message):
         """Send user message to AI (non-blocking)"""
@@ -1168,7 +887,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
 
         # Collect pinned images so Android-sent messages also reach the AI with images
         image_paths = []
-        if self.get_ai_provider() in ('puter', 'custom_script') and self._chat:
+        if self.get_ai_provider() == 'custom_script' and self._chat:
             image_paths = [pi['path'] for pi in getattr(self._chat, 'pinned_images', [])]
             if image_paths:
                 log.debug(f"[AssistantController.send_message] Found {len(image_paths)} pinned image(s) — "
@@ -1187,7 +906,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         log.debug("[AssistantController.send_message] AIWorker started")
 
     def send_message_with_image(self, user_message, image_paths):
-        """Send user message with one or more image attachments (Puter / custom_script)."""
+        """Send user message with one or more image attachments."""
         # Normalize: accept a single path string or a list
         if isinstance(image_paths, str):
             image_paths = [image_paths]
@@ -1198,12 +917,6 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
 
         if not user_message.strip():
             log.debug("[AssistantController.send_message_with_image] Empty message — ignoring")
-            return
-
-        if self.get_ai_provider() not in ('puter', 'custom_script'):
-            log.warning(
-                "[AssistantController.send_message_with_image] Non-Puter/custom-script provider — image not supported")
-            self.log("Image attachment only supported with Puter or Custom Script provider", "ERROR")
             return
 
             # Prevent overlapping requests
@@ -1348,7 +1061,6 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
                     pass
             # Start tool mode timer
             self.work_mode_timer.start()
-
 
     def handle_work_mode_response(self, result):
         """Handle tool mode response from worker thread"""
@@ -1773,126 +1485,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         else:
             log.warning(f"[AssistantController.detach_memory_context] Entry id='{context_id}' not found in history — session saved anyway")
 
-    # ═══════════════════════════════════════════════════════════════════════════
-    # UNIFIED MODEL MANAGEMENT  (all providers read from core/models.json)
-    # ═══════════════════════════════════════════════════════════════════════════
+    def get_ai_provider(self):
+        """Get current AI provider"""
+        return self.settings.get('ai_provider', 'custom_script')
 
-    def _load_all_models(self):
-        """Load and cache all models from core/models.json once."""
-        if not hasattr(self, '_all_models_cache'):
-            import json
-            models_path = _APP_ROOT / 'core' / 'models.json'
-            try:
-                with open(models_path, encoding='utf-8') as f:
-                    self._all_models_cache = json.load(f)
-                log.debug(f"[AssistantController._load_all_models] Loaded "
-                          f"{len(self._all_models_cache)} models from {models_path}")
-            except Exception as exc:
-                log.error(f"[AssistantController._load_all_models] Failed: {exc}")
-                self._all_models_cache = []
-        return self._all_models_cache
-
-    def get_all_models(self):
-        """Return all models (all providers)."""
-        return self._load_all_models()
-
-    def get_puter_models(self):
-        """Get Puter.js models (provider == 'puter') from core/models.json."""
-        return [m for m in self._load_all_models() if m.get('provider') == 'puter']
-
-    def get_gemini_models(self):
-        """Get Gemini models (provider == 'gemini') from core/models.json."""
-        return [m for m in self._load_all_models() if m.get('provider') == 'gemini']
-
-    def get_anthropic_models(self):
-        """Get Anthropic/Claude models (provider == 'anthropic') from core/models.json."""
-        return [m for m in self._load_all_models() if m.get('provider') == 'anthropic']
-
-    def get_anthropic_model(self):
-        return self.settings.get('anthropic_model', 'claude-sonnet-4-5-20250929')
-
-    def set_anthropic_model(self, model):
-        log.info(f"[AssistantController.set_anthropic_model] model='{model}'")
-        self.settings['anthropic_model'] = model
-        self.ai.set_anthropic_model(model)
-        self.save_settings()
-
-    def get_gemini_model(self):
-        return self.settings.get('gemini_model', 'gemini-2.5-flash')
-
-    def set_gemini_model(self, model):
-        log.info(f"[AssistantController.set_gemini_model] model='{model}'")
-        self.settings['gemini_model'] = model
-        self.ai.set_gemini_model(model)
-        self.save_settings()
-    # ── Anthropic generation-param getters/setters ────────────────────────────
-
-    def get_anthropic_temperature(self):
-        return float(self.settings.get('anthropic_temperature', 1.0))
-
-    def set_anthropic_temperature(self, value):
-        self.settings['anthropic_temperature'] = float(value)
-        self.ai.set_anthropic_temperature(value)
-        self.save_settings()
-
-    def get_anthropic_max_tokens(self):
-        return int(self.settings.get('anthropic_max_tokens', 8192))
-
-    def set_anthropic_max_tokens(self, value):
-        self.settings['anthropic_max_tokens'] = int(value)
-        self.ai.set_anthropic_max_tokens(value)
-        self.save_settings()
-
-    def get_anthropic_auto_tokens(self):
-        return bool(self.settings.get('anthropic_auto_tokens', True))
-
-    def set_anthropic_auto_tokens(self, enabled):
-        self.settings['anthropic_auto_tokens'] = bool(enabled)
-        self.ai.set_anthropic_auto_tokens(enabled)
-        self.save_settings()
-
-    # ── Gemini generation-param getters/setters ───────────────────────────────
-
-    def get_gemini_temperature(self):
-        return float(self.settings.get('gemini_temperature', 1.0))
-
-    def set_gemini_temperature(self, value):
-        self.settings['gemini_temperature'] = float(value)
-        self.ai.set_gemini_temperature(value)
-        self.save_settings()
-
-    def get_gemini_max_tokens(self):
-        return int(self.settings.get('gemini_max_tokens', 8192))
-
-    def set_gemini_max_tokens(self, value):
-        self.settings['gemini_max_tokens'] = int(value)
-        self.ai.set_gemini_max_tokens(value)
-        self.save_settings()
-
-    def get_gemini_auto_tokens(self):
-        return bool(self.settings.get('gemini_auto_tokens', True))
-
-    def set_gemini_auto_tokens(self, enabled):
-        self.settings['gemini_auto_tokens'] = bool(enabled)
-        self.ai.set_gemini_auto_tokens(enabled)
-        self.save_settings()
-
-    def get_gemini_top_p(self):
-        v = self.settings.get('gemini_top_p', None)
-        return float(v) if v is not None else None
-
-    def set_gemini_top_p(self, value):
-        v = float(value) if value is not None else None
-        self.settings['gemini_top_p'] = v
-        self.ai.set_gemini_top_p(v)
-        self.save_settings()
-
-    def get_gemini_top_k(self):
-        v = self.settings.get('gemini_top_k', None)
-        return int(v) if v is not None else None
-
-    def set_gemini_top_k(self, value):
-        v = int(value) if value is not None else None
-        self.settings['gemini_top_k'] = v
-        self.ai.set_gemini_top_k(v)
-        self.save_settings()
