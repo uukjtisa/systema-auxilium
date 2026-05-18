@@ -31,14 +31,12 @@ _ASSISTANT_PRIMING = (
 class AIEngine:
     """AI conversation engine"""
 
-    def __init__(self, log_callback=None, api_key='', puter_server=None, gemini_api_key='', system_info='',
+    def __init__(self, log_callback=None, system_info='',
                  voice_mode=False, elevenlabs_enabled=False, settings_callback=None, skill_manager=None,
                  controller=None):
         log.info("[AIEngine.__init__] ── Initializing AI Engine ──────────────────────────────")
         log.debug(f"[AIEngine.__init__] Parameters: voice_mode={voice_mode} | "
                   f"elevenlabs_enabled={elevenlabs_enabled} | "
-                  f"has_api_key={bool(api_key)} | has_gemini_key={bool(gemini_api_key)} | "
-                  f"has_puter_server={puter_server is not None} | "
                   f"has_settings_callback={settings_callback is not None}")
 
         self.log_callback = log_callback
@@ -49,10 +47,6 @@ class AIEngine:
         self.conversation_history = []
         log.debug("[AIEngine.__init__] conversation_history initialized (empty)")
 
-        self.api_key = api_key
-        self.gemini_api_key = gemini_api_key
-        self.puter_server = puter_server
-        log.debug("[AIEngine.__init__] API keys and puter_server reference stored")
 
         log.debug("[AIEngine.__init__] Creating ToolManager instance")
         self.tool_manager = ToolManager(
@@ -87,28 +81,10 @@ class AIEngine:
 
         self.last_raw_response = None
 
-        # Provider settings
-        self.ai_provider = 'anthropic'
-        self.anthropic_model = 'claude-sonnet-4-5-20250929'
-        self.puter_model = 'gpt-4o-mini'
-        self.gemini_model = 'gemini-2.5-flash'
-
-        # Anthropic generation params
-        self.anthropic_temperature = 1.0  # 0.0-1.0 (Anthropic range)
-        self.anthropic_max_tokens = 8192  # manual value when auto is off
-        self.anthropic_auto_tokens = True  # auto-scale max_tokens
-
-        # Gemini generation params
-        self.gemini_temperature = 1.0  # 0.0-2.0 (Gemini range)
-        self.gemini_max_tokens = 8192
-        self.gemini_auto_tokens = True
-        self.gemini_top_p = None  # None = use API default
-        self.gemini_top_k = None  # None = use API default
-
+        # Provider settings — all providers are now external scripts in providers/
+        # 'manual' is the only special built-in provider; everything else uses custom_script_path
+        self.ai_provider = 'custom_script'
         self.tts_provider = 'edge-tts'
-        self.puter_tts_model = 'tts-1'
-        self.puter_tts_voice = None
-        self.puter_timeout = 30
 
         # Manual provider — set by controller to a callable that blocks until
         # the user types a response.  Signature:
@@ -122,10 +98,7 @@ class AIEngine:
         self.system_prompt_hijacked = False
         self.custom_system_prompt = ""
 
-        log.info(f"[AIEngine.__init__] ── Initialization complete | provider='{self.ai_provider}' | "
-                 f"anthropic_model='{self.anthropic_model}' | "
-                 f"puter_model='{self.puter_model}' | gemini_model='{self.gemini_model}' | "
-                 f"timeout={self.puter_timeout}s ──")
+        log.info(f"[AIEngine.__init__] ── Initialization complete | provider='{self.ai_provider}'")
 
     # ═══════════════════════════════════════════════════════════════════════════
     # VOICE / VOICE-SETTINGS METHODS
@@ -144,7 +117,7 @@ class AIEngine:
         else:
             self.log("Voice mode DISABLED", "INFO")
 
-    def update_voice_settings(self, voice_mode, elevenlabs_enabled):
+    def update_voice_settings(self, voice_mode, elevenlabs_enabled=False):
         """Update voice mode settings and regenerate prompt"""
         log.info(f"[AIEngine.update_voice_settings] voice_mode={voice_mode} | "
                  f"elevenlabs_enabled={elevenlabs_enabled} | regenerating prompt")
@@ -211,21 +184,6 @@ class AIEngine:
     # PROVIDER SETTERS
     # ═══════════════════════════════════════════════════════════════════════════
 
-    def set_api_key(self, api_key):
-        log.info("[AIEngine.set_api_key] Anthropic API key updated")
-        self.api_key = api_key
-        self.log("Anthropic API key updated")
-
-    def set_anthropic_model(self, model):
-        log.info(f"[AIEngine.set_anthropic_model] Anthropic model: '{self.anthropic_model}' → '{model}'")
-        self.anthropic_model = model
-        self.log(f"Anthropic model set to: {model}")
-
-    def set_gemini_api_key(self, api_key):
-        log.info("[AIEngine.set_gemini_api_key] Gemini API key updated")
-        self.gemini_api_key = api_key
-        self.log("Gemini API key updated")
-
     def set_provider(self, provider):
         log.info(f"[AIEngine.set_provider] AI provider changing: '{self.ai_provider}' → '{provider}'")
         self.ai_provider = provider
@@ -243,82 +201,10 @@ class AIEngine:
         self.custom_script_path = path
         self.log(f"Custom script path set to: {path}")
 
-    def set_puter_model(self, model):
-        log.info(f"[AIEngine.set_puter_model] Puter model: '{self.puter_model}' → '{model}'")
-        self.puter_model = model
-        self.log(f"Puter.js model set to: {model}")
-
-    def set_gemini_model(self, model):
-        log.info(f"[AIEngine.set_gemini_model] Gemini model: '{self.gemini_model}' → '{model}'")
-        self.gemini_model = model
-        self.log(f"Gemini model set to: {model}")
-
-    # ── Generation-parameter setters ──────────────────────────────────────────
-
-    def set_anthropic_temperature(self, value):
-        self.anthropic_temperature = float(value)
-        log.debug(f"[AIEngine] anthropic_temperature → {self.anthropic_temperature}")
-
-    def set_anthropic_max_tokens(self, value):
-        self.anthropic_max_tokens = int(value)
-        log.debug(f"[AIEngine] anthropic_max_tokens → {self.anthropic_max_tokens}")
-
-    def set_anthropic_auto_tokens(self, enabled):
-        self.anthropic_auto_tokens = bool(enabled)
-        log.debug(f"[AIEngine] anthropic_auto_tokens → {self.anthropic_auto_tokens}")
-
-    def set_gemini_temperature(self, value):
-        self.gemini_temperature = float(value)
-        log.debug(f"[AIEngine] gemini_temperature → {self.gemini_temperature}")
-
-    def set_gemini_max_tokens(self, value):
-        self.gemini_max_tokens = int(value)
-        log.debug(f"[AIEngine] gemini_max_tokens → {self.gemini_max_tokens}")
-
-    def set_gemini_auto_tokens(self, enabled):
-        self.gemini_auto_tokens = bool(enabled)
-        log.debug(f"[AIEngine] gemini_auto_tokens → {self.gemini_auto_tokens}")
-
-    def set_gemini_top_p(self, value):
-        self.gemini_top_p = float(value) if value is not None else None
-        log.debug(f"[AIEngine] gemini_top_p → {self.gemini_top_p}")
-
-    def set_gemini_top_k(self, value):
-        self.gemini_top_k = int(value) if value is not None else None
-        log.debug(f"[AIEngine] gemini_top_k → {self.gemini_top_k}")
-
-    def _calc_auto_max_tokens(self, model_max: int) -> int:
-        """Estimate a smart max_tokens based on current conversation size.
-        Targets leaving enough tokens for a solid reply without hitting limits."""
-        # Rough token count: ~4 chars per token
-        total_chars = sum(len(m.get('content', '')) for m in self.conversation_history)
-        total_chars += len(self._get_effective_system_prompt())
-        used_tokens = total_chars // 4
-        # Leave at least 1024 for a short response, up to model_max
-        headroom = max(model_max - used_tokens - 512, 1024)
-        # But cap at a sensible ceiling so we don't request absurd amounts
-        return min(headroom, model_max)
-
     def set_tts_provider(self, provider):
         log.info(f"[AIEngine.set_tts_provider] TTS provider: '{self.tts_provider}' → '{provider}'")
         self.tts_provider = provider
         self.log(f"TTS provider set to: {provider}")
-
-    def set_puter_tts_model(self, model):
-        log.info(f"[AIEngine.set_puter_tts_model] Puter TTS model: '{self.puter_tts_model}' → '{model}'")
-        self.puter_tts_model = model
-        self.log(f"Puter TTS model set to: {model}")
-
-    def set_puter_tts_voice(self, voice):
-        log.info(f"[AIEngine.set_puter_tts_voice] Puter TTS voice → '{voice}'")
-        self.puter_tts_voice = voice
-        self.log(f"Puter TTS voice set to: {voice}")
-
-    def set_puter_timeout(self, timeout):
-        """Set Puter.js server timeout in seconds"""
-        log.info(f"[AIEngine.set_puter_timeout] Timeout: {self.puter_timeout}s → {timeout}s")
-        self.puter_timeout = int(timeout)
-        self.log(f"Puter timeout set to: {timeout} seconds")
 
     def log(self, message, level="INFO"):
         _level_fn = {
@@ -473,147 +359,11 @@ class AIEngine:
 
         return system_prompt, merged
 
-    def _http_anthropic(self, messages) -> str | None:
-        """Make an Anthropic API call using the official SDK.
-        Respects anthropic_temperature, anthropic_max_tokens, anthropic_auto_tokens."""
-        log.debug(f"[AIEngine._http_anthropic] model='{self.anthropic_model}' | "
-                  f"messages={len(messages)} | temp={self.anthropic_temperature} | "
-                  f"auto_tokens={self.anthropic_auto_tokens}")
-        try:
-            if not self.api_key:
-                log.error("[AIEngine._http_anthropic] ✗ No Anthropic API key")
-                self.log("Anthropic API key is not set", "ERROR")
-                return None
-
-            import anthropic
-            client = anthropic.Anthropic(api_key=self.api_key)
-
-            system_prompt, convo = self._extract_system_and_convo(messages)
-
-            # Resolve max_tokens
-            model_max = 64000  # safe ceiling; Anthropic SDK will cap to model limit
-            max_tokens = (self._calc_auto_max_tokens(model_max)
-                          if self.anthropic_auto_tokens
-                          else self.anthropic_max_tokens)
-            max_tokens = max(256, max_tokens)
-
-            log.debug(f"[AIEngine._http_anthropic] max_tokens={max_tokens} | ")
-
-            kwargs = {
-                'model': self.anthropic_model,
-                'max_tokens': max_tokens,
-                'messages': convo,
-                'temperature': self.anthropic_temperature,
-            }
-            if system_prompt:
-                kwargs['system'] = system_prompt
-
-            response = client.messages.create(**kwargs)
-            text = response.content[0].text
-            log.info(f"[AIEngine._http_anthropic] ✓ Response | length={len(text)} chars")
-            return text
-
-        except Exception as e:
-            log.error(f"[AIEngine._http_anthropic] ✗ {type(e).__name__}: {e}")
-            self.log(f"Anthropic error: {e}", "ERROR")
-            return None
-
-    def _http_gemini(self, messages) -> str | None:
-        """Make a Gemini API call using the google-genai SDK.
-        Respects gemini_temperature, gemini_max_tokens, gemini_auto_tokens, top_p, top_k."""
-        log.debug(f"[AIEngine._http_gemini] model='{self.gemini_model}' | "
-                  f"messages={len(messages)} | temp={self.gemini_temperature} | "
-                  f"auto_tokens={self.gemini_auto_tokens}")
-        try:
-            if not self.gemini_api_key:
-                log.error("[AIEngine._http_gemini] ✗ No Gemini API key")
-                self.log("Gemini API key is not set", "ERROR")
-                return None
-
-            from google import genai
-            from google.genai import types as genai_types
-
-            client = genai.Client(api_key=self.gemini_api_key)
-            system_prompt, convo = self._extract_system_and_convo(messages)
-
-            # Convert to Gemini contents format: role 'assistant' → 'model'
-            contents = []
-            for msg in convo:
-                gemini_role = 'model' if msg['role'] == 'assistant' else 'user'
-                contents.append({
-                    'role': gemini_role,
-                    'parts': [{'text': msg['content']}]
-                })
-
-            # Resolve max_output_tokens
-            model_max = 65536
-            max_out = (self._calc_auto_max_tokens(model_max)
-                       if self.gemini_auto_tokens
-                       else self.gemini_max_tokens)
-            max_out = max(256, max_out)
-
-            config_kwargs = {
-                'max_output_tokens': max_out,
-                'temperature': self.gemini_temperature,
-            }
-            if system_prompt:
-                config_kwargs['system_instruction'] = system_prompt
-            if self.gemini_top_p is not None:
-                config_kwargs['top_p'] = self.gemini_top_p
-            if self.gemini_top_k is not None:
-                config_kwargs['top_k'] = self.gemini_top_k
-
-            log.debug(f"[AIEngine._http_gemini] config={config_kwargs}")
-
-            response = client.models.generate_content(
-                model=self.gemini_model,
-                contents=contents,
-                config=genai_types.GenerateContentConfig(**config_kwargs),
-            )
-            text = response.text
-            log.info(f"[AIEngine._http_gemini] ✓ Response | length={len(text)} chars")
-            return text
-
-        except Exception as e:
-            log.error(f"[AIEngine._http_gemini] ✗ {type(e).__name__}: {e}")
-            self.log(f"Gemini error: {e}", "ERROR")
-            return None
-
-    def _http_puter(self, messages, image=None) -> str | None:
-        """Make a Puter.js API call via the local puter server.
-        Messages are already in OpenAI-compatible format — no conversion needed."""
-        log.debug(f"[AIEngine._http_puter] model='{self.puter_model}' | "
-                  f"messages={len(messages)} | has_image={image is not None} | timeout={self.puter_timeout}s")
-        try:
-            if not self.puter_server:
-                log.error("[AIEngine._http_puter] ✗ puter_server is None")
-                return None
-            if not self.puter_server.is_running:
-                log.error("[AIEngine._http_puter] ✗ puter_server not running")
-                return None
-
-            result = self.puter_server.send_chat_request(
-                messages=messages,
-                model=self.puter_model,
-                image=image,
-                timeout=self.puter_timeout
-            )
-            if result:
-                log.info(f"[AIEngine._http_puter] ✓ Response | length={len(result)} chars")
-            else:
-                log.error("[AIEngine._http_puter] ✗ No response from Puter server")
-            return result
-
-        except Exception as e:
-            log.error(f"[AIEngine._http_puter] ✗ {type(e).__name__}: {e}")
-            self.log(f"Puter error: {e}", "ERROR")
-            return None
-
     # ═══════════════════════════════════════════════════════════════════════════
     # UNIFIED PROVIDER DISPATCHER
     # ═══════════════════════════════════════════════════════════════════════════
 
-    def _http_manual(self) -> str | None:
+    def _provider_manual(self) -> str | None:
         """Manual provider — blocks the worker thread until the user submits a response.
 
         Shows the side panel whenever the most-recently appended history entry has
@@ -651,7 +401,7 @@ class AIEngine:
         log.info(f"[AIEngine._http_manual] Got manual response | length={len(result)}")
         return result
 
-    def _http_custom_script(self, messages, images=None) -> str | None:
+    def _provider_script(self, messages, images=None) -> str | None:
         """Custom script provider — reimports the user's .py file on every call
         and invokes its chat(system_prompt, messages) function.
         If images (list) is provided and the script defines chat_image(), that is called instead."""
@@ -704,64 +454,39 @@ class AIEngine:
         return result
 
     def _call_provider(self, image=None, images=None) -> str | None:
-        """Build the unified message list, dispatch to the active provider.
-        Returns raw AI text, or None on failure.
-
-        images: list of paths (custom_script multi-image).
-        image:  single path, backward-compat for puter.
-        'images' takes priority; puter always uses only the first image.
+        """Build the unified message list and dispatch to the active provider script.
+        The 'manual' provider is the only built-in special case.
+        All other providers are loaded from the custom_script_path.
         """
         if images is None and image is not None:
             images = [image]
-        puter_image = images[0] if images else None
 
-        log.debug(f"[AIEngine._call_provider] provider='{self.ai_provider}' | "
+        log.debug(f"[AIEngine._call_provider] script='{self.custom_script_path}' | "
                   f"images={len(images) if images else 0}")
         messages = self._build_messages()
-        if self.ai_provider == 'anthropic':
-            return self._http_anthropic(messages)
-        elif self.ai_provider == 'gemini':
-            return self._http_gemini(messages)
-        elif self.ai_provider == 'puter':
-            return self._http_puter(messages, image=puter_image)
-        elif self.ai_provider == 'manual':
-            return self._http_manual()
+
+        if self.ai_provider == 'manual':
+            return self._provider_manual()
         elif self.ai_provider == 'custom_script':
-            return self._http_custom_script(messages, images=images)
-        else:
-            log.error(f"[AIEngine._call_provider] Unknown provider: '{self.ai_provider}'")
-            return None
+            return self._provider_script(messages, images=images)
+        return
 
     def raw_call(self, system_prompt: str, history: list) -> str | None:
         """
         Stateless one-shot call for external callers (e.g. task engine).
-        Uses the current provider + model settings on THIS engine instance.
-        Does NOT read or touch self.conversation_history.
-
-        history: [{role: 'user'|'assistant', content: str}, ...]
+        Uses the current provider script. Does NOT touch self.conversation_history.
         """
-        log.info(f"[AIEngine.raw_call] provider='{self.ai_provider}' | history={len(history)} msgs")
+        log.info(f"[AIEngine.raw_call] script='{self.custom_script_path}' | history={len(history)} msgs")
+        if self.ai_provider == 'manual':
+            log.warning("[AIEngine.raw_call] 'manual' provider cannot be used in background tasks — returning None")
+            return None
         messages = [{'role': 'system', 'content': system_prompt}]
         messages.extend(
             {'role': m['role'], 'content': m['content']}
             for m in history
-            if m.get('role') in ('system', 'assistant')
+            if m.get('role') in ('user', 'assistant')
         )
-        if self.ai_provider == 'anthropic':
-            return self._http_anthropic(messages)
-        elif self.ai_provider == 'gemini':
-            return self._http_gemini(messages)
-        elif self.ai_provider == 'puter':
-            return self._http_puter(messages)
-        elif self.ai_provider == 'manual':
-            # Manual provider requires live UI interaction — not usable in background tasks
-            log.warning("[AIEngine.raw_call] 'manual' provider cannot be used in background tasks — returning None")
-            return None
-        elif self.ai_provider == 'custom_script':
-            return self._http_custom_script(messages)
-        else:
-            log.error(f"[AIEngine.raw_call] Unknown provider: '{self.ai_provider}'")
-            return None
+        return self._provider_script(messages)
 
     def _make_error_result(self, message="Error: No response from AI") -> dict:
         """Return a standard error result dict."""
@@ -809,12 +534,6 @@ class AIEngine:
         log.info(f"[AIEngine.generate_response_with_image] provider='{self.ai_provider}' | "
                  f"images={len(image_paths)} | msg_len={len(user_message)}")
 
-        if self.ai_provider not in ('puter', 'custom_script'):
-            log.warning(f"[AIEngine.generate_response_with_image] Image attachment requires Puter or custom_script, "
-                        f"current provider='{self.ai_provider}' — returning error")
-            return self._make_error_result(
-                "Error: Image attachment only supported with Puter or Custom Script provider")
-
         self._inject_memories(user_message)
         self.conversation_history.append({'role': 'user', 'content': user_message})
         log.debug(f"[AIEngine.generate_response_with_image] User message appended | "
@@ -858,14 +577,8 @@ class AIEngine:
                   f"prompt_len={len(prompt)} chars")
         try:
             single_turn = [{'role': 'user', 'content': prompt}]
-            if self.ai_provider == 'anthropic':
-                result = self._http_anthropic(single_turn)
-            elif self.ai_provider == 'gemini':
-                result = self._http_gemini(single_turn)
-            elif self.ai_provider == 'puter':
-                result = self._http_puter(single_turn)
-            elif self.ai_provider == 'custom_script':
-                result = self._http_custom_script(single_turn)
+            if self.ai_provider == 'custom_script':
+                result = self._provider_script(single_turn)
             else:
                 log.error(f"[AIEngine._get_ai_response_internal] Unknown provider: '{self.ai_provider}'")
                 return f"Error: Unknown provider '{self.ai_provider}'"

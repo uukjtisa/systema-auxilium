@@ -30,7 +30,7 @@ def _make_log_path():
         f"{now.strftime('%b').lower()}_"
         f"{now.strftime('%d')}_"
         f"{now.strftime('%A').lower()}_"
-        f"h{now.strftime('%I')}_"
+        f"h{now.strftime('%I') }_"
         f"m{now.strftime('%M')}_"
         f"s{now.strftime('%S')}_"
         f"ms{ms}_"
@@ -184,9 +184,20 @@ def hide_console_window():
 
 
 def main():
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtGui import QFont
+    QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
-    app.setApplicationName("Systema Auxilium - AI System Agent")
+    app.setApplicationName("Systema Auxilium - AI System Helper Agent")
     app.setOrganizationName("NicProjects")
+    font = QFont("Segoe UI", 10)
+    font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
+    app.setFont(font)
+
+    screen = app.primaryScreen()
+    print("DPR:", screen.devicePixelRatio())
+    print("DPI:", screen.physicalDotsPerInch())
+    print("Logical DPI:", screen.logicalDotsPerInch())
 
     print(
         "======================CAUTION======================\n\n"

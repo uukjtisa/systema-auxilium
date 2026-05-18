@@ -12,6 +12,7 @@
 - [Things to take into consideration](#things-to-take-into-consideration)
 - [What is Systema Auxilium](#what-is-systema-auxilium)
 - [What Can It Do](#what-can-it-do)
+- [Modular Provider Architecture](#modular-provider-architecture)
 - [Android Bridge App](#android-bridge-app)
 - [About AI System Control](#about-ai-system-control)
 - [Recommended Python Environment](#recommended-python-environment)
@@ -31,7 +32,7 @@ This is a **hobby project** built and maintained by a single person.
 **Bugs are expected.** Some features have not been deeply tested, and certain functions may behave unexpectedly depending on your setup. And tool calls may leak if the LLM misses proper usage. If something breaks, please try to replicate it and open an issue. Any details you can provide will help a lot. And if you happen to know your way around Python, taking a look at the bug yourself would be even more appreciated! :)
 
 - **Lighter models may struggle to follow the system prompt tool format reliably.**
-- **Model Instruction following capability.** This project was developed and tested almost exclusively using the **GPT-5.2** model via the API Provider [Puter.js](https://puter.com) with **limited free rates.** Other models, both lighter open-source ones and stronger alternatives, have **not** been tested. 
+- **Model instruction following capability matters.** This project was developed and tested with strong frontier models. Smaller or weaker models have not been tested and may produce unreliable tool usage. The modular provider system means you can test any model yourself without waiting for me to integrate it — which is kind of the whole point.
 - When the LLM fails to follow the format in tool usage, unintentional results may occur, like tool usage leaking into chat.
 - **System Prompt is not perfect.** I am still actively working on analyzing the system prompt to identify redundant and unnecessary instructions.
 - I'm open to suggestions for revamping the tool system. If you're experienced in agentic stuff, please consider mentoring me! **:)**
@@ -73,15 +74,10 @@ Check CPU usage, memory, disk space, running processes, system specs, and more.
 Perform complex calculations, process datasets, read and parse files (text, CSV, etc.), and return structured results.
 
 **Voice Mode**
-Speak to Systema Auxilium and have it respond via text-to-speech. Supports ElevenLabs for realistic emotional voice output, including natural expressions like laughter, sighs, and emphasis.
+Speak to Systema Auxilium and have it respond via text-to-speech. Supports ElevenLabs out of the box for realistic, emotional voice output — including natural expressions like laughter, sighs, and emphasis — plus any custom TTS provider via the modular script system.
 
-**Multi-Provider AI Support**
-Switch between AI backends with ease:
-- **Puter.js** — free, browser-based, no API key required (primary tested provider)
-- **Anthropic Claude API** — integrated, configurable models
-- **Google Gemini** — integrated, configurable models
-- **Manual Provider** — type responses by hand, useful for testing and debugging
-- **Custom Script Provider** — point to any `.py` file and use it as your AI backend. No need to touch the main codebase. Think of it like modding — write a script, plug it in, done. See `custom_provider_template.py` for instructions.
+**Modular AI Provider Support**
+Every AI backend is a self-contained script you drop into a folder. No hardcoded providers, no codebase changes. See [Modular Provider Architecture](#modular-provider-architecture) below.
 
 **Scheduled Tasks**
 Set up persistent background agents that ping the AI on a schedule — even while you're doing something else. Each task has its own instruction, active time window, and ping interval (or specific ping times within that window). Tasks can be paused or activated without deletion, and each runs in its own session context. You can pre-load skills into a task agent so it has specialized knowledge from the moment it starts, and set per-task permissions to control exactly what the agent is allowed to do — like whether it can run code, use work mode, or manage skills. Task agents can send messages directly into your main chat when they have something to report.
@@ -95,16 +91,60 @@ A safety-first mode that shows you the generated Python code *before* it runs, s
 
 ---
 
-## Custom Script Provider — Bring Your Own Provider
+## Modular Provider Architecture
 
-You can connect *any* AI provider to Systema Auxilium without touching the main codebase at all. Just write a Python script that implements:
+Systema Auxilium uses a **fully modular provider system** for both AI inference and text-to-speech. There is no hardcoded provider list — everything lives as a self-contained Python script in the `providers/` directory.
 
-```python
-def chat(system_prompt: str, messages: list[dict]) -> str:
-    ...
-```
+### How It Works
 
-Point the app at it in Settings → AI → Custom Script Provider. The script is reloaded on every request, so live edits take effect immediately. A full template and instructions are included in `custom_provider_template.py` at the repo root, including a ready-made prompt you can give to any AI to generate a working provider script for you.
+Each provider is just a Python file implementing a simple contract:
+
+- **LLM providers** (`providers/large-language-models/`) → define `chat(system_prompt, messages) -> str`
+  Optional: `chat_image(system_prompt, messages, image_paths)` for vision support
+- **TTS providers** (`providers/text-to-speech/`) → define `speak(text, save_to) -> bool`
+
+Drop a script in the right folder, hit Refresh in Settings, and it appears instantly. No codebase edits. No restart required.
+
+### First-Time Setup — Configure a Provider
+
+> **Before you can chat, you need to configure at least one LLM provider.** This is the only real setup step, and it's the same as any other AI platform — you need an API key or access credential for the service you want to use.
+
+Here's how to do it in three steps:
+
+1. Open `providers/large-language-models/` and pick one of the included provider scripts (or copy `_template.py`)
+2. Open the file and fill in your API key, model name, or endpoint URL — it's clearly marked at the top of every script
+3. In the app: go to **Settings → AI → Active Provider Script**, select your script, and hit **Save Settings**
+
+That's it. If you're unsure how to get an API key for a specific service, just ask any AI assistant — *"How do I get an API key for [provider name]?"* — and you'll have an answer in seconds. The configuration itself is just editing a text file; no Python knowledge required.
+
+This is intentional. Provider configuration lives in the script, not the GUI, because every provider has different fields. It's the same tradeoff every other AI platform makes — and it keeps the codebase clean.
+
+### Included Provider Scripts
+
+The repo ships with several working scripts demonstrating the flexibility of the system:
+
+**LLM:**
+- `anthropic_provider.py` — Anthropic Claude API
+- `gemini_provider.py` — Google Gemini
+- `puter_server.py` — Puter.js (free, no API key required — needs a Puter account)
+- `llm7_io.py` / `llm7_io_anon.py` — LLM7.io (anonymous access available)
+- `provider_cloudflare_kimi_k2_6.py` — Cloudflare Workers AI / Kimi K2.6
+- `provider_nvidia_deepseek_v4_flash.py` / `provider_nvidia_deepseek_v4_pro.py` — NVIDIA-hosted DeepSeek
+- `provider_nvidia_glm51.py` — NVIDIA-hosted GLM
+
+**TTS:**
+- `elevenlabs_tts.py` — Emotional, realistic voice synthesis with expression tags
+
+### Build Your Own in Minutes
+
+Each folder contains a `_template.py` with:
+- A ready-to-use `requests`-based implementation skeleton
+- Full docstrings explaining the contract
+- A **ready-made prompt you can paste into ChatGPT, Claude, or Gemini** to generate a working provider script for your specific API automatically
+
+Translation: *you don't even need to write the Python yourself.* Describe your provider to any AI, paste the output into the folder, reload in Settings, and you're live.
+
+The barrier to adding a new provider is essentially zero.
 
 ---
 
@@ -149,6 +189,7 @@ sudo make altinstall
 ```
 
 ---
+
 ## How to Install
 
 ### Windows
@@ -164,14 +205,15 @@ bash setup.sh       # Linux
 bash setup_macOs.sh   # macOS
 ```
 
-> Mac OS setup script is untested. So far i have only tested the respective setup script for these: Windows 11, 10, and Kali Linux (Python3.10)
+> Mac OS setup script is untested. So far I have only tested the respective setup script for these: Windows 11, 10, and Kali Linux (Python 3.10)
 
 ### Manual Setup (any platform)
 
 1. Ensure Python 3.10.11 is installed
 2. Install dependencies: `pip install -r requirements.txt`
-3. Configure your AI provider in Settings (Puter.js needs an account to be created first; a pop-up will appear in the browser that will be opened automatically.)
+3. Configure an AI provider — open a script in `providers/large-language-models/`, fill in your credentials, then select it in **Settings → AI**. See [First-Time Setup](#first-time-setup--configure-a-provider) above.
 4. Run the application: `python main.py`
+
 ---
 
 ## Safety Warnings

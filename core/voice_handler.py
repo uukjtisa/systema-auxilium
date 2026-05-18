@@ -115,12 +115,9 @@ class VoiceHandler:
                   f"silero_enabled={self.vad_silero_enabled} | aggressiveness={self.vad_aggressiveness} | "
                   f"silero_threshold={self.silero_threshold} | silence_duration={self.silence_duration}s")
 
-        # Puter TTS settings
-        self.puter_server = None
-        self.puter_tts_model = 'tts-1'
-        self.puter_tts_voice = None
-        log.debug(f"[VoiceHandler.__init__] Puter TTS: model='{self.puter_tts_model}' | "
-                  f"voice={self.puter_tts_voice} | server=None")
+        # TTS script path (set when a script is selected in settings)
+        self.tts_script_path = ''
+        log.debug("[VoiceHandler.__init__] TTS script path: (not set)")
 
         # Buffers
         self.audio_queue = queue.Queue()
@@ -420,13 +417,15 @@ class VoiceHandler:
         self._emit_log_callback(f"TTS provider set to {provider}")
         log.debug("[VoiceHandler.set_tts_provider] ✓ TTS provider updated")
 
+    def set_tts_script_path(self, path):
+        """Set the custom TTS provider script path."""
+        log.info(f"[VoiceHandler.set_tts_script_path] path='{path}'")
+        self.tts_script_path = path
+        self._emit_log_callback(f"Custom TTS script set: {path}")
+
     def set_puter_tts_settings(self, model, voice):
-        """Set Puter TTS settings"""
-        log.info(f"[VoiceHandler.set_puter_tts_settings] model='{model}' | voice='{voice}'")
-        self.puter_tts_model = model
-        self.puter_tts_voice = voice
-        self._emit_log_callback(f"Puter TTS: model={model}, voice={voice}")
-        log.debug("[VoiceHandler.set_puter_tts_settings] ✓ Puter TTS settings updated")
+        """Legacy stub — kept to avoid AttributeError if called. No-op."""
+        pass
 
     def set_vad_aggressiveness(self, level):
         """Set VAD aggressiveness (0-3)"""
@@ -791,24 +790,16 @@ class VoiceHandler:
                 self._emit_log_callback("[TTS] Using pyttsx3 (offline)")
                 await self._speak_pyttsx3(filtered_text)
 
-            elif self.tts_provider == 'puter':
-                use_elevenlabs = getattr(self, 'use_elevenlabs', False)
-                has_voice_id = hasattr(self, 'elevenlabs_voice_id') and self.elevenlabs_voice_id
-                log.debug(f"[VoiceHandler.speak_text] Puter provider: use_elevenlabs={use_elevenlabs} | "
-                          f"has_voice_id={has_voice_id}")
-                if use_elevenlabs and has_voice_id:
-                    log.debug("[VoiceHandler.speak_text] → _speak_puter_elevenlabs()")
-                    self._emit_log_callback("[TTS] Using Puter + ElevenLabs")
-                    await self._speak_puter_elevenlabs(filtered_text)
-                else:
-                    log.debug("[VoiceHandler.speak_text] → _speak_puter_tts()")
-                    self._emit_log_callback("[TTS] Using Puter standard TTS")
-                    await self._speak_puter_tts(filtered_text)
-
             elif self.tts_provider == 'edge-tts':
                 log.debug("[VoiceHandler.speak_text] → _speak_edge_tts()")
                 self._emit_log_callback("[TTS] Using Edge TTS")
                 await self._speak_edge_tts(filtered_text)
+
+            elif self.tts_provider == 'custom_script':
+                log.debug(f"[VoiceHandler.speak_text] → _speak_custom_script_tts() | "
+                          f"script='{self.tts_script_path}'")
+                self._emit_log_callback(f"[TTS] Using custom script provider")
+                await self._speak_custom_script_tts(filtered_text)
 
             else:
                 log.warning(f"[VoiceHandler.speak_text] ✗ Unknown provider '{self.tts_provider}' — "
@@ -1085,6 +1076,74 @@ class VoiceHandler:
         except Exception as e:
             log.error(f"[VoiceHandler._speak_edge_tts] ✗ Edge TTS error: {type(e).__name__}: {e}")
             self._emit_log_callback(f"Edge TTS error: {e}", "ERROR")
+
+    async def _speak_custom_script_tts(self, text):
+        """Speak using a custom TTS provider script.
+        The script must define:  speak(text: str, save_to: str) -> bool
+        """
+        self._ensure_pygame_mixer()
+        import importlib.util, traceback
+        log.info(f"[VoiceHandler._speak_custom_script_tts] ── Custom Script TTS | "
+                 f"text_len={len(text)} | script='{self.tts_script_path}' ──────")
+        try:
+            if not self.tts_script_path or not os.path.isfile(self.tts_script_path):
+                log.error(f"[VoiceHandler._speak_custom_script_tts] ✗ Script not found: "
+                          f"'{self.tts_script_path}'")
+                self._emit_log_callback("Custom TTS script not found — check settings", "ERROR")
+                return
+
+            spec = importlib.util.spec_from_file_location("custom_tts_provider", self.tts_script_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+
+            if not hasattr(module, 'speak') or not callable(module.speak):
+                log.error("[VoiceHandler._speak_custom_script_tts] ✗ Script missing speak() function")
+                self._emit_log_callback(
+                    "Custom TTS script must define speak(text: str, save_to: str) -> bool", "ERROR")
+                return
+
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+            temp_path = temp_file.name
+            temp_file.close()
+            log.debug(f"[VoiceHandler._speak_custom_script_tts] Temp file: '{temp_path}'")
+
+            success = module.speak(text, temp_path)
+            if not success:
+                log.error("[VoiceHandler._speak_custom_script_tts] ✗ speak() returned False")
+                self._emit_log_callback("Custom TTS speak() returned False", "ERROR")
+                return
+
+            pygame.mixer.music.load(temp_path)
+            pygame.mixer.music.play()
+            log.info("[VoiceHandler._speak_custom_script_tts] ✓ Pygame playback started")
+
+            if self.on_playback_started:
+                try:
+                    self.on_playback_started()
+                except Exception as cb_e:
+                    log.warning(f"[VoiceHandler._speak_custom_script_tts] on_playback_started error: {cb_e}")
+
+            wait_iters = 0
+            while pygame.mixer.music.get_busy():
+                if not self.is_speaking:
+                    log.info("[VoiceHandler._speak_custom_script_tts] is_speaking=False — stopping")
+                    pygame.mixer.music.stop()
+                    break
+                await asyncio.sleep(0.1)
+                wait_iters += 1
+
+            log.info(f"[VoiceHandler._speak_custom_script_tts] ✓ Playback finished | "
+                     f"wait_iters={wait_iters}")
+
+            try:
+                os.unlink(temp_path)
+            except Exception:
+                pass
+
+        except Exception as e:
+            log.error(f"[VoiceHandler._speak_custom_script_tts] ✗ Error: {type(e).__name__}: {e}\n"
+                      f"{traceback.format_exc()}")
+            self._emit_log_callback(f"Custom TTS error: {e}", "ERROR")
 
     def _filter_text_for_tts(self, text):
         """
