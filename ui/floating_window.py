@@ -594,7 +594,8 @@ class FloatingWindow(QWidget):
         draw.ellipse([4, 4, 60, 60], fill=(100, 100, 255, 255))
         draw.ellipse([18, 18, 46, 46], fill=(255, 255, 255, 255))
 
-        menu_items = [pystray.MenuItem("Show floating window", self._tray_show_floating),
+        menu_items = [pystray.MenuItem("Toggle Chat", self._tray_toggle_chat, default=True, visible=False),
+                      pystray.MenuItem("Show floating window", self._tray_show_floating),
                       pystray.MenuItem("Open Chat", self._tray_open_chat),
                       pystray.MenuItem("Appearance", self._tray_open_appearance),
                       pystray.MenuItem("Settings", self._tray_open_settings), pystray.MenuItem(
@@ -624,6 +625,20 @@ class FloatingWindow(QWidget):
     def _tray_show_floating(self, icon=None, item=None):
         QTimer.singleShot(0, self._do_show_from_tray)
 
+    def _tray_toggle_chat(self, icon=None, item=None):
+        """Left-click on tray icon — toggle chat window on/off."""
+        QTimer.singleShot(0, self._do_toggle_chat_from_tray)
+
+    def _do_toggle_chat_from_tray(self):
+        if self.chat_window is None:
+            from ui.chat_window import ChatWindow
+            self.chat_window = ChatWindow(self.controller)
+        if self.chat_window.isVisible():
+            self.chat_window.hide()
+        else:
+            self.chat_window.show()
+            self.chat_window.raise_()
+            self.chat_window.activateWindow()
     def _do_show_from_tray(self):
         if self.tray_icon:
             self.tray_icon.stop()
@@ -659,9 +674,8 @@ class FloatingWindow(QWidget):
         QTimer.singleShot(0, self.shutdown_app)
 
     def toggle_debug_from_tray(self, icon, item):
-        """Toggle debug mode from tray icon"""
-        self.toggle_debug()
-
+        """Toggle debug mode from tray icon — marshalled to main thread"""
+        QTimer.singleShot(0, self.toggle_debug)
     def put_to_tray(self):
         """Hide floating icon and show in system tray."""
         if self.tray_icon is None:

@@ -433,7 +433,7 @@ Use these sparingly and naturally.
             "  ```",
             "  Removes the skill from your active context.",
             "  Works inside AND outside work_environment.",
-            "  ⚠ Do NOT unload a skill that shows Is Loaded = false — it isn't loaded!",
+            "  ⚠ Do NOT unload a skill that shows Is Loaded = false — it isn't loaded!\n",
         ]
         skills_block = "\n".join(lines)
     # ─────────────────────────────────────────────────────────────────────────

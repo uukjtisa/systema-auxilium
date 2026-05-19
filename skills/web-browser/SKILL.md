@@ -1,6 +1,6 @@
 ---
 name: web-browser
-description: A personal web browser for AI agents. Use this skill whenever the agent needs to search the web, read web page content, extract links from pages, or navigate multi-page content. Triggers on any request to browse, google, search, open a URL, read a website, find links, or research a topic online. All browsing is free — no API keys required. Uses a multi-engine fallback system (DuckDuckGo HTML → Bing → Brave → DuckDuckGo library) with real browser headers for resilient search. Must be used when the agent needs any real-time or external web information.
+description: A personal web browser for AI agents.
 ---
 
 All scripts live in the `scripts/` folder. Run from that directory or provide the full path.

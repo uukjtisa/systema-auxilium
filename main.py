@@ -157,6 +157,14 @@ if sys.platform == "win32":
         pass
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ── Startup notification (fire and forget) ───────────────────────────────────
+import subprocess
+subprocess.Popen(
+    [sys.executable, str(Path(__file__).parent / "ui" / "startup_notif.py")],
+    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+)
+# ─────────────────────────────────────────────────────────────────────────────
+
 # ── Core imports come AFTER the Tee is in place ──────────────────────────────
 from PyQt6.QtWidgets import QApplication
 from core.controller import AssistantController
@@ -193,19 +201,6 @@ def main():
     font = QFont("Segoe UI", 10)
     font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
     app.setFont(font)
-
-    screen = app.primaryScreen()
-    print("DPR:", screen.devicePixelRatio())
-    print("DPI:", screen.physicalDotsPerInch())
-    print("Logical DPI:", screen.logicalDotsPerInch())
-
-    print(
-        "======================CAUTION======================\n\n"
-        "This Agent can execute system-level actions if ran with "
-        "sufficient permissions.\nUse caution when issuing prompts.\n"
-        "You are responsible for the actions taken.\n\n"
-        "======================CAUTION======================"
-    )
 
     controller = AssistantController()
     controller.show()

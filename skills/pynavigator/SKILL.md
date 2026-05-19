@@ -2,7 +2,6 @@
 name: pynavigator
 description: >
   Context-efficient Python code navigation and editing for agentic coding tasks.
-  Provides surgical read/write tools AND a persistent code intelligence index.
 ---
 
 # PyNavigator
