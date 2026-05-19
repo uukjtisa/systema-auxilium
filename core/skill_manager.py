@@ -4,7 +4,6 @@ SkillManager — watches the skills/ folder every 0.5 s, parses SKILL.md
 frontmatter, emits Qt signals on changes, and persists loaded-state to
 skills/skills_state.json.
 """
-
 import json
 import re
 import shutil

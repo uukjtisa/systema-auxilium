@@ -1,6 +1,6 @@
 ---
 name: data-viz
-description: Create data visualizations, charts, and graphs as PNG/HTML files on the user's desktop or any path. Use this skill whenever the user asks to visualize data, make a chart, graph, plot, dashboard, or anything involving visual representation of numbers or datasets — even if they just say "graph this" or "show me a chart of X". Always use this skill for any visualization request.
+description: Create data visualizations, charts, and graphs as PNG/HTML.
 ---
 
 # Data Visualization Skill

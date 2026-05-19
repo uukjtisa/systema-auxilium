@@ -218,6 +218,7 @@ class AssistantController(QObject):
 
         # Track processing
         self.is_processing = False
+        self._request_generation = 0  # incremented on each new request and on cancel
 
         # Connect voice message signal to handler (main thread safe)
         self.voice_message_signal.connect(self._handle_voice_message_on_main_thread)
@@ -900,7 +901,10 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         else:
             log.debug("[AssistantController.send_message] Creating AIWorker for 'generate'...")
             self.current_worker = AIWorker(self.ai, 'generate', user_message)
-        self.current_worker.response_ready.connect(self.handle_ai_response)
+        self._request_generation += 1
+        _gen = self._request_generation
+        self.current_worker.response_ready.connect(
+            lambda result, g=_gen: self._dispatch_ai_response(result, g))
         self.current_worker.error_occurred.connect(self.handle_ai_error)
         self.current_worker.start()
         log.debug("[AssistantController.send_message] AIWorker started")
@@ -941,10 +945,29 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         # Create worker thread with image list
         log.debug("[AssistantController.send_message_with_image] Creating AIWorker for 'generate_with_image'...")
         self.current_worker = AIWorker(self.ai, 'generate_with_image', user_message, image_paths)
-        self.current_worker.response_ready.connect(self.handle_ai_response)
+        self._request_generation += 1
+        _gen = self._request_generation
+        self.current_worker.response_ready.connect(
+            lambda result, g=_gen: self._dispatch_ai_response(result, g))
         self.current_worker.error_occurred.connect(self.handle_ai_error)
         self.current_worker.start()
         log.debug("[AssistantController.send_message_with_image] AIWorker started")
+
+    def _dispatch_ai_response(self, result, generation):
+        """Route a worker response to handle_ai_response only if it's still current."""
+        if generation != self._request_generation:
+            log.warning(f"[AssistantController._dispatch_ai_response] Stale response discarded "
+                        f"(gen={generation}, current={self._request_generation})")
+            return
+        self.handle_ai_response(result)
+
+    def _dispatch_work_mode_response(self, result, generation):
+        """Route a work-mode response to handle_work_mode_response only if it's still current."""
+        if generation != self._request_generation:
+            log.warning(f"[AssistantController._dispatch_work_mode_response] Stale work-mode response discarded "
+                        f"(gen={generation}, current={self._request_generation})")
+            return
+        self.handle_work_mode_response(result)
 
     def handle_ai_response(self, result):
         """Handle AI response from worker thread"""
@@ -953,10 +976,6 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
                  f"has_work_call={result.get('has_work_call', False)} | "
                  f"exited_work_mode={result.get('exited_work_mode', False)} | "
                  f"thinking={result.get('thinking', False)} ──")
-        if getattr(self, '_interrupt_flag', False):
-            log.warning("[AssistantController.handle_ai_response] Stale signal after interrupt — discarding")
-            self._interrupt_flag = False
-            return
         self.ui.hide_thinking()
         self.is_processing = False
         log.debug("[AssistantController.handle_ai_response] is_processing=False | thinking hidden")
@@ -1068,10 +1087,6 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
                  f"exited_work_mode={result.get('exited_work_mode', False)} | "
                  f"has_work_call={result.get('has_work_call', False)} | "
                  f"thinking={result.get('thinking', False)} ──")
-        if getattr(self, '_interrupt_flag', False):
-            log.warning("[AssistantController.handle_work_mode_response] Stale signal after interrupt — discarding")
-            self._interrupt_flag = False
-            return
         self.is_processing = False
         log.debug("[AssistantController.handle_work_mode_response] is_processing=False")
 
@@ -1174,7 +1189,10 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         # Create worker thread
         log.debug("[AssistantController.auto_continue_work_mode] Creating AIWorker for 'continue_tool'")
         self.current_worker = AIWorker(self.ai, 'continue_tool')
-        self.current_worker.response_ready.connect(self.handle_work_mode_response)
+        self._request_generation += 1
+        _gen = self._request_generation
+        self.current_worker.response_ready.connect(
+            lambda result, g=_gen: self._dispatch_work_mode_response(result, g))
         self.current_worker.error_occurred.connect(self.handle_ai_error)
         self.current_worker.start()
         log.debug("[AssistantController.auto_continue_work_mode] Worker started")
@@ -1244,7 +1262,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
 
         # Always clean up UI regardless of whether anything was interrupted
         try:
-            self._interrupt_flag = True  # discard any stale response_ready signals in queue
+            self._request_generation += 1  # invalidates all in-flight worker signals
             self._chat.hide_thinking()
             self._chat.set_input_enabled(True)
         except Exception:
