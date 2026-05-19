@@ -7,9 +7,10 @@ ACCOUNT NOTES:   account_notes.json   (same folder as this script)
 
 USAGE:
     python e_mailman.py --info
-    python e_mailman.py --account gmail read --latest [--count N]
-    python e_mailman.py --account gmail read --from "addr"
-    python e_mailman.py --account gmail read --search "keyword"
+    python e_mailman.py --account gmail read --latest [--count N] [--save-attachments DIR]
+    python e_mailman.py --account gmail read --from "addr" [--save-attachments DIR]
+    python e_mailman.py --account gmail read --search "keyword" [--save-attachments DIR]
+    python e_mailman.py --account gmail download --uid 12345 [--dir ./downloads]
     python e_mailman.py --account disroot send --to "addr" --subject "..." --body "..."
     python e_mailman.py notes
     python e_mailman.py notes --set  "account" "replacement note"
@@ -20,6 +21,7 @@ USAGE:
 """
 
 import argparse
+import datetime
 import email
 import imaplib
 import json
@@ -29,6 +31,7 @@ import sys
 import textwrap
 from email.header import decode_header
 from email.message import EmailMessage
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -207,6 +210,53 @@ def decode_str(value) -> str:
     return "".join(result)
 
 
+def format_local_date(date_str: str) -> str:
+    """Convert an email date string to the system's local timezone. No extra modules needed."""
+    try:
+        dt = parsedate_to_datetime(date_str)
+        local_dt = dt.astimezone()          # stdlib: converts to OS local timezone
+        offset = local_dt.strftime("%z")    # e.g. "+0800"
+        if len(offset) == 5:
+            offset = f"{offset[:3]}:{offset[3:]}"   # → "+08:00"
+        tz_name = local_dt.strftime("%Z") or f"UTC{offset}"
+        return local_dt.strftime(f"%a, %d %b %Y  %H:%M:%S  ({tz_name})")
+    except Exception:
+        return date_str     # fallback: show original if unparseable
+
+
+
+    """Return a list of (filename, part) tuples for all attachments in the message."""
+    attachments = []
+    if msg.is_multipart():
+        for part in msg.walk():
+            disp = str(part.get("Content-Disposition") or "")
+            if "attachment" in disp:
+                raw_name = part.get_filename()
+                filename = decode_str(raw_name) if raw_name else f"attachment_{len(attachments)+1}"
+                attachments.append((filename, part))
+    return attachments
+
+
+def save_attachments(msg, save_dir: Path, uid: str) -> list:
+    """Save all attachments from msg into save_dir. Returns list of saved filenames."""
+    save_dir.mkdir(parents=True, exist_ok=True)
+    saved = []
+    for filename, part in get_attachments(msg):
+        # Sanitise filename for filesystem
+        safe_name = "".join(c if c.isalnum() or c in "._- " else "_" for c in filename).strip()
+        if not safe_name:
+            safe_name = f"attachment_{uid}"
+        dest = save_dir / safe_name
+        # Avoid overwriting — append uid suffix if collision
+        if dest.exists():
+            stem, suffix = dest.stem, dest.suffix
+            dest = save_dir / f"{stem}_{uid}{suffix}"
+        dest.write_bytes(part.get_payload(decode=True) or b"")
+        saved.append(str(dest))
+        print(f"  💾  Saved: {dest}")
+    return saved
+
+
 def get_body(msg) -> str:
     body = ""
     if msg.is_multipart():
@@ -249,30 +299,39 @@ def fetch_emails(mail: imaplib.IMAP4_SSL, ids: list) -> list:
         _, data = mail.fetch(uid, "(RFC822)")
         raw = data[0][1]
         msg = email.message_from_bytes(raw)
+        attachment_names = [fname for fname, _ in get_attachments(msg)]
         results.append({
-            "uid":     uid.decode(),
-            "from":    decode_str(msg.get("From")),
-            "to":      decode_str(msg.get("To")),
-            "subject": decode_str(msg.get("Subject")),
-            "date":    msg.get("Date", "(no date)"),
-            "body":    get_body(msg),
+            "uid":          uid.decode(),
+            "from":         decode_str(msg.get("From")),
+            "to":           decode_str(msg.get("To")),
+            "subject":      decode_str(msg.get("Subject")),
+            "date":         msg.get("Date", "(no date)"),
+            "message_id":   msg.get("Message-ID", ""),
+            "references":   msg.get("References", ""),
+            "body":         get_body(msg),
+            "attachments":  attachment_names,
+            "_raw":         raw,   # kept for --save-attachments / download
         })
     return results
 
 
 def print_email(em: dict, index: int) -> None:
     print(f"\n{'═' * 62}")
-    print(f"  📧  Email #{index}")
+    print(f"  📧  Email #{index}  (UID: {em['uid']})")
     print(f"{'═' * 62}")
     print(f"  From    : {em['from']}")
     print(f"  Subject : {em['subject']}")
-    print(f"  Date    : {em['date']}")
+    print(f"  Date    : {format_local_date(em['date'])}")
+    if em.get("attachments"):
+        print(f"  📎  Attachments ({len(em['attachments'])}):")
+        for name in em["attachments"]:
+            print(f"        • {name}")
     print(f"{'─' * 62}")
     print(textwrap.indent(em["body"] or "(empty body)", "  "))
     print()
 
 
-def cmd_latest(cfg: dict, count: int = 5) -> None:
+def cmd_latest(cfg: dict, count: int = 5, save_dir: Path = None) -> None:
     print_account_banner(cfg)
     mail = imap_connect(cfg)
     _, data = mail.search(None, "ALL")
@@ -287,10 +346,13 @@ def cmd_latest(cfg: dict, count: int = 5) -> None:
     print(f"\n  Showing latest {len(emails)} email(s):\n")
     for i, em in enumerate(emails, 1):
         print_email(em, i)
+        if save_dir and em.get("attachments"):
+            msg = email.message_from_bytes(em["_raw"])
+            save_attachments(msg, save_dir, em["uid"])
     print(f"[ok] Fetched {len(emails)} email(s).")
 
 
-def cmd_from(cfg: dict, sender: str) -> None:
+def cmd_from(cfg: dict, sender: str, save_dir: Path = None) -> None:
     print_account_banner(cfg)
     mail = imap_connect(cfg)
     _, data = mail.search(None, f'FROM "{sender}"')
@@ -305,9 +367,12 @@ def cmd_from(cfg: dict, sender: str) -> None:
     print(f"\n  Emails from '{sender}' — {len(emails)} found:\n")
     for i, em in enumerate(emails, 1):
         print_email(em, i)
+        if save_dir and em.get("attachments"):
+            msg = email.message_from_bytes(em["_raw"])
+            save_attachments(msg, save_dir, em["uid"])
 
 
-def cmd_search(cfg: dict, keyword: str) -> None:
+def cmd_search(cfg: dict, keyword: str, save_dir: Path = None) -> None:
     print_account_banner(cfg)
     mail = imap_connect(cfg)
     _, data = mail.search(None, f'SUBJECT "{keyword}"')
@@ -322,6 +387,9 @@ def cmd_search(cfg: dict, keyword: str) -> None:
     print(f"\n  Emails matching '{keyword}' — {len(emails)} found:\n")
     for i, em in enumerate(emails, 1):
         print_email(em, i)
+        if save_dir and em.get("attachments"):
+            msg = email.message_from_bytes(em["_raw"])
+            save_attachments(msg, save_dir, em["uid"])
 
 # ---------------------------------------------------------------------------
 # SEND helpers (SMTP)
@@ -339,11 +407,17 @@ def attach_file(msg: EmailMessage, path: str) -> None:
     print(f"[info] Attached: {p.name}")
 
 
-def cmd_send(cfg: dict, to: str, subject: str, body: str, attachments: list) -> None:
+def cmd_send(cfg: dict, to: str, subject: str, body: str, attachments: list,
+             in_reply_to: str = "", references: str = "") -> None:
     msg = EmailMessage()
     msg["From"]    = cfg["account"]
     msg["To"]      = to
     msg["Subject"] = subject
+    if in_reply_to:
+        msg["In-Reply-To"] = in_reply_to
+        # References = previous chain + the message we're replying to
+        ref_chain = (references.strip() + " " + in_reply_to).strip()
+        msg["References"] = ref_chain
     msg.set_content(body)
     for path in attachments:
         attach_file(msg, path)
@@ -368,8 +442,56 @@ def cmd_send(cfg: dict, to: str, subject: str, body: str, attachments: list) -> 
         sys.exit(1)
     print(f"[ok] Sent from {cfg['account']} → {to}")
 
+def fetch_reply_meta(cfg: dict, uid: str) -> dict:
+    """Fetch Message-ID, References, From, and Subject from an email by UID (for reply threading)."""
+    mail = imap_connect(cfg)
+    uid_bytes = uid.encode()
+    _, data = mail.fetch(uid_bytes, "(RFC822)")
+    mail.logout()
+    if not data or data[0] is None:
+        print(f"[error] No email found with UID {uid}.", file=sys.stderr)
+        sys.exit(1)
+    raw = data[0][1]
+    msg = email.message_from_bytes(raw)
+    return {
+        "message_id": msg.get("Message-ID", ""),
+        "references":  msg.get("References", ""),
+        "from":        decode_str(msg.get("From", "")),
+        "subject":     decode_str(msg.get("Subject", "")),
+    }
+
+
 # ---------------------------------------------------------------------------
-# NOTES subcommand
+# DOWNLOAD subcommand — fetch attachments from a specific email by UID
+# ---------------------------------------------------------------------------
+
+def cmd_download(cfg: dict, uid: str, save_dir: Path) -> None:
+    print_account_banner(cfg)
+    mail = imap_connect(cfg)
+    uid_bytes = uid.encode()
+    _, data = mail.fetch(uid_bytes, "(RFC822)")
+    if not data or data[0] is None:
+        print(f"[error] No email found with UID {uid}.", file=sys.stderr)
+        mail.logout()
+        sys.exit(1)
+    raw = data[0][1]
+    msg = email.message_from_bytes(raw)
+    mail.logout()
+
+    attachments = get_attachments(msg)
+    if not attachments:
+        print(f"[info] Email UID {uid} has no attachments.")
+        return
+
+    print(f"\n  📎  {len(attachments)} attachment(s) found in UID {uid}:")
+    for name, _ in attachments:
+        print(f"       • {name}")
+    print()
+    saved = save_attachments(msg, save_dir, uid)
+    print(f"\n[ok] {len(saved)} file(s) saved to: {save_dir}")
+
+
+
 # ---------------------------------------------------------------------------
 
 def cmd_notes_show() -> None:
@@ -494,13 +616,24 @@ def build_parser() -> argparse.ArgumentParser:
     read_grp.add_argument("--from",   dest="sender")
     read_grp.add_argument("--search", dest="keyword")
     read_p.add_argument("--count", type=int, default=5)
+    read_p.add_argument("--save-attachments", dest="save_attachments", metavar="DIR", default=None,
+                        help="Download all attachments from fetched emails into DIR")
+
+    # --- DOWNLOAD ---
+    dl_p = sub.add_parser("download", help="Download attachments from a specific email by UID")
+    dl_p.add_argument("--uid", required=True, help="Email UID (shown in read output)")
+    dl_p.add_argument("--dir", dest="dl_dir", default="./attachments",
+                      help="Directory to save attachments (default: ./attachments)")
 
     # --- SEND ---
     send_p = sub.add_parser("send")
-    send_p.add_argument("--to",          required=True)
-    send_p.add_argument("--subject",     required=True)
-    send_p.add_argument("--body",        required=True)
-    send_p.add_argument("--attachments", nargs="*", default=[], metavar="FILE")
+    send_p.add_argument("--to",           required=True)
+    send_p.add_argument("--subject",      default=None,
+                        help="Subject line. Auto-filled with 'Re: …' when --reply-to-uid is used.")
+    send_p.add_argument("--body",         required=True)
+    send_p.add_argument("--attachments",  nargs="*", default=[], metavar="FILE")
+    send_p.add_argument("--reply-to-uid", dest="reply_uid", default=None,
+                        help="UID of the email to reply to (sets In-Reply-To / References headers)")
 
     # --- NOTES ---
     notes_p = sub.add_parser("notes")
@@ -578,17 +711,39 @@ def main() -> None:
     validate_account(cfg)
 
     if args.mode == "read":
+        save_dir = Path(args.save_attachments) if args.save_attachments else None
         if args.sender:
-            cmd_from(cfg, args.sender)
+            cmd_from(cfg, args.sender, save_dir)
         elif args.keyword:
-            cmd_search(cfg, args.keyword)
+            cmd_search(cfg, args.keyword, save_dir)
         else:
-            cmd_latest(cfg, args.count)
+            cmd_latest(cfg, args.count, save_dir)
+
+    elif args.mode == "download":
+        cmd_download(cfg, args.uid, Path(args.dl_dir))
 
     elif args.mode == "send":
         body = args.body.replace("\\n", "\n")
-        print(f"[info] From: {cfg['account']}  →  To: {args.to}  |  Subject: {args.subject}")
-        cmd_send(cfg, args.to, args.subject, body, args.attachments)
+
+        in_reply_to = ""
+        references  = ""
+        subject     = args.subject
+
+        if args.reply_uid:
+            meta = fetch_reply_meta(cfg, args.reply_uid)
+            in_reply_to = meta["message_id"]
+            references  = meta["references"]
+            # Auto-build subject if not explicitly provided
+            if not subject:
+                orig_subj = meta["subject"]
+                subject = orig_subj if orig_subj.lower().startswith("re:") else f"Re: {orig_subj}"
+        elif not subject:
+            print("[error] --subject is required when not using --reply-to-uid.", file=sys.stderr)
+            sys.exit(1)
+
+        print(f"[info] From: {cfg['account']}  →  To: {args.to}  |  Subject: {subject}")
+        cmd_send(cfg, args.to, subject, body, args.attachments,
+                 in_reply_to=in_reply_to, references=references)
 
 
 if __name__ == "__main__":

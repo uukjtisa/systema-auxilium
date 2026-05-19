@@ -40,12 +40,33 @@ Once resolved in a conversation, keep using it — don't re-ask.
 ## READ
 
 ```bash
-python e_mailman.py --account "gmail" read --latest [--count N]
-python e_mailman.py --account "gmail" read --from "addr"
-python e_mailman.py --account "gmail" read --search "keyword"
+python e_mailman.py --account "gmail" read --latest [--count N] [--save-attachments DIR]
+python e_mailman.py --account "gmail" read --from "addr" [--save-attachments DIR]
+python e_mailman.py --account "gmail" read --search "keyword" [--save-attachments DIR]
 ```
 
 No confirmation needed — run and summarize.
+
+Dates are automatically converted to the **system's local timezone** (no extra modules required — uses the OS clock). Regardless of what timezone the sender was in, the displayed date always reflects local time.
+
+Attachment filenames are always listed in the email summary (with a 📎 indicator and the UID).  
+Add `--save-attachments DIR` to automatically download all attachments from fetched emails into `DIR`.
+
+---
+
+## DOWNLOAD
+
+Download attachments from a **specific email** by its UID (shown in `read` output):
+
+```bash
+python e_mailman.py --account "gmail" download --uid 12345
+python e_mailman.py --account "gmail" download --uid 12345 --dir ./my_files
+```
+
+- `--uid` is required. UIDs appear in the `Email #N (UID: …)` header when reading.
+- `--dir` defaults to `./attachments` if omitted.
+- Filenames are sanitised and won't overwrite existing files (a UID suffix is appended on collision).
+- If the email has no attachments, the script says so and exits cleanly.
 
 ---
 
@@ -66,10 +87,20 @@ Send? (yes / edit / cancel)
 On yes:
 
 ```bash
+# Fresh email
 python e_mailman.py --account "disroot" send \
   --to "addr" --subject "..." --body "..." \
   [--attachments f1 f2]
+
+# Reply to an existing email (threads correctly in all email clients)
+python e_mailman.py --account "disroot" send \
+  --reply-to-uid UID \
+  --to "addr" --body "..." \
+  [--subject "..."]          # optional — auto-fills as "Re: <original subject>" if omitted
+  [--attachments f1 f2]
 ```
+
+`--reply-to-uid` takes the UID shown in the `Email #N (UID: …)` header when reading. It automatically sets the `In-Reply-To` and `References` headers so the message threads correctly in the recipient's email client.
 
 ---
 
@@ -150,11 +181,17 @@ python e_mailman.py notes --set "gmail" "personal, day-to-day"  # set a note
 python e_mailman.py notes --add "gmail" "also used for Drive"   # append to a note
 python e_mailman.py account --list                               # show all accounts
 
-# Reading
+# Reading  (dates shown in local system time; UIDs shown in Email #N header — needed for download/reply)
 python e_mailman.py --account gmail read --latest                # last 5 emails
 python e_mailman.py --account gmail read --latest --count 10     # last N emails
 python e_mailman.py --account gmail read --from "boss@co.com"   # filter by sender
 python e_mailman.py --account gmail read --search "invoice"      # filter by subject
+
+# Attachment listing & downloading
+python e_mailman.py --account gmail read --latest --save-attachments ./downloads
+                                                                 # read + save all attachments
+python e_mailman.py --account gmail download --uid 12345         # download from a specific email
+python e_mailman.py --account gmail download --uid 12345 --dir ./my_files
 
 # Sending  (always show draft + confirm first)
 python e_mailman.py --account disroot send \
@@ -162,6 +199,13 @@ python e_mailman.py --account disroot send \
 python e_mailman.py --account disroot send \
   --to "user@example.com" --subject "Files" --body "See attached" \
   --attachments report.pdf photo.jpg
+
+# Replying  (threads correctly in all email clients)
+python e_mailman.py --account disroot send \
+  --reply-to-uid 12345 \
+  --to "user@example.com" \
+  --body "Thanks for your message!"
+  # --subject auto-fills as "Re: <original subject>" — override it if needed
 
 # Managing accounts
 python e_mailman.py account --add \
