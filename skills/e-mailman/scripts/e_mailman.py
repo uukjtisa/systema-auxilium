@@ -225,6 +225,7 @@ def format_local_date(date_str: str) -> str:
 
 
 
+def get_attachments(msg) -> list:
     """Return a list of (filename, part) tuples for all attachments in the message."""
     attachments = []
     if msg.is_multipart():
