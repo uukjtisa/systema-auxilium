@@ -1,23 +1,5 @@
-#!/usr/bin/env python3
 """
-e_mailman.py — Multi-account email skill script.
-
-ACCOUNT DATA:    emails.json          (same folder as this script)
-ACCOUNT NOTES:   account_notes.json   (same folder as this script)
-
-USAGE:
-    python e_mailman.py --info
-    python e_mailman.py --account gmail read --latest [--count N] [--save-attachments DIR]
-    python e_mailman.py --account gmail read --from "addr" [--save-attachments DIR]
-    python e_mailman.py --account gmail read --search "keyword" [--save-attachments DIR]
-    python e_mailman.py --account gmail download --uid 12345 [--dir ./downloads]
-    python e_mailman.py --account disroot send --to "addr" --subject "..." --body "..."
-    python e_mailman.py notes
-    python e_mailman.py notes --set  "account" "replacement note"
-    python e_mailman.py notes --add  "account" "appended note"
-    python e_mailman.py account --list
-    python e_mailman.py account --add  --name "label" --email "x@y.com" --password "..." --smtp-host "h" --smtp-port 465 --imap-host "h" --imap-port 993
-    python e_mailman.py account --remove "name_or_email"
+skills/e-mailman/e_mailman.py — Multi-account email skill script.
 """
 
 import argparse
@@ -44,6 +26,7 @@ if hasattr(sys.stdout, "reconfigure"):
 _HERE           = Path(__file__).parent
 EMAILS_FILE     = _HERE / "emails.json"
 NOTES_FILE      = _HERE / "account_notes.json"
+CONTACTS_FILE   = _HERE / "contacts.json"
 DEFAULT_ACCOUNT = 0
 
 # ---------------------------------------------------------------------------
@@ -494,6 +477,8 @@ def cmd_download(cfg: dict, uid: str, save_dir: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# NOTES subcommand
+# ---------------------------------------------------------------------------
 
 def cmd_notes_show() -> None:
     notes = load_notes()
@@ -501,25 +486,138 @@ def cmd_notes_show() -> None:
         print("[info] account_notes.json is empty.")
         return
     for account, data in notes.items():
-        print(f"\n  {account}")
-        print(f"    {data.get('notes', '(no notes)')}")
+        email_str = data.get("email", "")
+        note_str  = data.get("notes", "(no notes)")
+        print(f"\n  ▸ {account}")
+        if email_str:
+            print(f"    📧  {email_str}")
+        else:
+            print(f"    📧  (no email set — use: notes --set-email \"{account}\" \"addr@example.com\")")
+        print(f"    📝  {note_str}")
     print()
 
 
 def cmd_notes_set(account: str, note: str) -> None:
     notes = load_notes()
-    notes[account] = {"notes": note}
+    existing_email = notes.get(account, {}).get("email", "")
+    notes[account] = {"email": existing_email, "notes": note}
     save_notes(notes)
     print(f"[ok] Notes replaced for '{account}'.")
 
 
+def cmd_notes_set_email(account: str, email_addr: str) -> None:
+    notes = load_notes()
+    existing_notes = notes.get(account, {}).get("notes", "")
+    notes[account] = {"email": email_addr, "notes": existing_notes}
+    save_notes(notes)
+    print(f"[ok] Email set for '{account}' → {email_addr}")
+
+
 def cmd_notes_add(account: str, note: str) -> None:
     notes = load_notes()
-    existing = notes.get(account, {}).get("notes", "")
-    updated  = (existing + "\n" + note).strip() if existing else note
-    notes[account] = {"notes": updated}
+    existing_email = notes.get(account, {}).get("email", "")
+    existing_notes = notes.get(account, {}).get("notes", "")
+    updated = (existing_notes + "\n" + note).strip() if existing_notes else note
+    notes[account] = {"email": existing_email, "notes": updated}
     save_notes(notes)
     print(f"[ok] Note appended to '{account}'.")
+
+# ---------------------------------------------------------------------------
+# CONTACTS — contacts.json  (name → email + optional note)
+# ---------------------------------------------------------------------------
+# Separate from account_notes.json (which is about *sending* accounts).
+# This is an address book: maps friendly names to email addresses so the
+# agent can resolve "send my mom an email" without asking every time.
+# Structure:
+#   { "mom": {"email": "mom@example.com", "note": "..."},  ... }
+# ---------------------------------------------------------------------------
+
+def load_contacts() -> dict:
+    if not CONTACTS_FILE.exists():
+        save_contacts({})
+        print(f"[info] Created empty contacts.json at {CONTACTS_FILE}")
+        return {}
+    with open(CONTACTS_FILE, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_contacts(contacts: dict) -> None:
+    with open(CONTACTS_FILE, "w", encoding="utf-8") as f:
+        json.dump(contacts, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+
+def resolve_contact(name_or_email: str) -> str | None:
+    """Return the email address for a contact label, or None if not found.
+    If name_or_email already looks like an address, return it as-is."""
+    if "@" in name_or_email:
+        return name_or_email
+    contacts = load_contacts()
+    needle = name_or_email.strip().lower()
+    # Exact key match first
+    for key, data in contacts.items():
+        if key.lower() == needle:
+            return data["email"]
+    # Partial match fallback
+    matches = [(k, v) for k, v in contacts.items() if needle in k.lower()]
+    if len(matches) == 1:
+        return matches[0][1]["email"]
+    if len(matches) > 1:
+        names = ", ".join(k for k, _ in matches)
+        print(f"[warn] '{name_or_email}' matched multiple contacts: {names}. Be more specific.")
+    return None
+
+
+def cmd_contacts_list() -> None:
+    contacts = load_contacts()
+    if not contacts:
+        print("[info] contacts.json is empty. Add one with: contacts --add \"name\" --email \"addr\"")
+        return
+    print(f"\n  {'Label':<20} {'Email':<36} Note")
+    print("  " + "─" * 72)
+    for label, data in sorted(contacts.items()):
+        note = data.get("note", "")
+        print(f"  {label:<20} {data['email']:<36} {note}")
+    print()
+
+
+def cmd_contacts_add(label: str, email_addr: str, note: str = "") -> None:
+    contacts = load_contacts()
+    key = label.strip()
+    existed = key in contacts
+    contacts[key] = {"email": email_addr.strip(), "note": note.strip()}
+    save_contacts(contacts)
+    verb = "Updated" if existed else "Added"
+    print(f"[ok] {verb} contact '{key}' → {email_addr}")
+
+
+def cmd_contacts_remove(label: str) -> None:
+    contacts = load_contacts()
+    needle = label.strip().lower()
+    to_delete = [k for k in contacts if k.lower() == needle]
+    if not to_delete:
+        print(f"[error] No contact matching '{label}'.", file=sys.stderr)
+        sys.exit(1)
+    for k in to_delete:
+        del contacts[k]
+    save_contacts(contacts)
+    print(f"[ok] Removed contact '{label}'.")
+
+
+def cmd_contacts_search(query: str) -> None:
+    contacts = load_contacts()
+    needle = query.strip().lower()
+    results = {k: v for k, v in contacts.items()
+               if needle in k.lower() or needle in v["email"].lower()
+               or needle in v.get("note", "").lower()}
+    if not results:
+        print(f"[info] No contacts matching '{query}'.")
+        return
+    print(f"\n  {'Label':<20} {'Email':<36} Note")
+    print("  " + "─" * 72)
+    for label, data in results.items():
+        print(f"  {label:<20} {data['email']:<36} {data.get('note', '')}")
+    print()
 
 # ---------------------------------------------------------------------------
 # ACCOUNT subcommand — add / remove / list
@@ -566,9 +664,9 @@ def cmd_account_add(name: str, email_addr: str, password: str,
     notes = load_notes()
     key = name or email_addr
     if key not in notes:
-        notes[key] = {"notes": ""}
+        notes[key] = {"email": email_addr, "notes": ""}
         save_notes(notes)
-        print(f"[info] Added empty notes entry for '{key}' in account_notes.json.")
+        print(f"[info] Added notes entry for '{key}' ({email_addr}) in account_notes.json.")
 
 
 def cmd_account_remove(selector: str) -> None:
@@ -639,8 +737,21 @@ def build_parser() -> argparse.ArgumentParser:
     # --- NOTES ---
     notes_p = sub.add_parser("notes")
     notes_grp = notes_p.add_mutually_exclusive_group()
-    notes_grp.add_argument("--set", nargs=2, metavar=("ACCOUNT", "NOTE"))
-    notes_grp.add_argument("--add", nargs=2, metavar=("ACCOUNT", "NOTE"))
+    notes_grp.add_argument("--set",       nargs=2, metavar=("ACCOUNT", "NOTE"))
+    notes_grp.add_argument("--add",       nargs=2, metavar=("ACCOUNT", "NOTE"))
+    notes_grp.add_argument("--set-email", nargs=2, metavar=("ACCOUNT", "EMAIL"),
+                           dest="set_email", help="Set the email address shown for an account entry")
+
+    # --- CONTACTS ---
+    con_p = sub.add_parser("contacts", help="Manage contacts.json address book")
+    con_grp = con_p.add_mutually_exclusive_group(required=True)
+    con_grp.add_argument("--list",   action="store_true",  help="Show all contacts")
+    con_grp.add_argument("--add",    action="store_true",  help="Add or update a contact")
+    con_grp.add_argument("--remove", metavar="LABEL",      help="Remove a contact by label")
+    con_grp.add_argument("--search", metavar="QUERY",      help="Search contacts by name, email, or note")
+    con_p.add_argument("--label",    default="",  help="Friendly name  (required with --add)")
+    con_p.add_argument("--email",    default="",  help="Email address  (required with --add)")
+    con_p.add_argument("--note",     default="",  help="Optional note  (used with --add)")
 
     # --- ACCOUNT ---
     acc_p = sub.add_parser("account", help="Manage accounts in emails.json")
@@ -684,8 +795,25 @@ def main() -> None:
             cmd_notes_set(args.set[0], args.set[1])
         elif args.add:
             cmd_notes_add(args.add[0], args.add[1])
+        elif args.set_email:
+            cmd_notes_set_email(args.set_email[0], args.set_email[1])
         else:
             cmd_notes_show()
+        return
+
+    # --- CONTACTS ---
+    if args.mode == "contacts":
+        if args.list:
+            cmd_contacts_list()
+        elif args.search:
+            cmd_contacts_search(args.search)
+        elif args.remove:
+            cmd_contacts_remove(args.remove)
+        elif args.add:
+            if not args.label or not args.email:
+                print("[error] --add requires --label and --email.", file=sys.stderr)
+                sys.exit(1)
+            cmd_contacts_add(args.label, args.email, args.note)
         return
 
     # --- ACCOUNT ---
@@ -726,6 +854,16 @@ def main() -> None:
     elif args.mode == "send":
         body = args.body.replace("\\n", "\n")
 
+        # Resolve recipient — contacts.json lookup if not a raw email address
+        recipient = resolve_contact(args.to)
+        if not recipient:
+            print(f"[error] No contact found for '{args.to}'. "
+                  f"Add them with: contacts --add --label \"{args.to}\" --email \"addr@example.com\"",
+                  file=sys.stderr)
+            sys.exit(1)
+        if recipient != args.to:
+            print(f"[info] Resolved '{args.to}' → {recipient}")
+
         in_reply_to = ""
         references  = ""
         subject     = args.subject
@@ -742,8 +880,8 @@ def main() -> None:
             print("[error] --subject is required when not using --reply-to-uid.", file=sys.stderr)
             sys.exit(1)
 
-        print(f"[info] From: {cfg['account']}  →  To: {args.to}  |  Subject: {subject}")
-        cmd_send(cfg, args.to, subject, body, args.attachments,
+        print(f"[info] From: {cfg['account']}  →  To: {recipient}  |  Subject: {subject}")
+        cmd_send(cfg, recipient, subject, body, args.attachments,
                  in_reply_to=in_reply_to, references=references)
 
 
