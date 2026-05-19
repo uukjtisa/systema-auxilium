@@ -107,10 +107,56 @@ python e_mailman.py --account "disroot" send \
 ## NOTES commands
 
 ```bash
-python e_mailman.py notes                           # show all
-python e_mailman.py notes --set "account" "note"    # replace entirely
-python e_mailman.py notes --add "account" "note"    # append a line
+python e_mailman.py notes                                    # show all (displays label, email, and note)
+python e_mailman.py notes --set "account" "note"             # replace note text
+python e_mailman.py notes --add "account" "note"             # append a line to note
+python e_mailman.py notes --set-email "account" "addr@x.com" # set or update the email shown for an entry
 ```
+
+Each entry in `account_notes.json` now holds both the email address and the note:
+```json
+{
+  "Thirdy's email": {
+    "email": "thirdy@gmail.com",
+    "notes": "Personal Gmail. Use for reading emails..."
+  }
+}
+```
+
+When reading notes, the output clearly shows the label, email, and note for each entry — so the agent always knows which address it's dealing with. If an entry has no email set yet, it will say so and suggest the command to fix it.
+
+---
+
+## CONTACTS
+
+`contacts.json` is a personal address book — separate from `account_notes.json`. It maps friendly labels (like "mom", "boss", "Kimi") to email addresses, so the agent can resolve names without asking every time.
+
+The `--to` flag on `send` accepts either a raw email address **or** a contact label. If a label is given, it is automatically resolved via `contacts.json`.
+
+```bash
+python e_mailman.py contacts --list
+python e_mailman.py contacts --add --label "mom"  --email "mom@example.com" [--note "optional note"]
+python e_mailman.py contacts --remove "mom"
+python e_mailman.py contacts --search "mom"
+```
+
+### Proactive contact-saving behavior (initiative rule)
+
+**When the user mentions a person by name for the first time and no matching contact exists**, the agent must:
+
+1. Ask for their email address (once, clearly).
+2. Send the email.
+3. Immediately after — without being asked — run:
+   ```bash
+   python e_mailman.py contacts --add --label "name" --email "their@email.com"
+   ```
+4. Confirm: `"I've saved [name] as a contact so you won't need to tell me next time."`
+
+**When the user provides a raw email address the agent hasn't seen before** (not already in contacts), after sending offer once:
+> "Want me to save [addr] as a contact? If so, what label should I use?"  
+> If yes → run `contacts --add`. If they decline or ignore, drop it.
+
+Once a contact exists, use it silently — never ask for the email again.
 
 ---
 
@@ -193,9 +239,17 @@ python e_mailman.py --account gmail read --latest --save-attachments ./downloads
 python e_mailman.py --account gmail download --uid 12345         # download from a specific email
 python e_mailman.py --account gmail download --uid 12345 --dir ./my_files
 
+# Contacts (address book — resolves names to emails on send)
+python e_mailman.py contacts --list
+python e_mailman.py contacts --add --label "mom" --email "mom@example.com" --note "optional"
+python e_mailman.py contacts --remove "mom"
+python e_mailman.py contacts --search "mom"
+
 # Sending  (always show draft + confirm first)
 python e_mailman.py --account disroot send \
-  --to "user@example.com" --subject "Hello" --body "Hi there"
+  --to "mom" --subject "Hello" --body "Hi there"          # contact label
+python e_mailman.py --account disroot send \
+  --to "user@example.com" --subject "Hello" --body "Hi"   # raw address
 python e_mailman.py --account disroot send \
   --to "user@example.com" --subject "Files" --body "See attached" \
   --attachments report.pdf photo.jpg
