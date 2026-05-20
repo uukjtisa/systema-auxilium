@@ -23,7 +23,7 @@ root.overrideredirect(True)
 root.attributes('-topmost', True)
 root.attributes('-alpha', 0.97)
 
-CLOSE_AFTER_SECONDS = 10  # ← change this number to adjust how long the notification stays
+CLOSE_AFTER_SECONDS = 5  # ← change this number to adjust how long the notification stays
 
 bg        = "#0d1117"
 bg_card   = "#161b22"
@@ -104,3 +104,4 @@ btn.bind("<Leave>", lambda e: btn.config(bg=accent,    fg="#0d1117"))
 update_countdown(root, countdown_label, CLOSE_AFTER_SECONDS)
 
 root.mainloop()
+

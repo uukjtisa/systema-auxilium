@@ -97,6 +97,9 @@ Every AI backend is a self-contained script you drop into a folder. No hardcoded
 
 **Scheduled Tasks**
 Set up persistent background agents that ping the AI on a schedule — even while you're doing something else. Each task has its own instruction, active time window, and ping interval (or specific ping times within that window). Tasks can be paused or activated without deletion, and each runs in its own session context. You can pre-load skills into a task agent so it has specialized knowledge from the moment it starts, and set per-task permissions to control exactly what the agent is allowed to do — like whether it can run code, use work mode, or manage skills. Task agents can send messages directly into your main chat when they have something to report.
+Extra features:
+    - Scripted Instructions: Possible applications Make conditional Instructions and well defined case appropriate instructions.
+    - Scripted Ping poller: Possible applications make a listener for messages in an app and ping the agent about it.
 IMPORTANT NOTE: Within the scheduled task, code execution calls are approved immediately, so be very careful with your instructions and permissions you allow!
 
 **Session Naming**

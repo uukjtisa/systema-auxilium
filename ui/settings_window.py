@@ -863,6 +863,31 @@ class SettingsWindow(BaseWindow):
         self.system_prompt_hijack_input.setStyleSheet(_INPUT)
         sp_lay.addWidget(self.system_prompt_hijack_input)
         sys_lay.addWidget(sp_group)
+
+        sp_extras_group = QGroupBox("🧩 Optional System Prompt Sections (Main AI Engine)")
+        sp_extras_group.setStyleSheet(_GROUP)
+        sp_extras_lay = QVBoxLayout(sp_extras_group)
+        self.include_image_tools_checkbox = QCheckBox("Inject Image Tools into system prompt")
+        self.include_image_tools_checkbox.setStyleSheet(_CHECK)
+        self.include_image_tools_checkbox.setToolTip(
+            "Adds image tool instructions to the main AI engine's system prompt.\n"
+            "Does NOT affect task sessions — those have their own toggle in the task editor."
+        )
+        self.include_controller_ref_checkbox = QCheckBox("Inject Controller Reference into system prompt")
+        self.include_controller_ref_checkbox.setStyleSheet(_CHECK)
+        self.include_controller_ref_checkbox.setToolTip(
+            "Adds controller usage reference into the main AI engine's system prompt."
+        )
+        self.include_notify_tool_checkbox = QCheckBox("Inject Notify Tool into system prompt")
+        self.include_notify_tool_checkbox.setStyleSheet(_CHECK)
+        self.include_notify_tool_checkbox.setToolTip(
+            "Adds notify tool instructions into the main AI engine's system prompt."
+        )
+        sp_extras_lay.addWidget(self.include_image_tools_checkbox)
+        sp_extras_lay.addWidget(self.include_controller_ref_checkbox)
+        sp_extras_lay.addWidget(self.include_notify_tool_checkbox)
+        sys_lay.addWidget(sp_extras_group)
+
         sys_lay.addStretch()
         tabs.addTab(sys_scroll, "💻 System")
 
@@ -1077,6 +1102,12 @@ class SettingsWindow(BaseWindow):
         # Load system prompt hijacking
         sys_prompt_hijacked = self.controller.settings.get('system_prompt_hijacked', False)
         self.system_prompt_hijack_checkbox.setChecked(sys_prompt_hijacked)
+        self.include_image_tools_checkbox.setChecked(
+            self.controller.settings.get('include_image_tools', False))
+        self.include_controller_ref_checkbox.setChecked(
+            self.controller.settings.get('include_controller_ref', False))
+        self.include_notify_tool_checkbox.setChecked(
+            self.controller.settings.get('include_notify_tool', False))
 
         # Load system prompt
         self.system_prompt_hijack_input.setPlainText(
@@ -1242,6 +1273,11 @@ class SettingsWindow(BaseWindow):
         self.controller.set_system_prompt_hijack(
             self.system_prompt_hijack_checkbox.isChecked(),
             self.system_prompt_hijack_input.toPlainText()
+        )
+        self.controller.set_system_prompt_extras(
+            include_image_tools=self.include_image_tools_checkbox.isChecked(),
+            include_controller_ref=self.include_controller_ref_checkbox.isChecked(),
+            include_notify_tool=self.include_notify_tool_checkbox.isChecked(),
         )
 
         # Save custom system prompt
