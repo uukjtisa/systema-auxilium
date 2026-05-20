@@ -15,6 +15,7 @@ from datetime import datetime, date, timedelta
 import math
 from pathlib import Path
 from core.logger import _make_logger, _NoOpLogger
+from core.python_interpreter import PythonInterpreter
 
 _verbose = True
 log = _make_logger("TaskManager") if _verbose else _NoOpLogger()
@@ -31,9 +32,10 @@ def _now_stamp():
 
 # ── {{code}} block resolver ───────────────────────────────────────────────────
 
-def _resolve_instruction(instruction: str) -> tuple:
+def _resolve_instruction(instruction: str, interpreter=None, functions: list = None) -> tuple:
     """
-    Finds all {{...}} blocks in instruction text, executes each one,
+    Finds all {{...}} blocks in instruction text, executes each one
+    using a shared PythonInterpreter instance (persistent namespace across blocks),
     and replaces the block with its output inline.
 
     Returns:
@@ -42,43 +44,30 @@ def _resolve_instruction(instruction: str) -> tuple:
     """
     pattern = re.compile(r'\{\{(.*?)\}\}', re.DOTALL)
     errors = []
+    interp = interpreter if interpreter is not None else PythonInterpreter()
+
+    # Pre-inject saved functions so {{ my_func() }} works in instruction blocks
+    if functions:
+        for _fn in functions:
+            try:
+                interp.execute(_fn['code'])
+            except Exception:
+                pass
 
     def _run_block(match):
         code = match.group(1).strip()
-        lines = code.splitlines()
-        out_buf = io.StringIO()
-        old_stdout = sys.stdout
-        result_holder = [None]
-        try:
-            # Split into body + final expression for auto-return
-            if lines:
-                try:
-                    compile(lines[-1], '<expr>', 'eval')
-                    exec_body = '\n'.join(lines[:-1])
-                    eval_expr = lines[-1]
-                except SyntaxError:
-                    exec_body = code
-                    eval_expr = None
-            else:
-                exec_body = code
-                eval_expr = None
+        result = interp.execute(code)
 
-            ns = {}
-            sys.stdout = out_buf
-            if exec_body.strip():
-                exec(exec_body, ns)  # noqa: S102
-            if eval_expr:
-                result_holder[0] = eval(eval_expr, ns)  # noqa: S307
-            sys.stdout = old_stdout
-        except Exception:
-            sys.stdout = old_stdout
-            errors.append(traceback.format_exc())
+        if result['error']:
+            errors.append(result['error'])
             return match.group(0)  # leave block unchanged on error
 
-        printed = out_buf.getvalue()
-        if result_holder[0] is not None:
-            return f"{printed.rstrip()}\n{result_holder[0]}" if printed else str(result_holder[0])
-        return printed.rstrip() if printed else ''
+        parts = []
+        if result['stdout']:
+            parts.append(result['stdout'].rstrip())
+        if result['result'] is not None:
+            parts.append(str(result['result']))
+        return '\n'.join(parts) if parts else ''
 
     resolved = pattern.sub(_run_block, instruction)
     if errors:
@@ -130,23 +119,23 @@ class TaskAIEngine:
             def _task_take_screenshot(save_path=None):
                 """Take a screenshot and queue it to be passed as an image to the
                 AI on the next work step via chat_image(). Returns the saved path."""
-                import os, time, tempfile
+                import uuid
                 try:
                     from PIL import ImageGrab
                     if save_path is None:
-                        save_path = os.path.join(
-                            tempfile.gettempdir(), f"task_shot_{int(time.time())}.png"
-                        )
+                        _temp_dir = _APP_ROOT / "data" / "temp"
+                        _temp_dir.mkdir(parents=True, exist_ok=True)
+                        save_path = str(_temp_dir / f"task_shot_{uuid.uuid4().hex[:12]}.png")
                     ImageGrab.grab().save(save_path)
                     _task_ai_ref._pending_context_images.append(save_path)
                     return save_path
                 except Exception as _e1:
                     try:
-                        import pyautogui
+                        import pyautogui, uuid
                         if save_path is None:
-                            save_path = os.path.join(
-                                tempfile.gettempdir(), f"task_shot_{int(time.time())}.png"
-                            )
+                            _temp_dir = _APP_ROOT / "data" / "temp"
+                            _temp_dir.mkdir(parents=True, exist_ok=True)
+                            save_path = str(_temp_dir / f"task_shot_{uuid.uuid4().hex[:12]}.png")
                         pyautogui.screenshot(save_path)
                         _task_ai_ref._pending_context_images.append(save_path)
                         return save_path
@@ -304,9 +293,45 @@ class TaskAIEngine:
         return msg, cleaned
 
 
+def _group_history_logical(history: list) -> list:
+    """
+    Groups chat history into logical units for message-limit counting.
+    A consecutive run of assistant messages that all contain a
+    ```work_environment block (the full tool session, including the final
+    exit step) counts as ONE logical unit — not counted individually.
+    Ping messages (system role) and normal assistant replies each count as one.
+    Returns a list of groups; each group is a list of message dicts.
+    Session history is never modified — this only affects counting/display.
+    """
+    groups = []
+    i = 0
+    while i < len(history):
+        msg = history[i]
+        role = msg.get('role', '')
+        content = msg.get('content', '')
+        if role == 'assistant' and '```work_environment' in content:
+            # Start of a work sequence — collect all consecutive work messages
+            group = [msg]
+            i += 1
+            while i < len(history):
+                nxt = history[i]
+                if (nxt.get('role') == 'assistant'
+                        and '```work_environment' in nxt.get('content', '')):
+                    group.append(nxt)
+                    i += 1
+                else:
+                    break
+            groups.append(group)
+        else:
+            groups.append([msg])
+            i += 1
+    return groups
+
+
 # ── Task Thread ───────────────────────────────────────────────────────────────
 
 class TaskThread(threading.Thread):
+
     """One daemon thread per task — runs the scheduled ping loop independently."""
 
     def __init__(self, task: dict, controller, skill_manager, send_main_callback, set_inactive_callback=None):
@@ -319,6 +344,10 @@ class TaskThread(threading.Thread):
         self._set_inactive = set_inactive_callback   # fn(task_id) → marks task inactive after one-shot
         self._stop_event = threading.Event()
         self._ai = TaskAIEngine(controller)
+        # Inject shared references into task AI's Python interpreter namespace
+        _py_ns = self._ai._engine.tool_manager.tools['python'].namespace
+        _py_ns['controller'] = controller
+        _py_ns['notify'] = controller.notify if hasattr(controller, 'notify') else None
         self._sessions_root = _APP_ROOT / "data" / "task-sessions"
         self._sessions_root.mkdir(parents=True, exist_ok=True)
         log.info(f"[TaskThread.__init__] Ready | task='{task['name']}' id={task['id'][:8]}")
@@ -371,58 +400,8 @@ class TaskThread(threading.Thread):
     # ── System prompt ─────────────────────────────────────────────────────────
 
     def _build_system_prompt(self) -> str:
-        task = self._task
-        perms = task.get('permissions', {})
-
-        # ── Base: full system prompt from controller (same as main session) ──
-        base_prompt = ""
-        try:
-            base_prompt = self._controller.ai._get_effective_system_prompt()
-        except Exception as e:
-            log.warning(f"[TaskThread._build_system_prompt] Could not get controller prompt: {e}")
-
-        # Build permissions block
-        perm_lines = []
-        if perms.get('allow_workmode'):
-            perm_lines.append("- You MAY use the work_environment tool to perform agentic tasks.")
-        if perms.get('allow_execute_code'):
-            perm_lines.append("- You MAY use execute_code to run Python code.")
-        if perms.get('allow_skill_load_unload'):
-            perm_lines.append("- You MAY use load_skill and unload_skill.")
-        if not perm_lines:
-            perm_lines.append("- READ-ONLY mode. Do not attempt to execute code or use tools.")
-        perm_block = '\n'.join(perm_lines)
-
-        # Task-specific context appended after the full system prompt
-        task_section = (
-            f"\n\n=== BACKGROUND TASK CONTEXT ===\n"
-            f"You are currently running as an automated background task agent — NOT in a live user conversation.\n"
-            f"Task name: {task['name']}\n\n"
-            f"Task Permissions:\n{perm_block}\n\n"
-            f"To notify the user, emit EXACTLY this JSON on its own line:\n"
-            f'{{"tool": "send_message_main", "input": "your message to the user"}}\n\n'
-            f"Only message the user when something genuinely needs their attention.\n"
-            f"Each ping message has a timestamp appended for your temporal awareness.\n"
-            f"=== END BACKGROUND TASK CONTEXT ===\n"
-        )
-
-        # ── Inject pre-loaded skill content ───────────────────────────────────
-        loaded_skills = task.get('loaded_skills', [])
-        skill_injections = []
-        for skill_name in loaded_skills:
-            content = self._load_skill_content(skill_name)
-            if content:
-                skill_injections.append(
-                    f"\n\n=== PRE-LOADED SKILL: {skill_name} ===\n"
-                    f"{content}\n"
-                    f"=== END SKILL: {skill_name} ===\n"
-                )
-                log.info(f"[TaskThread._build_system_prompt] Injected skill '{skill_name}'")
-            else:
-                log.warning(f"[TaskThread._build_system_prompt] Skill '{skill_name}' not found — skipped")
-
-        skills_section = "".join(skill_injections)
-        return base_prompt + skills_section + task_section
+        """Delegate to the centralized controller builder — single source of truth."""
+        return self._controller.build_task_system_prompt(self._task)
 
     # ── Schedule helpers ──────────────────────────────────────────────────────
 
@@ -487,29 +466,14 @@ class TaskThread(threading.Thread):
         """
         # ── Try skill_manager API ─────────────────────────────────────────────
         if self._skill_manager is not None:
-            for method_name in ('get_skill_instructions', 'get_skill_prompt',
-                                'get_skill_content', 'load_skill_content'):
-                fn = getattr(self._skill_manager, method_name, None)
-                if callable(fn):
-                    try:
-                        content = fn(skill_name)
-                        if content:
-                            return str(content)
-                    except Exception:
-                        pass
-
-        # ── Fall back to reading skill instruction files from disk ────────────
-        skills_dir = _APP_ROOT / "skills"
-        for fname in ("instructions.md", "SKILL.md", "skill.md",
-                      "instructions.txt", "prompt.md", "system_prompt.txt"):
-            p = skills_dir / skill_name / fname
-            if p.exists():
+            fn = getattr(self._skill_manager, 'get_skill_content', None)
+            if callable(fn):
                 try:
-                    content = p.read_text(encoding='utf-8')
-                    log.info(f"[TaskThread._load_skill_content] Loaded '{skill_name}' from '{p.name}'")
-                    return content
-                except Exception as e:
-                    log.warning(f"[TaskThread._load_skill_content] Could not read '{p}': {e}")
+                    content = fn(skill_name, "TaskThread._load_skill_content")
+                    if content:
+                        return str(content)
+                except Exception:
+                    pass
 
         log.warning(f"[TaskThread._load_skill_content] Skill '{skill_name}' content not found anywhere")
         return None
@@ -571,6 +535,215 @@ class TaskThread(threading.Thread):
         next_ping = start_today + timedelta(seconds=(slots_passed + 1) * interval_sec)
         return max(0.0, (next_ping - now).total_seconds())
 
+    def _get_ping_interval_mode(self) -> str:
+        """
+        Return the effective ping interval mode.
+        Reads unambiguous 'ping_interval_mode' first; falls back to legacy
+        boolean fields so old task files continue to work.
+        """
+        task = self._task
+        mode = task.get('ping_interval_mode', '')
+        if mode in ('timed', 'specific_times', 'script_trigger'):
+            return mode
+        if task.get('use_specific_ping_times', False):
+            return 'specific_times'
+        return 'timed'
+
+    def _fire_ping_now(self, task: dict, task_id: str, session: dict, today: str):
+        """
+        Resolve the instruction, call the AI, and dispatch send_message_main calls.
+        Returns (response_text, send_main_calls).
+        Shared by the timed loop and the script trigger loop.
+        """
+        instruction = task.get('instruction', '')
+        _fns = []
+        try:
+            _fns = self._controller.task_manager.get_functions()
+        except Exception:
+            pass
+        resolved, error = _resolve_instruction(
+            instruction,
+            self._ai._engine.tool_manager.tools['python'],
+            functions=_fns,
+        )
+        if error:
+            log.error(f"[TaskThread._fire_ping_now] Code block error in '{task['name']}': "
+                      f"{error[:200]}")
+            try:
+                self._send_main(
+                    f"⚠️ **Task '{task['name']}' — code block error, ping skipped.**\n\n"
+                    f"```\n{error}\n```"
+                )
+            except Exception as _e:
+                log.error(f"[TaskThread._fire_ping_now] send_main failed: {_e}")
+            return None, []
+
+        system_prompt = self._build_system_prompt()
+        api_history   = self._build_api_history(session)
+        ping_content  = (
+            f"<SYSTEM_AUTOMATED_TASK_PING>\nTHIS IS AN AUTOMATED "
+            f"SYSTEM MESSAGE, YOUR TASK IS STATED BELOW:\n\n{resolved}\n{_now_stamp()}\n\n"
+            f"</SYSTEM_AUTOMATED_TASK_PING>"
+        )
+        session['chat_history'].append({'role': 'system', 'content': ping_content})
+        _unlimited = task.get('unlimited_work_iterations', False)
+        _max_iter  = 999999 if _unlimited else task.get('max_work_iterations', 20)
+        response_text, send_main_calls, engine_history = self._ai.run_full_ping(
+            ping_content, api_history, system_prompt, max_iterations=_max_iter
+        )
+        return response_text, send_main_calls, engine_history, len(api_history)
+
+    def _run_script_trigger_loop(self):
+        """
+        Script Trigger mode main loop.
+
+        Polls fire_ping() in a sub-thread every script_poll_ms milliseconds.
+        Fires the full AI ping when fire_ping() returns True.
+
+        Two guards:
+          _script_busy — only one fire_ping() call runs at a time.
+                         If the previous call is still hanging, that poll tick
+                         is skipped entirely. Prevents thread pile-up.
+          _ping_busy   — only one AI ping runs at a time. Any True signals that
+                         arrive while a ping is in progress are discarded.
+        """
+        task        = self._task
+        task_id     = task['id']
+        script_name = task.get('script_name', '')
+        poll_ms     = max(100, int(task.get('script_poll_ms', 1000)))
+        poll_sec    = poll_ms / 1000.0
+        script_path = _APP_ROOT / "data" / "tasks" / "interval-scripts" / script_name
+
+        if not script_name or not script_path.exists():
+            log.error(
+                f"[TaskThread._run_script_trigger_loop] Script not found: "
+                f"'{script_name}' — task '{task['name']}' will not poll."
+            )
+            return
+
+        log.info(
+            f"[TaskThread._run_script_trigger_loop] Starting | "
+            f"task='{task['name']}' script='{script_name}' poll={poll_ms}ms"
+        )
+
+        _script_busy   = threading.Event()   # set = script sub-thread running
+        _ping_busy     = threading.Event()   # set = AI ping running
+        _trigger_lock  = threading.Lock()
+        _trigger_ready = [False]             # written by script thread, read by main loop
+
+        def _call_script():
+            """Execute fire_ping() once; posts True to _trigger_ready if fired."""
+            try:
+                code_src = script_path.read_text(encoding='utf-8')
+                ns: dict = {}
+                exec(compile(code_src, str(script_path), 'exec'), ns)
+                fn = ns.get('fire_ping')
+                if callable(fn):
+                    if fn() is True:
+                        with _trigger_lock:
+                            _trigger_ready[0] = True
+                        log.debug(
+                            f"[TaskThread._run_script_trigger_loop] "
+                            f"fire_ping() → True in '{script_name}'"
+                        )
+                else:
+                    log.warning(
+                        f"[TaskThread._run_script_trigger_loop] "
+                        f"'{script_name}' has no fire_ping() callable."
+                    )
+            except Exception as _e:
+                log.error(
+                    f"[TaskThread._run_script_trigger_loop] "
+                    f"Script error in '{script_name}': {type(_e).__name__}: {_e}"
+                )
+            finally:
+                _script_busy.clear()
+
+        while not self._stop_event.is_set():
+
+            # ── Window gate ──────────────────────────────────────────────────
+            if not self._in_window():
+                wait = self._wait_seconds_until_start()
+                log.info(
+                    f"[TaskThread._run_script_trigger_loop] Outside window — "
+                    f"sleeping {wait:.0f}s"
+                )
+                self._stop_event.wait(wait)
+                if self._stop_event.is_set():
+                    break
+                if not self._in_window():
+                    continue
+
+            # ── Launch script check (skip if previous call still running) ────
+            if not _script_busy.is_set():
+                _script_busy.set()
+                threading.Thread(
+                    target=_call_script,
+                    daemon=True,
+                    name=f"ScriptCheck-{task_id[:8]}",
+                ).start()
+
+            # ── Check for pending trigger (skip if ping already running) ─────
+            triggered = False
+            with _trigger_lock:
+                if _trigger_ready[0] and not _ping_busy.is_set():
+                    triggered = True
+                    _trigger_ready[0] = False   # consume the signal
+
+            if triggered:
+                log.info(
+                    f"[TaskThread._run_script_trigger_loop] Trigger received — "
+                    f"firing ping for task '{task['name']}'"
+                )
+                _ping_busy.set()
+                try:
+                    today   = date.today().isoformat()
+                    session = self._load_session(task_id, today)
+                    if session is None:
+                        session = self._new_session()
+                        self._save_session(session, task_id, today)
+
+                    response_text, send_main_calls, engine_history, api_hist_len = self._fire_ping_now(
+                        task, task_id, session, today
+                    )
+                    for msg in send_main_calls:
+                        try:
+                            self._send_main(msg)
+                        except Exception as _e:
+                            log.error(
+                                f"[TaskThread._run_script_trigger_loop] "
+                                f"send_main failed: {_e}"
+                            )
+                    # Save AI messages from engine history (assistant + system work mode)
+                    for _msg in engine_history[api_hist_len:]:
+                        if _msg.get('role') in ('assistant', 'system'):
+                            session['chat_history'].append(dict(_msg))
+                    # Stamp the last assistant entry with the finish time
+                    for _i in range(len(session['chat_history']) - 1, -1, -1):
+                        if session['chat_history'][_i].get('role') == 'assistant':
+                            session['chat_history'][_i]['content'] += f"\n{_now_stamp()}"
+                            break
+                    self._save_session(session, task_id, today)
+                    log.info(
+                        f"[TaskThread._run_script_trigger_loop] Ping complete for "
+                        f"task='{task['name']}'"
+                    )
+                except Exception as _e:
+                    log.error(
+                        f"[TaskThread._run_script_trigger_loop] Ping error: "
+                        f"{type(_e).__name__}: {_e}"
+                    )
+                finally:
+                    _ping_busy.clear()
+
+            # ── Sleep until next poll tick ───────────────────────────────────
+            self._stop_event.wait(poll_sec)
+
+        log.info(
+            f"[TaskThread._run_script_trigger_loop] Loop exited for "
+            f"task='{task['name']}'"
+        )
+
     def run(self):
         task = self._task
         task_id = task['id']
@@ -619,7 +792,14 @@ class TaskThread(threading.Thread):
             session = self._load_session(task_id, today) or self._new_session()
             self._save_session(session, task_id, today)
             instruction = task.get('instruction', '')
-            resolved, error = _resolve_instruction(instruction)
+            _fns = []
+            try:
+                _fns = self._controller.task_manager.get_functions()
+            except Exception:
+                pass
+            resolved, error = _resolve_instruction(
+                instruction, self._ai._engine.tool_manager.tools['python'], functions=_fns
+            )
             if error:
                 log.error(f"[TaskThread.run] One-shot code block error: {error[:200]}")
                 try:
@@ -639,7 +819,7 @@ class TaskThread(threading.Thread):
                 session['chat_history'].append({'role': 'system', 'content': ping_content})
                 _unlimited = task.get('unlimited_work_iterations', False)
                 _max_iter  = 999999 if _unlimited else task.get('max_work_iterations', 20)
-                response_text, send_main_calls, _ = self._ai.run_full_ping(
+                response_text, send_main_calls, engine_history = self._ai.run_full_ping(
                     ping_content, api_history, system_prompt, max_iterations=_max_iter
                 )
                 # Dispatch all messages — run_full_ping is fully done by this point
@@ -648,16 +828,25 @@ class TaskThread(threading.Thread):
                         self._send_main(msg)
                     except Exception as e:
                         log.error(f"[TaskThread.run] One-shot send_main failed: {e}")
-                if response_text:
-                    session['chat_history'].append({
-                        'role': 'assistant',
-                        'content': f"{response_text}\n{_now_stamp()}"
-                    })
+                # Save AI messages from engine history (assistant + system work mode)
+                for _msg in engine_history[len(api_history):]:
+                    if _msg.get('role') in ('assistant', 'system'):
+                        session['chat_history'].append(dict(_msg))
+                # Stamp the last assistant entry with the finish time
+                for _i in range(len(session['chat_history']) - 1, -1, -1):
+                    if session['chat_history'][_i].get('role') == 'assistant':
+                        session['chat_history'][_i]['content'] += f"\n{_now_stamp()}"
+                        break
                 self._save_session(session, task_id, today)
                 log.info(f"[TaskThread.run] One-shot ping complete for task='{task['name']}'")
             # ── AI is fully done — NOW mark inactive ──────────────────────────
             if self._set_inactive:
                 self._set_inactive(task_id)
+            return
+
+        # ── Script Trigger mode ───────────────────────────────────────────────
+        if self._get_ping_interval_mode() == 'script_trigger':
+            self._run_script_trigger_loop()
             return
 
         while not self._stop_event.is_set():
@@ -682,7 +871,7 @@ class TaskThread(threading.Thread):
                 log.info(f"[TaskThread.run] New session for task='{task['name']}' date={today}")
 
             # ── Wait for the interval or next specific ping time ─────────────
-            if self._task.get('use_specific_ping_times', False):
+            if self._get_ping_interval_mode() == 'specific_times':
                 wait_sec = self._next_specific_ping_seconds()
                 if wait_sec is None:
                     log.info(f"[TaskThread.run] No more specific pings today — waiting for next window")
@@ -720,8 +909,13 @@ class TaskThread(threading.Thread):
 
             # ── Resolve {{code}} blocks in instruction ───────────────────────
             instruction = task.get('instruction', '')
-            resolved, error = _resolve_instruction(instruction)
-
+            _fns = []
+            try:
+                _fns = self._controller.task_manager.get_functions()
+            except Exception:
+                pass
+            resolved, error = _resolve_instruction(instruction, self._ai._engine.tool_manager.tools['python'],
+                                                   functions=_fns)
             if error:
                 log.error(f"[TaskThread.run] Code block error in '{task['name']}': {error[:200]}")
                 err_msg = (
@@ -751,7 +945,7 @@ class TaskThread(threading.Thread):
             _max_iter  = 999999 if _unlimited else task.get('max_work_iterations', 20)
 
             # ── Call AI with full tool support (work_environment, execute_code, etc.) ──
-            response_text, send_main_calls, _ = self._ai.run_full_ping(
+            response_text, send_main_calls, engine_history = self._ai.run_full_ping(
                 ping_content, api_history, system_prompt, max_iterations=_max_iter
             )
 
@@ -767,12 +961,17 @@ class TaskThread(threading.Thread):
                 except Exception as e:
                     log.error(f"[TaskThread.run] send_message_main failed: {e}")
 
-            # ── Append stamped response to session ────────────────────────────
-            stamped = f"{response_text}\n{_now_stamp()}"
-            session['chat_history'].append({'role': 'assistant', 'content': stamped})
+            # ── Save AI messages from engine history (assistant + system work mode) ──
+            for _msg in engine_history[len(api_history):]:
+                if _msg.get('role') in ('assistant', 'system'):
+                    session['chat_history'].append(dict(_msg))
+            # Stamp the last assistant entry with the finish time
+            for _i in range(len(session['chat_history']) - 1, -1, -1):
+                if session['chat_history'][_i].get('role') == 'assistant':
+                    session['chat_history'][_i]['content'] += f"\n{_now_stamp()}"
+                    break
             self._save_session(session, task_id, today)
             log.info(f"[TaskThread.run] Ping complete for task='{task['name']}'")
-
         log.info(f"[TaskThread.run] Thread exiting for task='{task['name']}'")
 
 
@@ -785,13 +984,19 @@ class TaskManager:
     """
 
     TASKS_FILE = _APP_ROOT / "data" / "tasks" / "tasks.json"
+    FUNCTIONS_FILE = _APP_ROOT / "data" / "tasks" / "functions.json"
+    SCRIPTS_DIR = _APP_ROOT / "data" / "tasks" / "interval-scripts"
 
     def __init__(self, controller):
         self._controller = controller
         self._tasks: list = []
         self._threads: dict = {}           # task_id → TaskThread
         self.TASKS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        self.SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+        self._ensure_script_template()
         self._load_tasks()
+        self._functions: list = []
+        self._load_functions()
         log.info(f"[TaskManager.__init__] Ready | {len(self._tasks)} task(s)")
 
     # ── Persistence ──────────────────────────────────────────────────────────
@@ -815,6 +1020,112 @@ class TaskManager:
             tmp.replace(self.TASKS_FILE)
         except Exception as e:
             log.error(f"[TaskManager._save_tasks] ✗ {e}")
+
+    # ── Functions Library ─────────────────────────────────────────────────────
+
+    def _load_functions(self):
+        if not self.FUNCTIONS_FILE.exists():
+            self._functions = []
+            return
+        try:
+            with open(self.FUNCTIONS_FILE, 'r', encoding='utf-8') as f:
+                self._functions = json.load(f)
+        except Exception as e:
+            log.error(f"[TaskManager._load_functions] ✗ {e}")
+            self._functions = []
+
+    def _save_functions(self):
+        try:
+            self.FUNCTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.FUNCTIONS_FILE.with_suffix('.json.tmp')
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(self._functions, f, indent=2, ensure_ascii=False)
+            tmp.replace(self.FUNCTIONS_FILE)
+        except Exception as e:
+            log.error(f"[TaskManager._save_functions] ✗ {e}")
+
+    def get_functions(self) -> list:
+        return list(self._functions)
+
+    def save_function(self, name: str, code: str) -> bool:
+        name = name.strip()
+        code = code.strip()
+        if not name or not code:
+            return False
+        for fn in self._functions:
+            if fn['name'] == name:
+                fn['code'] = code
+                self._save_functions()
+                return True
+        self._functions.append({'name': name, 'code': code})
+        self._save_functions()
+        return True
+
+    def delete_function(self, name: str) -> bool:
+        before = len(self._functions)
+        self._functions = [f for f in self._functions if f['name'] != name]
+        if len(self._functions) < before:
+            self._save_functions()
+            return True
+        return False
+
+    # ── Script Trigger Library ────────────────────────────────────────────────
+
+    def _ensure_script_template(self):
+        """Create _template.py in interval-scripts if it does not exist."""
+        tpl = self.SCRIPTS_DIR / "_template.py"
+        if not tpl.exists():
+            tpl.write_text(
+                '"""\n'
+                'Script Trigger Template\n'
+                '────────────────────────────────────────────────────────────────\n'
+                'Contract: define fire_ping() → return True to fire the AI ping,\n'
+                '          return False to skip this poll cycle.\n'
+                '\n'
+                'The poller calls fire_ping() every N milliseconds (your Poll Rate).\n'
+                'Once True fires and the ping completes, polling resumes immediately.\n'
+                'It is YOUR responsibility to reset the condition back to False so\n'
+                'the ping does not keep firing on every subsequent poll cycle.\n'
+                '────────────────────────────────────────────────────────────────\n'
+                '"""\n\n\n'
+                'def fire_ping() -> bool:\n'
+                '    """\n'
+                '    Return True  → ping fires immediately.\n'
+                '    Return False → sleep for Poll Rate ms and check again.\n'
+                '    """\n'
+                '    # ── Example: fire once when a sentinel file appears ──────\n'
+                '    # from pathlib import Path\n'
+                '    # flag = Path("C:/trigger.flag")\n'
+                '    # if flag.exists():\n'
+                '    #     flag.unlink()   # ← delete it so it won\'t re-fire\n'
+                '    #     return True\n'
+                '    # return False\n\n'
+                '    return False   # ← replace with your condition\n',
+                encoding='utf-8',
+            )
+            log.info("[TaskManager._ensure_script_template] Created _template.py")
+
+    def get_script_names(self) -> list:
+        """Return sorted list of .py filenames in the interval-scripts folder."""
+        try:
+            return sorted(p.name for p in self.SCRIPTS_DIR.glob("*.py"))
+        except Exception as e:
+            log.error(f"[TaskManager.get_script_names] ✗ {e}")
+            return []
+
+    def open_scripts_folder(self):
+        """Open the interval-scripts folder in the OS file manager."""
+        import subprocess, sys as _sys
+        try:
+            folder = str(self.SCRIPTS_DIR.resolve())
+            if _sys.platform == 'win32':
+                subprocess.Popen(['explorer', folder])
+            elif _sys.platform == 'darwin':
+                subprocess.Popen(['open', folder])
+            else:
+                subprocess.Popen(['xdg-open', folder])
+        except Exception as e:
+            log.error(f"[TaskManager.open_scripts_folder] ✗ {e}")
 
     # ── CRUD ─────────────────────────────────────────────────────────────────
 

@@ -20,7 +20,6 @@ import os
 from datetime import datetime
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer
 from core.python_interpreter import PythonInterpreter
-from core.memory_manager import get_memory_manager
 from core.logger import _make_logger, _NoOpLogger
 
 
@@ -110,7 +109,7 @@ class ToolManager:
         # ── Tool registry ─────────────────────────────────────────────────────
         # Canonical tool names.  To add a new tool, append its name here and
         # implement the corresponding parse_/run_ methods.
-        self._tool_keys = ['work_environment', 'execute_code', 'set_session_name', 'memorize', 'load_skill', 'unload_skill']
+        self._tool_keys = ['work_environment', 'execute_code', 'set_session_name', 'load_skill', 'unload_skill']
         # Maps normalised (no-underscore, lowercase) form → canonical name
         self._tool_keys_norm = {k.replace('_', '').lower(): k for k in self._tool_keys}
         log.debug(f"[ToolManager.__init__] Registered tool keys: {self._tool_keys}")
@@ -293,17 +292,6 @@ class ToolManager:
                 log.info(f"[ToolManager.parse_set_session_name] ✓ Found | name='{name}'")
                 return name, remaining
             log.debug("[ToolManager.parse_set_session_name] Not found")
-            return None
-
-    def parse_memorize(self, text):
-            """Parse memorize fence from AI output. Returns (memory_text, remaining_text) or None."""
-            log.debug(f"[ToolManager.parse_memorize] Parsing {len(text)} chars")
-            result = self._parse_fence(text, 'memorize')
-            if result:
-                memory_text, remaining = result
-                log.info(f"[ToolManager.parse_memorize] ✓ Found | text='{memory_text[:60]}'")
-                return memory_text, remaining
-            log.debug("[ToolManager.parse_memorize] Not found")
             return None
 
     def parse_load_skill(self, text):

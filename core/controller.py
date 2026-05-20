@@ -18,6 +18,9 @@ import json
 import random
 import socket
 import threading
+import subprocess
+import sys
+import tkinter as tk
 from core.logger import _make_logger, _NoOpLogger
 
 
@@ -116,11 +119,7 @@ class AssistantController(QObject):
         self.ai.tool_manager._get_chat = lambda: self._chat
         self.ai.tool_manager._get_android_bridge = lambda: getattr(getattr(self, 'ui', None), 'android_bridge', None)
 
-        # META CONTROL: Inject controller reference into Python interpreter namespace
-        # so the AI can do: controller.current_session_id, controller.settings, etc.
-        self.ai.tool_manager.tools['python'].namespace['controller'] = self
-
-        # ── Agent Image Attach Hijacker ───────────────────────────────────────
+        # ── Agent Image Attach ───────────────────────────────────────
         # Exposes attach_image() and take_screenshot() into the Python interpreter
         # namespace so the AI can call them from code execution on any thread.
         # Uses bridge_attach_image_signal to safely hop to the main Qt thread.
@@ -130,8 +129,8 @@ class AssistantController(QObject):
             Can be called from any thread (uses Qt signal for thread safety).
 
             Usage inside code execution:
-                attach_image(r"C:\\path\\to\\image.png")
-                attach_image([r"C:\\img1.png", r"C:\\img2.png"])
+                attach_image_to_chat(r"C:\\path\\to\\image.png")
+                attach_image_to_chat([r"C:\\img1.png", r"C:\\img2.png"])
             """
             if isinstance(path_or_paths, str):
                 paths = [path_or_paths]
@@ -140,55 +139,56 @@ class AssistantController(QObject):
             self.bridge_attach_image_signal.emit(paths)
             return f"[attach_image] Queued {len(paths)} image(s) for attachment."
 
-        def _agent_take_screenshot(save_path=None, attach=True):
+        def _agent_take_screenshot(save_path=None):
             """Take a screenshot of the current screen.
-            Saves to a temp file and optionally attaches it to the chat.
+            Saves to app's own data/temp/ folder (never the Windows temp folder).
+            Returns the path — use attach_image_to_chat(path) to pin it to chat.
 
             Args:
-                save_path: optional path to save screenshot (default: auto temp file)
-                attach: if True, automatically pins the screenshot to the chat
+                save_path: optional path to save screenshot (default: auto file in data/temp/)
 
             Returns:
                 str: path to the saved screenshot file
 
             Usage inside code execution:
-                path = take_screenshot()              # auto-attach
-                path = take_screenshot(attach=False)  # just get the path
-                path = take_screenshot(r"C:\\my_shot.png")
+                path = take_screenshot()
+                attach_image_to_chat(path)
             """
-            import time, os, tempfile
+            import uuid
             try:
                 from PIL import ImageGrab
                 if save_path is None:
-                    ts = int(time.time())
-                    save_path = os.path.join(
-                        tempfile.gettempdir(), f"agent_screenshot_{ts}.png"
-                    )
+                    _temp_dir = _APP_ROOT / "data" / "temp"
+                    _temp_dir.mkdir(parents=True, exist_ok=True)
+                    _unique = uuid.uuid4().hex[:12]
+                    save_path = str(_temp_dir / f"screenshot_{_unique}.png")
                 img = ImageGrab.grab()
                 img.save(save_path)
-                if attach:
-                    _agent_attach_image(save_path)
                 return save_path
             except ImportError:
                 # Fallback: use pyautogui if Pillow/ImageGrab unavailable
                 try:
-                    import pyautogui, os, time, tempfile
+                    import pyautogui, uuid
                     if save_path is None:
-                        ts = int(time.time())
-                        save_path = os.path.join(
-                            tempfile.gettempdir(), f"agent_screenshot_{ts}.png"
-                        )
+                        _temp_dir = _APP_ROOT / "data" / "temp"
+                        _temp_dir.mkdir(parents=True, exist_ok=True)
+                        _unique = uuid.uuid4().hex[:12]
+                        save_path = str(_temp_dir / f"screenshot_{_unique}.png")
                     pyautogui.screenshot(save_path)
-                    if attach:
-                        _agent_attach_image(save_path)
                     return save_path
                 except Exception as e2:
                     return f"[take_screenshot] ERROR: {e2}"
             except Exception as e:
                 return f"[take_screenshot] ERROR: {e}"
 
-        self.ai.tool_manager.tools['python'].namespace['attach_image'] = _agent_attach_image
+        # Inject references into Python interpreter namespace
+        self.ai.tool_manager.tools['python'].namespace['controller'] = self
+        self.ai.tool_manager.tools['python'].namespace['attach_image_to_chat'] = _agent_attach_image
         self.ai.tool_manager.tools['python'].namespace['take_screenshot'] = _agent_take_screenshot
+        self.ai.tool_manager.tools['python'].namespace['notify'] = self.notify
+        self.ai.tool_manager.tools['python'].namespace['memorize'] = self.memorize
+        self.ai.tool_manager.tools['python'].namespace['search_memory'] = self.search_memory
+        self.ai.tool_manager.tools['python'].namespace['view_all_memory'] = self.view_all_memory
         # ─────────────────────────────────────────────────────────────────────
 
         # Apply settings
@@ -198,6 +198,11 @@ class AssistantController(QObject):
         self.ai.set_system_prompt_hijack(
             self.settings.get('system_prompt_hijacked', False),
             self.settings.get('custom_system_prompt', '')
+        )
+        self.ai.set_system_prompt_extras(
+            include_image_tools=self.settings.get('include_image_tools', False),
+            include_controller_ref=self.settings.get('include_controller_ref', False),
+            include_notify_tool=self.settings.get('include_notify_tool', False),
         )
 
         self.ai.set_tts_provider(self.settings.get('tts_provider', 'edge-tts'))
@@ -540,6 +545,12 @@ class AssistantController(QObject):
         """Slot — always runs on main thread. Pins images sent from the Android app."""
         if not self._chat:
             return
+        # If the incoming paths are agent screenshots, remove any previously
+        # pinned agent screenshots first so the old one doesn't keep getting sent.
+        if any('agent_screenshot_' in p for p in (paths or [])):
+            for pi in list(getattr(self._chat, 'pinned_images', [])):
+                if 'agent_screenshot_' in pi.get('path', ''):
+                    self._chat._remove_pinned_image(pi, notify=False)
         for p in (paths or []):
             try:
                 self._chat._show_image_preview(p)
@@ -695,6 +706,111 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         self.ai.update_voice_settings(self.ai.voice_mode, self.ai.elevenlabs_enabled)
         log.info("[AssistantController._update_system_prompt] ✓ System prompt updated")
 
+    def build_task_system_prompt(self, task_dict: dict) -> str:
+        """
+        Centralized task system prompt builder — single source of truth.
+        Called by TaskThread._build_system_prompt AND manage_tasks_window preview.
+
+        Includes: system info, assistant name, user name, custom instructions,
+                  task permissions, task context block, and any pre-loaded skills.
+
+        Args:
+            task_dict:    The task dict (must have 'permissions', 'name', 'loaded_skills').
+            skill_loader: Optional callable(skill_name: str) -> str | None.
+        Returns:
+            Full system prompt string ready for the task agent.
+        """
+        log.info(f"[AssistantController.build_task_system_prompt] Building for task='{task_dict.get('name', '?')}'")
+        from core.global_instructions import get_system_prompt as _gsp
+
+        perms = task_dict.get('permissions', {})
+
+        # ── System info: already contains assistant name, user name, custom instructions ──
+        try:
+            system_info = self.ai.system_info
+        except Exception:
+            system_info = ""
+
+        _allow_workmode  = perms.get('allow_workmode',      False)
+        _allow_exec_code = perms.get('allow_execute_code',  False)
+        _any_code        = _allow_workmode or _allow_exec_code
+
+        base_prompt = _gsp(
+            is_task_session_prompt=True,
+            system_info                = system_info,
+            voice_mode                 = False,   # tasks are silent — no voice
+            elevenlabs_enabled         = False,
+            skills                     = None,    # task skills injected separately below
+            include_session_naming     = False,   # tasks don't name sessions
+            include_memory             = True,    # memorize is always useful for tasks
+            include_execution_tools    = _any_code,     # "CORE EXECUTION TOOLS" section
+            include_fence_syntax       = _any_code,     # fence syntax guide
+            include_work_mode_rules    = _allow_workmode,
+            include_execute_code_rules = _allow_exec_code,
+            include_must_remember      = _any_code,     # reminder block references tools
+            include_image_tools        = perms.get('inject_image_tools',    False),
+            include_controller_ref     = perms.get('inject_controller_ref', False),
+            include_notify_tool        = perms.get('inject_notify_tool',    False),
+        )
+
+        # ── Permissions block ─────────────────────────────────────────────────
+        perm_lines = []
+        if perms.get('allow_workmode'):
+            perm_lines.append("- You MAY use the work_environment tool to perform agentic tasks.")
+        if perms.get('allow_execute_code'):
+            perm_lines.append("- You MAY use execute_code to run Python code.")
+        if perms.get('allow_skill_load_unload'):
+            perm_lines.append("- You MAY use load_skill and unload_skill.")
+        if not perm_lines:
+            perm_lines.append("- READ-ONLY mode. Do not attempt to execute code or use tools.")
+        perm_block = '\n'.join(perm_lines)
+
+        # ── Task context block ────────────────────────────────────────────────
+        task_section = (
+            f"\n\n=== BACKGROUND TASK CONTEXT ===\n"
+            f"You are currently running as an automated background task agent — NOT in a live user conversation.\n"
+            f"Task name: {task_dict.get('name', '?')}\n\n"
+            f"Task Permissions:\n{perm_block}\n\n"
+            f"To notify the user, emit EXACTLY this JSON on its own line:\n"
+            f'{{"tool": "send_message_main", "input": "your message to the user"}}\n\n'
+            f"Only message the user when something genuinely needs their attention.\n"
+            f"Each ping message has a timestamp appended for your temporal awareness.\n"
+            f"=== END BACKGROUND TASK CONTEXT ===\n"
+        )
+
+        # ── Skill injections — use controller's own skill_manager directly ────
+        skills_section = ""
+        loaded_skills = task_dict.get('loaded_skills', [])
+        if loaded_skills and hasattr(self, 'skill_manager') and self.skill_manager:
+            skill_injections = []
+            for skill_name in loaded_skills:
+                try:
+                    content = self.skill_manager.get_skill_content(skill_name)
+                    if content and not content.startswith("ERROR:"):
+                        skill_injections.append(
+                            f"\n\n=== PRE-LOADED SKILL: {skill_name} ===\n"
+                            f"{content}\n"
+                            f"=== END SKILL: {skill_name} ===\n"
+                        )
+                        log.info(f"[AssistantController.build_task_system_prompt] Injected skill '{skill_name}'")
+                    else:
+                        log.warning(f"[AssistantController.build_task_system_prompt] Skill '{skill_name}' not found — skipped")
+                except Exception as _e:
+                    log.warning(f"[AssistantController.build_task_system_prompt] Skill '{skill_name}' error: {_e}")
+            skills_section = "".join(skill_injections)
+
+        # ── Skill path rule — injected when task has preloaded skills ─────────
+        # get_system_prompt() is called with skills=None for tasks (skills are
+        # injected manually below), so the rule is never auto-generated there.
+        # We generate it here explicitly when loaded_skills is non-empty.
+        skill_path_rule_block = ""
+        if loaded_skills:
+            from core.global_instructions import get_skill_path_rule as _gpr
+            skill_path_rule_block = "\n\n" + _gpr() + "\n\n"
+
+        log.info(f"[AssistantController.build_task_system_prompt] ✓ Built | {len(base_prompt + skills_section + task_section):,} chars")
+        return base_prompt + skill_path_rule_block + skills_section + task_section
+
     def speak_text(self, text):
         """Speak text using TTS (only if voice mode is active and not in tool mode)"""
         log.debug(f"[AssistantController.speak_text] voice_mode_active={self.voice_mode_active} | "
@@ -815,6 +931,18 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         self.settings['system_prompt_hijacked'] = enabled
         self.settings['custom_system_prompt'] = custom_prompt
         self.ai.set_system_prompt_hijack(enabled, custom_prompt)
+
+    def set_system_prompt_extras(self, include_image_tools: bool = False,
+                                  include_controller_ref: bool = False,
+                                  include_notify_tool: bool = False):
+        self.settings['include_image_tools'] = include_image_tools
+        self.settings['include_controller_ref'] = include_controller_ref
+        self.settings['include_notify_tool'] = include_notify_tool
+        self.ai.set_system_prompt_extras(
+            include_image_tools=include_image_tools,
+            include_controller_ref=include_controller_ref,
+            include_notify_tool=include_notify_tool,
+        )
         self.save_settings()
 
     def get_debug_mode(self):
@@ -1489,6 +1617,62 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         log.info("[AssistantController.reset_python_interpreter] ✓ Reset complete")
         self.log("Python interpreter reset", "SUCCESS")
 
+    # ── Memory namespace helpers ──────────────────────────────────────────────
+
+    def memorize(self, title: str, body: str, tags: str = "") -> str:
+        """Store a structured memory. Call from work_environment:
+           memorize('Title', 'Body sentence(s).', 'tag1, tag2')"""
+        if not self.memory_manager or not self.memory_manager.is_ready:
+            return "[memorize] Memory manager not ready."
+        title = str(title).strip()
+        body = str(body).strip()
+        tags = str(tags).strip()
+        if not title:
+            return "[memorize] Title is required."
+        if not body:
+            return "[memorize] Body is required."
+        parts = [title, body]
+        if tags:
+            parts.append(f"Tags: {tags}")
+        text = "\n\n".join(parts)
+        success = self.memory_manager.memorize(text)
+        if success:
+            log.info(f"[AssistantController.memorize] ✓ Stored: '{title}'")
+            return f"[memorize] ✓ Stored: \"{title}\""
+        return "[memorize] ✗ Failed to store memory."
+
+    def search_memory(self, query: str, threshold: float = 0.4, max_results: int = 5) -> str:
+        """Search memories by query. Call from work_environment: search_memory('query')"""
+        if not self.memory_manager or not self.memory_manager.is_ready:
+            return "[search_memory] Memory manager not ready."
+        results = self.memory_manager.recall(query, threshold=threshold, max_results=max_results)
+        if not results:
+            return f"[search_memory] No memories found for query: \"{query}\""
+        lines = [f"[search_memory] {len(results)} result(s) for \"{query}\":"]
+        for i, m in enumerate(results, 1):
+            lines.append(f"  {i}. (score={m['similarity']}) {m['text']}")
+        return "\n".join(lines)
+
+    def view_all_memory(self, titles_only: bool = False) -> str:
+        """List all stored memories. Call from work_environment:
+           view_all_memory()              → full entries
+           view_all_memory(titles_only=True) → titles only (lighter)"""
+        if not self.memory_manager or not self.memory_manager.is_ready:
+            return "[view_all_memory] Memory manager not ready."
+        memories = self.memory_manager.get_all()
+        if not memories:
+            return "[view_all_memory] No memories stored yet."
+        mode = "titles only" if titles_only else "full"
+        lines = [f"[view_all_memory] {len(memories)} memory/memories ({mode}):"]
+        for i, m in enumerate(memories, 1):
+            edited = " [edited]" if m.get('edited') else ""
+            if titles_only:
+                title = m['text'].split('\n')[0]
+                lines.append(f"  {i}. {title}{edited}")
+            else:
+                lines.append(f"  {i}. {m['text']}{edited}")
+        return "\n".join(lines)
+
     def detach_memory_context(self, context_id: str):
         """Remove a memory context ui_event from history, save session, and sync Android."""
         log.info(f"[AssistantController.detach_memory_context] id='{context_id}'")
@@ -1506,4 +1690,141 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
     def get_ai_provider(self):
         """Get current AI provider"""
         return self.settings.get('ai_provider', 'custom_script')
+
+    # ── Fire-and-forget Desktop Notification ─────────────────────────────────
+
+    _NOTIF_THEMES = {
+        "modern": {
+            "bg": "#0d1117", "bg_card": "#161b22", "border": "#30363d",
+            "fg_main": "#e6edf3", "fg_sub": "#8b949e", "fg_dim": "#484f58",
+            "accent": "#58a6ff", "btn_hover": "#1f6feb", "btn_fg": "#0d1117",
+            "dot_color": "#3fb950", "dots_idle": "#30363d",
+        },
+        "brutalist-darkmode": {
+            "bg": "#000000", "bg_card": "#0a0a0a", "border": "#ffffff",
+            "fg_main": "#ffffff", "fg_sub": "#aaaaaa", "fg_dim": "#555555",
+            "accent": "#ffffff", "btn_hover": "#dddddd", "btn_fg": "#000000",
+            "dot_color": "#ffffff", "dots_idle": "#333333",
+        },
+        "girly-pinkish": {
+            "bg": "#1a0a12", "bg_card": "#2d1020", "border": "#c2185b",
+            "fg_main": "#fce4ec", "fg_sub": "#f48fb1", "fg_dim": "#ad1457",
+            "accent": "#f06292", "btn_hover": "#e91e63", "btn_fg": "#1a0a12",
+            "dot_color": "#f06292", "dots_idle": "#4a1530",
+        },
+        "flower-girl": {
+            "bg": "#fdf6f0", "bg_card": "#fff9f5", "border": "#f8bbd0",
+            "fg_main": "#4a1942", "fg_sub": "#ad6b8d", "fg_dim": "#c9a0b4",
+            "accent": "#e91e8c", "btn_hover": "#c2185b", "btn_fg": "#ffffff",
+            "dot_color": "#e91e8c", "dots_idle": "#f8bbd0",
+        },
+    }
+
+    def notify(
+        self,
+        title: str = "Systema Auxilium",
+        body: str = "",
+        closing_time: int = 10,
+        theme: str = "modern",
+        close_button_text: str = "Close",
+    ) -> None:
+        """
+        Fire-and-forget desktop notification popup.
+        Runs in a daemon thread — never blocks the caller.
+
+        Can be called from anywhere:
+            controller.notify("Done!", "Task finished.")
+            controller.notify("Alert", "Something happened.", theme="brutalist-darkmode")
+
+        Also injected into the Python interpreter namespace as notify():
+            notify("Hello", "World", closing_time=5)
+
+        Themes: modern | brutalist-darkmode | girly-pinkish | flower-girl
+        """
+        log.info(f"[AssistantController.notify] title='{title}' | body='{body[:40]}' | "
+                 f"theme='{theme}' | closing_time={closing_time}")
+
+        def _run():
+            t = self._NOTIF_THEMES.get(theme, self._NOTIF_THEMES["modern"])
+
+            root = tk.Tk()
+            root.title("Systema Auxilium")
+            sw = root.winfo_screenwidth()
+            sh = root.winfo_screenheight()
+            root.geometry(f"420x220+{sw - 440}+{sh - 270}")
+            root.overrideredirect(True)
+            root.attributes("-topmost", True)
+            root.attributes("-alpha", 0.97)
+            root.configure(bg=t["bg"])
+
+            outer = tk.Frame(root, bg=t["border"], padx=1, pady=1)
+            outer.pack(fill="both", expand=True)
+
+            frame = tk.Frame(outer, bg=t["bg_card"], padx=20, pady=16)
+            frame.pack(fill="both", expand=True)
+
+            # Top bar
+            top_bar = tk.Frame(frame, bg=t["bg_card"])
+            top_bar.pack(fill="x", pady=(0, 10))
+
+            dot_canvas = tk.Canvas(top_bar, width=10, height=10,
+                                   bg=t["bg_card"], highlightthickness=0)
+            dot_canvas.create_oval(1, 1, 9, 9, fill=t["dot_color"], outline="")
+            dot_canvas.pack(side="left", padx=(0, 7), pady=2)
+
+            tk.Label(top_bar, text="SYSTEMA AUXILIUM", bg=t["bg_card"],
+                     fg=t["fg_sub"], font=("Segoe UI", 8, "bold")).pack(side="left")
+            tk.Label(top_bar, text="●  ●  ●", bg=t["bg_card"],
+                     fg=t["dots_idle"], font=("Segoe UI", 8)).pack(side="right")
+
+            # Divider
+            tk.Frame(frame, bg=t["border"], height=1).pack(fill="x", pady=(0, 12))
+
+            # Title
+            tk.Label(frame, text=title, bg=t["bg_card"], fg=t["fg_main"],
+                     font=("Segoe UI", 13, "bold"),
+                     justify="left", anchor="w").pack(fill="x")
+
+            # Body
+            tk.Label(frame, text=body, bg=t["bg_card"], fg=t["fg_sub"],
+                     font=("Segoe UI", 9), justify="left", anchor="w",
+                     wraplength=380).pack(fill="x", pady=(4, 0))
+
+            # Bottom row
+            bottom = tk.Frame(frame, bg=t["bg_card"])
+            bottom.pack(fill="x", pady=(14, 0))
+
+            countdown_label = tk.Label(
+                bottom, text=f"Notification closing in {closing_time}s",
+                bg=t["bg_card"], fg=t["fg_dim"], font=("Segoe UI", 8)
+            )
+            countdown_label.pack(side="left", anchor="s")
+
+            btn = tk.Button(
+                bottom, text=f"  {close_button_text}  ",
+                command=root.destroy,
+                bg=t["accent"], fg=t["btn_fg"],
+                font=("Segoe UI", 9, "bold"),
+                activebackground=t["btn_hover"], activeforeground="#ffffff",
+                bd=0, padx=14, pady=5, cursor="hand2", relief="flat"
+            )
+            btn.pack(side="right")
+            btn.bind("<Enter>", lambda e: btn.config(bg=t["btn_hover"], fg="#ffffff"))
+            btn.bind("<Leave>", lambda e: btn.config(bg=t["accent"], fg=t["btn_fg"]))
+
+            # Countdown logic
+            _ct = [closing_time]
+            def _tick():
+                _ct[0] -= 1
+                if _ct[0] <= 0:
+                    root.destroy()
+                    return
+                countdown_label.config(text=f"Notification closing in {_ct[0]}s")
+                root.after(1000, _tick)
+            root.after(1000, _tick)
+
+            root.mainloop()
+
+        t = threading.Thread(target=_run, daemon=True, name="NotifPopup")
+        t.start()
 

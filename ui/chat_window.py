@@ -351,8 +351,8 @@ ANIM_WINDOW_FADE_IN_MS       = 340    # Chat window fade-in when shown (ms)
 
 # --- Sidebar ---
 ANIM_SIDEBAR_SLIDE_MS        = 360    # Sidebar slide in / out (ms)
-SIDEBAR_DEFAULT_W            = 260    # Default sidebar width (px) — wide enough for hero + pills
-SIDEBAR_MIN_W                = 260    # Minimum — same as default, don't allow inward squish
+SIDEBAR_DEFAULT_W            = 278    # Default sidebar width (px) — wide enough for hero + pills
+SIDEBAR_MIN_W                = 278    # Minimum — wide enough for 3 hero pills without clipping
 SIDEBAR_MAX_W                = 420    # Maximum sidebar width when dragging
 
 # --- Messages ---

@@ -32,15 +32,88 @@ Note: No other formats are accepted. No JSON. No curly braces. Code goes directl
 
 AVAILABLE TOOLS SUMMARY TABLE
 
-┌──────────────────────┬──────────────────────────────────────────┐
-│ tool name            │ what "input" contains                    │
-├──────────────────────┼──────────────────────────────────────────┤
-│ work_environment     │ Python code to run (you SEE output)      │
-│ execute_code         │ Python code to run (you DON'T see output)│
-│ set_session_name     │ Short title for this conversation        │
-│ memorize             │ Text to remember permanently             │
-└──────────────────────┴──────────────────────────────────────────┘
+{tool_table}
 """
+
+def get_skill_path_rule() -> str:
+    """
+    Returns the SKILL SCRIPTS FULL PATH RULE block.
+    Call this from build_task_system_prompt() when tasks have preloaded skills,
+    since those tasks pass skills=None to get_system_prompt() and the rule
+    would otherwise be silently skipped.
+    """
+    from pathlib import Path as _P
+    _app  = str(_P(__file__).resolve().parent.parent)
+    _skls = str(_P(__file__).resolve().parent.parent / "skills")
+    return (
+        "╔═══════════════════════════════════════════════════════════════════╗\n"
+        "║          SKILL SCRIPTS — FULL PATH RULE (NON-NEGOTIABLE)          ║\n"
+        "╚═══════════════════════════════════════════════════════════════════╝\n"
+        "\n"
+        "Your app root and skills directory are the following:\n"
+        f"\n  APP_ROOT   = {_app}\n"
+        f"  SKILLS_DIR = {_skls}\n"
+        "\n"
+        f"Skill scripts live at:\n  {_skls}\\<skill-name>\\scripts\\<script.py>\n"
+        "\n"
+        "⚠ CRITICAL — WHEN EXECUTING SKILL SCRIPTS YOU MUST ALWAYS:\n"
+        "\n"
+        "  1. Use the FULL ABSOLUTE PATH — never relative paths\n"
+        "  2. Build from SKILLS_DIR shown above\n"
+        '  3. Use raw strings r"..." or double-backslashes on Windows paths\n'
+        "\n"
+        "Reason: Most skills only show relative path examples. Always use\n"
+        "the full path instead to avoid FileNotFoundError.\n"
+        "\n"
+        "✅ CORRECT:\n"
+        f'  exec(open(rf"{_skls}\\\\data-viz\\\\scripts\\\\setup.py").read())\n'
+        f'  exec(open(rf"{_skls}\\\\data-viz\\\\scripts\\\\chart.py").read())\n'
+        "\n"
+        "  When running skill scripts via subprocess, ALWAYS use sys.executable\n"
+        "  so the correct Python environment (with all packages) is used:\n"
+        "\n"
+        "  import subprocess, sys\n"
+        f'  subprocess.run(\n'
+        f'      [sys.executable, rf"{_skls}\\\\<skill-name>\\\\scripts\\\\<script.py>",\n'
+        f'       "arg1", "arg2"],\n'
+        f'      capture_output=True, text=True, encoding="utf-8"\n'
+        f'  )\n'
+        "\n"
+        "❌ WRONG — WILL BREAK:\n"
+        '  exec(open("scripts/setup.py").read())\n'
+        '  exec(open("chart.py").read())\n'
+        '  exec(open("data-viz/scripts/chart.py").read())\n'
+        '  subprocess.run(["python", "script.py", ...])  # Risk of using the wrong Python version!\n'
+        "\n"
+        "THIS RULE APPLIES TO EVERY SKILL, EVERY SCRIPT, EVERY TIME. NO EXCEPTIONS.\n"
+        "RELATIVE PATHS FOR SKILL SCRIPTS WILL ALWAYS FAIL. USE FULL PATHS."
+    )
+
+def _build_tool_table(
+    include_session_naming: bool = True,
+    include_memory: bool = True,
+    include_workmode: bool = True,
+    include_execute_code: bool = True,
+) -> str:
+    """Build the AVAILABLE TOOLS table dynamically based on which sections are active."""
+    rows = []
+    if include_workmode:
+        rows.append("│ work_environment     │ Python code to run (you SEE output)      │")
+    if include_execute_code:
+        rows.append("│ execute_code         │ Python code to run (you DON'T see output)│")
+    if include_session_naming:
+        rows.append("│ set_session_name     │ Short title for this conversation        │")
+
+    if not rows:
+        return "(no interactive tools available in this context)"
+
+    header = (
+        "┌──────────────────────┬──────────────────────────────────────────┐\n"
+        "│ tool name            │ what \"input\" contains                    │\n"
+        "├──────────────────────┼──────────────────────────────────────────┤"
+    )
+    footer = "└──────────────────────┴──────────────────────────────────────────┘"
+    return header + "\n" + "\n".join(rows) + "\n" + footer
 
 _SECTION_SESSION_NAMING = """
 SESSION NAMING TOOL
@@ -74,57 +147,61 @@ Note: Never do this — always include a real response rather than just naming t
 """
 
 _SECTION_MEMORY = """
-MEMORY TOOL — PERSISTENT ACROSS SESSIONS
+MEMORY — PERSISTENT ACROSS SESSIONS
 
-Use the memorize tool to remember important things about the user
-or the environment that should persist beyond this conversation.
+Three functions are available inside work_environment for managing memory:
 
-When to memorize:
-  • User preferences, habits, or working style
-  • Important facts the user mentions about themselves
-  • Software/hardware specifics that affect how you help them
-  • Any time the user explicitly asks you to remember something
+  memorize(title, body, tags="")          → Save a memory permanently
+  search_memory(query)                    → Search memories by topic
+                                            Optional: threshold (float), max_results (int)
+  view_all_memory(titles_only=False)      → List memories (use titles_only=True to avoid context window bloat)
 
-Format:
-```memorize
-TITLE
+MEMORY STRUCTURE RULES:
+  title  — Required. Concise, descriptive, unique. One line. (e.g. "User prefers dark mode")
+  body   — Required. 1–5 sentences, max one paragraph. Include enough context to be useful later.
+  tags   — Optional but recommended. Comma-separated keywords that help semantic recall.
+           Good tags = topic words a future query might naturally contain.
 
-Concise but descriptive memory. Include enough context to be useful later.
-
-Tags: Life, Creator Instructions, Preferences, etc.
+Example usage:
+```work_environment: [Storing memory]
+result = memorize(
+    title="User prefers concise responses",
+    body="The user explicitly stated they dislike long explanations and prefer short, direct answers. Apply this to all responses.", #NO NEW LINES
+    tags="preferences, communication style, response format"
+)
+print(result)
 ```
-Note: The title helps the RAG system match memories accurately. Add relevant tags at the end (e.g. Life, Creator Instructions, Preferences, etc.).
 
-Guidelines:
-  - Be specific — vague memories aren't useful
-  - One fact per memorize call
-  - Don't memorize session-specific or temporary info
-  - Don't repeat memories already stored (you won't know, so use judgement)
+When to memorize (proactively, without being asked):
+  • User preferences, habits, working style, milestones, important info
+  • Key facts the user mentions about themselves
+  • Software/hardware details that affect how you help
+  • Any time the user explicitly asks you to remember something
+  • NEVER memorize passwords or credentials unless the user explicitly asks
 
+Rules:
+  - One fact per memorize() call — never bundle multiple facts
+  - Skip session-specific or temporary info
+  - Run search_memory() first if unsure whether something is already stored
+  - Use view_all_memory(titles_only=True) to browse without bloating context
+  - Avoid view_all_memory() with titles_only=False unless you need full entry details
 
-MEMORY AWARENESS — ONLY WHEN DIRECTLY ASKED ABOUT MEMORY
+If the user asks any memory-related question (e.g. "do you remember X?", "what do you know about me?"):
+  1. First: take initiative — run search_memory() or view_all_memory(titles_only=True) in work_environment
+  2. Report back what you found (or didn't find) clearly to the user
+  3. (Optional) Explain that the system auto-recalls memories when context keywords match
 
-ONLY apply these rules if the user explicitly asks about your memory.
-Do NOT mention any of this unprompted during normal conversation.
-
-Two sources of knowledge — never confuse them:
-  1. System prompt — always visible, injected every session (name, rules, etc.)
-  2. Persistent memories — stored via memorize tool, recalled automatically
-     by context matching. You cannot browse them. They appear in your context
-     as a labelled memory block when triggered.
-
-If asked "do you have memory?" or "do you remember me?":
-  - Explain you can't browse memories, but the system recalls them automatically
-  - ALWAYS MENTION TO TRY OTHER KEYWORDS TO TRIGGER THE MEMORY RECALL
-  - Offer to test it or store something new with the memorize tool
-  - If you know something about the user with NO memory block present → it's
-    from the system prompt. Say so honestly if they ask where you got it.
-
-NEVER claim system-prompt info "surfaced from memory"
-NEVER mention system prompt / memory sources during normal unrelated chat
+NEVER mention any of this during unrelated conversation.
 """
 
-_SECTION_EXECUTION_TOOLS = """
+def _build_execution_tools_section(
+    include_workmode: bool = True,
+    include_execute_code: bool = True,
+) -> str:
+    """Build CORE EXECUTION TOOLS section — 3 variants depending on which tools are active."""
+
+    if include_workmode and include_execute_code:
+        return """
 CORE EXECUTION TOOLS
 
 You have TWO ways to execute Python code:
@@ -158,7 +235,37 @@ NO → use execute_code:
   - "Play a sound"                  → Just play it, ask user if they heard it
 """
 
-_SECTION_FENCE_SYNTAX = """
+    if include_workmode:
+        return """
+CORE EXECUTION TOOL
+
+You execute Python code using work_environment when you need to see the output:
+  - Use for: reading files, calculations, gathering data, checking system info
+  - You enter "work mode" where you can chain multiple executions
+  - You see all outputs and can analyse them
+  - Stay in work mode until you have ALL information needed
+"""
+
+    if include_execute_code:
+        return """
+CORE EXECUTION TOOL
+
+You execute Python code using execute_code when you do NOT need to see the output:
+  - Use for: opening apps, showing UI, launching programs, quick actions
+  - Code runs immediately, you don't see the result
+  - Immediately ask the user if it worked
+"""
+
+    return ""
+
+def _build_fence_syntax_section(
+    include_workmode: bool = True,
+    include_execute_code: bool = True,
+) -> str:
+    """Build FENCE SYNTAX section — 3 variants depending on which tools are active."""
+
+    if include_workmode and include_execute_code:
+        return """
 FENCE SYNTAX  (CRITICAL — USE EXACTLY THIS FORMAT)
 
 WORK ENVIRONMENT (you see output):
@@ -212,6 +319,62 @@ When you say you'll do something, DO IT in that SAME response!
 print(open('file.txt').read())
 ```"
 """
+
+    if include_workmode:
+        return """
+FENCE SYNTAX  (CRITICAL — USE EXACTLY THIS FORMAT)
+
+WORK ENVIRONMENT (you see output):
+```work_environment: [Brief label of what this block does]
+your_python_code_here
+print("multi-line is fine, no escaping needed")
+```
+
+EXIT WORK MODE:
+```work_environment: [Exiting Work Environment]
+exit
+```
+
+IMPORTANT: When you exit work mode, write your full summary BEFORE the exit fence
+in the SAME response. Do not wait for a follow-up turn. The exit fence must come last.
+
+IMPORTANT RULES:
+- Use the tool name as the fence language — that IS the whole format
+- Code goes directly between the fences — no JSON, no escaping, no curly braces
+- Multi-line code works naturally — just write it out normally
+- Place tool fences at the END of your message
+- ALWAYS USE TOOL FENCES, NEVER JSON!!! ← CRITICAL
+- ONLY ONE work_environment fence per response. Each execution is ONE turn. Wait for output.
+
+
+CRITICAL: DO NOT ROLEPLAY EXECUTION!
+
+When you say you'll do something, DO IT in that SAME response!
+"""
+
+    if include_execute_code:
+        return """
+FENCE SYNTAX  (CRITICAL — USE EXACTLY THIS FORMAT)
+
+EXECUTE CODE (you don't see output):
+```execute_code
+your_python_code_here
+```
+
+IMPORTANT RULES:
+- Use the tool name as the fence language — that IS the whole format
+- Code goes directly between the fences — no JSON, no escaping, no curly braces
+- Place tool fences at the END of your message
+- ALWAYS USE TOOL FENCES, NEVER JSON!!! ← CRITICAL
+- ONLY ONE execute_code fence per response.
+
+
+CRITICAL: DO NOT ROLEPLAY EXECUTION!
+
+When you say you'll do something, DO IT in that SAME response!
+"""
+
+    return ""
 
 _SECTION_WORK_MODE = """
 WORK ENVIRONMENT MODE — STAY UNTIL COMPLETE!
@@ -286,41 +449,127 @@ You have two functions available in your Python execution namespace
 that let you attach images directly to the chat as pinned context.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  attach_image(path_or_paths)
+  attach_image_to_chat(path_or_paths)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   Pins one or more images to the chat input so they are sent
   with the next user-visible message. Thread-safe — works from
   work_environment or execute_code.
 
   Examples:
-    attach_image(r"C:\\Users\\user\\screenshot.png")
-    attach_image([r"C:\\img1.png", r"C:\\img2.png"])
+    attach_image_to_chat(r"C:\\Users\\user\\screenshot.png")
+    attach_image_to_chat([r"C:\\img1.png", r"C:\\img2.png"])
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  take_screenshot(save_path=None, attach=True)
+  take_screenshot(save_path=None)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Captures the current screen, saves it to a temp file, and
-  optionally pins it to the chat automatically.
-  Returns the path to the saved PNG.
+  Captures the current screen, saves it to data/temp/ inside
+  the app folder with a unique filename, and returns the path.
+  Does NOT attach automatically — call attach_image_to_chat()
+  with the returned path to pin it to the chat.
 
   Examples:
-    path = take_screenshot()                  # capture + auto-attach
-    path = take_screenshot(attach=False)      # capture only, no attach
+    path = take_screenshot()
     path = take_screenshot(r"C:\\shot.png")   # save to specific path
 
 WHEN TO USE THESE:
   - User asks you to "look at the screen" or "see what's on the screen"
   - You need to assess current system state during a task
-  - You want to show the user a visual result of something you just did
+  - User asks to show a visual result of something you just did
   - Debugging a UI issue where a screenshot would help diagnosis
 
 FLOW EXAMPLE — assessing screen state:
 ```work_environment: [Taking screenshot to assess system state]
 path = take_screenshot()
-print(f"Screenshot saved: {path}")
-attach_image(path)
+attach_image_to_chat(path)
+print(f"Screenshot captured and pinned: {path}")
 ```
-  (System responds, then.. You should automatically see the image on your context window.)
+  (The image will appear pinned above the chat input and be sent with the next message.)
+  (After this, you should proceed to explaining the Image to the user if he asked you to.)
+"""
+
+_SECTION_IMAGE_TOOLS_TASK = """
+AGENT IMAGE TOOLS — TASK SESSION
+
+You have two functions available in your Python execution namespace
+for working with images during background task execution.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  take_screenshot(save_path=None)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Captures the current screen, saves it to data/temp/ inside
+  the app folder with a unique filename, and returns the path.
+  Automatically queues the image to be passed to YOU as visual
+  context on the next work step. Returns the saved path.
+
+  Example:
+    path = take_screenshot()
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  attach_image_to_context(path)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Queues an existing image file to be passed to YOU as visual
+  context on the next work step. Use this when you already have
+  an image path and just want to feed it into your context.
+  The image is automatically deleted from disk after you see it.
+  YOU MUST MAKE A DESCRIPTION IMMEDIATELY IN YOUR RESPONSE ONCE YOU SEE IT TO AVOID FORGETTING!
+
+  Example:
+    attach_image_to_context(r"C:\\some\\existing\\image.png")
+
+IMPORTANT:
+  - These images are passed to YOU (the task AI) — they do NOT
+    appear in the user's chat window. This is silent background work.
+  - Each image is used once then deleted from disk automatically.
+  - To notify the user about what you saw, use send_message_main.
+
+FLOW EXAMPLE — checking screen state during a task:
+```work_environment: [Taking screenshot to assess current state]
+path = take_screenshot()
+print(f"Screenshot queued for context: {path}")
+```
+  (The image will be passed to you automatically on the next work step.)
+"""
+
+_SECTION_CONTROLLER_REF = """
+CONTROLLER REFERENCE — DIRECT APP ACCESS
+
+`controller` is the live AssistantController instance, available in your Python namespace.
+
+Use it to access app state directly:
+  controller.settings               # current settings dict
+  controller.current_session_id     # active session ID
+  controller.memory_manager         # memory manager instance
+  controller.log("msg", "INFO")     # write to the log panel
+
+Examples:
+```work_environment: [Checking current session]
+print(controller.current_session_id)
+print(controller.settings.get('ai_provider'))
+```
+
+Only use this when you genuinely need live app state. Don't poke it needlessly.
+"""
+
+_SECTION_NOTIFY_TOOL = """
+NOTIFY TOOL — DESKTOP NOTIFICATION POPUP
+
+`notify()` fires a fire-and-forget desktop popup. Non-blocking — never stalls execution.
+
+Signature:
+  notify(title, body, closing_time=10, theme="modern", close_button_text="Close")
+
+Themes: modern | brutalist-darkmode | girly-pinkish | flower-girl
+
+Examples:
+  notify("Done!", "Your file has been processed.")
+  notify("Alert", "Something needs your attention.", closing_time=15)
+  notify("Task Complete", "All files sorted.", theme="brutalist-darkmode")
+
+Use this to alert the user when:
+  - A long background task finishes
+  - Something requires their attention
+  - A scheduled task ran successfully
+  - You want to surface a result without waiting for them to check the chat
 """
 
 _SECTION_MUST_REMEMBER = """
@@ -344,6 +593,7 @@ MUST REMEMBER:
 
 
 def get_system_prompt(
+        is_task_session_prompt: bool = False,
         system_info: str = "",
         voice_mode: bool = False,
         elevenlabs_enabled: bool = False,
@@ -357,7 +607,10 @@ def get_system_prompt(
         include_work_mode_rules: bool = True,
         include_execute_code_rules: bool = True,
         include_must_remember: bool = True,
-        include_image_tools: bool = False,  # Hide the auto image attach feature from the Agent from the main chat for now...
+        # Optionals, not included for less token usage.
+        include_image_tools: bool = False,
+        include_controller_ref: bool = False,
+        include_notify_tool: bool = False,
 ):
     """
     Generate system prompt with optional modular sections.
@@ -444,81 +697,64 @@ Use these sparingly and naturally.
     if _any_loaded:
         _app = str(_P(__file__).resolve().parent.parent)
         _skls = str(_P(__file__).resolve().parent.parent / "skills")
-        _skill_path_rule = (
-            "╔═══════════════════════════════════════════════════════════════════╗\n"
-            "║          SKILL SCRIPTS — FULL PATH RULE (NON-NEGOTIABLE)          ║\n"
-            "╚═══════════════════════════════════════════════════════════════════╝\n"
-            "\n"
-            "Your app root and skills directory are the following:\n"
-            f"\n  APP_ROOT   = {_app}\n"
-            f"  SKILLS_DIR = {_skls}\n"
-            "\n"
-            f"Skill scripts live at:\n  {_skls}\\<skill-name>\\scripts\\<script.py>\n"
-            "\n"
-            "⚠ CRITICAL — WHEN EXECUTING SKILL SCRIPTS YOU MUST ALWAYS:\n"
-            "\n"
-            "  1. Use the FULL ABSOLUTE PATH — never relative paths\n"
-            "  2. Build from SKILLS_DIR shown above\n"
-            '  3. Use raw strings r"..." or double-backslashes on Windows paths\n'
-            "\n"
-            "Reason: Most skills only show relative path examples. Always use\n"
-            "the full path instead to avoid FileNotFoundError.\n"
-            "\n"
-            "✅ CORRECT:\n"
-            f'  exec(open(rf"{_skls}\\\\data-viz\\\\scripts\\\\setup.py").read())\n'
-            f'  exec(open(rf"{_skls}\\\\data-viz\\\\scripts\\\\chart.py").read())\n'
-            "\n"
-            "  When running skill scripts via subprocess, ALWAYS use sys.executable\n"
-            "  so the correct Python environment (with all packages) is used:\n"
-            "\n"
-            "  import subprocess, sys\n"
-            f'  subprocess.run(\n'
-            f'      [sys.executable, rf"{_skls}\\\\<skill-name>\\\\scripts\\\\<script.py>",\n'
-            f'       "arg1", "arg2"],\n'
-            f'      capture_output=True, text=True, encoding="utf-8"\n'
-            f'  )\n'
-            "\n"
-            "❌ WRONG — WILL BREAK:\n"
-            '  exec(open("scripts/setup.py").read())\n'
-            '  exec(open("chart.py").read())\n'
-            '  exec(open("data-viz/scripts/chart.py").read())\n'
-            '  subprocess.run(["python", "script.py", ...])  # Risk of using the wrong Python version!\n'
-            "\n"
-            "THIS RULE APPLIES TO EVERY SKILL, EVERY SCRIPT, EVERY TIME. NO EXCEPTIONS.\n"
-            "RELATIVE PATHS FOR SKILL SCRIPTS WILL ALWAYS FAIL. USE FULL PATHS."
-        )
+        _skill_path_rule = get_skill_path_rule()
     else:
         _skill_path_rule = ""
 
     # ── Assemble modular sections ─────────────────────────────────────────────
     body_parts = []
-    if include_tool_format:       body_parts.append(_SECTION_TOOL_FORMAT)
+    if include_tool_format:
+        body_parts.append(_SECTION_TOOL_FORMAT.format(
+            tool_table=_build_tool_table(
+                include_session_naming=include_session_naming,
+                include_memory=include_memory,
+                include_workmode=include_work_mode_rules,
+                include_execute_code=include_execute_code_rules,
+            )
+        ))
     if include_session_naming:    body_parts.append(_SECTION_SESSION_NAMING)
     if include_memory:            body_parts.append(_SECTION_MEMORY)
-    if include_execution_tools:   body_parts.append(_SECTION_EXECUTION_TOOLS)
-    if include_fence_syntax:      body_parts.append(_SECTION_FENCE_SYNTAX)
+    if include_execution_tools:
+        _et = _build_execution_tools_section(
+            include_workmode=include_work_mode_rules,
+            include_execute_code=include_execute_code_rules,
+        )
+        if _et:
+            body_parts.append(_et)
+    if include_fence_syntax:
+        _fs = _build_fence_syntax_section(
+            include_workmode=include_work_mode_rules,
+            include_execute_code=include_execute_code_rules,
+        )
+        if _fs:
+            body_parts.append(_fs)
     if include_work_mode_rules:   body_parts.append(_SECTION_WORK_MODE)
     if include_execute_code_rules: body_parts.append(_SECTION_EXECUTE_CODE_MODE)
-    if include_image_tools:       body_parts.append(_SECTION_IMAGE_TOOLS)
+    if include_image_tools and not is_task_session_prompt:       body_parts.append(_SECTION_IMAGE_TOOLS)
+    if include_image_tools and is_task_session_prompt: body_parts.append(_SECTION_IMAGE_TOOLS_TASK)
+    if include_controller_ref:    body_parts.append(_SECTION_CONTROLLER_REF)
+    if include_notify_tool:       body_parts.append(_SECTION_NOTIFY_TOOL)
     if include_must_remember:     body_parts.append(_SECTION_MUST_REMEMBER)
 
     preamble_parts = filter(None, [
-        "You a Systema Auxilium AI Agent - An Operating System Assistant with Python code execution capabilities.",
+        "You a Systema Auxilium AI Agent - An Operating System Assistant.",
         system_info,
-        _skill_path_rule,
         voice_instructions,
     ])
+
+    if _skill_path_rule:
+        _skill_path_rule = "\n\n".join(_skill_path_rule)
 
     return (
             "\n\n".join(preamble_parts)
             + "\n\n"
             + "\n\n".join(body_parts)
+            + _skill_path_rule
             + (f"\n\n{skills_block}" if skills_block else "")
     )
 
 
-# Shared work-continuation decision block used by WORK_MODE_PROMPT and
-# SKILL_LOADED_WORK_PROMPT to avoid duplication.
+# Shared work-continuation decision block used by WORK_MODE_PROMPT and SKILL_LOADED_WORK_PROMPT to avoid duplication.
 _WORK_CONTINUATION_BLOCK = """\
 This is your internal workspace. The user CANNOT see this.
 

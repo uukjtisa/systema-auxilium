@@ -7,66 +7,142 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QFrame, QLineEdit, QTextEdit, QCheckBox,
     QSpinBox, QStackedWidget, QSizePolicy, QApplication,
-    QTimeEdit, QRadioButton, QDateTimeEdit,
+    QTimeEdit, QRadioButton, QDateTimeEdit, QMessageBox,
 )
-from PyQt6.QtCore import Qt, QTime, QDateTime, QPoint
-from PyQt6.QtGui import QFont
+from core.logger import _make_logger, _NoOpLogger
+from PyQt6.QtCore import Qt, QTime, QDateTime, QPoint, QThread, pyqtSignal, QTimer
+from PyQt6.QtGui import QFont, QSyntaxHighlighter, QTextCharFormat, QColor
+import re
 from ui.base_window import BaseWindow
 
-_BG       = "#0D1117"
-_SURFACE  = "#161B22"
-_SURFACE2 = "#21262D"
-_BORDER   = "#30363D"
-_ACCENT   = "#58A6FF"
-_TEXT     = "#E6EDF3"
-_MUTED    = "#8B949E"
-_RED      = "#F85149"
-_GREEN    = "#3FB950"
+# ─────────────────────────── Colored Logger Setup ────────────────────────────
+_verbose = True
+log = _make_logger("Manage Task Window") if _verbose else _NoOpLogger()
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+_BG       = "#080D14"
+_SURFACE  = "#0F1620"
+_SURFACE2 = "#1A2233"
+_BORDER   = "#252E40"
+_ACCENT   = "#4F9EF8"
+_TEXT     = "#E8EFF8"
+_MUTED    = "#637080"
+_RED      = "#F0524F"
+_GREEN    = "#34D058"
+_YELLOW   = "#E3B341"
+_PURPLE   = "#A78BFA"
+_GLOW     = "rgba(79, 158, 248, 0.12)"
+_GLOW_GN  = "rgba(52, 208, 88, 0.15)"
 
 _BTN = f"""
     QPushButton {{
         background: {_SURFACE2}; color: {_TEXT};
-        border: 1px solid {_BORDER}; border-radius: 6px;
-        padding: 6px 14px; font-size: 12px;
+        border: 1px solid {_BORDER}; border-radius: 8px;
+        padding: 6px 16px; font-size: 12px;
     }}
-    QPushButton:hover {{ background: #2D333B; border-color: {_ACCENT}; }}
-    QPushButton:pressed {{ background: #1C2128; }}
+    QPushButton:hover {{ background: #22304A; border-color: {_ACCENT}; color: {_ACCENT}; }}
+    QPushButton:pressed {{ background: #111A28; }}
 """
 _BTN_ACCENT = f"""
     QPushButton {{
-        background: {_ACCENT}; color: #0D1117;
-        border: none; border-radius: 6px;
-        padding: 6px 14px; font-size: 12px; font-weight: 600;
+        background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+            stop:0 #5AA8FF, stop:1 {_ACCENT});
+        color: #060C14;
+        border: none; border-radius: 8px;
+        padding: 6px 18px; font-size: 12px; font-weight: 700;
     }}
-    QPushButton:hover {{ background: #79B8FF; }}
+    QPushButton:hover {{ background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+        stop:0 #7BBEFF, stop:1 #5AA8FF); }}
     QPushButton:pressed {{ background: #388BFD; }}
 """
 _BTN_RED = f"""
     QPushButton {{
         background: transparent; color: {_RED};
-        border: 1px solid {_RED}; border-radius: 6px;
-        padding: 5px 10px; font-size: 11px;
+        border: 1px solid rgba(240,82,79,0.45); border-radius: 8px;
+        padding: 5px 12px; font-size: 11px;
     }}
-    QPushButton:hover {{ background: rgba(248,81,73,0.15); }}
+    QPushButton:hover {{ background: rgba(240,82,79,0.12); border-color: {_RED}; }}
+"""
+_BTN_GHOST = f"""
+    QPushButton {{
+        background: transparent; color: {_MUTED};
+        border: 1px solid {_BORDER}; border-radius: 8px;
+        padding: 5px 12px; font-size: 11px;
+    }}
+    QPushButton:hover {{ background: {_SURFACE2}; color: {_TEXT}; border-color: {_ACCENT}; }}
 """
 _INPUT = f"""
     QLineEdit, QTextEdit, QSpinBox, QTimeEdit {{
         background: {_SURFACE2}; color: {_TEXT};
-        border: 1px solid {_BORDER}; border-radius: 6px;
-        padding: 6px 10px; font-size: 12px;
+        border: 1px solid {_BORDER}; border-radius: 8px;
+        padding: 7px 12px; font-size: 12px;
     }}
     QLineEdit:focus, QTextEdit:focus, QSpinBox:focus, QTimeEdit:focus {{
-        border-color: {_ACCENT};
+        border-color: {_ACCENT}; background: #1E2D45;
     }}
 """
 _CHECK = f"""
-    QCheckBox {{ color: {_TEXT}; font-size: 12px; spacing: 6px; }}
-    QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 4px;
+    QCheckBox {{ color: {_TEXT}; font-size: 12px; spacing: 8px; }}
+    QCheckBox::indicator {{ width: 17px; height: 17px; border-radius: 5px;
         border: 1px solid {_BORDER}; background: {_SURFACE2}; }}
-    QCheckBox::indicator:checked {{ background: {_ACCENT}; border-color: {_ACCENT}; }}
+    QCheckBox::indicator:checked {{
+        background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
+            stop:0 #5AA8FF, stop:1 {_ACCENT});
+        border-color: {_ACCENT}; }}
+    QCheckBox::indicator:hover {{ border-color: {_ACCENT}; }}
 """
-_SEC = f"color: {_MUTED}; font-size: 10px; font-weight: 600; letter-spacing: 1px;"
+_SEC = f"color: {_ACCENT}; font-size: 10px; font-weight: 700; letter-spacing: 1.5px;"
 _LBL = f"color: {_TEXT}; font-size: 12px;"
+
+
+class _PythonHighlighter(QSyntaxHighlighter):
+    """Minimal Python syntax highlighter for the function code editor."""
+
+    def __init__(self, document):
+        super().__init__(document)
+
+        def _fmt(color, bold=False, italic=False):
+            f = QTextCharFormat()
+            f.setForeground(QColor(color))
+            if bold:
+                f.setFontWeight(700)
+            if italic:
+                f.setFontItalic(True)
+            return f
+
+        self._rules = [
+            (re.compile(
+                r'\b(def|class|return|if|else|elif|for|while|try|except|finally|'
+                r'with|import|from|as|pass|break|continue|raise|yield|and|or|not|'
+                r'in|is|lambda|global|nonlocal|del|assert|True|False|None)\b'
+            ), _fmt("#C792EA", bold=True)),
+            (re.compile(
+                r'\b(print|len|range|type|str|int|float|list|dict|set|tuple|bool|'
+                r'open|enumerate|zip|map|filter|sorted|reversed|sum|min|max|abs|'
+                r'round|hasattr|getattr|setattr|isinstance|super)\b'
+            ), _fmt("#82AAFF")),
+            (re.compile(r'\bself\b'),       _fmt("#F07178")),
+            (re.compile(r'\bcontroller\b'), _fmt("#FFCB6B")),
+            (re.compile(r'@\w+'),           _fmt("#FFCB6B")),
+            (re.compile(r'\b\d+\.?\d*\b'),  _fmt("#F78C6C")),
+            (re.compile(r'#.*$'),           _fmt("#546E7A", italic=True)),
+        ]
+        self._str_fmt = _fmt("#C3E88D")
+        self._str_patterns = [
+            re.compile(r'""".*?"""'),
+            re.compile(r"'''.*?'''"),
+            re.compile(r'"(?:[^"\\]|\\.)*"'),
+            re.compile(r"'(?:[^'\\]|\\.)*'"),
+        ]
+
+    def highlightBlock(self, text):
+        for pattern, fmt in self._rules:
+            for m in pattern.finditer(text):
+                self.setFormat(m.start(), m.end() - m.start(), fmt)
+        for pattern in self._str_patterns:
+            for m in pattern.finditer(text):
+                self.setFormat(m.start(), m.end() - m.start(), self._str_fmt)
 
 
 def _sep():
@@ -74,6 +150,189 @@ def _sep():
     f.setFrameShape(QFrame.Shape.HLine)
     f.setStyleSheet(f"background: {_BORDER}; max-height: 1px;")
     return f
+
+def _extract_after_code_block(raw: str) -> str:
+    """Return any text that follows the closing ``` of a ```work_environment block."""
+    open_idx = raw.find('```work_environment')
+    if open_idx == -1:
+        return ''
+    close_idx = raw.find('```', open_idx + len('```work_environment'))
+    if close_idx == -1:
+        return ''
+    return raw[close_idx + 3:].strip()
+
+def _viewer_group_history(history: list) -> list:
+    """
+    Groups session chat history for viewer display.
+    Consecutive assistant messages that all contain a ```work_environment block
+    are merged into a single display unit so the viewer shows one 'Work Session'
+    bubble instead of N separate raw-code bubbles.
+    Each group: {'role': str, 'content': str, '_step_count': int}
+    _step_count > 1 means it is a merged work-session group.
+    Session history is never modified.
+    """
+    groups = []
+    i = 0
+    while i < len(history):
+        msg = history[i]
+        role = msg.get('role', '')
+        content = msg.get('content', '')
+        if role == 'assistant' and '```work_environment' in content:
+            # Collect all consecutive work_environment assistant messages
+            collected = [msg]
+            i += 1
+            while i < len(history):
+                nxt = history[i]
+                if (nxt.get('role') == 'assistant'
+                        and '```work_environment' in nxt.get('content', '')):
+                    collected.append(nxt)
+                    i += 1
+                else:
+                    break
+            # Build a merged display entry
+            if len(collected) == 1:
+                raw1 = collected[0].get('content', '')
+                split1 = raw1.find('```work_environment')
+                vis1 = raw1[:split1].strip() if split1 != -1 else raw1.strip()
+                inline_tail = _extract_after_code_block(raw1)
+                tail1 = inline_tail
+                if (not tail1 and i < len(history)
+                        and history[i].get('role') == 'assistant'
+                        and '```work_environment' not in history[i].get('content', '')):
+                    tail1 = history[i].get('content', '').strip()
+                    i += 1
+                groups.append({
+                    'role': 'assistant',
+                    'content': vis1 if vis1 else '(executing…)',
+                    '_step_count': 1,
+                    '_tail': tail1,
+                })
+            else:
+                # Extract visible text before each work_environment block for display
+                parts = []
+                for step_i, step_msg in enumerate(collected, 1):
+                    raw = step_msg.get('content', '')
+                    # Grab text before the first ```work_environment marker
+                    split_idx = raw.find('```work_environment')
+                    visible = raw[:split_idx].strip() if split_idx != -1 else raw.strip()
+                    if visible:
+                        parts.append(f"[Step {step_i}] {visible}")
+                    else:
+                        parts.append(f"[Step {step_i}] (executing…)")
+                merged_content = '\n\n'.join(parts)
+
+                # Capture inline tail from the last step (text after its closing ```)
+                last_raw = collected[-1].get('content', '')
+                inline_tail = _extract_after_code_block(last_raw)
+
+                # Also check the next message if no inline tail found yet
+                tail_content = inline_tail
+                if (not tail_content and i < len(history)
+                        and history[i].get('role') == 'assistant'
+                        and '```work_environment' not in history[i].get('content', '')):
+                    tail_content = history[i].get('content', '').strip()
+                    i += 1  # consume it so it won't also render as a separate bubble
+
+                groups.append({
+                    'role': 'assistant',
+                    'content': merged_content,
+                    '_step_count': len(collected),
+                    '_tail': tail_content,
+                })
+        else:
+            # Hide work-mode system prompts from the viewer.
+            # Only actual task pings (SYSTEM_AUTOMATED_TASK_PING) are shown.
+            # Non-ping system messages stay in history for the AI — just not displayed.
+            if role == 'system' and 'SYSTEM_AUTOMATED_TASK_PING' not in content:
+                i += 1
+                continue
+            groups.append({'role': role, 'content': content, '_step_count': 1})
+            i += 1
+    return groups
+
+
+class _VerifyWorker(QThread):
+    """Runs {{ }} block verification off the main thread so the UI never freezes."""
+    done = pyqtSignal(dict)
+
+    def __init__(self, text: str, functions: list, controller, blocking_patterns: list):
+        super().__init__()
+        self._text = text
+        self._functions = functions
+        self._controller = controller
+        self._blocking_patterns = blocking_patterns
+
+    def run(self):
+        import ast
+        raw_blocks = re.findall(r'\{\{(.*?)\}\}', self._text, re.DOTALL)
+        if not raw_blocks:
+            self.done.emit({'blocks': [], 'has_errors': False, 'has_blocking': False})
+            return
+
+        try:
+            from core.python_interpreter import PythonInterpreter
+            interp = PythonInterpreter()
+            interp.namespace['controller'] = self._controller
+            for _fn in self._functions:
+                try:
+                    interp.execute(_fn['code'])
+                except Exception:
+                    pass
+        except Exception as e:
+            self.done.emit({
+                'blocks': [{'expr': '(interpreter)', '_raw': '', 'result': '',
+                            'error': f"Could not load Python interpreter: {e}", 'blocking': None}],
+                'has_errors': True,
+                'has_blocking': False,
+            })
+            return
+
+        results = []
+        has_errors = False
+        has_blocking = False
+
+        for raw in raw_blocks:
+            expr = raw.strip()
+            blocking_reason = None
+            error = None
+            result_str = ''
+
+            for pattern, reason in self._blocking_patterns:
+                if re.search(pattern, expr):
+                    blocking_reason = reason
+                    has_blocking = True
+                    break
+
+            if blocking_reason:
+                results.append({'expr': expr, '_raw': raw, 'result': '', 'error': None, 'blocking': blocking_reason})
+                continue
+
+            try:
+                ast.parse(expr)
+            except SyntaxError as e:
+                has_errors = True
+                results.append({'expr': expr, '_raw': raw, 'result': '', 'error': f"SyntaxError: {e}", 'blocking': None})
+                continue
+
+            try:
+                out = interp.execute(expr)
+                if out.get('error'):
+                    last_line = out['error'].strip().splitlines()[-1] if out['error'].strip() else 'Error'
+                    error = last_line
+                    has_errors = True
+                elif out.get('stdout'):
+                    result_str = out['stdout'].strip()
+                elif out.get('result') is not None:
+                    result_str = repr(out['result'])
+                else:
+                    result_str = '(no output)'
+            except Exception as e:
+                error = str(e)
+                has_errors = True
+
+            results.append({'expr': expr, '_raw': raw, 'result': result_str, 'error': error, 'blocking': None})
+
+        self.done.emit({'blocks': results, 'has_errors': has_errors, 'has_blocking': has_blocking})
 
 
 class ManageTasksWindow(BaseWindow):
@@ -83,16 +342,26 @@ class ManageTasksWindow(BaseWindow):
 
     def __init__(self, controller, parent=None):
         super().__init__(parent)
+        self._skill_manager = getattr(controller, 'skill_manager', None)
         self._init_chrome_state()
-        self.controller = controller
+        self._controller = controller
         self._task_mgr = getattr(controller, 'task_manager', None)
-        self._editing_task_id = None   # None = creating new
-        self._sessions_expanded = {}   # task_id → bool
+        self._editing_task_id = None  # None = creating new
+        self._verify_worker = None  # background verify QThread (Verify button)
+        self._save_verify_worker = None  # background verify QThread (Save path)
+        self._save_spinner_timer = None  # QTimer animating the Save button
+        self._save_spinner_frame = 0
+        self._sessions_expanded = {}  # task_id → bool
+        self._selected_script_name = ''  # currently selected script in Script Trigger mode
+        self._viewer_task_id: str | None = None     # task currently open in session viewer
+        self._viewer_date_str: str | None = None    # session date currently open
+        self._viewer_msg_count: int = 0             # message count at last render
+        self._viewer_refresh_timer: QTimer | None = None  # live-refresh timer
 
         self.setWindowTitle("Manage Tasks")
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.resize(720, 600)
+        self.resize(860, 680)
         self.setStyleSheet("background: transparent;")
 
         self.container = QWidget(self)
@@ -202,11 +471,22 @@ class ManageTasksWindow(BaseWindow):
         page = QWidget()
         page.setStyleSheet(f"background: {_BG};")
         vl = QVBoxLayout(page)
-        vl.setContentsMargins(20, 20, 20, 20)
-        vl.setSpacing(12)
+        vl.setContentsMargins(22, 18, 22, 18)
+        vl.setSpacing(14)
 
         # Header
         hl = QHBoxLayout()
+        hl.setSpacing(12)
+        _title = QLabel("Scheduled Tasks")
+        _title.setStyleSheet(
+            f"color: {_TEXT}; font-size: 16px; font-weight: 700; background: transparent;"
+        )
+        self._tasks_header_count = QLabel("")
+        self._tasks_header_count.setStyleSheet(
+            f"color: {_MUTED}; font-size: 11px; background: transparent;"
+        )
+        hl.addWidget(_title)
+        hl.addWidget(self._tasks_header_count)
         hl.addStretch()
         new_btn = QPushButton("＋  New Task")
         new_btn.setStyleSheet(_BTN_ACCENT)
@@ -215,7 +495,13 @@ class ManageTasksWindow(BaseWindow):
         hl.addWidget(new_btn)
         vl.addLayout(hl)
 
-        vl.addWidget(_sep())
+        # Thin accent divider
+        _div = QFrame()
+        _div.setFrameShape(QFrame.Shape.HLine)
+        _div.setFixedHeight(1)
+        _div.setStyleSheet(f"background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+                           f"stop:0 {_ACCENT}, stop:0.5 {_BORDER}, stop:1 {_BG});")
+        vl.addWidget(_div)
 
         # Scrollable task list
         scroll = QScrollArea()
@@ -247,10 +533,29 @@ class ManageTasksWindow(BaseWindow):
             return
 
         tasks = self._task_mgr.get_tasks()
+        if hasattr(self, '_tasks_header_count'):
+            _active = sum(1 for t in tasks if t.get('active', True))
+            self._tasks_header_count.setText(
+                f"  {_active} active · {len(tasks)} total" if tasks else ""
+            )
         if not tasks:
-            lbl = QLabel("No tasks yet. Click ＋ New Task to create one.")
-            lbl.setStyleSheet(f"color: {_MUTED}; padding: 20px;")
-            self._list_layout.insertWidget(0, lbl)
+            _empty = QWidget()
+            _empty.setStyleSheet(f"background: {_SURFACE}; border-radius: 10px; border: 1px solid {_BORDER};")
+            _el = QVBoxLayout(_empty)
+            _el.setContentsMargins(24, 28, 24, 28)
+            _ei = QLabel("🗂")
+            _ei.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            _ei.setStyleSheet("font-size: 32px; background: transparent; border: none;")
+            _et = QLabel("No tasks yet")
+            _et.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            _et.setStyleSheet(f"color: {_TEXT}; font-size: 14px; font-weight: 600; background: transparent; border: none;")
+            _eh = QLabel("Click ＋ New Task to create your first scheduled agent task.")
+            _eh.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            _eh.setStyleSheet(f"color: {_MUTED}; font-size: 11px; background: transparent; border: none;")
+            _el.addWidget(_ei)
+            _el.addWidget(_et)
+            _el.addWidget(_eh)
+            self._list_layout.insertWidget(0, _empty)
             return
 
         for i, task in enumerate(tasks):
@@ -259,27 +564,55 @@ class ManageTasksWindow(BaseWindow):
 
     def _build_task_row(self, task: dict) -> QWidget:
         task_id = task['id']
+        is_active = task.get('active', True)
+        _status_color = _GREEN if is_active else _MUTED
+
+        # Outer wrapper for the left status bar effect
+        wrapper = QWidget()
+        wrapper.setObjectName("taskRowWrapper")
+        wrapper.setStyleSheet(f"""
+            QWidget#taskRowWrapper {{
+                background: transparent;
+            }}
+        """)
+        _wl = QHBoxLayout(wrapper)
+        _wl.setContentsMargins(0, 0, 0, 0)
+        _wl.setSpacing(0)
+
+        # Left color bar
+        _bar = QFrame()
+        _bar.setFixedWidth(3)
+        _bar.setStyleSheet(f"background: {_status_color}; border-radius: 2px;")
+        _wl.addWidget(_bar)
+
         container = QWidget()
         container.setObjectName("taskRowCard")
         container.setStyleSheet(f"""
-                    QWidget#taskRowCard {{
-                        background: {_SURFACE};
-                        border-radius: 8px;
-                        border: 1px solid rgba(88, 166, 255, 0.18);
-                    }}
-                """)
+            QWidget#taskRowCard {{
+                background: {_SURFACE};
+                border-radius: 0 10px 10px 0;
+                border: 1px solid {_BORDER};
+                border-left: none;
+            }}
+            QWidget#taskRowCard:hover {{
+                background: {_SURFACE2};
+                border-color: rgba(79,158,248,0.3);
+            }}
+        """)
+        _wl.addWidget(container, stretch=1)
+
         vl = QVBoxLayout(container)
-        vl.setContentsMargins(14, 12, 14, 12)
+        vl.setContentsMargins(16, 12, 14, 12)
         vl.setSpacing(6)
 
         # ── Top row: name + buttons ───────────────────────────────────────────
         top = QHBoxLayout()
 
         name_col = QVBoxLayout()
-        name_col.setSpacing(2)
+        name_col.setSpacing(3)
         name_lbl = QLabel(task.get('name', 'Unnamed Task'))
         name_lbl.setStyleSheet(
-            f"color: {_TEXT}; font-size: 14px; font-weight: 700; background: transparent; border: none;")
+            f"color: {_TEXT}; font-size: 13px; font-weight: 700; background: transparent; border: none;")
         name_col.addWidget(name_lbl)
 
         one_time = task.get('one_time_schedule', {})
@@ -295,10 +628,21 @@ class ManageTasksWindow(BaseWindow):
                     label += f"  +{count - 1} backup{'s' if count > 2 else ''}"
                 info_lbl = QLabel(f"One-time: {label}")
         else:
-            interval = task.get('interval_minutes', 30)
+            _pim = task.get('ping_interval_mode', '')
+            if not _pim:
+                _pim = 'specific_times' if task.get('use_specific_ping_times', False) else 'timed'
             sched = task.get('daily_schedule', {})
             sched_text = "Whole day" if sched.get('whole_day') else f"{sched.get('start', '?')} – {sched.get('end', '?')}"
-            info_lbl = QLabel(f"Every {interval} min  ·  {sched_text}")
+            if _pim == 'script_trigger':
+                _sn = task.get('script_name', '?')
+                info_lbl = QLabel(f"Scripted ping ({_sn})  ·  {sched_text}")
+            elif _pim == 'specific_times':
+                _times = task.get('specific_ping_times', [])
+                _times_str = ', '.join(_times[:3]) + ('…' if len(_times) > 3 else '')
+                info_lbl = QLabel(f"Specific times: {_times_str or '?'}  ·  {sched_text}")
+            else:
+                interval = task.get('interval_minutes', 30)
+                info_lbl = QLabel(f"Every {interval} min  ·  {sched_text}")
         info_lbl.setStyleSheet(f"color: {_MUTED}; font-size: 10px; background: transparent; border: none;")
         name_col.addWidget(info_lbl)
         top.addLayout(name_col, stretch=1)
@@ -317,19 +661,29 @@ class ManageTasksWindow(BaseWindow):
         del_btn.clicked.connect(lambda _, tid=task_id: self._delete_task(tid))
         top.addWidget(del_btn)
 
-        is_active = task.get('active', True)
         active_btn = QPushButton("● Active" if is_active else "○ Inactive")
         active_btn.setFixedHeight(26)
         active_btn.setStyleSheet(
-            f"QPushButton {{ background: transparent; color: {_GREEN}; border: 1px solid {_GREEN}; "
-            f"border-radius: 6px; padding: 4px 10px; font-size: 11px; }}"
+            f"QPushButton {{ background: {_GLOW_GN}; color: {_GREEN}; "
+            f"border: 1px solid rgba(52,208,88,0.4); "
+            f"border-radius: 8px; padding: 4px 12px; font-size: 11px; font-weight: 600; }}"
+            f"QPushButton:hover {{ background: rgba(52,208,88,0.22); }}"
             if is_active else
-            f"QPushButton {{ background: transparent; color: {_MUTED}; border: 1px solid {_MUTED}; "
-            f"border-radius: 6px; padding: 4px 10px; font-size: 11px; }}"
+            f"QPushButton {{ background: transparent; color: {_MUTED}; "
+            f"border: 1px solid {_BORDER}; "
+            f"border-radius: 8px; padding: 4px 12px; font-size: 11px; }}"
+            f"QPushButton:hover {{ background: {_SURFACE2}; color: {_TEXT}; }}"
         )
         active_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         active_btn.clicked.connect(lambda _, tid=task_id, btn=active_btn: self._toggle_task_active(tid, btn))
         top.addWidget(active_btn)
+
+        prompt_btn = QPushButton("👁  Task System Prompt")
+        prompt_btn.setStyleSheet(_BTN)
+        prompt_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        prompt_btn.setToolTip("Preview the system prompt this task session will receive.")
+        prompt_btn.clicked.connect(lambda _, t=task: self._show_system_prompt_preview(task_dict=t))
+        top.addWidget(prompt_btn)
 
         sess_btn = QPushButton("▶  Sessions")
         sess_btn.setFixedHeight(26)
@@ -356,7 +710,7 @@ class ManageTasksWindow(BaseWindow):
         top.addWidget(sess_btn)
 
         vl.addWidget(sess_panel)
-        return container
+        return wrapper
 
     def _populate_sessions_panel(self, layout: QVBoxLayout, task_id: str):
         # Clear existing
@@ -364,6 +718,12 @@ class ManageTasksWindow(BaseWindow):
             item = layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+            elif item.layout():
+                sub = item.layout()
+                while sub.count():
+                    si = sub.takeAt(0)
+                    if si.widget():
+                        si.widget().deleteLater()
 
         if self._task_mgr is None:
             return
@@ -448,21 +808,40 @@ class ManageTasksWindow(BaseWindow):
         bar.setFixedHeight(48)
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(16, 0, 16, 0)
-        back_btn = QPushButton("← Back")
-        back_btn.setStyleSheet(_BTN)
-        back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        back_btn.clicked.connect(lambda: self._stack.setCurrentIndex(0))
-        bl.addWidget(back_btn)
+        self._back_btn = QPushButton("← Back")
+        self._back_btn.setStyleSheet(_BTN)
+        self._back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._back_btn.clicked.connect(lambda: self._stack.setCurrentIndex(0))
+        bl.addWidget(self._back_btn)
         self._editor_title = QLabel("New Task")
         self._editor_title.setStyleSheet(
             f"color: {_TEXT}; font-size: 14px; font-weight: 600; padding-left: 12px;"
         )
         bl.addWidget(self._editor_title, stretch=1)
-        save_btn = QPushButton("Save Task")
-        save_btn.setStyleSheet(_BTN_ACCENT)
-        save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        save_btn.clicked.connect(self._save_task)
-        bl.addWidget(save_btn)
+
+        _preview_btn = QPushButton("👁  Task System Prompt")
+        _preview_btn.setStyleSheet(_BTN)
+        _preview_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        _preview_btn.setToolTip("Preview the full system prompt this task session will receive.")
+        _preview_btn.clicked.connect(lambda: self._show_system_prompt_preview(task_dict={
+            'name': self._f_name.text().strip() or 'New Task (Preview)',
+            'permissions': {
+                'allow_workmode':          self._f_perm_workmode.isChecked(),
+                'allow_execute_code':      self._f_perm_exec_code.isChecked(),
+                'allow_skill_load_unload': False,
+                'inject_image_tools':      self._f_perm_image_tools.isChecked(),
+                'inject_controller_ref':   self._f_perm_controller_ref.isChecked(),
+                'inject_notify_tool':      self._f_perm_notify_tool.isChecked(),
+            },
+            'loaded_skills': self._get_checked_skill_names(),
+        }))
+        bl.addWidget(_preview_btn)
+
+        self._save_btn = QPushButton("Save Task")
+        self._save_btn.setStyleSheet(_BTN_ACCENT)
+        self._save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._save_btn.clicked.connect(self._save_task)
+        bl.addWidget(self._save_btn)
         outer.addWidget(bar)
 
         # ── Scrollable form ───────────────────────────────────────────────────
@@ -498,12 +877,12 @@ class ManageTasksWindow(BaseWindow):
             card = QWidget()
             card.setObjectName("editorCard")
             card.setStyleSheet(
-                f"QWidget#editorCard {{ background: {_SURFACE}; border-radius: 8px;"
+                f"QWidget#editorCard {{ background: {_SURFACE}; border-radius: 10px;"
                 f" border: 1px solid {_BORDER}; }}"
             )
             cl = QVBoxLayout(card)
-            cl.setContentsMargins(16, 14, 16, 14)
-            cl.setSpacing(10)
+            cl.setContentsMargins(18, 16, 18, 16)
+            cl.setSpacing(12)
             for w in inner_widgets:
                 if isinstance(w, QWidget):
                     cl.addWidget(w)
@@ -535,12 +914,147 @@ class ManageTasksWindow(BaseWindow):
         )
         self._f_instruction.setMinimumHeight(130)
         self._f_instruction.setStyleSheet(_INPUT)
+        # ── Verify button row ─────────────────────────────────────────────────
+        verify_row = QWidget()
+        verify_row.setStyleSheet("background: transparent;")
+        vr = QHBoxLayout(verify_row)
+        vr.setContentsMargins(0, 4, 0, 0)
+        vr.setSpacing(8)
+        verify_btn = QPushButton("Verify instruction")
+        verify_btn.setStyleSheet(_BTN)
+        verify_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        verify_btn.clicked.connect(self._run_verify_and_display)
+        vr.addWidget(verify_btn)
+        vr.addStretch()
+
+        self._verify_result_box = QTextEdit()
+        self._verify_result_box.setReadOnly(True)
+        self._verify_result_box.setFixedHeight(90)
+        self._verify_result_box.setStyleSheet(
+            f"QTextEdit {{ background: {_BG}; color: {_TEXT}; border: 1px solid {_BORDER};"
+            f" border-radius: 6px; padding: 6px 8px; font-size: 11px; font-family: monospace; }}"
+        )
+        self._verify_result_box.setVisible(False)
+
         fl.addWidget(_card(
             _field(
                 "INSTRUCTION",
                 self._f_instruction,
                 "What should the agent do at each ping? Supports {{ Python }} inline blocks.",
-            )
+            ),
+            verify_row,
+            self._verify_result_box,
+        ))
+
+        # ══ CARD 2b: Functions Library ════════════════════════════════════════
+        fn_header_lbl = QLabel("FUNCTIONS LIBRARY")
+        fn_header_lbl.setStyleSheet(_SEC)
+        fn_hint_lbl = QLabel(
+            "Write reusable multi-line Python functions. Reference them in instructions with {{ my_func() }}. "
+            "Functions are shared across all tasks."
+        )
+        fn_hint_lbl.setStyleSheet(f"color: {_MUTED}; font-size: 10px;")
+        fn_hint_lbl.setWordWrap(True)
+
+        self._fn_list_widget = QWidget()
+        self._fn_list_widget.setStyleSheet("background: transparent;")
+        self._fn_list_layout = QVBoxLayout(self._fn_list_widget)
+        self._fn_list_layout.setContentsMargins(0, 0, 0, 0)
+        self._fn_list_layout.setSpacing(4)
+
+        add_fn_btn = QPushButton("＋  Add Function")
+        add_fn_btn.setStyleSheet(_BTN)
+        add_fn_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        self._fn_editor_panel = QWidget()
+        self._fn_editor_panel.setStyleSheet(
+            f"background: {_BG}; border-radius: 6px; border: 1px solid {_BORDER};"
+        )
+        self._fn_editor_panel.setVisible(False)
+        fe_layout = QVBoxLayout(self._fn_editor_panel)
+        fe_layout.setContentsMargins(10, 10, 10, 10)
+        fe_layout.setSpacing(6)
+
+        fn_name_row = QWidget()
+        fn_name_row.setStyleSheet("background: transparent;")
+        fn_name_rl = QHBoxLayout(fn_name_row)
+        fn_name_rl.setContentsMargins(0, 0, 0, 0)
+        fn_name_rl.setSpacing(6)
+        fn_name_lbl2 = QLabel("Function Name:  (optional — auto-detected from def)")
+        fn_name_lbl2.setStyleSheet(f"color: {_MUTED}; font-size: 11px; background: transparent;")
+        self._fn_name_input = QLineEdit()
+        self._fn_name_input.setPlaceholderText("auto-detected from  def name():  …")
+        self._fn_name_input.setStyleSheet(_INPUT)
+        self._fn_name_input.setFixedWidth(260)
+        fn_name_rl.addWidget(fn_name_lbl2)
+        fn_name_rl.addWidget(self._fn_name_input)
+        fn_name_rl.addStretch()
+        fe_layout.addWidget(fn_name_row)
+
+        self._fn_code_editor = QTextEdit()
+        self._fn_code_editor.setPlaceholderText(
+            "def check_chat():\n    if controller.ui.chat_window.isVisible():\n        print('true')\n    else:\n        print('false')"
+        )
+        self._fn_code_editor.setMinimumHeight(130)
+        self._fn_code_editor.setTabStopDistance(28)
+        self._fn_code_editor.setStyleSheet(
+            f"QTextEdit {{ background: #0D1117; color: {_TEXT}; border: 1px solid {_BORDER};"
+            f" border-radius: 6px; padding: 6px 8px; font-size: 12px;"
+            f" font-family: 'Courier New', 'Consolas', monospace; }}"
+            f"QTextEdit:focus {{ border-color: {_ACCENT}; }}"
+        )
+        fe_layout.addWidget(self._fn_code_editor)
+        self._fn_highlighter = _PythonHighlighter(self._fn_code_editor.document())
+
+        def _auto_detect_fn_name():
+            txt = self._fn_code_editor.toPlainText()
+            m = re.search(r'^\s*def\s+([a-zA-Z_]\w*)\s*\(', txt, re.MULTILINE)
+            if m and not self._fn_name_input.text().strip():
+                self._fn_name_input.setText(m.group(1))
+
+        self._fn_code_editor.textChanged.connect(_auto_detect_fn_name)
+
+        fn_btn_row = QWidget()
+        fn_btn_row.setStyleSheet("background: transparent;")
+        fn_br = QHBoxLayout(fn_btn_row)
+        fn_br.setContentsMargins(0, 0, 0, 0)
+        fn_br.setSpacing(6)
+        fn_save_btn = QPushButton("Save Function")
+        fn_save_btn.setStyleSheet(_BTN_ACCENT)
+        fn_save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        fn_save_btn.clicked.connect(self._save_function_from_editor)
+        fn_br.addWidget(fn_save_btn)
+        fn_cancel_btn = QPushButton("Cancel")
+        fn_cancel_btn.setStyleSheet(_BTN)
+        fn_cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        fn_cancel_btn.clicked.connect(lambda: (
+            self._fn_editor_panel.setVisible(False),
+            self._fn_name_input.clear(),
+            self._fn_code_editor.clear(),
+        ))
+        fn_br.addWidget(fn_cancel_btn)
+        fn_br.addStretch()
+        fe_layout.addWidget(fn_btn_row)
+
+        self._fn_error_lbl = QLabel("")
+        self._fn_error_lbl.setStyleSheet(
+            f"color: {_RED}; font-size: 11px; background: transparent; padding: 2px 0px;"
+        )
+        self._fn_error_lbl.setWordWrap(True)
+        self._fn_error_lbl.setVisible(False)
+        fe_layout.addWidget(self._fn_error_lbl)
+
+        add_fn_btn.clicked.connect(lambda: (
+            self._fn_editor_panel.setVisible(True),
+            self._fn_name_input.setFocus(),
+        ))
+
+        fl.addWidget(_card(
+            fn_header_lbl,
+            fn_hint_lbl,
+            self._fn_list_widget,
+            add_fn_btn,
+            self._fn_editor_panel,
         ))
 
         # ══ CARD 3: Schedule ══════════════════════════════════════════════════
@@ -595,7 +1109,7 @@ class ManageTasksWindow(BaseWindow):
         self._f_mode_startup.setStyleSheet(_RADIO)
         self._f_mode_startup.setToolTip(
             "Interval counts down from when the app/thread starts.\n"
-            "Example: app opens at 4:31 PM, interval 30 min → next ping at 5:01 PM."
+            "Example: app/thread opens at 4:31 PM, interval 30 min → next ping at 5:01 PM."
         )
 
         self._f_mode_schedule = QRadioButton("Schedule Relative")
@@ -609,10 +1123,6 @@ class ManageTasksWindow(BaseWindow):
         pmr.addWidget(self._f_mode_startup)
         pmr.addWidget(self._f_mode_schedule)
         pmr.addStretch()
-
-        # Specific ping toggle
-        self._f_specific_ping = QCheckBox("Use Specific Ping Times  (disables the interval above)")
-        self._f_specific_ping.setStyleSheet(_CHECK)
 
         self._ping_times_panel = QWidget()
         self._ping_times_panel.setStyleSheet(
@@ -647,31 +1157,212 @@ class ManageTasksWindow(BaseWindow):
         self._ping_times_list_layout.setSpacing(4)
         ptl.addLayout(self._ping_times_list_layout)
 
-        self._f_specific_ping.toggled.connect(lambda on: (
-            self._f_interval.setEnabled(not on),
-            ping_mode_row.setEnabled(not on),
-            self._ping_times_panel.setVisible(on),
-        ))
-
-        schedule_lbl = QLabel("DAILY SCHEDULE")
+        # ── Card 3: Daily Session Schedule ────────────────────────────────────
+        schedule_lbl = QLabel("DAILY SESSION SCHEDULE")
         schedule_lbl.setStyleSheet(_SEC)
-        interval_lbl = QLabel("PING INTERVAL / TIMES")
-        interval_lbl.setStyleSheet(_SEC)
-        mode_lbl = QLabel("INTERVAL MODE")
-        mode_lbl.setStyleSheet(_SEC)
+        schedule_hint = QLabel(
+            "Sets the daily active window for this task. "
+            "A fresh session starts when the window opens each day."
+        )
+        schedule_hint.setStyleSheet(f"color: {_MUTED}; font-size: 10px;")
+        schedule_hint.setWordWrap(True)
 
         self._daily_schedule_card = _card(
             schedule_lbl,
+            schedule_hint,
             self._f_whole_day,
             time_row,
-            interval_lbl,
-            _field("", self._f_interval),
-            mode_lbl,
-            ping_mode_row,
-            self._f_specific_ping,
-            self._ping_times_panel,
         )
         fl.addWidget(self._daily_schedule_card)
+
+        # ── Card 4: Ping Interval ─────────────────────────────────────────────
+        ping_interval_lbl = QLabel("PING INTERVAL")
+        ping_interval_lbl.setStyleSheet(_SEC)
+
+        _SEG_ON = (
+            f"QPushButton {{ background: {_ACCENT}; color: #0D1117; border: 1px solid {_ACCENT};"
+            f" border-radius: 5px; padding: 4px 14px; font-size: 11px; font-weight: 600; }}"
+        )
+        _SEG_OFF = (
+            f"QPushButton {{ background: transparent; color: {_MUTED}; border: 1px solid {_BORDER};"
+            f" border-radius: 5px; padding: 4px 14px; font-size: 11px; }}"
+            f"QPushButton:hover {{ color: {_TEXT}; border-color: {_ACCENT}; }}"
+        )
+
+        seg_row = QWidget()
+        seg_row.setStyleSheet("background: transparent;")
+        seg_rl = QHBoxLayout(seg_row)
+        seg_rl.setContentsMargins(0, 0, 0, 0)
+        seg_rl.setSpacing(4)
+        self._seg_timed_btn    = QPushButton("Timed Interval")
+        self._seg_specific_btn = QPushButton("Specific Ping Times")
+        self._seg_script_btn   = QPushButton("Script Trigger")
+        for _b in (self._seg_timed_btn, self._seg_specific_btn, self._seg_script_btn):
+            _b.setCheckable(True)
+            _b.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._seg_timed_btn.setChecked(True)
+        self._seg_timed_btn.setStyleSheet(_SEG_ON)
+        self._seg_specific_btn.setStyleSheet(_SEG_OFF)
+        self._seg_script_btn.setStyleSheet(_SEG_OFF)
+        seg_rl.addWidget(self._seg_timed_btn)
+        seg_rl.addWidget(self._seg_specific_btn)
+        seg_rl.addWidget(self._seg_script_btn)
+        seg_rl.addStretch()
+
+        # ── Timed interval sub-section ────────────────────────────────────────
+        self._timed_interval_section = QWidget()
+        self._timed_interval_section.setStyleSheet("background: transparent;")
+        tis_vl = QVBoxLayout(self._timed_interval_section)
+        tis_vl.setContentsMargins(0, 0, 0, 0)
+        tis_vl.setSpacing(6)
+        timer_behavior_lbl = QLabel("TIMER BEHAVIOR")
+        timer_behavior_lbl.setStyleSheet(_SEC)
+        timer_inline_row = QWidget()
+        timer_inline_row.setStyleSheet("background: transparent;")
+        tir_hl = QHBoxLayout(timer_inline_row)
+        tir_hl.setContentsMargins(0, 0, 0, 0)
+        tir_hl.setSpacing(12)
+        self._f_interval.setFixedWidth(150)
+        tir_hl.addWidget(self._f_interval)
+        tir_hl.addWidget(self._f_mode_startup)
+        tir_hl.addWidget(self._f_mode_schedule)
+        tir_hl.addStretch()
+        tis_vl.addWidget(timer_behavior_lbl)
+        tis_vl.addWidget(timer_inline_row)
+
+        # ── Script Trigger sub-section ────────────────────────────────────────
+        self._script_trigger_section = QWidget()
+        self._script_trigger_section.setStyleSheet("background: transparent;")
+        self._script_trigger_section.setVisible(False)
+        sts_vl = QVBoxLayout(self._script_trigger_section)
+        sts_vl.setContentsMargins(0, 0, 0, 0)
+        sts_vl.setSpacing(8)
+
+        # Script library header row (label + Open Folder + Refresh)
+        _sl_hdr = QWidget()
+        _sl_hdr.setStyleSheet("background: transparent;")
+        _sl_hdr_hl = QHBoxLayout(_sl_hdr)
+        _sl_hdr_hl.setContentsMargins(0, 0, 0, 0)
+        _sl_hdr_hl.setSpacing(6)
+        _sl_lbl = QLabel("SCRIPT LIBRARY")
+        _sl_lbl.setStyleSheet(_SEC)
+        _sl_hdr_hl.addWidget(_sl_lbl)
+        _sl_hdr_hl.addStretch()
+        _sl_open_btn = QPushButton("📂  Open Script Folder")
+        _sl_open_btn.setStyleSheet(_BTN)
+        _sl_open_btn.setFixedHeight(24)
+        _sl_open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        _sl_open_btn.clicked.connect(self._open_scripts_folder)
+        _sl_hdr_hl.addWidget(_sl_open_btn)
+        _sl_refresh_btn = QPushButton("↺")
+        _sl_refresh_btn.setFixedSize(50, 50)
+        _sl_refresh_btn.setStyleSheet(_BTN)
+        _sl_refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        _sl_refresh_btn.setToolTip("Refresh script list")
+        _sl_refresh_btn.clicked.connect(self._refresh_script_library)
+        _sl_hdr_hl.addWidget(_sl_refresh_btn)
+        sts_vl.addWidget(_sl_hdr)
+
+        _sl_hint = QLabel(
+            "Each script must define  fire_ping() → bool.  "
+            "Click a card to select it.  The library auto-refreshes while this mode is active."
+        )
+        _sl_hint.setStyleSheet(f"color: {_MUTED}; font-size: 10px;")
+        _sl_hint.setWordWrap(True)
+        sts_vl.addWidget(_sl_hint)
+
+        # Script cards container
+        self._script_lib_container = QWidget()
+        self._script_lib_container.setStyleSheet("background: transparent;")
+        self._script_lib_layout = QVBoxLayout(self._script_lib_container)
+        self._script_lib_layout.setContentsMargins(0, 0, 0, 0)
+        self._script_lib_layout.setSpacing(4)
+        sts_vl.addWidget(self._script_lib_container)
+
+        # Poll Rate row
+        _pr_row = QWidget()
+        _pr_row.setStyleSheet("background: transparent;")
+        _pr_hl = QHBoxLayout(_pr_row)
+        _pr_hl.setContentsMargins(0, 4, 0, 0)
+        _pr_hl.setSpacing(8)
+        _pr_lbl = QLabel("POLL RATE")
+        _pr_lbl.setStyleSheet(_SEC)
+        _pr_hl.addWidget(_pr_lbl)
+        self._f_script_poll_ms = QSpinBox()
+        self._f_script_poll_ms.setRange(100, 60000)
+        self._f_script_poll_ms.setValue(1000)
+        self._f_script_poll_ms.setSuffix("  ms")
+        self._f_script_poll_ms.setFixedWidth(140)
+        self._f_script_poll_ms.setStyleSheet(_INPUT)
+        self._f_script_poll_ms.setToolTip(
+            "How often fire_ping() is called, in milliseconds.\n"
+            "Lower = faster reaction; higher = less CPU use.\n"
+            "Minimum: 100 ms."
+        )
+        _pr_hl.addWidget(self._f_script_poll_ms)
+        _pr_desc = QLabel("— how often fire_ping() is called")
+        _pr_desc.setStyleSheet(f"color: {_MUTED}; font-size: 11px;")
+        _pr_hl.addWidget(_pr_desc)
+        _pr_hl.addStretch()
+        sts_vl.addWidget(_pr_row)
+
+        # How to use button
+        _howto_btn = QPushButton("?  How to use")
+        _howto_btn.setStyleSheet(_BTN)
+        _howto_btn.setFixedHeight(26)
+        _howto_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        _howto_btn.clicked.connect(self._show_script_trigger_help)
+        sts_vl.addWidget(_howto_btn)
+
+        # Auto-refresh timer (runs only while Script Trigger mode is visible)
+        self._script_lib_refresh_timer = QTimer(self)
+        self._script_lib_refresh_timer.setInterval(2500)
+        self._script_lib_refresh_timer.timeout.connect(self._refresh_script_library)
+
+        # ── Segment select handler — three modes ──────────────────────────────
+        def _seg_select_mode(mode: str):
+            """mode: 'timed' | 'specific_times' | 'script_trigger'"""
+            for _b, _m in (
+                (self._seg_timed_btn,    'timed'),
+                (self._seg_specific_btn, 'specific_times'),
+                (self._seg_script_btn,   'script_trigger'),
+            ):
+                _b.blockSignals(True)
+                _b.setChecked(_m == mode)
+                _b.setStyleSheet(_SEG_ON if _m == mode else _SEG_OFF)
+                _b.blockSignals(False)
+
+            self._timed_interval_section.setVisible(mode == 'timed')
+            self._ping_times_panel.setVisible(mode == 'specific_times')
+            self._script_trigger_section.setVisible(mode == 'script_trigger')
+
+            if mode == 'script_trigger':
+                self._refresh_script_library()
+                self._script_lib_refresh_timer.start()
+            else:
+                self._script_lib_refresh_timer.stop()
+
+        self._seg_timed_btn.clicked.connect(lambda: _seg_select_mode('timed'))
+        self._seg_specific_btn.clicked.connect(lambda: _seg_select_mode('specific_times'))
+        self._seg_script_btn.clicked.connect(lambda: _seg_select_mode('script_trigger'))
+
+        # Legacy compatibility shims (still called by _new_task, _edit_task)
+        self._is_specific_ping  = lambda: self._seg_specific_btn.isChecked()
+        self._set_specific_ping = lambda use_s: _seg_select_mode('specific_times' if use_s else 'timed')
+        self._get_ping_interval_mode_ui = lambda: (
+            'script_trigger' if self._seg_script_btn.isChecked() else
+            'specific_times' if self._seg_specific_btn.isChecked() else
+            'timed'
+        )
+        self._set_ping_interval_mode_ui = _seg_select_mode
+
+        fl.addWidget(_card(
+            ping_interval_lbl,
+            seg_row,
+            self._timed_interval_section,
+            self._ping_times_panel,
+            self._script_trigger_section,
+        ))
 
         # ══ CARD 3b: One-Time Schedule ════════════════════════════════════════
         one_time_lbl = QLabel("ONE TIME SCHEDULE")
@@ -744,9 +1435,11 @@ class ManageTasksWindow(BaseWindow):
         perm_hint = QLabel("Controls what the agent is allowed to do during each ping.")
         perm_hint.setStyleSheet(f"color: {_MUTED}; font-size: 10px;")
 
-        self._f_perm_workmode   = QCheckBox("Allow Work Mode  (can use work_environment to run code & see output)")
-        self._f_perm_exec_code  = QCheckBox("Allow Execute Code  (can run fire-and-forget Python)")
-        self._f_perm_skill_mgmt = QCheckBox("Allow Skill Load / Unload  (can modify its own skill context)")
+        self._f_perm_workmode = QCheckBox("Allow Work Mode  (can use work_environment to run code & see output)")
+        self._f_perm_exec_code = QCheckBox("Allow Execute Code  (can run fire-and-forget Python)")
+        self._f_perm_image_tools = QCheckBox("Inject Image Tools on the system prompt")
+        self._f_perm_controller_ref = QCheckBox("Inject Controller Reference on the system prompt")
+        self._f_perm_notify_tool = QCheckBox("Inject Notify Tool on the system prompt")
 
         # ── Work iterations row (sits under the workmode checkbox) ────────────
         _iter_row = QWidget()
@@ -792,18 +1485,29 @@ class ManageTasksWindow(BaseWindow):
             "⚠  Bypasses the 'Supervised Execution' setting.\n"
             "Code runs automatically in the background — no approval prompt."
         )
-        self._f_perm_skill_mgmt.setToolTip(
-            "Lets the agent call load_skill / unload_skill during a ping session,\n"
-            "dynamically swapping which skills are active in its context.\n\n"
-            "The skill changes only last for that session and do not affect your main window."
+        self._f_perm_image_tools.setToolTip(
+            "Injects the image tool instructions into this task session's system prompt.\n"
+            "Only affects this task — does not change the main AI engine or other tasks."
+        )
+        self._f_perm_controller_ref.setToolTip(
+            "Injects the controller reference instructions into this task session's system prompt.\n"
+            "Only affects this task — does not change the main AI engine or other tasks."
+        )
+        self._f_perm_notify_tool.setToolTip(
+            "Injects the notify tool instructions into this task session's system prompt.\n"
+            "Only affects this task — does not change the main AI engine or other tasks."
         )
 
-        for cb in (self._f_perm_workmode, self._f_perm_exec_code, self._f_perm_skill_mgmt):
+        for cb in (self._f_perm_workmode, self._f_perm_exec_code,
+                   self._f_perm_image_tools,
+                   self._f_perm_controller_ref, self._f_perm_notify_tool):
             cb.setStyleSheet(_CHECK)
 
         fl.addWidget(_card(perm_lbl, perm_hint,
                            self._f_perm_workmode, _iter_row,
-                           self._f_perm_exec_code, self._f_perm_skill_mgmt))
+                           self._f_perm_exec_code,
+                           self._f_perm_image_tools,
+                           self._f_perm_controller_ref, self._f_perm_notify_tool))
 
         # ══ CARD 5: Pre-loaded Skills ══════════════════════════════════════════
         skills_lbl = QLabel("PRE-LOADED SKILLS")
@@ -888,34 +1592,69 @@ class ManageTasksWindow(BaseWindow):
 
         # Toolbar
         bar = QWidget()
-        bar.setStyleSheet(f"background: {_SURFACE}; border-bottom: 1px solid {_BORDER};")
-        bar.setFixedHeight(48)
+        bar.setStyleSheet(
+            f"background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            f"stop:0 #131D2E, stop:1 {_SURFACE});"
+            f"border-bottom: 1px solid {_BORDER};"
+        )
+        bar.setFixedHeight(52)
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(16, 0, 16, 0)
+        bl.setSpacing(10)
 
         back_btn = QPushButton("← Back")
         back_btn.setStyleSheet(_BTN)
         back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        back_btn.clicked.connect(lambda: self._stack.setCurrentIndex(0))
+        back_btn.clicked.connect(self._close_viewer)
         bl.addWidget(back_btn)
 
         self._viewer_title = QLabel("Session")
-        self._viewer_title.setStyleSheet(f"color: {_TEXT}; font-size: 14px; font-weight: 600; padding-left: 12px;")
+        self._viewer_title.setStyleSheet(
+            f"color: {_TEXT}; font-size: 13px; font-weight: 600; padding-left: 8px;"
+        )
         bl.addWidget(self._viewer_title, stretch=1)
+
+        # Live indicator dot
+        self._viewer_live_dot = QLabel("● LIVE")
+        self._viewer_live_dot.setStyleSheet(
+            f"color: {_GREEN}; font-size: 10px; font-weight: 700; background: transparent;"
+        )
+        self._viewer_live_dot.setVisible(False)
+        bl.addWidget(self._viewer_live_dot)
+
+        # Blink timer for live dot
+        self._viewer_blink_timer = QTimer(self)
+        self._viewer_blink_timer.setInterval(900)
+        self._viewer_blink_state = True
+        def _blink():
+            self._viewer_blink_state = not self._viewer_blink_state
+            self._viewer_live_dot.setStyleSheet(
+                f"color: {'#34D058' if self._viewer_blink_state else '#1A4028'}; "
+                f"font-size: 10px; font-weight: 700; background: transparent;"
+            )
+        self._viewer_blink_timer.timeout.connect(_blink)
+
         vl.addWidget(bar)
 
         # Read-only chat area
         self._viewer_area = QScrollArea()
         self._viewer_area.setWidgetResizable(True)
         self._viewer_area.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        self._viewer_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._viewer_body = QWidget()
         self._viewer_body.setStyleSheet(f"background: {_BG};")
         self._viewer_body_layout = QVBoxLayout(self._viewer_body)
-        self._viewer_body_layout.setContentsMargins(20, 16, 20, 16)
+        self._viewer_body_layout.setContentsMargins(22, 18, 22, 18)
         self._viewer_body_layout.setSpacing(10)
         self._viewer_body_layout.addStretch()
         self._viewer_area.setWidget(self._viewer_body)
         vl.addWidget(self._viewer_area, stretch=1)
+
+        # Live refresh timer (fires every 2.5s while viewer is open)
+        self._viewer_refresh_timer = QTimer(self)
+        self._viewer_refresh_timer.setInterval(2500)
+        self._viewer_refresh_timer.timeout.connect(self._refresh_viewer_tick)
+
         return page
 
     def _view_session(self, task_id: str, date_str: str):
@@ -925,6 +1664,9 @@ class ManageTasksWindow(BaseWindow):
         if session is None:
             return
 
+        self._viewer_task_id = task_id
+        self._viewer_date_str = date_str
+
         # Clear viewer
         layout = self._viewer_body_layout
         while layout.count() > 1:
@@ -932,45 +1674,283 @@ class ManageTasksWindow(BaseWindow):
             if item.widget():
                 item.widget().deleteLater()
 
-        self._viewer_title.setText(f"Session — {date_str}  ({session.get('session_name', '')})")
+        history = session.get('chat_history', [])
+        self._viewer_msg_count = len(history)
+        task_name = session.get('session_name', '')
+        self._viewer_title.setText(f"{task_name}  ·  {date_str}")
 
-        for msg in session.get('chat_history', []):
-            role = msg.get('role', 'system')
+        self._render_session_bubbles(history)
+
+        # Show live indicator and start timers
+        self._viewer_live_dot.setVisible(True)
+        self._viewer_blink_timer.start()
+        self._viewer_refresh_timer.start()
+
+        self._stack.setCurrentIndex(2)
+        # Scroll to bottom after render
+        QTimer.singleShot(80, lambda: self._viewer_area.verticalScrollBar().setValue(
+            self._viewer_area.verticalScrollBar().maximum()
+        ))
+
+    def _render_session_bubbles(self, history: list):
+        """Render chat bubbles into the viewer. Called on initial load and refresh."""
+        layout = self._viewer_body_layout
+        # Group work_environment sequences into single display units
+        grouped = _viewer_group_history(history)
+        for msg in grouped:
+            role = msg.get('role', 'user')
             content = msg.get('content', '')
+            step_count = msg.get('_step_count', 1)
+            if not content:
+                continue
+
+            is_agent = role == 'assistant'
+            is_ping  = role in ('user', 'system')
+
             bubble = QFrame()
-            is_system = role == 'system'
-            bubble.setStyleSheet(f"""
-                            QFrame {{
-                                background: {'#0D1117' if is_system else _SURFACE2};
-                                border: 1px solid {'rgba(88, 166, 255, 0.12)' if not is_system else _BORDER};
-                                border-radius: 8px;
-                                padding: 8px;
-                            }}
-                        """)
+            bubble.setObjectName("viewerBubble")
+
+            if is_agent:
+                bubble.setStyleSheet(f"""
+                    QFrame#viewerBubble {{
+                        background: {_SURFACE2};
+                        border: 1px solid rgba(79,158,248,0.25);
+                        border-left: 3px solid {_ACCENT};
+                        border-radius: 0 10px 10px 0;
+                    }}
+                """)
+            else:
+                bubble.setStyleSheet(f"""
+                    QFrame#viewerBubble {{
+                        background: {_SURFACE};
+                        border: 1px solid {_BORDER};
+                        border-left: 3px solid {_YELLOW if is_ping else _PURPLE};
+                        border-radius: 0 10px 10px 0;
+                    }}
+                """)
+
             bl = QVBoxLayout(bubble)
-            bl.setContentsMargins(10, 8, 10, 8)
-            role_lbl = QLabel("📥 Ping" if is_system else "🤖 Agent")
-            role_lbl.setStyleSheet(f"color: {_ACCENT if not is_system else _MUTED}; font-size: 10px; font-weight: 600;")
-            bl.addWidget(role_lbl)
+            bl.setContentsMargins(14, 10, 14, 10)
+            bl.setSpacing(6)
+
+            # Role label row
+            role_row = QHBoxLayout()
+            if is_agent:
+                role_icon = "🤖"
+                if step_count > 1:
+                    role_text = f"Work Session  ·  {step_count} steps"
+                else:
+                    role_text = "Agent Response"
+                role_color = _ACCENT
+            else:
+                role_icon = "⏰"
+                role_text = "Task Ping"
+                role_color = _YELLOW
+
+            role_lbl = QLabel(f"{role_icon}  {role_text}")
+            role_lbl.setStyleSheet(
+                f"color: {role_color}; font-size: 10px; font-weight: 700; "
+                f"background: transparent; border: none; letter-spacing: 0.5px;"
+            )
+            role_row.addWidget(role_lbl)
+            role_row.addStretch()
+            bl.addLayout(role_row)
+
+            # Content — step annotations
             text_lbl = QLabel(content)
             text_lbl.setWordWrap(True)
             text_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            text_lbl.setStyleSheet(f"color: {_TEXT}; font-size: 12px;")
+            text_lbl.setStyleSheet(
+                f"color: {_TEXT}; font-size: 12px; line-height: 1.5; "
+                f"background: transparent; border: none;"
+            )
             bl.addWidget(text_lbl)
+
+            # If a tail (AI's final response after work session exits) was
+            # captured, render it prominently inside the same bubble so it's
+            # never hidden below a scroll boundary.
+            tail = msg.get('_tail', '')
+            if tail:
+                tail_sep = QFrame()
+                tail_sep.setStyleSheet(
+                    f"background: rgba(79,158,248,0.30); border: none; max-height: 1px;"
+                )
+                tail_sep.setFixedHeight(1)
+                bl.addWidget(tail_sep)
+
+                tail_hdr = QLabel("💬  AI Response")
+                tail_hdr.setStyleSheet(
+                    f"color: {_ACCENT}; font-size: 10px; font-weight: 700; "
+                    f"letter-spacing: 0.5px; background: transparent; border: none; padding-top: 2px;"
+                )
+                bl.addWidget(tail_hdr)
+
+                tail_lbl = QLabel(tail)
+                tail_lbl.setWordWrap(True)
+                tail_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                tail_lbl.setStyleSheet(
+                    f"color: {_TEXT}; font-size: 12px; line-height: 1.5; "
+                    f"background: transparent; border: none;"
+                )
+                bl.addWidget(tail_lbl)
+
             layout.insertWidget(layout.count() - 1, bubble)
 
-        self._stack.setCurrentIndex(2)
+    def _refresh_viewer_tick(self):
+        """Called every 2.5s while session viewer is open. Re-renders if new messages appeared."""
+        if self._task_mgr is None or not self._viewer_task_id or not self._viewer_date_str:
+            return
+        try:
+            session = self._task_mgr.load_task_session(self._viewer_task_id, self._viewer_date_str)
+            if session is None:
+                return
+            history = session.get('chat_history', [])
+            if len(history) <= self._viewer_msg_count:
+                return  # nothing new
+            # New messages — re-render only the new ones
+            new_msgs = history[self._viewer_msg_count:]
+            self._viewer_msg_count = len(history)
+            self._render_session_bubbles(new_msgs)
+            # Scroll to bottom
+            QTimer.singleShot(60, lambda: self._viewer_area.verticalScrollBar().setValue(
+                self._viewer_area.verticalScrollBar().maximum()
+            ))
+        except Exception:
+            pass
+
+    def _close_viewer(self):
+        """Stop live-refresh timers and go back to the task list."""
+        if self._viewer_refresh_timer:
+            self._viewer_refresh_timer.stop()
+        if hasattr(self, '_viewer_blink_timer') and self._viewer_blink_timer:
+            self._viewer_blink_timer.stop()
+        if hasattr(self, '_viewer_live_dot'):
+            self._viewer_live_dot.setVisible(False)
+        self._viewer_task_id = None
+        self._viewer_date_str = None
+        self._viewer_msg_count = 0
+        self._stack.setCurrentIndex(0)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # System Prompt Preview
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _show_system_prompt_preview(self, task_dict: dict | None):
+        """
+        Build and display the effective system prompt for a task.
+        task_dict=None → read permissions from the currently open editor form.
+        task_dict=<saved task> → use that task's saved permissions.
+        """
+        perms = task_dict.get('permissions', {}) if task_dict else {}
+        task_name = task_dict.get('name', '?') if task_dict else '?'
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QTextEdit, QPushButton, QLabel
+        try:
+            full_prompt = self._controller.build_task_system_prompt(task_dict)
+        except Exception as e:
+            full_prompt = f"[Could not build preview: {e}]"
+            task_name = "?"
+
+        # ── Dialog ────────────────────────────────────────────────────────────
+        dlg = QDialog(self)
+        dlg.setWindowTitle("System Prompt Preview")
+        dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        dlg.resize(680, 560)
+
+        outer = QWidget(dlg)
+        outer.setObjectName("spOuter")
+        outer.setStyleSheet(f"""
+            QWidget#spOuter {{
+                background: {_SURFACE};
+                border-radius: 12px;
+                border: 1px solid {_BORDER};
+            }}
+        """)
+        _dlg_vl = QVBoxLayout(dlg)
+        _dlg_vl.setContentsMargins(0, 0, 0, 0)
+        _dlg_vl.addWidget(outer)
+
+        ol = QVBoxLayout(outer)
+        ol.setContentsMargins(20, 16, 20, 16)
+        ol.setSpacing(12)
+
+        # Header
+        _hl = QHBoxLayout()
+        _title = QLabel(f"System Prompt Preview  ·  {task_name}")
+        _title.setStyleSheet(f"color: {_TEXT}; font-size: 14px; font-weight: 700;")
+        _hint = QLabel(f"{len(full_prompt):,} chars")
+        _hint.setStyleSheet(f"color: {_MUTED}; font-size: 11px;")
+        _hl.addWidget(_title)
+        _hl.addStretch()
+        _hl.addWidget(_hint)
+        ol.addLayout(_hl)
+
+        # Text area
+        txt = QTextEdit()
+        txt.setReadOnly(True)
+        txt.setPlainText(full_prompt)
+        txt.setStyleSheet(f"""
+            QTextEdit {{
+                background: {_BG}; color: {_TEXT};
+                border: 1px solid {_BORDER}; border-radius: 8px;
+                padding: 10px; font-size: 11px;
+                font-family: 'Consolas', 'Courier New', monospace;
+            }}
+        """)
+        ol.addWidget(txt, stretch=1)
+
+        # Footer buttons
+        _fl = QHBoxLayout()
+        _copy_btn = QPushButton("📋  Copy")
+        _copy_btn.setStyleSheet(_BTN)
+        _copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        def _copy():
+            QApplication.clipboard().setText(full_prompt)
+            _copy_btn.setText("✅  Copied!")
+            QTimer.singleShot(1800, lambda: _copy_btn.setText("📋  Copy"))
+        _copy_btn.clicked.connect(_copy)
+        _close_btn = QPushButton("Close")
+        _close_btn.setStyleSheet(_BTN_ACCENT)
+        _close_btn.setFixedWidth(80)
+        _close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        _close_btn.clicked.connect(dlg.accept)
+        _fl.addWidget(_copy_btn)
+        _fl.addStretch()
+        _fl.addWidget(_close_btn)
+        ol.addLayout(_fl)
+
+        dlg.exec()
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Editor logic
     # ═══════════════════════════════════════════════════════════════════════════
 
     # ── Skill checklist helpers ────────────────────────────────────────────────
+    
+    def _load_skill_content(self, skill_name: str) -> str | None:
+        """
+        Load the instruction content of a skill by name.
+        Tries skill_manager API first, then falls back to common file paths on disk.
+        Returns the skill instruction text, or None if not found.
+        """
+        # ── Try skill_manager API ─────────────────────────────────────────────
+        if self._skill_manager is not None:
+            fn = getattr(self._skill_manager, 'get_skill_content', None)
+            if callable(fn):
+                try:
+                    content = fn(skill_name, "TaskThread._load_skill_content")
+                    if content:
+                        return str(content)
+                except Exception:
+                    pass
+
+        log.warning(f"[TaskThread._load_skill_content] Skill '{skill_name}' content not found anywhere")
+        return None
 
     def _get_available_skill_names(self) -> list:
         """Fetch available skill names from the skill manager."""
         try:
-            sm = getattr(self.controller, 'skill_manager', None)
+            sm = getattr(self._controller, 'skill_manager', None)
             if sm is None:
                 return []
             skills = sm.get_skills()
@@ -1061,8 +2041,7 @@ class ManageTasksWindow(BaseWindow):
         lbl = QLabel(t_str)
         lbl.setStyleSheet(f"color: {_TEXT}; font-size: 12px; background: transparent;")
         rl.addWidget(lbl, stretch=1)
-        rm_btn = QPushButton("✕")
-        rm_btn.setFixedSize(24, 24)
+        rm_btn = QPushButton("✕  Remove")
         rm_btn.setStyleSheet(_BTN_RED)
         rm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         rm_btn.clicked.connect(row.deleteLater)
@@ -1147,12 +2126,14 @@ class ManageTasksWindow(BaseWindow):
         self._f_end.setTime(QTime(21, 0))
         self._f_perm_workmode.setChecked(False)
         self._f_perm_exec_code.setChecked(False)
-        self._f_perm_skill_mgmt.setChecked(False)
+        self._f_perm_image_tools.setChecked(False)
+        self._f_perm_controller_ref.setChecked(False)
+        self._f_perm_notify_tool.setChecked(False)
         self._f_max_iterations.setValue(20)
         self._f_max_iterations.setEnabled(True)
         self._f_unlimited_iterations.setChecked(False)
         self._f_mode_startup.setChecked(True)
-        self._f_specific_ping.setChecked(False)
+        self._set_specific_ping(False)
         self._clear_ping_times_list()
         self._ping_hint_lbl.setText("⏰  Add ping times within your active schedule window.")
         self._populate_skill_checklist([])
@@ -1165,6 +2146,9 @@ class ManageTasksWindow(BaseWindow):
         self._clear_one_time_dt_list()
         self._one_time_dt_picker.setDateTime(QDateTime.currentDateTime().addSecs(3600))
         self._daily_schedule_card.setEnabled(True)
+        self._selected_script_name = ''
+        self._f_script_poll_ms.setValue(1000)
+        self._refresh_functions_list()
         self._stack.setCurrentIndex(1)
 
     def _edit_task(self, task: dict):
@@ -1181,13 +2165,11 @@ class ManageTasksWindow(BaseWindow):
         self._f_mode_startup.setChecked(ping_mode != 'schedule_relative')
 
         use_specific = task.get('use_specific_ping_times', False)
-        self._f_specific_ping.setChecked(use_specific)
-        self._f_interval.setEnabled(not use_specific)
+        self._set_specific_ping(use_specific)
         self._clear_ping_times_list()
         self._ping_hint_lbl.setText("⏰  Add ping times within your active schedule window.")
         for t_str in task.get('specific_ping_times', []):
             self._render_ping_time_row(t_str)
-        self._ping_times_panel.setVisible(use_specific)
 
         sched = task.get('daily_schedule', {})
         self._f_whole_day.setChecked(sched.get('whole_day', False))
@@ -1205,7 +2187,9 @@ class ManageTasksWindow(BaseWindow):
         perms = task.get('permissions', {})
         self._f_perm_workmode.setChecked(perms.get('allow_workmode', False))
         self._f_perm_exec_code.setChecked(perms.get('allow_execute_code', False))
-        self._f_perm_skill_mgmt.setChecked(perms.get('allow_skill_load_unload', False))
+        self._f_perm_image_tools.setChecked(perms.get('inject_image_tools', False))
+        self._f_perm_controller_ref.setChecked(perms.get('inject_controller_ref', False))
+        self._f_perm_notify_tool.setChecked(perms.get('inject_notify_tool', False))
 
         self._f_max_iterations.setValue(task.get('max_work_iterations', 20))
         unlimited = task.get('unlimited_work_iterations', False)
@@ -1220,6 +2204,16 @@ class ManageTasksWindow(BaseWindow):
         self._f_limit_enabled.setChecked(limit.get('enabled', False))
         self._f_limit_max.setValue(limit.get('max_messages', 5))
 
+        # ── Ping interval mode (unambiguous restore) ──────────────────────────
+        _pim = task.get('ping_interval_mode', '')
+        if not _pim:
+            _pim = 'specific_times' if task.get('use_specific_ping_times', False) else 'timed'
+        self._set_ping_interval_mode_ui(_pim)
+        self._selected_script_name = task.get('script_name', '')
+        self._f_script_poll_ms.setValue(task.get('script_poll_ms', 1000))
+        if _pim == 'script_trigger':
+            self._refresh_script_library()
+
         one_time = task.get('one_time_schedule', {})
         one_time_on = one_time.get('enabled', False)
         self._f_one_time_enabled.setChecked(one_time_on)
@@ -1229,11 +2223,536 @@ class ManageTasksWindow(BaseWindow):
         for dt_str in one_time.get('datetimes', []):
             self._render_one_time_dt_row(dt_str)
         self._one_time_dt_picker.setDateTime(QDateTime.currentDateTime().addSecs(3600))
-
+        self._refresh_functions_list()
         self._stack.setCurrentIndex(1)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # FUNCTIONS LIBRARY HELPERS
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SCRIPT TRIGGER HELPERS
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _refresh_script_library(self):
+        """Rebuild the script cards in the Script Trigger library panel."""
+        if not hasattr(self, '_script_lib_layout'):
+            return
+
+        while self._script_lib_layout.count():
+            item = self._script_lib_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        if self._task_mgr is None:
+            return
+
+        scripts = self._task_mgr.get_script_names()
+
+        if not scripts:
+            _empty = QLabel("No scripts found.  Click 📂 Open Script Folder to add one.")
+            _empty.setStyleSheet(f"color: {_MUTED}; font-size: 11px; background: transparent;")
+            _empty.setWordWrap(True)
+            self._script_lib_layout.addWidget(_empty)
+            return
+
+        for _sname in scripts:
+            _is_sel = (_sname == getattr(self, '_selected_script_name', ''))
+            _card_w = QWidget()
+            _card_w.setObjectName("scriptCard")
+            _card_w.setStyleSheet(
+                f"QWidget#scriptCard {{ background: {_ACCENT}22; border-radius: 5px;"
+                f" border: 1px solid {_ACCENT}; }}"
+                if _is_sel else
+                f"QWidget#scriptCard {{ background: {_SURFACE2}; border-radius: 5px;"
+                f" border: 1px solid {_BORDER}; }}"
+            )
+            _card_w.setCursor(Qt.CursorShape.PointingHandCursor)
+            _cr = QHBoxLayout(_card_w)
+            _cr.setContentsMargins(8, 5, 8, 5)
+            _cr.setSpacing(6)
+            _name_lbl = QLabel(_sname)
+            _name_lbl.setStyleSheet(
+                f"color: {_ACCENT}; font-size: 11px; font-family: 'Courier New', monospace;"
+                f" background: transparent; border: none;"
+                if _is_sel else
+                f"color: {_TEXT}; font-size: 11px; font-family: 'Courier New', monospace;"
+                f" background: transparent; border: none;"
+            )
+            _cr.addWidget(_name_lbl, stretch=1)
+            if _is_sel:
+                _sel_lbl = QLabel("✓ selected")
+                _sel_lbl.setStyleSheet(
+                    f"color: {_ACCENT}; font-size: 10px; background: transparent; border: none;"
+                )
+                _cr.addWidget(_sel_lbl)
+
+            def _make_select(sn):
+                def _do(_ev=None):
+                    self._selected_script_name = sn
+                    self._refresh_script_library()
+                return _do
+
+            _card_w.mousePressEvent = _make_select(_sname)
+            self._script_lib_layout.addWidget(_card_w)
+
+    def _open_scripts_folder(self):
+        """Delegate to TaskManager to open the interval-scripts folder."""
+        if self._task_mgr:
+            self._task_mgr.open_scripts_folder()
+
+    def _show_script_trigger_help(self):
+        """Open a small informational dialog explaining Script Trigger mode."""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QTextBrowser
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Script Trigger — How to use")
+        dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        dlg.resize(520, 440)
+
+        outer = QWidget(dlg)
+        outer.setObjectName("helpOuter")
+        outer.setStyleSheet(f"""
+            QWidget#helpOuter {{
+                background: {_SURFACE};
+                border-radius: 10px;
+                border: 1px solid {_BORDER};
+            }}
+        """)
+        _dlg_vl = QVBoxLayout(dlg)
+        _dlg_vl.setContentsMargins(0, 0, 0, 0)
+        _dlg_vl.addWidget(outer)
+
+        _ol = QVBoxLayout(outer)
+        _ol.setContentsMargins(20, 16, 20, 16)
+        _ol.setSpacing(12)
+
+        _title = QLabel("Script Trigger — How it works")
+        _title.setStyleSheet(f"color: {_TEXT}; font-size: 14px; font-weight: 700;")
+        _ol.addWidget(_title)
+
+        _browser = QTextBrowser()
+        _browser.setStyleSheet(f"""
+            QTextBrowser {{
+                background: {_BG}; color: {_TEXT};
+                border: 1px solid {_BORDER}; border-radius: 6px;
+                padding: 10px; font-size: 12px;
+            }}
+        """)
+        _browser.setOpenExternalLinks(False)
+        _browser.setHtml(f"""
+        <style>
+            body  {{ color: {_TEXT}; font-size: 12px; line-height: 1.6; }}
+            h3    {{ color: {_ACCENT}; margin-bottom: 2px; margin-top: 10px; }}
+            code  {{ color: #C3E88D; background: #1a1f28; padding: 1px 4px;
+                     border-radius: 3px; font-family: Consolas, monospace; }}
+            li    {{ margin-bottom: 4px; }}
+        </style>
+        <h3>Overview</h3>
+        <p>Instead of a fixed timer, the agent waits for a Python script to signal it.
+        The script is polled at your <b>Poll Rate</b>. When it returns <code>True</code>,
+        the full AI ping fires — exactly like a timed ping — then polling resumes.</p>
+
+        <h3>The contract</h3>
+        <p>Your script must define exactly one function:</p>
+        <p><code>def fire_ping() -> bool:</code></p>
+        <ul>
+            <li>Return <code>True</code> → ping fires immediately.</li>
+            <li>Return <code>False</code> → sleep for Poll Rate ms and check again.</li>
+        </ul>
+
+        <h3>Your responsibility</h3>
+        <p>Once <code>fire_ping()</code> returns <code>True</code> and the ping fires,
+        polling resumes. <b>You must reset the condition to False inside your script</b>
+        (e.g. delete a flag file, clear a variable) — otherwise it keeps firing every
+        poll cycle.</p>
+
+        <h3>Thread safety — built in</h3>
+        <ul>
+            <li><b>Script guard</b> — if a previous <code>fire_ping()</code> is still
+            running when the next tick arrives, that tick is skipped. Hangs never stack.</li>
+            <li><b>Ping guard</b> — if a ping is already in progress, any
+            <code>True</code> signals received during it are discarded. Only one ping
+            at a time.</li>
+        </ul>
+
+        <h3>How to add a script</h3>
+        <ol>
+            <li>Click <b>📂 Open Script Folder</b> →
+            <code>data/tasks/interval-scripts/</code>.</li>
+            <li>Copy <code>_template.py</code>, rename it (e.g.
+            <code>watch_file.py</code>).</li>
+            <li>Edit <code>fire_ping()</code> with your condition.</li>
+            <li>Click <b>↺</b> or switch modes — your script appears as a card.
+            Click it to select.</li>
+        </ol>
+        """)
+        _ol.addWidget(_browser, stretch=1)
+
+        _close_btn = QPushButton("Close")
+        _close_btn.setStyleSheet(_BTN_ACCENT)
+        _close_btn.setFixedWidth(90)
+        _close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        _close_btn.clicked.connect(dlg.accept)
+        _ol.addWidget(_close_btn, alignment=Qt.AlignmentFlag.AlignRight)
+
+        dlg.exec()
+
+    def _refresh_functions_list(self):
+        """Rebuild the function pills in the Functions Library card."""
+        if not hasattr(self, '_fn_list_layout'):
+            return
+        while self._fn_list_layout.count():
+            item = self._fn_list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        if self._task_mgr is None:
+            return
+
+        functions = self._task_mgr.get_functions()
+        if not functions:
+            empty_lbl = QLabel("No functions yet. Click ＋ Add Function to write one.")
+            empty_lbl.setStyleSheet(f"color: {_MUTED}; font-size: 11px; background: transparent;")
+            self._fn_list_layout.addWidget(empty_lbl)
+            return
+
+        for fn in functions:
+            row = QWidget()
+            row.setStyleSheet(
+                f"background: {_SURFACE2}; border-radius: 5px; border: 1px solid {_BORDER};"
+            )
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(8, 4, 8, 4)
+            rl.setSpacing(6)
+            name_lbl = QLabel(f"def {fn['name']}(...)")
+            name_lbl.setStyleSheet(
+                f"color: {_ACCENT}; font-size: 11px; font-family: 'Courier New', monospace;"
+                f" background: transparent; border: none;"
+            )
+            rl.addWidget(name_lbl, stretch=1)
+            edit_btn = QPushButton("Edit")
+            edit_btn.setFixedSize(54, 24)
+            edit_btn.setStyleSheet(_BTN)
+            edit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            edit_btn.clicked.connect(lambda _, f=fn: self._edit_function_entry(f))
+            rl.addWidget(edit_btn)
+            del_btn = QPushButton("✕  Delete")
+            del_btn.setStyleSheet(_BTN_RED)
+            del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            del_btn.clicked.connect(lambda _, n=fn['name']: self._delete_function_entry(n))
+            rl.addWidget(del_btn)
+            self._fn_list_layout.addWidget(row)
+
+    def _edit_function_entry(self, fn: dict):
+        """Load an existing function into the inline editor."""
+        self._fn_name_input.setText(fn['name'])
+        self._fn_code_editor.setPlainText(fn['code'])
+        self._fn_editor_panel.setVisible(True)
+        self._fn_name_input.setFocus()
+
+    def _save_function_from_editor(self):
+        """Validate and save the function from the inline editor."""
+        if self._task_mgr is None:
+            return
+        import ast
+
+        code = self._fn_code_editor.toPlainText().strip()
+        name = self._fn_name_input.text().strip()
+        self._fn_error_lbl.setVisible(False)
+
+        if not code:
+            self._fn_error_lbl.setText("⚠  Code cannot be empty.")
+            self._fn_error_lbl.setVisible(True)
+            return
+
+        # Auto-extract name from def if field was left blank
+        if not name:
+            m = re.search(r'^\s*def\s+([a-zA-Z_]\w*)\s*\(', code, re.MULTILINE)
+            if m:
+                name = m.group(1)
+                self._fn_name_input.setText(name)
+            else:
+                self._fn_error_lbl.setText(
+                    "⚠  No function name given and none detected. "
+                    "Either fill in the name field or make sure your code starts with  def name():"
+                )
+                self._fn_error_lbl.setVisible(True)
+                return
+
+        # Syntax check with full visible error
+        try:
+            ast.parse(code)
+        except SyntaxError as e:
+            self._fn_error_lbl.setText(
+                f"⚠  SyntaxError on line {e.lineno}: {e.msg}  —  "
+                f"check your quotes, colons, and indentation."
+            )
+            self._fn_error_lbl.setVisible(True)
+            return
+
+        self._task_mgr.save_function(name, code)
+        self._fn_editor_panel.setVisible(False)
+        self._fn_name_input.clear()
+        self._fn_code_editor.clear()
+        self._fn_error_lbl.setVisible(False)
+        self._refresh_functions_list()
+
+    def _delete_function_entry(self, name: str):
+        """Delete a function from the library."""
+        if self._task_mgr is None:
+            return
+        self._task_mgr.delete_function(name)
+        self._refresh_functions_list()
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # INSTRUCTION VERIFIER
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    _BLOCKING_PATTERNS = [
+        (r'\binput\s*\(',          "input() — blocks waiting for keyboard input"),
+        (r'\braw_input\s*\(',      "raw_input() — blocks waiting for keyboard input"),
+        (r'\btkinter\b',           "tkinter — would launch a blocking GUI window"),
+        (r'\bimport\s+wx\b',       "wx — would launch a blocking GUI window"),
+        (r'\bQApplication\s*\(',   "QApplication() — would launch a blocking Qt GUI"),
+        (r'\bplt\.show\s*\(',      "plt.show() — opens a blocking plot window"),
+        (r'\bmatplotlib.*\.show\s*\(', "matplotlib.show() — opens a blocking plot window"),
+        (r'\bpygame\.display\b',   "pygame.display — would launch a blocking game window"),
+        (r'\bgtk\.main\s*\(',      "gtk.main() — blocking GTK event loop"),
+    ]
+
+    def _verify_instruction(self) -> dict:
+        """
+        Parse all {{ }} blocks from the instruction field and test-execute each one.
+        Returns a dict:
+            {
+              'blocks': [ {'expr': str, '_raw': str, 'result': str, 'error': str|None, 'blocking': str|None} ],
+              'has_errors': bool,
+              'has_blocking': bool,
+            }
+        """
+        import ast
+        text = self._f_instruction.toPlainText()
+        raw_blocks = re.findall(r'\{\{(.*?)\}\}', text, re.DOTALL)
+
+        if not raw_blocks:
+            return {'blocks': [], 'has_errors': False, 'has_blocking': False}
+
+        try:
+            from core.python_interpreter import PythonInterpreter
+            interp = PythonInterpreter()
+            # Inject controller so {{ controller.ui.chat_window.isVisible() }} works
+            interp.namespace['controller'] = self._controller
+            # Pre-inject saved functions so {{ my_func() }} resolves correctly
+            if self._task_mgr is not None:
+                for _fn in self._task_mgr.get_functions():
+                    try:
+                        interp.execute(_fn['code'])
+                    except Exception:
+                        pass
+        except Exception as e:
+            return {
+                'blocks': [{'expr': '(interpreter)', '_raw': '', 'result': '',
+                            'error': f"Could not load Python interpreter: {e}", 'blocking': None}],
+                'has_errors': True,
+                'has_blocking': False,
+            }
+
+        results = []
+        has_errors = False
+        has_blocking = False
+
+        for raw in raw_blocks:
+            expr = raw.strip()
+            blocking_reason = None
+            error = None
+            result_str = ''
+
+            # ── Check for blocking / GUI patterns ─────────────────────────────
+            for pattern, reason in self._BLOCKING_PATTERNS:
+                if re.search(pattern, expr):
+                    blocking_reason = reason
+                    has_blocking = True
+                    break
+
+            if blocking_reason:
+                results.append({'expr': expr, '_raw': raw, 'result': '', 'error': None, 'blocking': blocking_reason})
+                continue
+
+            # ── Syntax check ──────────────────────────────────────────────────
+            try:
+                ast.parse(expr)
+            except SyntaxError as e:
+                has_errors = True
+                results.append(
+                    {'expr': expr, '_raw': raw, 'result': '', 'error': f"SyntaxError: {e}", 'blocking': None})
+                continue
+
+            # ── Execute ───────────────────────────────────────────────────────
+            try:
+                out = interp.execute(expr)
+                if out.get('error'):
+                    last_line = out['error'].strip().splitlines()[-1] if out['error'].strip() else 'Error'
+                    error = last_line
+                    has_errors = True
+                elif out.get('stdout'):
+                    result_str = out['stdout'].strip()
+                elif out.get('result') is not None:
+                    result_str = repr(out['result'])
+                else:
+                    result_str = '(no output)'
+            except Exception as e:
+                error = str(e)
+                has_errors = True
+
+            results.append({'expr': expr, '_raw': raw, 'result': result_str, 'error': error, 'blocking': None})
+
+        return {'blocks': results, 'has_errors': has_errors, 'has_blocking': has_blocking}
+    def _run_verify_and_display(self):
+        """Called by the Verify button — offloads execution to a background thread so the UI never freezes."""
+        # Ignore double-click while a verify is already running
+        if self._verify_worker and self._verify_worker.isRunning():
+            return
+
+        text = self._f_instruction.toPlainText()
+        raw_blocks = re.findall(r'\{\{(.*?)\}\}', text, re.DOTALL)
+
+        self._verify_result_box.setVisible(True)
+        if not raw_blocks:
+            self._verify_result_box.setHtml(
+                f"<span style='color:{_MUTED};'>No {{{{ }}}} blocks found in instruction.</span>"
+            )
+            return
+
+        self._verify_result_box.setPlainText("⏳  Running verification…")
+
+        functions = self._task_mgr.get_functions() if self._task_mgr else []
+        self._verify_worker = _VerifyWorker(text, functions, self._controller, self._BLOCKING_PATTERNS)
+        self._verify_worker.done.connect(lambda data: self._on_verify_done(text, data))
+        self._verify_worker.start()
+
+    def _on_verify_done(self, text: str, data: dict):
+        """Slot called when _VerifyWorker finishes — always executes on the main thread via Qt signal."""
+        import html as _html
+
+        # ── Build rendered preview: replace each {{ }} with its evaluated value ──
+        rendered = text
+        for b in data['blocks']:
+            placeholder = '{{' + b['_raw'] + '}}'
+            if b['blocking']:
+                substitution = f"[⛔ {b['blocking']}]"
+            elif b['error']:
+                substitution = f"[✗ {b['error']}]"
+            else:
+                substitution = b['result'] if b['result'] not in ('', '(no output)') else '(no output)'
+            rendered = rendered.replace(placeholder, substitution, 1)
+
+        rendered_escaped = _html.escape(rendered).replace('\n', '<br>')
+        lines = []
+
+        # ── Section 1: full rendered instruction ──────────────────────────────
+        lines.append(
+            f"<div style='margin-bottom:6px;'>"
+            f"<span style='color:{_MUTED}; font-size:10px; font-weight:600; letter-spacing:1px;'>RENDERED PREVIEW</span><br>"
+            f"<span style='color:{_TEXT};'>{rendered_escaped}</span>"
+            f"</div>"
+        )
+
+        # ── Section 2: per-block status ───────────────────────────────────────
+        lines.append(
+            f"<span style='color:{_MUTED}; font-size:10px; font-weight:600; letter-spacing:1px;'>BLOCKS</span>"
+        )
+        for i, b in enumerate(data['blocks'], 1):
+            preview = b['expr'][:60].replace('\n', ' ')
+            if len(b['expr']) > 60:
+                preview += '…'
+            if b['blocking']:
+                lines.append(
+                    f"<span style='color:{_RED};'>⛔ [{i}] <code>{_html.escape(preview)}</code>"
+                    f" → Blocked: {_html.escape(b['blocking'])}</span>"
+                )
+            elif b['error']:
+                lines.append(
+                    f"<span style='color:{_RED};'>✗ [{i}] <code>{_html.escape(preview)}</code>"
+                    f" → {_html.escape(b['error'])}</span>"
+                )
+            else:
+                lines.append(
+                    f"<span style='color:{_GREEN};'>✓ [{i}] <code>{_html.escape(preview)}</code>"
+                    f" → {_html.escape(b['result'])}</span>"
+                )
+
+        self._verify_result_box.setFixedHeight(max(110, min(220, 70 + len(data['blocks']) * 22)))
+        self._verify_result_box.setHtml("<br>".join(lines))
+
+    _SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+    def _start_save_spinner(self):
+        """Disable Save + Back and start the braille spinner animation."""
+        self._save_btn.setEnabled(False)
+        self._back_btn.setEnabled(False)
+        self._save_spinner_frame = 0
+        if self._save_spinner_timer is None:
+            self._save_spinner_timer = QTimer(self)
+            self._save_spinner_timer.timeout.connect(self._tick_save_spinner)
+        self._save_spinner_timer.start(80)
+
+    def _tick_save_spinner(self):
+        frame = self._SPINNER_FRAMES[self._save_spinner_frame % len(self._SPINNER_FRAMES)]
+        self._save_btn.setText(f"{frame}  Saving…")
+        self._save_spinner_frame += 1
+
+    def _stop_save_spinner(self):
+        """Stop animation and restore Save + Back to normal state."""
+        if self._save_spinner_timer:
+            self._save_spinner_timer.stop()
+        self._save_btn.setText("Save Task")
+        self._save_btn.setStyleSheet(_BTN_ACCENT)
+        self._save_btn.setEnabled(True)
+        self._back_btn.setEnabled(True)
+
+    def _do_save(self, task_dict: dict, editing_id):
+        """Persist the task then navigate back to the list."""
+        try:
+            if editing_id:
+                self._task_mgr.update_task(editing_id, task_dict)
+            else:
+                self._task_mgr.add_task(task_dict)
+        except Exception:
+            pass  # task_mgr already logs internally
+        finally:
+            self._stop_save_spinner()
+            # Rebuild the list regardless of visibility — the widget tree is always
+            # alive, so this is safe. The user will see the correct list next open.
+            self._refresh_list()
+            if self.isVisible():
+                self._stack.setCurrentIndex(0)
+
+    def _on_save_verify_done(self, task_dict: dict, editing_id, data: dict):
+        """Slot fired when the background save-path verify thread finishes."""
+        if data['has_blocking'] or data['has_errors']:
+            self._stop_save_spinner()
+            issues = []
+            for b in data['blocks']:
+                if b['blocking']:
+                    issues.append(f"• Blocking call: {b['blocking']}")
+                elif b['error']:
+                    issues.append(f"• {b['error']}")
+            msg = "Cannot save — issues found in {{ }} blocks:\n\n" + "\n".join(issues)
+            if hasattr(self, 'controller') and hasattr(self._controller, 'notify'):
+                self._controller.notify("Task Validation Failed", msg, level="warning")
+            else:
+                QMessageBox.warning(self, "Task Validation Failed", msg)
+            self._run_verify_and_display()
+            return
+        self._do_save(task_dict, editing_id)
 
     def _save_task(self):
         if self._task_mgr is None:
+            return
+
+        # Ignore click if a save verify is already running
+        if self._save_verify_worker and self._save_verify_worker.isRunning():
             return
 
         name = self._f_name.text().strip()
@@ -1241,21 +2760,24 @@ class ManageTasksWindow(BaseWindow):
             self._f_name.setPlaceholderText("⚠ Name required!")
             return
 
+        # ── Snapshot ALL form state NOW before any async gap ─────────────────
         start_t = self._f_start.time()
         end_t   = self._f_end.time()
-
-        use_specific = self._f_specific_ping.isChecked()
+        _pim_ui        = self._get_ping_interval_mode_ui()
+        use_specific   = (_pim_ui == 'specific_times')
         specific_times = sorted(self._get_current_ping_times()) if use_specific else []
-
-        ping_mode = 'schedule_relative' if self._f_mode_schedule.isChecked() else 'startup_relative'
+        ping_mode      = 'schedule_relative' if self._f_mode_schedule.isChecked() else 'startup_relative'
         task_dict = {
             "name": name,
             "active": self._f_active_editor.isChecked(),
             "instruction": self._f_instruction.toPlainText(),
             "interval_minutes": self._f_interval.value(),
             "ping_mode": ping_mode,
+            "ping_interval_mode": _pim_ui,
             "use_specific_ping_times": use_specific,
             "specific_ping_times": specific_times,
+            "script_name": self._selected_script_name if _pim_ui == 'script_trigger' else '',
+            "script_poll_ms": self._f_script_poll_ms.value(),
             "daily_schedule": {
                 "whole_day": self._f_whole_day.isChecked(),
                 "start": f"{start_t.hour():02d}:{start_t.minute():02d}",
@@ -1264,7 +2786,9 @@ class ManageTasksWindow(BaseWindow):
             "permissions": {
                 "allow_workmode": self._f_perm_workmode.isChecked(),
                 "allow_execute_code": self._f_perm_exec_code.isChecked(),
-                "allow_skill_load_unload": self._f_perm_skill_mgmt.isChecked(),
+                "inject_image_tools": self._f_perm_image_tools.isChecked(),
+                "inject_controller_ref": self._f_perm_controller_ref.isChecked(),
+                "inject_notify_tool": self._f_perm_notify_tool.isChecked(),
             },
             "max_work_iterations": self._f_max_iterations.value(),
             "unlimited_work_iterations": self._f_unlimited_iterations.isChecked(),
@@ -1278,12 +2802,20 @@ class ManageTasksWindow(BaseWindow):
                 "datetimes": self._collect_one_time_datetimes(),
             },
         }
+        editing_id = self._editing_task_id   # snapshot before any async gap
 
-        if self._editing_task_id:
-            self._task_mgr.update_task(self._editing_task_id, task_dict)
+        # ── If instruction has {{ }} blocks, verify off-thread first ──────────
+        if re.search(r'\{\{.*?\}\}', task_dict['instruction'], re.DOTALL):
+            self._start_save_spinner()
+            functions = self._task_mgr.get_functions() if self._task_mgr else []
+            self._save_verify_worker = _VerifyWorker(
+                task_dict['instruction'], functions, self._controller, self._BLOCKING_PATTERNS
+            )
+            self._save_verify_worker.done.connect(
+                lambda data: self._on_save_verify_done(task_dict, editing_id, data)
+            )
+            self._save_verify_worker.start()
         else:
-            self._task_mgr.add_task(task_dict)
-
-        self._stack.setCurrentIndex(0)
-        self._refresh_list()
+            # No {{ }} blocks — save is instant, go straight through
+            self._do_save(task_dict, editing_id)
 
