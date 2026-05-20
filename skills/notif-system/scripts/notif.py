@@ -74,12 +74,6 @@ THEMES = {
     },
 }
 
-# ─── Animation state ─────────────────────────────────────────────────────────
-
-SPINNER_FRAMES  = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-ELLIPSIS_FRAMES = [".  ", ".. ", "..."]
-DOT_FRAMES      = ["●  ○  ○", "○  ●  ○", "○  ○  ●", "○  ●  ○"]
-
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
 def close_window(root):
@@ -93,17 +87,6 @@ def update_countdown(root, label, seconds_left):
     label.config(text=f"Notification closing in {seconds_left}s")
     root.after(1000, update_countdown, root, label, seconds_left - 1)
 
-
-def animate_spinner(label, title_text, frame_index=0):
-    spinner  = SPINNER_FRAMES[frame_index % len(SPINNER_FRAMES)]
-    ellipsis = ELLIPSIS_FRAMES[(frame_index // 4) % len(ELLIPSIS_FRAMES)]
-    label.config(text=f"{spinner}  {title_text}{ellipsis}")
-    label.after(80, animate_spinner, label, title_text, frame_index + 1)
-
-
-def animate_dots(label, frame_index=0):
-    label.config(text=DOT_FRAMES[frame_index % len(DOT_FRAMES)])
-    label.after(400, animate_dots, label, frame_index + 1)
 
 # ─── Build UI ────────────────────────────────────────────────────────────────
 
@@ -143,7 +126,6 @@ def build_notification(title, body, closing_time, theme_name, close_btn_text):
     dots_label = tk.Label(top_bar, text="●  ●  ●", bg=t["bg_card"],
                           fg=t["dots_idle"], font=("Segoe UI", 8))
     dots_label.pack(side="right")
-    animate_dots(dots_label)
 
     # ── Divider ──────────────────────────────────────────────────
     tk.Frame(frame, bg=t["border"], height=1).pack(fill="x", pady=(0, 12))
@@ -153,7 +135,6 @@ def build_notification(title, body, closing_time, theme_name, close_btn_text):
                          font=("Segoe UI", 13, "bold"),
                          justify="left", anchor="w")
     msg_label.pack(fill="x")
-    animate_spinner(msg_label, title)
 
     # ── Body ─────────────────────────────────────────────────────
     tk.Label(frame, text=body, bg=t["bg_card"], fg=t["fg_sub"],

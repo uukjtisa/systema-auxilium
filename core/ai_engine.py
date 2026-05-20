@@ -97,6 +97,10 @@ class AIEngine:
         self.tool_execution_lockout = False
         self.system_prompt_hijacked = False
         self.custom_system_prompt = ""
+        # Optional system prompt section flags (main engine only)
+        self.include_image_tools = False
+        self.include_controller_ref = False
+        self.include_notify_tool = False
 
         log.info(f"[AIEngine.__init__] ── Initialization complete | provider='{self.ai_provider}'")
 
@@ -108,8 +112,13 @@ class AIEngine:
         """Enable/disable voice mode flag"""
         log.info(f"[AIEngine.set_voice_mode] voice_mode → {enabled} | regenerating system prompt")
         self.voice_mode = enabled
-        self.system_prompt = get_system_prompt(self.system_info, self.voice_mode, self.elevenlabs_enabled,
-                                               skills=self.skill_manager.get_skills() if self.skill_manager else [])
+        self.system_prompt = get_system_prompt(
+            self.system_info, self.voice_mode, self.elevenlabs_enabled,
+            skills=self.skill_manager.get_skills() if self.skill_manager else [],
+            include_image_tools=self.include_image_tools,
+            include_controller_ref=self.include_controller_ref,
+            include_notify_tool=self.include_notify_tool,
+        )
         log.debug(f"[AIEngine.set_voice_mode] System prompt regenerated | "
                   f"length={len(self.system_prompt)} chars")
         if enabled:
@@ -123,8 +132,13 @@ class AIEngine:
                  f"elevenlabs_enabled={elevenlabs_enabled} | regenerating prompt")
         self.voice_mode = voice_mode
         self.elevenlabs_enabled = elevenlabs_enabled
-        self.system_prompt = get_system_prompt(self.system_info, voice_mode, elevenlabs_enabled,
-                                               skills=self.skill_manager.get_skills() if self.skill_manager else [])
+        self.system_prompt = get_system_prompt(
+            self.system_info, voice_mode, elevenlabs_enabled,
+            skills=self.skill_manager.get_skills() if self.skill_manager else [],
+            include_image_tools=self.include_image_tools,
+            include_controller_ref=self.include_controller_ref,
+            include_notify_tool=self.include_notify_tool,
+        )
         log.debug(f"[AIEngine.update_voice_settings] Prompt regenerated | "
                   f"length={len(self.system_prompt)} chars")
         self.log(f"Voice settings updated: voice_mode={voice_mode}, elevenlabs={elevenlabs_enabled}")
@@ -140,7 +154,10 @@ class AIEngine:
             self.system_info,
             self.voice_mode,
             self.elevenlabs_enabled,
-            skills=self.skill_manager.get_skills() if self.skill_manager else []
+            skills=self.skill_manager.get_skills() if self.skill_manager else [],
+            include_image_tools=self.include_image_tools,
+            include_controller_ref=self.include_controller_ref,
+            include_notify_tool=self.include_notify_tool,
         )
         log.info(f"[AIEngine._on_skills_changed] System prompt regenerated | "
                  f"length={len(self.system_prompt)} chars")
@@ -195,6 +212,22 @@ class AIEngine:
     def set_system_prompt_hijack(self, enabled: bool, custom_prompt: str = ""):
         self.system_prompt_hijacked = enabled
         self.custom_system_prompt = custom_prompt
+
+    def set_system_prompt_extras(self, include_image_tools: bool = False,
+                                  include_controller_ref: bool = False,
+                                  include_notify_tool: bool = False):
+        self.include_image_tools = include_image_tools
+        self.include_controller_ref = include_controller_ref
+        self.include_notify_tool = include_notify_tool
+        self.system_prompt = get_system_prompt(
+            self.system_info,
+            self.voice_mode,
+            self.elevenlabs_enabled,
+            skills=self.skill_manager.get_skills() if self.skill_manager else [],
+            include_image_tools=self.include_image_tools,
+            include_controller_ref=self.include_controller_ref,
+            include_notify_tool=self.include_notify_tool,
+        )
 
     def set_custom_script_path(self, path):
         log.info(f"[AIEngine.set_custom_script_path] path → '{path}'")
@@ -644,17 +677,7 @@ class AIEngine:
             self.log(f"Set session name call detected: {session_name}")
             ai_text = remaining_text
 
-        # Process ALL memorize fences — keep ai_text intact so fences stay in history
         _display_text = ai_text
-        while True:
-            _mem_result = self.tool_manager.parse_memorize(_display_text)
-            if not _mem_result:
-                break
-            _mem_text, _display_text = _mem_result
-            self.memory_manager.memorize(_mem_text)
-            log.info(f"[AIEngine] Memory stored: '{_mem_text[:60]}'")
-        # ai_text = original (memorize fences kept) → goes to conversation history
-        # _display_text = memorize-stripped version → used for all tool parsing below
 
         # ── Check for load_skill call (now valid anywhere) ────────────────────
         load_skill_result = self.tool_manager.parse_load_skill(_display_text)

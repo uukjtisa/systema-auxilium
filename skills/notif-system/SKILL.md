@@ -1,7 +1,7 @@
 ---
 name: notif-system
 description: >
-  Fire-and-forget desktop notification popups.
+  Fire-and-forget a desktop notification pop-up.
 ---
 
 # notif-system
