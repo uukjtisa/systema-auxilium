@@ -1,0 +1,132 @@
+[
+  {
+    "name": "System Monitor",
+    "active": true,
+    "instruction": "Send an email to your_email@example.com regarding the system state, talk as your AI assistant name. like an assistant notifying the user. No need to notify the main session.\n\nSystem Current State:\n\n{{current_system_state()}}\n",
+    "interval_minutes": 60,
+    "ping_mode": "schedule_relative",
+    "ping_interval_mode": "timed",
+    "use_specific_ping_times": false,
+    "specific_ping_times": [],
+    "script_name": "",
+    "script_poll_ms": 1000,
+    "daily_schedule": {
+      "whole_day": true,
+      "start": "00:00",
+      "end": "21:00"
+    },
+    "permissions": {
+      "allow_workmode": true,
+      "allow_execute_code": true,
+      "inject_image_tools": false,
+      "inject_controller_ref": false,
+      "inject_notify_tool": false
+    },
+    "max_work_iterations": 20,
+    "unlimited_work_iterations": false,
+    "loaded_skills": [
+      "e-mailman"
+    ],
+    "limit_session_messages": {
+      "enabled": true,
+      "max_messages": 5
+    },
+    "one_time_schedule": {
+      "enabled": false,
+      "datetimes": []
+    },
+    "id": "00000000-0000-0000-0000-000000000001",
+    "created_at": "2026-01-01T00:00:00.000000"
+  },
+  {
+    "name": "Remind me to sleep",
+    "active": true,
+    "instruction": "{{reminder_for_sleep()}}\n\n",
+    "interval_minutes": 30,
+    "ping_mode": "schedule_relative",
+    "ping_interval_mode": "specific_times",
+    "use_specific_ping_times": true,
+    "specific_ping_times": [
+      "00:05",
+      "00:10",
+      "00:15",
+      "00:20",
+      "22:00",
+      "23:00",
+      "23:10",
+      "23:20",
+      "23:30",
+      "23:40",
+      "23:50",
+      "23:55"
+    ],
+    "script_name": "",
+    "script_poll_ms": 1000,
+    "daily_schedule": {
+      "whole_day": true,
+      "start": "00:00",
+      "end": "21:00"
+    },
+    "permissions": {
+      "allow_workmode": false,
+      "allow_execute_code": true,
+      "inject_image_tools": false,
+      "inject_controller_ref": false,
+      "inject_notify_tool": false
+    },
+    "max_work_iterations": 20,
+    "unlimited_work_iterations": false,
+    "loaded_skills": [
+      "notif-system"
+    ],
+    "limit_session_messages": {
+      "enabled": false,
+      "max_messages": 5
+    },
+    "one_time_schedule": {
+      "enabled": false,
+      "datetimes": []
+    },
+    "id": "00000000-0000-0000-0000-000000000002",
+    "created_at": "2026-01-01T00:00:00.000000"
+  },
+  {
+    "name": "Email Sent to Assistant",
+    "active": true,
+    "instruction": "An email was sent to you\n\nTrusted emails\nUser (replace me):\n    - you@example.com\n    - your_alt_email@example.com\nTrusted Contact (replace me — or remove if unused):\n    - trusted_contact@example.com\n\n{{read_latest_email()}}",
+    "interval_minutes": 30,
+    "ping_mode": "startup_relative",
+    "ping_interval_mode": "script_trigger",
+    "use_specific_ping_times": false,
+    "specific_ping_times": [],
+    "script_name": "email_listener.py",
+    "script_poll_ms": 1000,
+    "daily_schedule": {
+      "whole_day": true,
+      "start": "00:00",
+      "end": "21:00"
+    },
+    "permissions": {
+      "allow_workmode": true,
+      "allow_execute_code": false,
+      "inject_image_tools": true,
+      "inject_controller_ref": false,
+      "inject_notify_tool": false
+    },
+    "max_work_iterations": 20,
+    "unlimited_work_iterations": true,
+    "loaded_skills": [
+      "e-mailman"
+    ],
+    "limit_session_messages": {
+      "enabled": false,
+      "max_messages": 5
+    },
+    "one_time_schedule": {
+      "enabled": false,
+      "datetimes": []
+    },
+    "id": "00000000-0000-0000-0000-000000000003",
+    "created_at": "2026-01-01T00:00:00.000000"
+  }
+]

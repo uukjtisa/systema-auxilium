@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
 **/*.json
-!core/models.json
+!data/tasks/functions.json
+!data/tasks/tasks.json
 .pynavigator/
