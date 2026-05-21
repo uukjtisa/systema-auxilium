@@ -41,52 +41,46 @@ def get_skill_path_rule() -> str:
     Call this from build_task_system_prompt() when tasks have preloaded skills,
     since those tasks pass skills=None to get_system_prompt() and the rule
     would otherwise be silently skipped.
+
+    NOTE: `app_root` and `skills_path` are pre-injected into the Python
+    interpreter namespace by AssistantController.__init__, so this block
+    no longer needs to compute or hardcode their values — it just tells
+    the agent to use those variables directly.
     """
-    from pathlib import Path as _P
-    _app  = str(_P(__file__).resolve().parent.parent)
-    _skls = str(_P(__file__).resolve().parent.parent / "skills")
     return (
         "╔═══════════════════════════════════════════════════════════════════╗\n"
-        "║          SKILL SCRIPTS — FULL PATH RULE (NON-NEGOTIABLE)          ║\n"
+        "║          SKILL SCRIPTS — FULL PATH RULE (THIS IS A MUST)          ║\n"
         "╚═══════════════════════════════════════════════════════════════════╝\n"
         "\n"
-        "Your app root and skills directory are the following:\n"
-        f"\n  APP_ROOT   = {_app}\n"
-        f"  SKILLS_DIR = {_skls}\n"
+        "Two variables are pre-injected into your Python namespace — use them:\n"
         "\n"
-        f"Skill scripts live at:\n  {_skls}\\<skill-name>\\scripts\\<script.py>\n"
+        "  app_root     → absolute path to the application root directory\n"
+        "  skills_path  → absolute path to the skills directory (app_root/skills)\n"
+        "\n"
+        "Skill script example location:\n"
+        "  {skills_path}\\<skill-name>\\scripts\\<script.py>\n"
         "\n"
         "⚠ CRITICAL — WHEN EXECUTING SKILL SCRIPTS YOU MUST ALWAYS:\n"
         "\n"
-        "  1. Use the FULL ABSOLUTE PATH — never relative paths\n"
-        "  2. Build from SKILLS_DIR shown above\n"
-        '  3. Use raw strings r"..." or double-backslashes on Windows paths\n'
-        "\n"
-        "Reason: Most skills only show relative path examples. Always use\n"
-        "the full path instead to avoid FileNotFoundError.\n"
-        "\n"
+        "  1. Build paths from `skills_path` — never hardcode, never use relative paths\n"
+        '  2. Use raw strings r"..." or double-backslashes for Windows path separators\n'
+        "  3. Use sys.executable — never bare \"python\" — to guarantee the correct environment\n"
+        "---EXAMPLES---\n"
         "✅ CORRECT:\n"
-        f'  exec(open(rf"{_skls}\\\\data-viz\\\\scripts\\\\setup.py").read())\n'
-        f'  exec(open(rf"{_skls}\\\\data-viz\\\\scripts\\\\chart.py").read())\n'
-        "\n"
-        "  When running skill scripts via subprocess, ALWAYS use sys.executable\n"
-        "  so the correct Python environment (with all packages) is used:\n"
-        "\n"
         "  import subprocess, sys\n"
-        f'  subprocess.run(\n'
-        f'      [sys.executable, rf"{_skls}\\\\<skill-name>\\\\scripts\\\\<script.py>",\n'
-        f'       "arg1", "arg2"],\n'
-        f'      capture_output=True, text=True, encoding="utf-8"\n'
-        f'  )\n'
+        "  script = rf\"{skills_path}\\\\<skill-name>\\\\scripts\\\\<script.py>\"\n"
+        "  result = subprocess.run(\n"
+        "      [sys.executable, script, \"arg1\", \"arg2\"],\n"
+        "      capture_output=True, text=True, encoding=\"utf-8\"\n"
+        "  )\nprint(result)"
         "\n"
         "❌ WRONG — WILL BREAK:\n"
-        '  exec(open("scripts/setup.py").read())\n'
-        '  exec(open("chart.py").read())\n'
-        '  exec(open("data-viz/scripts/chart.py").read())\n'
-        '  subprocess.run(["python", "script.py", ...])  # Risk of using the wrong Python version!\n'
+        "  subprocess.run([\"python\", \"scripts/script.py\", ...])  # wrong exe + relative path\n"
+        "  exec(open(\"skills/data-viz/scripts/chart.py\").read())  # relative path\n"
+        "  rf\"C:\\\\hardcoded\\\\path\\\\skills\\\\...\"              # hardcoded, breaks on other machines\n"
         "\n"
         "THIS RULE APPLIES TO EVERY SKILL, EVERY SCRIPT, EVERY TIME. NO EXCEPTIONS.\n"
-        "RELATIVE PATHS FOR SKILL SCRIPTS WILL ALWAYS FAIL. USE FULL PATHS."
+        "RELATIVE PATHS AND HARDCODED PATHS FOR SKILL SCRIPTS WILL ALWAYS FAIL."
     )
 
 def _build_tool_table(
@@ -790,12 +784,30 @@ Options:
   skill_name
   ```
 
+ANTI-PATTERNS — NEVER DO THESE:
+
+❌ NEVER walk or list the skills directory:
+  Walking skills_path with os.walk() or os.listdir() dumps the entire folder
+  tree to stdout and massively bloats your context window. It is NEVER useful.
+
+  # ALL of these are FORBIDDEN:
+  for root, dirs, files in os.walk(skills_path): ...
+  print(os.listdir(skills_path))
+  os.scandir(skills_path)
+
+YOU MUST SEARCH PRECISELY!
+
 VERY IMPORTANT: Don't rush! Chain executions for complete answers if you feel you are not yet ready!
 CRITICAL: IF YOU ARE SEEING THIS MESSAGE THEN YOU MUST NOT YET TALK! YOU ARE INSIDE YOUR WORK ENVIRONMENT! IF YOU WANNA TALK TO THE USER AND IF YOU ARE READY WITH ALL YOU NEED, THEN EXIT FIRST!
 VERY CRITICAL: WHEN YOU ARE GONNA EXIT, IN YOUR RESPONSE, THERE MUST BE A REPORT, AND OTHER SUMMARY OF WHAT YOU HAVE DONE!
 """
 
 WORK_MODE_PROMPT = "<SYSTEM_MESSAGE>\n" + _WORK_CONTINUATION_BLOCK + "</SYSTEM_MESSAGE>"
+
+# Slim version stored in history for all but the latest work-mode ping.
+# Once the AI has seen the full instructions once, prior entries are replaced
+# with just the output so they don't bloat the context.
+WORK_MODE_OUTPUT_ONLY_PROMPT = "<SYSTEM_MESSAGE>\n{work_output}\n</SYSTEM_MESSAGE>"
 
 SKILL_LOADED_WORK_PROMPT = (
         "<SYSTEM_MESSAGE>\n"

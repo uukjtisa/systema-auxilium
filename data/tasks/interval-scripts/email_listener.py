@@ -22,21 +22,20 @@ from pathlib import Path
 # ══════════════════════════════════════════════════════════════
 
 ACCOUNT_1_ADDRESS  = "your_primary_email@example.com"   # replace me
-ACCOUNT_1_PASSWORD = "your_password_here"               # replace me
-ACCOUNT_1_IMAP     = "imap.example.com"                 # replace me
-ACCOUNT_1_PORT     = 993                                # replace me if different
+ACCOUNT_1_PASSWORD = "your_password_here"               #GMAIL USES APP PASSWORD INSTEAD, GET IT BY
+                                                        #1. Go to myaccount.google.com → Security
+                                                        #2. Search "App Passwords" in the search bar
+                                                        #3. Click App Passwords → name it anything (e.g. "e-mail-LISTENER") → Create
+                                                        #4. Copy the 16-character code — this is your App Password
+ACCOUNT_1_IMAP     = "imap.example.com"                 # GMAIL USES imap.gmail.com
+ACCOUNT_1_PORT     = 993                                # GMAIL USES 993
+                                                        # SEARCH FOR YOUR PROVIDER DETAILS ON THIS ONE.
 
 ACCOUNT_2_ADDRESS  = "your_secondary_email@example.com" # replace me
 ACCOUNT_2_PASSWORD = "your_password_here"               # replace me
 ACCOUNT_2_IMAP     = "imap.example.com"                 # replace me
 ACCOUNT_2_PORT     = 993                                # replace me if different
 
-# ══════════════════════════════════════════════════════════════
-# ✏️  TRUSTED SENDERS — Add addresses you want special handling for
-# ══════════════════════════════════════════════════════════════
-
-TRUSTED_USER_EMAIL = "you@example.com"                  # replace me — your own email
-TRUSTED_MOM_EMAIL  = "mom@example.com"                  # replace me — or remove if unused
 
 # ══════════════════════════════════════════════════════════════
 

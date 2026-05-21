@@ -189,6 +189,8 @@ class AssistantController(QObject):
         self.ai.tool_manager.tools['python'].namespace['memorize'] = self.memorize
         self.ai.tool_manager.tools['python'].namespace['search_memory'] = self.search_memory
         self.ai.tool_manager.tools['python'].namespace['view_all_memory'] = self.view_all_memory
+        self.ai.tool_manager.tools['python'].namespace['app_root'] = str(Path(__file__).resolve().parent.parent)
+        self.ai.tool_manager.tools['python'].namespace['skills_path'] = str(Path(__file__).resolve().parent.parent / "skills")
         # ─────────────────────────────────────────────────────────────────────
 
         # Apply settings
@@ -771,7 +773,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             f"You are currently running as an automated background task agent — NOT in a live user conversation.\n"
             f"Task name: {task_dict.get('name', '?')}\n\n"
             f"Task Permissions:\n{perm_block}\n\n"
-            f"To notify the user, emit EXACTLY this JSON on its own line:\n"
+            f"Tool for sending a message to main session, emit EXACTLY this JSON on its own line:\n"
             f'{{"tool": "send_message_main", "input": "your message to the user"}}\n\n'
             f"Only message the user when something genuinely needs their attention.\n"
             f"Each ping message has a timestamp appended for your temporal awareness.\n"
