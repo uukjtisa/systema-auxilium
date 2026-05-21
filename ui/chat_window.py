@@ -428,8 +428,8 @@ ANIM_WINDOW_FADE_IN_MS       = 340    # Chat window fade-in when shown (ms)
 
 # --- Sidebar ---
 ANIM_SIDEBAR_SLIDE_MS        = 360    # Sidebar slide in / out (ms)
-SIDEBAR_DEFAULT_W            = 278    # Default sidebar width (px) — wide enough for hero + pills
-SIDEBAR_MIN_W                = 278    # Minimum — wide enough for 3 hero pills without clipping
+SIDEBAR_DEFAULT_W            = 290    # Default sidebar width (px) — wide enough for hero + pills
+SIDEBAR_MIN_W                = 280    # Minimum — wide enough for 3 hero pills without clipping
 SIDEBAR_MAX_W                = 420    # Maximum sidebar width when dragging
 
 # --- Messages ---
@@ -1308,6 +1308,9 @@ class ChatWindow(BaseWindow):
         # Force mode settings
         self.force_mode = None
 
+        # Session switching lock — prevents spamming, blocks during AI generation / work mode
+        self._session_switching_locked = False
+
         # Image attachment (multi-image + persistent pinned images)
         self.attached_image = None  # backward compat — last added image
         self.attached_images = []  # list of paths queued in input bar
@@ -1319,6 +1322,8 @@ class ChatWindow(BaseWindow):
 
         # MESSAGE CONTROL: Track all messages for edit/delete/rewind
         self.message_widgets = []  # List of {widget, role, content, history_index}
+        self._skills_ui_card_widget = None   # Single per-session skills card (only one allowed)
+        self._skills_ui_card_timer = None    # 500ms live-sync timer for that card
 
         # Window chrome state
         self._init_chrome_state()
@@ -2543,7 +2548,8 @@ class ChatWindow(BaseWindow):
         if self.sidebar_visible and self.sidebar.isVisible():
             container_h = self.container.height()
             self.sidebar.setGeometry(0, 0, self._sidebar_w, container_h)
-
+        if hasattr(self, '_session_list_overlay') and hasattr(self, '_session_list_body'):
+            self._session_list_overlay.setGeometry(self._session_list_body.rect())
 
     def _animate_sidebar(self, show: bool):
         """Slide the sidebar in (show=True) or out (show=False)."""
@@ -3491,6 +3497,14 @@ class ChatWindow(BaseWindow):
                 item.widget().deleteLater()
 
         self.message_widgets = []
+        # Stop the live-sync timer and drop the card reference so a new session gets a fresh card
+        if hasattr(self, '_skills_ui_card_timer') and self._skills_ui_card_timer is not None:
+            try:
+                self._skills_ui_card_timer.stop()
+            except Exception:
+                pass
+        self._skills_ui_card_widget = None
+        self._skills_ui_card_timer = None
 
     def render_loaded_messages(self):
         """Render messages from loaded session"""
@@ -3518,6 +3532,8 @@ class ChatWindow(BaseWindow):
                                 memories=msg.get("_memories_preview", []),
                                 save_to_history=False,
                             )
+                    elif msg.get("_type") == "skills_card":
+                        self.add_loaded_skills_card(save_to_history=False)
                     else:
                         self.add_code_execution_note(
                             msg.get("_code", ""),
@@ -3827,6 +3843,37 @@ class ChatWindow(BaseWindow):
             user = self.controller.get_user_name() or "You"
             self._hero_user_name.setText(user)
 
+    def _start_session_lock_watcher(self):
+        """Lock the session list then spin up a background thread that polls
+        until both is_processing and in_work_mode are False, then unlocks."""
+        self.set_session_list_locked(True, "AI is responding…")
+
+        import threading as _threading
+
+        def _watch():
+            import time
+            while True:
+                try:
+                    processing = getattr(self.controller, 'is_processing', False)
+                    try:
+                        in_work = self.controller.ai.tool_manager.in_work_mode
+                    except Exception:
+                        in_work = False
+                    if not processing and not in_work:
+                        break
+                except Exception:
+                    break
+                time.sleep(0.25)
+            # Unlock back on the main thread
+            QTimer.singleShot(0, lambda: self.set_session_list_locked(False))
+
+        t = _threading.Thread(target=_watch, daemon=True)
+        t.start()
+
+    def _session_show_more(self):
+        self._session_visible_count += 10
+        self.refresh_session_list()
+
     def _session_show_more(self):
         self._session_visible_count += 10
         self.refresh_session_list()
@@ -3841,6 +3888,23 @@ class ChatWindow(BaseWindow):
 
     def _toggle_session_list(self):
         pass
+
+    def set_session_list_locked(self, locked: bool, reason: str = ""):
+        """
+        Lock or unlock the session list.
+        On lock: rebuilds all items as grayed-out disabled widgets (mousePressEvent = noop).
+        On unlock: rebuilds all items as normal clickable widgets.
+        """
+        self._session_switching_locked = locked
+        self.refresh_session_list()
+
+        # Show a brief status bar hint when the user is blocked
+        if locked and reason:
+            self.status_label.setText(f"⏳ {reason}")
+        elif not locked:
+            current = self.status_label.text()
+            if current.startswith("⏳"):
+                self.status_label.setText("")
 
     def refresh_session_list(self):
         """Refresh the session list with search, sort and show-more pagination."""
@@ -3880,10 +3944,12 @@ class ChatWindow(BaseWindow):
         shown = sessions[:visible_count]
         remaining = total - len(shown)
 
+        is_locked = getattr(self, '_session_switching_locked', False)
         for session in shown:
             session_item = self._create_session_item(
                 session['id'], session['name'], session['date'],
-                is_active=(session['id'] == self.controller.current_session_id)
+                is_active=(session['id'] == self.controller.current_session_id),
+                disabled=is_locked
             )
             self.session_list_layout.addWidget(session_item)
 
@@ -3905,8 +3971,57 @@ class ChatWindow(BaseWindow):
                     self._session_visible_count = 10
 
 
-    def _create_session_item(self, session_id, session_name, creation_date, is_active=False):
-        """Create a session list item widget"""
+    def _create_session_item(self, session_id, session_name, creation_date, is_active=False, disabled=False):
+        """Create a session list item widget. Pass disabled=True to gray it out and block clicks."""
+        if disabled:
+            # ── Locked / grayed-out appearance ────────────────────────────
+            item_widget = QFrame()
+            item_widget.setStyleSheet("""
+                QFrame {
+                    background-color: transparent;
+                    border-radius: 6px;
+                    padding: 8px;
+                    margin: 2px 0px;
+                    opacity: 0.4;
+                }
+            """)
+            layout = QHBoxLayout(item_widget)
+            layout.setContentsMargins(8, 4, 8, 4)
+            layout.setSpacing(8)
+
+            content_layout = QVBoxLayout()
+            content_layout.setSpacing(2)
+
+            name_label = QLabel(session_name)
+            name_label.setStyleSheet("color: #4A5060; font-size: 12px; font-weight: normal;")
+            name_label.setWordWrap(True)
+            content_layout.addWidget(name_label)
+
+            date_label = QLabel(creation_date)
+            date_label.setStyleSheet("color: #3A3F4A; font-size: 10px;")
+            content_layout.addWidget(date_label)
+
+            layout.addLayout(content_layout, 1)
+
+            # Lock icon instead of delete button
+            lock_lbl = QLabel("")
+            lock_lbl.setFixedSize(24, 24)
+            lock_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lock_lbl.setStyleSheet("font-size: 11px; color: #3A3F4A;")
+            layout.addWidget(lock_lbl)
+
+            # Apply opacity effect to the whole item
+            opacity_effect = QGraphicsOpacityEffect(item_widget)
+            opacity_effect.setOpacity(0.4)
+            item_widget.setGraphicsEffect(opacity_effect)
+
+            # Blocked cursor + no-op click
+            item_widget.setCursor(Qt.CursorShape.ForbiddenCursor)
+            item_widget.mousePressEvent = lambda e: None
+
+            return item_widget
+
+        # ── Normal (enabled) appearance ────────────────────────────────────
         item_widget = QFrame()
         item_widget.setStyleSheet(f"""
             QFrame {{
@@ -3965,12 +4080,41 @@ class ChatWindow(BaseWindow):
         return item_widget
 
     def _load_session_clicked(self, session_id):
-        """Load session when clicked"""
-        # if session_id == self.controller.current_session_id:
-        #     return
-        # commented because it's used by the floating window to switch back to the chat_window and load the history again from the TUI version
+        """Load session when clicked — guarded against concurrent loads, AI generation, and work mode."""
 
-        self.controller.load_session(session_id)
+        # ── Guard 1: already loading — items are rebuilt as disabled so this
+        #    lambda should never fire, but flag check is the final safety net ─
+        if getattr(self, '_session_switching_locked', False):
+            return
+
+        # ── Guard 2: AI is currently generating a response ─────────────────
+        if getattr(self.controller, 'is_processing', False):
+            self.status_label.setText("⏳ Cannot switch sessions while AI is responding…")
+            QTimer.singleShot(2500, lambda: (
+                self.status_label.setText("")
+                if self.status_label.text().startswith("⏳") else None
+            ))
+            return
+
+        # ── Guard 3: AI is in work / tool-use mode ─────────────────────────
+        try:
+            in_work = self.controller.ai.tool_manager.in_work_mode
+        except Exception:
+            in_work = False
+        if in_work:
+            self.status_label.setText("⏳ Cannot switch sessions while AI is working…")
+            QTimer.singleShot(2500, lambda: (
+                self.status_label.setText("")
+                if self.status_label.text().startswith("⏳") else None
+            ))
+            return
+
+        # ── All clear: lock (rebuilds items as grayed disabled), load, unlock ─
+        self.set_session_list_locked(True, "Loading session…")
+        try:
+            self.controller.load_session(session_id)
+        finally:
+            QTimer.singleShot(1500, lambda: self.set_session_list_locked(False))
 
     def _delete_session_clicked(self, session_id):
         """Delete session when delete button clicked"""
@@ -4655,6 +4799,258 @@ class ChatWindow(BaseWindow):
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, outer)
         self._animate_message_in(outer, on_settled=lambda: self.scroll_to_widget(outer))
 
+    def add_loaded_skills_card(self, save_to_history: bool = True):
+        """
+        Show (or refresh) the single per-session loaded-skills card.
+        If the card already exists in this session, scrolls to it instead of creating a new one.
+        A QTimer fires every 500 ms to sync badges/buttons with live skill state.
+        Persisted as a ui_event so it survives session save/load.
+        """
+        # ── Only one card allowed per session ─────────────────────────────────
+        if self._skills_ui_card_widget is not None:
+            self.scroll_to_widget(self._skills_ui_card_widget)
+            return
+
+        skill_mgr = None
+        if hasattr(self, 'controller') and self.controller:
+            skill_mgr = getattr(self.controller.ai, 'skill_manager', None)
+        if skill_mgr is None:
+            return
+
+        _tc = self._t()
+
+        # ── Outer wrapper ──────────────────────────────────────────────────────
+        message_widget = QFrame()
+        message_widget.setStyleSheet(
+            "QFrame { background-color: transparent; padding: 4px 16px; }")
+        outer_lay = QVBoxLayout(message_widget)
+        outer_lay.setContentsMargins(0, 0, 0, 0)
+        outer_lay.setSpacing(0)
+
+        # ── Header row (always visible) ────────────────────────────────────────
+        header = QFrame()
+        header.setStyleSheet(f"""
+            QFrame {{
+                background-color: {_tc['elevated']};
+                border: 1px solid {_tc['border']};
+                border-radius: 8px;
+            }}
+        """)
+        header_lay = QHBoxLayout(header)
+        header_lay.setContentsMargins(12, 6, 10, 6)
+        header_lay.setSpacing(8)
+
+        icon_lbl = QLabel("⚡")
+        icon_lbl.setStyleSheet(
+            "font-size: 13px; background: transparent; border: none; color: #7C7CFF;")
+        icon_lbl.setFixedWidth(18)
+        header_lay.addWidget(icon_lbl)
+
+        summary_lbl = QLabel()
+        summary_lbl.setTextFormat(Qt.TextFormat.RichText)
+        summary_lbl.setStyleSheet("background: transparent; border: none;")
+        header_lay.addWidget(summary_lbl, stretch=1)
+
+        toggle_btn = QPushButton("▶ Show")
+        toggle_btn.setFixedSize(58, 20)
+        toggle_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; border: 1px solid {_tc['border']};
+                border-radius: 4px; font-size: 10px; color: #8B949E; padding: 0 6px;
+            }}
+            QPushButton:hover {{ color: {_tc['accent']}; border-color: {_tc['accent']}; }}
+        """)
+        toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        header_lay.addWidget(toggle_btn)
+        outer_lay.addWidget(header)
+
+        # ── Expandable skills list ─────────────────────────────────────────────
+        detail = QFrame()
+        detail.setStyleSheet("background: transparent; border: none;")
+        detail.hide()
+        detail_lay = QVBoxLayout(detail)
+        detail_lay.setContentsMargins(4, 4, 4, 4)
+        detail_lay.setSpacing(4)
+        outer_lay.addWidget(detail)
+
+        # ── Per-skill rows (added/removed dynamically by the sync timer) ───────
+        _skill_rows = {}  # name → {'row': QFrame, 'badge': QLabel, 'btn': QPushButton}
+
+        def _row_style_loaded():
+            return (
+                "QPushButton { background-color: #3C1A1A; color: #C0392B; "
+                "border: 1px solid #C0392B; border-radius: 4px; font-size: 9px; padding: 0; }"
+                "QPushButton:hover { background-color: #4A2020; }"
+            )
+
+        def _row_style_unloaded():
+            return (
+                "QPushButton { background-color: #1A2B1A; color: #4CAF50; "
+                "border: 1px solid #4CAF50; border-radius: 4px; font-size: 9px; padding: 0; }"
+                "QPushButton:hover { background-color: #223322; }"
+            )
+
+        def _badge_style_loaded():
+            return ("QLabel { background-color: #1A2B1A; color: #4CAF50; "
+                    "border-radius: 4px; font-size: 9px; padding: 1px 6px; }")
+
+        def _badge_style_unloaded():
+            return ("QLabel { background-color: #21262D; color: #9AA0A6; "
+                    "border-radius: 4px; font-size: 9px; padding: 1px 6px; }")
+
+        def _make_toggle(n):
+            def _toggle_skill():
+                smgr = None
+                if hasattr(self, 'controller') and self.controller:
+                    smgr = getattr(self.controller.ai, 'skill_manager', None)
+                if smgr is None:
+                    return
+                if smgr.is_loaded(n):
+                    smgr.unload_skill(n)
+                else:
+                    smgr.load_skill(n)
+
+            return _toggle_skill
+
+        def _update_summary():
+            if skill_mgr is None:
+                return
+            names = list(skill_mgr.get_loaded_skills().keys())
+            count = len(names)
+            if count == 0:
+                preview = "none loaded"
+                extra = ""
+            else:
+                first = names[0]
+                preview = first[:40] + ("…" if len(first) > 40 else "")
+                extra = f"&nbsp;<span style='font-size:10px;color:{_tc['accent']};'>+{count - 1} more</span>" if count > 1 else ""
+            summary_lbl.setText(
+                f"<span style='color:{_tc['accent']};font-size:11px;font-weight:600;'>"
+                f"Skills loaded</span>"
+                f"&nbsp;&nbsp;<span style='color:#5F6368;'>·</span>&nbsp;&nbsp;"
+                f"<span style='font-size:10px;color:#8B949E;'>{preview}</span>{extra}")
+
+        def _build_or_refresh_rows():
+            if skill_mgr is None:
+                return
+            current_loaded = skill_mgr.get_loaded_skills()  # {name: content}
+            all_skills = {s['name']: s for s in skill_mgr.get_skills()}
+
+            # Remove rows for skills that are no longer in the skill list at all
+            gone = [n for n in list(_skill_rows.keys()) if n not in all_skills]
+            for name in gone:
+                row_data = _skill_rows.pop(name)
+                try:
+                    row_data['row'].deleteLater()
+                except Exception:
+                    pass
+
+            # Add rows for skills that don't have a row yet
+            for name in all_skills:
+                if name not in _skill_rows:
+                    is_loaded = name in current_loaded
+                    row = QFrame()
+                    row.setStyleSheet(f"""
+                        QFrame {{
+                            background: {_tc['elevated']};
+                            border: 1px solid {_tc['accent']}33;
+                            border-radius: 6px;
+                        }}
+                    """)
+                    row_lay = QHBoxLayout(row)
+                    row_lay.setContentsMargins(10, 5, 8, 5)
+                    row_lay.setSpacing(8)
+
+                    name_lbl = QLabel(f"<b>{name}</b>")
+                    name_lbl.setStyleSheet(
+                        "font-size: 11px; color: #C8CAFF; background: transparent; border: none;")
+                    name_lbl.setWordWrap(True)
+                    row_lay.addWidget(name_lbl, stretch=1)
+
+                    badge = QLabel("● Loaded" if is_loaded else "○ Unloaded")
+                    badge.setStyleSheet(_badge_style_loaded() if is_loaded else _badge_style_unloaded())
+                    row_lay.addWidget(badge)
+
+                    btn = QPushButton("Unload" if is_loaded else "Load")
+                    btn.setFixedSize(52, 20)
+                    btn.setStyleSheet(_row_style_loaded() if is_loaded else _row_style_unloaded())
+                    btn.clicked.connect(_make_toggle(name))
+                    row_lay.addWidget(btn)
+
+                    detail_lay.addWidget(row)
+                    _skill_rows[name] = {'row': row, 'badge': badge, 'btn': btn}
+
+            # Sync badge + button text/style for every existing row
+            for name, rd in _skill_rows.items():
+                is_loaded = name in current_loaded
+                if is_loaded:
+                    rd['badge'].setText("● Loaded")
+                    rd['badge'].setStyleSheet(_badge_style_loaded())
+                    rd['btn'].setText("Unload")
+                    rd['btn'].setStyleSheet(_row_style_loaded())
+                else:
+                    rd['badge'].setText("○ Unloaded")
+                    rd['badge'].setStyleSheet(_badge_style_unloaded())
+                    rd['btn'].setText("Load")
+                    rd['btn'].setStyleSheet(_row_style_unloaded())
+
+        # Initial population
+        _update_summary()
+        _build_or_refresh_rows()
+
+        # ── Toggle expand / collapse ───────────────────────────────────────────
+        def _toggle():
+            if detail.isHidden():
+                detail.show()
+                toggle_btn.setText("▼ Hide")
+            else:
+                detail.hide()
+                toggle_btn.setText("▶ Show")
+
+        toggle_btn.clicked.connect(_toggle)
+
+        # ── 500 ms live-sync timer ─────────────────────────────────────────────
+        sync_timer = QTimer()
+        sync_timer.setInterval(500)
+
+        def _sync():
+            if message_widget is None:
+                return
+            try:
+                _update_summary()
+                _build_or_refresh_rows()
+            except Exception:
+                pass
+
+        sync_timer.timeout.connect(_sync)
+        sync_timer.start()
+        self._skills_ui_card_timer = sync_timer
+
+        # ── Insert before trailing spacer ──────────────────────────────────────
+        self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
+        self._animate_message_in(
+            message_widget,
+            on_settled=lambda: self.scroll_to_widget(message_widget))
+
+        # ── Track ──────────────────────────────────────────────────────────────
+        self._skills_ui_card_widget = message_widget
+        self.message_widgets.append({
+            'widget': message_widget,
+            'role': 'skills_card',
+            'content_wrapper': header,
+        })
+
+        # ── Persist to conversation history (skipped on reload) ────────────────
+        if save_to_history:
+            try:
+                self.controller.ai.conversation_history.append({
+                    'role': 'ui_event',
+                    '_type': 'skills_card',
+                    'content': '',
+                })
+            except Exception:
+                pass
+
     def copy_to_clipboard(self, text):
         """Copy text to clipboard"""
         clipboard = QApplication.clipboard()
@@ -5225,6 +5621,9 @@ class ChatWindow(BaseWindow):
             self.controller.send_message_with_image(message, images_for_send)
         else:
             self.controller.send_message(message)
+
+        # ── Auto-lock session list while AI is busy, then auto-unlock ────────
+        QTimer.singleShot(600, self._start_session_lock_watcher)
 
 
     def _update_token_count(self):
