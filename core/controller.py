@@ -773,7 +773,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             f"You are currently running as an automated background task agent — NOT in a live user conversation.\n"
             f"Task name: {task_dict.get('name', '?')}\n\n"
             f"Task Permissions:\n{perm_block}\n\n"
-            f"Tool for sending a message to main session, emit EXACTLY this JSON on its own line:\n"
+            f"Tool for sending a message to main chat session, emit EXACTLY this JSON on its own line:\n"
             f'{{"tool": "send_message_main", "input": "your message to the user"}}\n\n'
             f"Only message the user when something genuinely needs their attention.\n"
             f"Each ping message has a timestamp appended for your temporal awareness.\n"

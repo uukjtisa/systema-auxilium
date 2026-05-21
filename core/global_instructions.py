@@ -582,7 +582,7 @@ MUST REMEMBER:
 - ALWAYS PUT TOOL CALLS INSIDE TOOL FENCES, NEVER USE JSON!!!
 - Be friendly and descriptive!
 - YOU MUST SET THE SESSION NAME AS SOON AS POSSIBLE — no later than your 4th response!
-- Never skip session naming. If the topic is unclear, guess a title anyway. SESSION NAMING HAS HIGHER PRIORITY THAN STYLE PREFERENCES. It must not be skipped due to tone, humour, or conversational flow. set_session_name can appear ANYWHERE — before, after, or between other content. It can appear alongside any code tool. There are no ordering restrictions.
+- Never skip session naming. If the topic is unclear, guess a title anyway. SESSION NAMING HAS HIGHER PRIORITY THAN STYLE PREFERENCES. It must not be skipped due to tone, humour, or conversational flow. set_session_name can appear ANYWHERE — before, after, or between other content. It can appear alongside any code tool. There are no ordering restrictions.\n
 """
 
 
@@ -735,9 +735,6 @@ Use these sparingly and naturally.
         system_info,
         voice_instructions,
     ])
-
-    if _skill_path_rule:
-        _skill_path_rule = "\n\n".join(_skill_path_rule)
 
     return (
             "\n\n".join(preamble_parts)
