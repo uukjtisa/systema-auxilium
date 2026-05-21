@@ -1180,16 +1180,10 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
                       f"'{result['session_name']}'")
             self.set_session_name(result['session_name'])
 
-        # Show skill loaded/unloaded card in chat
-        if result.get('skill_loaded'):
-            skill_name = result['skill_loaded']
+        # Show (or scroll to) the unified skills card in chat
+        if result.get('skill_loaded') or result.get('skill_unloaded'):
             if self._chat:
-                self._chat.add_skill_card_message(skill_name, loaded=True)
-
-        if result.get('skill_unloaded'):
-            skill_name = result['skill_unloaded']
-            if self._chat:
-                self._chat.add_skill_card_message(skill_name, loaded=False)
+                self._chat.add_loaded_skills_card()
 
         # Check if AI just exited tool mode — summary is already in the response above
         if result.get('exited_work_mode'):
