@@ -1252,6 +1252,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         if result.get('exited_work_mode'):
             self.log("AI exited tool mode")
             self.work_mode_timer.stop()
+            self.ai.tool_manager.in_work_mode = False
             # SESSION SAVE: Persist the completed work session
             if not self.session_has_messages:
                 self.session_has_messages = True
