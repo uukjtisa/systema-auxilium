@@ -1858,7 +1858,8 @@ class ChatWindow(BaseWindow):
         sidebar_layout.addLayout(search_sort_row)
 
         # New session button — accent, full width
-        new_session_btn = QPushButton("➕  New Session")
+        self._new_session_btn = QPushButton("➕  New Session")
+        new_session_btn = self._new_session_btn
         new_session_btn.setFixedHeight(32)
         new_session_btn.setStyleSheet("""
             QPushButton {
@@ -3844,31 +3845,40 @@ class ChatWindow(BaseWindow):
             self._hero_user_name.setText(user)
 
     def _start_session_lock_watcher(self):
-        """Lock the session list then spin up a background thread that polls
+        """Lock the session list then start a QTimer on the main thread that polls
         until both is_processing and in_work_mode are False, then unlocks."""
         self.set_session_list_locked(True, "AI is responding…")
 
-        import threading as _threading
+        if hasattr(self, '_lock_watcher_timer') and self._lock_watcher_timer is not None:
+            try:
+                self._lock_watcher_timer.stop()
+            except Exception:
+                pass
 
-        def _watch():
-            import time
-            while True:
-                try:
-                    processing = getattr(self.controller, 'is_processing', False)
-                    try:
-                        in_work = self.controller.ai.tool_manager.in_work_mode
-                    except Exception:
-                        in_work = False
-                    if not processing and not in_work:
-                        break
-                except Exception:
-                    break
-                time.sleep(0.25)
-            # Unlock back on the main thread
-            QTimer.singleShot(0, lambda: self.set_session_list_locked(False))
+        self._lock_watcher_timer = QTimer(self)
+        self._lock_watcher_timer.setInterval(250)
+        self._lock_watcher_timer.timeout.connect(self._check_session_lock_state)
+        self._lock_watcher_timer.start()
 
-        t = _threading.Thread(target=_watch, daemon=True)
-        t.start()
+    def _check_session_lock_state(self):
+        """Called every 250 ms (main thread) to check if the AI is still busy."""
+        try:
+            processing = getattr(self.controller, 'is_processing', False)
+            try:
+                in_work = self.controller.ai.tool_manager.in_work_mode
+            except Exception:
+                in_work = False
+            if not processing and not in_work:
+                self._lock_watcher_timer.stop()
+                self._lock_watcher_timer = None
+                self.set_session_list_locked(False)
+        except Exception:
+            try:
+                self._lock_watcher_timer.stop()
+                self._lock_watcher_timer = None
+            except Exception:
+                pass
+            self.set_session_list_locked(False)
 
     def _session_show_more(self):
         self._session_visible_count += 10
@@ -3897,6 +3907,10 @@ class ChatWindow(BaseWindow):
         """
         self._session_switching_locked = locked
         self.refresh_session_list()
+
+        # Disable the New Session button while locked
+        if hasattr(self, '_new_session_btn'):
+            self._new_session_btn.setEnabled(not locked)
 
         # Show a brief status bar hint when the user is blocked
         if locked and reason:
@@ -5419,6 +5433,7 @@ class ChatWindow(BaseWindow):
             # Re-render the user bubble with updated text, then fire AI
             self.add_user_message(new_content)
             self.controller.send_message(new_content)
+            QTimer.singleShot(600, self._start_session_lock_watcher)
 
         else:
             # Assistant / system edit: update in-place
@@ -5514,6 +5529,7 @@ class ChatWindow(BaseWindow):
         # For user messages: fire a new AI response (bubble stays visible)
         if role == 'user':
             self.controller.send_message(message_data['content'])
+            QTimer.singleShot(600, self._start_session_lock_watcher)
 
     def _regenerate_response(self, message_data):
         """Regenerate AI response — rewinds before the user message, re-renders the user
@@ -5539,6 +5555,7 @@ class ChatWindow(BaseWindow):
 
         # Fire AI (generate_response will append user turn to history once)
         self.controller.send_message(user_message)
+        QTimer.singleShot(600, self._start_session_lock_watcher)
 
     def _get_history_index(self, message_data):
         """Find the real index of a message in conversation_history by matching role+content.

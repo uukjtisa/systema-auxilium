@@ -535,6 +535,7 @@ class ToolManager:
         # Check for exit command
         if code.lower() == 'exit':
             log.info("[ToolManager.run_work_environment] Exit command detected — returning EXITED_WORK_MODE")
+            QTimer.singleShot(0, lambda: self._chat.set_session_list_locked(False)) # Extra call to make sure it unlocks the session list.
             self.in_work_mode = False
             return "EXITED_WORK_MODE"
 

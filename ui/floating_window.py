@@ -586,13 +586,22 @@ class FloatingWindow(QWidget):
 
     def create_tray_icon(self):
         """Create system tray icon with RGBA image (required on Windows)."""
-        from PIL import Image, ImageDraw
+        from PIL import Image
         import pystray
-        # RGBA required — RGB silently fails to show on Windows tray
-        image = Image.new('RGBA', (64, 64), color=(0, 0, 0, 0))
-        draw = ImageDraw.Draw(image)
-        draw.ellipse([4, 4, 60, 60], fill=(100, 100, 255, 255))
-        draw.ellipse([18, 18, 46, 46], fill=(255, 255, 255, 255))
+
+        # Load the app icon
+        icon_path = _APP_ROOT / "assets" / "systema_auxilium.ico"
+        try:
+            image = Image.open(icon_path).convert("RGBA")
+            # pystray works best with 64x64
+            image = image.resize((64, 64), Image.LANCZOS)
+        except Exception:
+            # Fallback: plain circle if icon file is missing
+            from PIL import ImageDraw
+            image = Image.new('RGBA', (64, 64), color=(0, 0, 0, 0))
+            draw = ImageDraw.Draw(image)
+            draw.ellipse([4, 4, 60, 60], fill=(100, 100, 255, 255))
+            draw.ellipse([18, 18, 46, 46], fill=(255, 255, 255, 255))
 
         menu_items = [pystray.MenuItem("Toggle Chat", self._tray_toggle_chat, default=True, visible=False),
                       pystray.MenuItem("Show floating window", self._tray_show_floating),

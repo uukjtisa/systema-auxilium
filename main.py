@@ -193,11 +193,16 @@ def hide_console_window():
 
 def main():
     from PyQt6.QtCore import Qt
-    from PyQt6.QtGui import QFont
+    from PyQt6.QtGui import QFont, QIcon
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
     app.setApplicationName("Systema Auxilium - AI System Helper Agent")
     app.setOrganizationName("NicProjects")
+    # ── App icon ──────────────────────────────────────────────────────────────
+    icon_path = Path(__file__).parent / "assets" / "systema_auxilium.ico"
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
+    # ─────────────────────────────────────────────────────────────────────────
     font = QFont("Segoe UI", 10)
     font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
     app.setFont(font)
