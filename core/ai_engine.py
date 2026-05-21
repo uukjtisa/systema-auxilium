@@ -75,7 +75,7 @@ class AIEngine:
             skill_manager.loaded_skills_changed.connect(self._on_skills_changed)
             log.info("[AIEngine.__init__] SkillManager wired — skills_changed + loaded_skills_changed connected")
         self.system_prompt = get_system_prompt(
-            system_info, voice_mode, elevenlabs_enabled,
+            system_info=system_info, voice_mode=voice_mode, elevenlabs_enabled=elevenlabs_enabled,
             skills=skill_manager.get_skills() if skill_manager else []
         )
         log.info(f"[AIEngine.__init__] System prompt generated | length={len(self.system_prompt)} chars")
@@ -114,7 +114,7 @@ class AIEngine:
         log.info(f"[AIEngine.set_voice_mode] voice_mode → {enabled} | regenerating system prompt")
         self.voice_mode = enabled
         self.system_prompt = get_system_prompt(
-            self.system_info, self.voice_mode, self.elevenlabs_enabled,
+            system_info=self.system_info, voice_mode=self.voice_mode, elevenlabs_enabled=self.elevenlabs_enabled,
             skills=self.skill_manager.get_skills() if self.skill_manager else [],
             include_image_tools=self.include_image_tools,
             include_controller_ref=self.include_controller_ref,
@@ -134,7 +134,7 @@ class AIEngine:
         self.voice_mode = voice_mode
         self.elevenlabs_enabled = elevenlabs_enabled
         self.system_prompt = get_system_prompt(
-            self.system_info, voice_mode, elevenlabs_enabled,
+            system_info=self.system_info, voice_mode=voice_mode, elevenlabs_enabled=elevenlabs_enabled,
             skills=self.skill_manager.get_skills() if self.skill_manager else [],
             include_image_tools=self.include_image_tools,
             include_controller_ref=self.include_controller_ref,
@@ -152,9 +152,9 @@ class AIEngine:
         """Regenerate system prompt when the skills folder changes."""
         log.info("[AIEngine._on_skills_changed] Skills changed — regenerating system prompt")
         self.system_prompt = get_system_prompt(
-            self.system_info,
-            self.voice_mode,
-            self.elevenlabs_enabled,
+            system_info=self.system_info,
+            voice_mode=self.voice_mode,
+            elevenlabs_enabled=self.elevenlabs_enabled,
             skills=self.skill_manager.get_skills() if self.skill_manager else [],
             include_image_tools=self.include_image_tools,
             include_controller_ref=self.include_controller_ref,
@@ -221,9 +221,9 @@ class AIEngine:
         self.include_controller_ref = include_controller_ref
         self.include_notify_tool = include_notify_tool
         self.system_prompt = get_system_prompt(
-            self.system_info,
-            self.voice_mode,
-            self.elevenlabs_enabled,
+            system_info=self.system_info,
+            voice_mode=self.voice_mode,
+            elevenlabs_enabled=self.elevenlabs_enabled,
             skills=self.skill_manager.get_skills() if self.skill_manager else [],
             include_image_tools=self.include_image_tools,
             include_controller_ref=self.include_controller_ref,
@@ -499,10 +499,23 @@ class AIEngine:
                   f"images={len(images) if images else 0}")
         messages = self._build_messages()
 
+        try:
+            from core.token_est import log_tokens, estimate_history_tokens
+            log_tokens(estimate_history_tokens(messages))
+        except Exception:
+            pass
+
         if self.ai_provider == 'manual':
             return self._provider_manual()
         elif self.ai_provider == 'custom_script':
-            return self._provider_script(messages, images=images)
+            result = self._provider_script(messages, images=images)
+            if result:
+                try:
+                    from core.token_est import log_output_tokens, estimate_tokens
+                    log_output_tokens(estimate_tokens(result))
+                except Exception:
+                    pass
+            return result
         return
 
     def raw_call(self, system_prompt: str, history: list) -> str | None:
@@ -520,7 +533,19 @@ class AIEngine:
             for m in history
             if m.get('role') in ('user', 'assistant')
         )
-        return self._provider_script(messages)
+        try:
+            from core.token_est import log_tokens, estimate_history_tokens
+            log_tokens(estimate_history_tokens(messages))
+        except Exception:
+            pass
+        result = self._provider_script(messages)
+        if result:
+            try:
+                from core.token_est import log_output_tokens, estimate_tokens
+                log_output_tokens(estimate_tokens(result))
+            except Exception:
+                pass
+        return result
 
     def _make_error_result(self, message="Error: No response from AI") -> dict:
         """Return a standard error result dict."""

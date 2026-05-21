@@ -244,12 +244,53 @@ class SkillsSidebarSection(QWidget):
         bl.setContentsMargins(0, 0, 0, 0)
         bl.setSpacing(4)
 
+        # ── Search box ────────────────────────────────────────────────────────
+        self._skill_search = QLineEdit()
+        self._skill_search.setPlaceholderText("Search skills…")
+        self._skill_search.setFixedHeight(26)
+        self._skill_search.setStyleSheet(f"""
+            QLineEdit {{ background-color: {_SK_SURFACE2}; border: 1px solid {_SK_BORDER};
+                        border-radius: 5px; color: {_SK_TEXT}; font-size: 10px; padding: 0 7px; }}
+            QLineEdit:focus {{ border-color: {_SK_ACCENT}; color: {_SK_TEXT}; }}
+        """)
+        self._skill_search.textChanged.connect(self._on_skill_search_changed)
+        bl.addWidget(self._skill_search)
+
         self._rows_widget = QWidget()
         self._rows_widget.setStyleSheet("background: transparent;")
         self._rows_layout = QVBoxLayout(self._rows_widget)
         self._rows_layout.setContentsMargins(0, 0, 0, 0)
         self._rows_layout.setSpacing(4)
         bl.addWidget(self._rows_widget)
+
+        # ── Pagination footer ─────────────────────────────────────────────────
+        self._sk_footer = QWidget()
+        self._sk_footer.setStyleSheet("background: transparent;")
+        _sf_lay = QHBoxLayout(self._sk_footer)
+        _sf_lay.setContentsMargins(0, 2, 0, 0)
+        _sf_lay.setSpacing(6)
+        _sk_btn_ss = f"""
+            QPushButton {{ background: transparent; border: none;
+                          color: {_SK_MUTED}; font-size: 9px; padding: 0; }}
+            QPushButton:hover {{ color: #E6EDF3; }}
+        """
+        self._sk_show_more_btn = QPushButton("Show 10 more")
+        self._sk_show_more_btn.setStyleSheet(_sk_btn_ss)
+        self._sk_show_more_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._sk_show_more_btn.clicked.connect(self._skill_show_more)
+        self._sk_show_all_btn = QPushButton("Show all")
+        self._sk_show_all_btn.setStyleSheet(_sk_btn_ss)
+        self._sk_show_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._sk_show_all_btn.clicked.connect(self._skill_show_all)
+        _sep = QLabel("·")
+        _sep.setStyleSheet("color: #333; background: transparent; font-size: 9px;")
+        _sf_lay.addWidget(self._sk_show_more_btn)
+        _sf_lay.addWidget(_sep)
+        _sf_lay.addWidget(self._sk_show_all_btn)
+        _sf_lay.addStretch()
+        self._sk_footer.hide()
+        bl.addWidget(self._sk_footer)
+        self._sk_visible_count = 10
 
         # new-skill input row
         add_w = QWidget()
@@ -308,19 +349,55 @@ class SkillsSidebarSection(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
-        skills = self._skill_manager.get_skills()
-        loaded_count = sum(1 for s in skills if s.get('is_loaded'))
-        self._count_lbl.setText(f"{len(skills)} · {loaded_count} loaded")
+        all_skills = self._skill_manager.get_skills()
+        loaded_count = sum(1 for s in all_skills if s.get('is_loaded'))
+        self._count_lbl.setText(f"{len(all_skills)} · {loaded_count} loaded")
+
+        # Filter by search query
+        q = ""
+        if hasattr(self, '_skill_search'):
+            q = self._skill_search.text().strip().lower()
+        if q:
+            skills = [s for s in all_skills
+                      if q in s['name'].lower() or q in s.get('description', '').lower()]
+        else:
+            skills = all_skills
 
         if not skills:
-            empty = QLabel("No skills installed.\nCreate one below ↓")
+            msg = "No matching skills." if q else "No skills installed.\nCreate one below ↓"
+            empty = QLabel(msg)
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            empty.setStyleSheet(
-                f"color: {_SK_MUTED}; font-size: 10px; padding: 12px;")
+            empty.setStyleSheet(f"color: {_SK_MUTED}; font-size: 10px; padding: 12px;")
             self._rows_layout.addWidget(empty)
-        else:
-            for skill in skills:
-                self._rows_layout.addWidget(_SkillRow(skill, self._skill_manager))
+            if hasattr(self, '_sk_footer'):
+                self._sk_footer.hide()
+            return
+
+        vis = getattr(self, '_sk_visible_count', 10)
+        for skill in skills[:vis]:
+            self._rows_layout.addWidget(_SkillRow(skill, self._skill_manager))
+
+        remaining = len(skills) - vis
+        if hasattr(self, '_sk_footer') and hasattr(self, '_sk_show_more_btn'):
+            if remaining > 0:
+                self._sk_show_more_btn.setText(f"Show {min(10, remaining)} more")
+                self._sk_show_all_btn.setText(f"Show all ({len(skills)})")
+                self._sk_footer.show()
+            else:
+                self._sk_footer.hide()
+
+    def _on_skill_search_changed(self):
+        """Reset pagination and refresh when the search query changes."""
+        self._sk_visible_count = 10
+        self.refresh()
+
+    def _skill_show_more(self):
+        self._sk_visible_count = getattr(self, '_sk_visible_count', 10) + 10
+        self.refresh()
+
+    def _skill_show_all(self):
+        self._sk_visible_count = 99999
+        self.refresh()
 
     def _create_skill(self):
         name = self._name_input.text().strip()
@@ -2143,6 +2220,7 @@ class ChatWindow(BaseWindow):
             }
         """)
         self.input_field.enterPressed.connect(self.send_message)
+        self.input_field.text_input.textChanged.connect(self._update_token_count)
         text_row_layout.addWidget(self.input_field, 1)
         combined_layout.addWidget(text_row)
 
@@ -2197,6 +2275,20 @@ class ChatWindow(BaseWindow):
         """)
         self.mode_dropdown.clicked.connect(self.show_mode_menu)
         bottom_row_layout.addWidget(self.mode_dropdown)
+
+        # ── Token estimate label ──────────────────────────────────────────────
+        self._token_count_lbl = QLabel("~0 token per message")
+        self._token_count_lbl.setStyleSheet(
+            "QLabel { color: #3D4450; font-size: 9px; background: transparent; padding: 0 4px; }")
+        self._token_count_lbl.setToolTip(
+            "Estimated tokens for next message (your input + full conversation history)")
+        bottom_row_layout.addWidget(self._token_count_lbl)
+        _show_tk = getattr(self.controller, 'settings', {}).get('show_token_count', True)
+        self._token_count_lbl.setVisible(_show_tk)
+        self._token_refresh_timer = QTimer(self)
+        self._token_refresh_timer.setInterval(2000)
+        self._token_refresh_timer.timeout.connect(self._update_token_count)
+        self._token_refresh_timer.start()
 
         bottom_row_layout.addStretch()
 
@@ -5134,6 +5226,35 @@ class ChatWindow(BaseWindow):
         else:
             self.controller.send_message(message)
 
+
+    def _update_token_count(self):
+        """Update the token estimate label whenever the input text changes."""
+        try:
+            if not hasattr(self, '_token_count_lbl') or not self._token_count_lbl.isVisible():
+                return
+            from core.token_est import estimate_next_message_tokens, estimate_tokens
+            text = self.input_field.toPlainText()
+            hist = []
+            sys_tokens = 0
+            ai = getattr(self.controller, 'ai', None)
+            if ai:
+                hist = getattr(ai, 'chat_history', []) or getattr(ai, 'conversation_history', [])
+                sys_tokens = estimate_tokens(getattr(ai, 'system_prompt', '') or '')
+            total = estimate_next_message_tokens(text, hist) + sys_tokens
+            lbl = f"~{total/1000:.1f}k token per message" if total >= 1000 else f"~{total} token per message"
+            if total > 50000:
+                color = "#FF6B6B"
+            elif total > 20000:
+                color = "#E8833A"
+            elif total > 5000:
+                color = "#8B949E"
+            else:
+                color = "#3D4450"
+            self._token_count_lbl.setStyleSheet(
+                f"QLabel {{ color: {color}; font-size: 9px; background: transparent; padding: 0 4px; }}")
+            self._token_count_lbl.setText(lbl)
+        except Exception:
+            pass
 
     # ── Image preview helpers ─────────────────────────────────────────────────
 

@@ -8,9 +8,85 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QLineEdit, QPushButton, QTextEdit, QComboBox, QGroupBox,
                              QCheckBox, QScrollArea, QFrame, QSlider, QSpinBox, QDoubleSpinBox,
                              QPlainTextEdit, QFileDialog)
-from PyQt6.QtCore import Qt, QPoint, QTimer, QRect
-from PyQt6.QtGui import QRegion
+from PyQt6.QtCore import Qt, QPoint, QTimer, QRect, QRectF
+from PyQt6.QtGui import QRegion, QPainter, QColor, QFont, QPen
 from ui.base_window import BaseWindow
+
+
+class _TokenGraphCanvas(QWidget):
+    """Simple bar graph for token usage data."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._data = []
+        self._mode = "Daily"
+
+    def set_data(self, data, mode):
+        self._data = data
+        self._mode = mode
+        self.update()
+
+    def paintEvent(self, event):
+        from PyQt6.QtCore import QRectF
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        pad_l, pad_r, pad_t, pad_b = 40, 10, 12, 26
+        graph_w = w - pad_l - pad_r
+        graph_h = h - pad_t - pad_b
+
+        painter.fillRect(0, 0, w, h, QColor("#161B22"))
+
+        if not self._data:
+            painter.setPen(QColor("#555"))
+            painter.setFont(QFont("Segoe UI", 9))
+            painter.drawText(QRectF(0, 0, w, h),
+                             Qt.AlignmentFlag.AlignCenter,
+                             "No token data yet.\nSend a message to start tracking.")
+            painter.end()
+            return
+
+        raw_max = max(v for _, v in self._data) or 1
+        padding = max(raw_max * 0.1, 10)
+        max_val = raw_max + padding
+        n = len(self._data)
+        gap = graph_w / n
+        bar_w = max(2, min(int(gap * 0.65), 48))
+
+        # Grid lines
+        painter.setPen(QPen(QColor("#21262D"), 1))
+        for i in range(1, 4):
+            y = pad_t + graph_h - int(graph_h * i / 3)
+            painter.drawLine(pad_l, y, pad_l + graph_w, y)
+
+        def _fmt(v):
+            return f"{v//1000}k" if v >= 1000 else str(v)
+
+        painter.setPen(QColor("#555"))
+        painter.setFont(QFont("Segoe UI", 7))
+        for i in range(0, 4):
+            v = int(max_val * i / 3)
+            y = pad_t + graph_h - int(graph_h * i / 3)
+            painter.drawText(QRectF(0, y - 8, pad_l - 4, 16),
+                             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                             _fmt(v))
+
+        accent = QColor("#58A6FF")
+        accent_dim = QColor("#1A2D4A")
+        for i, (lbl, val) in enumerate(self._data):
+            x = pad_l + int(i * gap) + int((gap - bar_w) / 2)
+            bar_h = max(2, int(graph_h * val / max_val))
+            y = pad_t + graph_h - bar_h
+            painter.fillRect(x, pad_t, bar_w, graph_h, accent_dim)
+            painter.fillRect(x, y, bar_w, bar_h, accent)
+            # X label — only show every other label if crowded
+            if n <= 16 or i % max(1, n // 12) == 0:
+                painter.setPen(QColor("#555"))
+                lbl_short = lbl[-5:] if len(lbl) > 5 else lbl
+                painter.drawText(QRectF(x - gap / 2, pad_t + graph_h + 3, gap * 2, pad_b),
+                                 Qt.AlignmentFlag.AlignCenter, lbl_short)
+
+        painter.end()
 
 
 class SettingsWindow(BaseWindow):
@@ -412,6 +488,62 @@ class SettingsWindow(BaseWindow):
         ai_lay.addWidget(pf_group)
         # ────────────────────────────────────────────────────────────────────
 
+        # ── Token Usage Graph ────────────────────────────────────────────────
+        tok_group = QGroupBox("Token Usage")
+        tok_group.setStyleSheet(_GROUP)
+        tg_lay = QVBoxLayout(tok_group)
+        tg_lay.addWidget(_label("Estimated tokens consumed over time.", muted=True))
+
+        _tok_mode_row = QHBoxLayout()
+        _tok_modes = ["Minutes", "Hourly", "Daily", "Weekly", "Monthly", "Yearly", "All"]
+        self._tok_mode_btns = {}
+        self._tok_graph_mode = "Daily"
+        for _m in _tok_modes:
+            _mb = QPushButton(_m)
+            _mb.setFixedHeight(22)
+            _mb.setCheckable(True)
+            _mb.setChecked(_m == "Daily")
+            _mb.setStyleSheet(f"""
+                QPushButton {{
+                    background: {_ELEV}; border: 1px solid {_BORDER};
+                    border-radius: 4px; font-size: 9px; color: {_MUTED}; padding: 0 6px;
+                }}
+                QPushButton:checked {{
+                    background: {_ACCENT}; border-color: {_ACCENT}; color: #000;
+                }}
+                QPushButton:hover:!checked {{ border-color: {_ACCENT}; color: {_TEXT}; }}
+            """)
+            _mb.clicked.connect(lambda _checked, m=_m: self._set_tok_graph_mode(m))
+            _tok_mode_row.addWidget(_mb)
+            self._tok_mode_btns[_m] = _mb
+        tg_lay.addLayout(_tok_mode_row)
+
+        self._tok_canvas = _TokenGraphCanvas()
+        self._tok_canvas.setMinimumHeight(160)
+        self._tok_canvas.setMaximumHeight(320)
+        self._tok_canvas.setSizePolicy(
+            self._tok_canvas.sizePolicy().horizontalPolicy(),
+            __import__('PyQt6.QtWidgets', fromlist=['QSizePolicy']).QSizePolicy.Policy.Expanding
+        )
+        self._tok_canvas.setStyleSheet(f"background: {_ELEV}; border-radius: 6px;")
+        tg_lay.addWidget(self._tok_canvas)
+
+        self._tok_summary_lbl = QLabel("Open this tab to load data.")
+        self._tok_summary_lbl.setStyleSheet(f"color: {_MUTED}; font-size: 9px;")
+        tg_lay.addWidget(self._tok_summary_lbl)
+
+        tg_lay.addWidget(_label("Output Tokens", muted=True))
+        self._tok_out_canvas = _TokenGraphCanvas()
+        self._tok_out_canvas.setMinimumHeight(160)
+        self._tok_out_canvas.setMaximumHeight(320)
+        self._tok_out_canvas.setStyleSheet(f"background: {_ELEV}; border-radius: 6px;")
+        tg_lay.addWidget(self._tok_out_canvas)
+        self._tok_out_summary_lbl = QLabel("")
+        self._tok_out_summary_lbl.setStyleSheet(f"color: {_MUTED}; font-size: 9px;")
+        tg_lay.addWidget(self._tok_out_summary_lbl)
+
+        ai_lay.addWidget(tok_group)
+
         ai_lay.addStretch()
 
         # ════════════════════════════════════════════════════════════════════
@@ -436,6 +568,21 @@ class SettingsWindow(BaseWindow):
             "When enabled, the Android Bridge TCP server starts automatically on launch.\n"
             "Connect the Systema Auxilium Android app over Wi-Fi LAN to remote-control the assistant."))
         gen_lay.addWidget(gen_startup_group)
+
+        gen_display_group = QGroupBox("Chat Display")
+        gen_display_group.setStyleSheet(_GROUP)
+        gd_lay = QVBoxLayout(gen_display_group)
+        self.show_token_count_checkbox = QCheckBox("Show token estimate in message input")
+        self.show_token_count_checkbox.setStyleSheet(_CHECK)
+        self.show_token_count_checkbox.setToolTip(
+            "Shows a small live token counter inside the message input.\n"
+            "Grows as the conversation gets longer.")
+        gd_lay.addWidget(self.show_token_count_checkbox)
+        gd_lay.addWidget(_info_box(
+            "The estimate = your current input + entire conversation history. "
+            "Useful for knowing when you're approaching model context limits."))
+        gen_lay.addWidget(gen_display_group)
+
         gen_lay.addStretch()
         tabs.addTab(gen_scroll, "⚙️  General")
 
@@ -1076,6 +1223,9 @@ class SettingsWindow(BaseWindow):
         self.open_packet_on_startup_checkbox.setChecked(
             self.controller.settings.get('open_packet_on_startup', False)
         )
+        self.show_token_count_checkbox.setChecked(
+            self.controller.settings.get('show_token_count', True)
+        )
 
         # Load active LLM provider script
         self._refresh_llm_provider_scripts()
@@ -1251,6 +1401,13 @@ class SettingsWindow(BaseWindow):
         # Save General settings
         self.controller.settings['open_chat_on_startup'] = self.open_chat_on_startup_checkbox.isChecked()
         self.controller.settings['open_packet_on_startup'] = self.open_packet_on_startup_checkbox.isChecked()
+        self.controller.settings['show_token_count'] = self.show_token_count_checkbox.isChecked()
+        try:
+            chat_win = getattr(getattr(self.controller, 'ui', None), 'chat_window', None)
+            if chat_win and hasattr(chat_win, '_token_count_lbl'):
+                chat_win._token_count_lbl.setVisible(self.show_token_count_checkbox.isChecked())
+        except Exception:
+            pass
 
         # Save active LLM provider script
         script_path = self.provider_script_combo.currentData() or ''
@@ -1369,6 +1526,31 @@ class SettingsWindow(BaseWindow):
         # Show confirmation
         self.show_status_message("✓ Settings saved successfully!")
 
+    def _set_tok_graph_mode(self, mode):
+        """Switch the token graph time mode and refresh."""
+        self._tok_graph_mode = mode
+        for m, btn in self._tok_mode_btns.items():
+            btn.setChecked(m == mode)
+        self._refresh_tok_graph()
+
+    def _refresh_tok_graph(self):
+        """Reload token usage data from disk and repaint the graph."""
+        try:
+            from core.token_est import get_usage_data, get_output_usage_data
+            mode = getattr(self, '_tok_graph_mode', 'Daily')
+            data = get_usage_data(mode)
+            self._tok_canvas.set_data(data, mode)
+            total = sum(v for _, v in data)
+            self._tok_summary_lbl.setText(
+                f"Input ({mode.lower()}): ~{total:,} tokens  ·  {len(data)} bucket(s)")
+            out_data = get_output_usage_data(mode)
+            self._tok_out_canvas.set_data(out_data, mode)
+            out_total = sum(v for _, v in out_data)
+            self._tok_out_summary_lbl.setText(
+                f"Output ({mode.lower()}): ~{out_total:,} tokens  ·  {len(out_data)} bucket(s)")
+        except Exception:
+            pass
+
     def show_status_message(self, message):
         """Show a temporary status message in the footer."""
         print(f"[Settings] {message}")
@@ -1394,6 +1576,10 @@ class SettingsWindow(BaseWindow):
     def showEvent(self, event):
         """Sync container background to the current chat window theme on show."""
         super().showEvent(event)
+        try:
+            self._refresh_tok_graph()
+        except Exception:
+            pass
         try:
             ui = getattr(self.controller, 'ui', None)
             chat_win = getattr(ui, 'chat_window', None) if ui else None
