@@ -14,6 +14,7 @@ from core.global_instructions import (
     get_system_prompt,
     EMPTY_EXIT_SUMMARY_PROMPT,
     PREFILLING,
+    WORK_MODE_OUTPUT_ONLY_PROMPT,
 )
 
 # ─────────────────────────── Colored Logger Setup ────────────────────────────
@@ -589,9 +590,25 @@ class AIEngine:
             log.warning("[AIEngine.continue_work_mode] Not in work mode — returning early")
             return self._make_error_result("Not in work mode")
 
+        # Slim down the previous work-mode system message so only the latest ping
+        # carries the full instruction block — everything before becomes output-only.
+        for entry in reversed(self.conversation_history):
+            if entry.get('role') == 'system' and entry.get('_is_work_prompt'):
+                prev_output = entry.get('_work_output', '')
+                entry['content'] = WORK_MODE_OUTPUT_ONLY_PROMPT.format(work_output=prev_output)
+                del entry['_is_work_prompt']
+                break
+
+        # Capture output now — before get_work_mode_prompt() — to store alongside the entry
+        _current_work_output = self.tool_manager.last_work_output or "No previous output"
         work_prompt = self.tool_manager.get_work_mode_prompt()
-        self.conversation_history.append({'role': 'system', 'content': work_prompt})
-        log.debug(f"[AIEngine.continue_work_mode] Work mode prompt appended | "
+        self.conversation_history.append({
+            'role': 'system',
+            'content': work_prompt,
+            '_is_work_prompt': True,      # marks this as the "live" work ping
+            '_work_output': _current_work_output,  # stored so we can slim it next iteration
+        })
+        log.debug(f"[AIEngine.continue_work_mode] Work mode prompt appended (full) | "
                   f"prompt_len={len(work_prompt)} | history_len={len(self.conversation_history)}")
 
         ai_text = self._call_provider()
@@ -997,6 +1014,16 @@ class AIEngine:
                          "clearing in_work_mode flag (skills persist)")
                 self.tool_manager.in_work_mode = False
 
+                # Slim down the last work-mode ping now that work mode is exiting.
+                # It was never slimmed by continue_work_mode() because no next ping came after it.
+                for entry in reversed(self.conversation_history):
+                    if entry.get('role') == 'system' and entry.get('_is_work_prompt'):
+                        prev_output = entry.get('_work_output', '')
+                        entry['content'] = WORK_MODE_OUTPUT_ONLY_PROMPT.format(work_output=prev_output)
+                        del entry['_is_work_prompt']
+                        log.debug("[AIEngine._process_work_mode_response] Last work-mode ping slimmed on exit")
+                        break
+
                 if ai_text and ai_text.strip():
                     self.conversation_history.append({'role': 'assistant', 'content': ai_text})
                     log.debug("[AIEngine._process_work_mode_response] ai_text appended to history (exit)")
@@ -1047,6 +1074,16 @@ class AIEngine:
             log.info("[AIEngine._process_work_mode_response] No more work_environment calls — "
                      "AI is done, clearing in_work_mode (skills persist)")
             self.tool_manager.in_work_mode = False
+
+            # Slim down the last work-mode ping now that work mode is exiting.
+            # It was never slimmed by continue_work_mode() because no next ping came after it.
+            for entry in reversed(self.conversation_history):
+                if entry.get('role') == 'system' and entry.get('_is_work_prompt'):
+                    prev_output = entry.get('_work_output', '')
+                    entry['content'] = WORK_MODE_OUTPUT_ONLY_PROMPT.format(work_output=prev_output)
+                    del entry['_is_work_prompt']
+                    log.debug("[AIEngine._process_work_mode_response] Last work-mode ping slimmed on exit")
+                    break
 
             self.conversation_history.append({'role': 'assistant', 'content': ai_text})
             log.debug("[AIEngine._process_work_mode_response] Normal response appended to history | "
