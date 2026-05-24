@@ -137,6 +137,71 @@ def _setup_session_logger():
     return log_path
 
 
+# ── Single-instance check — before logger so blocked launches leave no log ───
+import subprocess as _subprocess
+
+_LOCK_FILE  = Path(__file__).parent / "data" / "systema_auxilium.lock"
+_MUTEX_HOLD = None  # held for the entire process lifetime on Windows
+
+def _read_lock_pid():
+    try:
+        return int(_LOCK_FILE.read_text().strip())
+    except Exception:
+        return None
+
+def _acquire_instance_lock():
+    global _MUTEX_HOLD
+    _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    if sys.platform == "win32":
+        ERROR_ALREADY_EXISTS = 183
+        handle = ctypes.windll.kernel32.CreateMutexW(None, True,
+                                                     "SystemaAuxiliumSingleInstance")
+        err = ctypes.windll.kernel32.GetLastError()
+
+        if err == ERROR_ALREADY_EXISTS:
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+            return False, _read_lock_pid()
+
+        _MUTEX_HOLD = handle
+        try:
+            _LOCK_FILE.write_text(str(os.getpid()))
+        except Exception:
+            pass
+        atexit.register(lambda: _LOCK_FILE.unlink(missing_ok=True))
+        return True, None
+
+    else:
+        while True:
+            try:
+                with open(_LOCK_FILE, 'x') as f:
+                    f.write(str(os.getpid()))
+                atexit.register(lambda: _LOCK_FILE.unlink(missing_ok=True))
+                return True, None
+            except FileExistsError:
+                pid = _read_lock_pid()
+                try:
+                    if pid:
+                        os.kill(pid, 0)
+                        return False, pid
+                except OSError:
+                    pass
+                try:
+                    _LOCK_FILE.unlink()
+                except FileNotFoundError:
+                    pass
+
+_is_primary, _existing_pid = _acquire_instance_lock()
+if not _is_primary:
+    _subprocess.Popen(
+        [sys.executable, str(Path(__file__).parent / "ui" / "startup_notif.py"),
+         "--already-running", str(_existing_pid or 0)],
+        creationflags=_subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    )
+    sys.exit(0)
+# ─────────────────────────────────────────────────────────────────────────────
+
 # Run setup FIRST — before importing anything from core
 _setup_session_logger()
 
@@ -158,10 +223,9 @@ if sys.platform == "win32":
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Startup notification (fire and forget) ───────────────────────────────────
-import subprocess
-subprocess.Popen(
+_subprocess.Popen(
     [sys.executable, str(Path(__file__).parent / "ui" / "startup_notif.py")],
-    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    creationflags=_subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 )
 # ─────────────────────────────────────────────────────────────────────────────
 
