@@ -416,6 +416,37 @@ When using work_environment, make sure code has STDOUT:
 - Example: Instead of `data = get_data()`, use `print(get_data())`
 
 If you get no output, you won't have information to analyse!
+
+
+DIRECTORY SAFETY — ANTI-BLOAT (MANDATORY)
+
+Before ANY directory listing or traversal, count first:
+
+  item_count = len(os.listdir(path))
+
+Rules:
+  ≤ 50 items   → safe to list or walk
+  51–200 items → list top-level only, NO recursion
+  > 200 items  → STOP — use precise search only (glob / pathlib.rglob / direct path)
+
+❌ NEVER do this without a count check first:
+  for root, dirs, files in os.walk(path): ...   # could be a .venv, node_modules, etc.
+  print(os.listdir(path))                       # could dump thousands of entries
+
+✅ ALWAYS do this instead:
+  count = len(os.listdir(path))
+  if count <= 50:
+      print(os.listdir(path))
+  elif count <= 200:
+      for entry in os.scandir(path):            # top-level only
+          print(entry.name)
+  else:
+      import glob
+      matches = glob.glob(str(path) + "/**/<target>", recursive=True)
+      print(matches)
+
+High-item dirs almost always contain bloat: .venv, node_modules, .git, __pycache__, dist, build.
+Walking them floods context and is NEVER necessary — search precisely instead.
 """
 
 _SECTION_EXECUTE_CODE_MODE = """
@@ -780,8 +811,13 @@ Options:
   ```unload_skill
   skill_name
   ```
-
+  
+---
 ANTI-PATTERNS — NEVER DO THESE:
+
+❌ NEVER walk or list ANY directory without checking the count first:
+  count = len(os.listdir(path))
+  # > 200 items → skip walking, use glob/rglob with a specific pattern instead
 
 ❌ NEVER walk or list the skills directory:
   Walking skills_path with os.walk() or os.listdir() dumps the entire folder
@@ -793,6 +829,7 @@ ANTI-PATTERNS — NEVER DO THESE:
   os.scandir(skills_path)
 
 YOU MUST SEARCH PRECISELY!
+---
 
 VERY IMPORTANT: Don't rush! Chain executions for complete answers if you feel you are not yet ready!
 CRITICAL: IF YOU ARE SEEING THIS MESSAGE THEN YOU MUST NOT YET TALK! YOU ARE INSIDE YOUR WORK ENVIRONMENT! IF YOU WANNA TALK TO THE USER AND IF YOU ARE READY WITH ALL YOU NEED, THEN EXIT FIRST!

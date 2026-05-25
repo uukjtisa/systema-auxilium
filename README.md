@@ -247,8 +247,7 @@ bash setup_macOs.sh   # macOS
 
 ## Contributing
 
-This project is maintained by one person only as of April 25, 2026, and has grown to over 22,000 lines. Contributions of any kind are genuinely welcome — bug reports, feature ideas, pull requests, and general feedback all help.
-
+Contributions of any kind are genuinely welcome — bug reports, feature ideas, pull requests, and general feedback all help.
 If you'd like to get involved, please see [CONTRIBUTING.md](CONTRIBUTING.md) or reach out directly.
 
 ---
