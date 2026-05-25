@@ -1,6 +1,6 @@
 ---
 name: create-skill
-description: scaffold a new skill into {app_root}/skills/
+description: create a new skill for systema auxilium.
 ---
 
 ## Purpose
