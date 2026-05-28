@@ -8,6 +8,7 @@ Original Architecture & Implementation:
 """
 
 import faulthandler
+import threading
 import sys
 import os
 import re
@@ -44,14 +45,30 @@ def _make_log_path():
 
 class _Tee:
     """
-    Mirrors every write to both the real stream and the log file.
+    Thread-aware tee. Mirrors writes to both the real stream and the log file.
+    Threads that call set_capture() get their output routed to their own buffer
+    instead — so background threads never bleed into code execution output.
     Strips ANSI color codes so the log file is clean plain text.
     """
     def __init__(self, real, log_file):
-        self._real = real
-        self._log  = log_file
+        self._real  = real
+        self._log   = log_file
+        self._local = threading.local()  # per-thread capture slot
+
+    def set_capture(self, buf):
+        """Called by the execution thread to start capturing its own output."""
+        self._local.capture = buf
+
+    def clear_capture(self):
+        """Called by the execution thread when done — restores normal routing."""
+        self._local.capture = None
 
     def write(self, data):
+        buf = getattr(self._local, 'capture', None)
+        if buf is not None:
+            buf.write(data)   # this thread is capturing — don't touch the log
+            return
+        # Normal path — mirror to real stream + log file
         self._real.write(data)
         self._real.flush()
         try:
@@ -62,6 +79,11 @@ class _Tee:
             pass
 
     def flush(self):
+        buf = getattr(self._local, 'capture', None)
+        if buf is not None:
+            try: buf.flush()
+            except Exception: pass
+            return
         self._real.flush()
         try: self._log.flush()
         except Exception: pass

@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QTimeEdit, QRadioButton, QDateTimeEdit, QMessageBox,
 )
 from core.logger import _make_logger, _NoOpLogger
-from PyQt6.QtCore import Qt, QTime, QDateTime, QPoint, QThread, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, QTime, QDateTime, QPoint, QThread, pyqtSignal, QTimer, QFileSystemWatcher
 from PyQt6.QtGui import QFont, QSyntaxHighlighter, QTextCharFormat, QColor
 import re
 from ui.base_window import BaseWindow
@@ -394,6 +394,24 @@ class ManageTasksWindow(BaseWindow):
 
         self._stack.setCurrentIndex(0)
         self._refresh_list()
+
+        # ── File watcher: auto-reload when data files change externally ───────
+        self._file_watcher = QFileSystemWatcher(self)
+        if self._task_mgr is not None:
+            try:
+                import os as _os
+                _tf = str(self._task_mgr.TASKS_FILE)
+                _ff = str(self._task_mgr.FUNCTIONS_FILE)
+                _sd = str(self._task_mgr.TASKS_FILE.parent.parent / 'task-sessions')
+                for _p in (_tf, _ff):
+                    if _os.path.exists(_p):
+                        self._file_watcher.addPath(_p)
+                if _os.path.isdir(_sd):
+                    self._file_watcher.addPath(_sd)
+            except Exception:
+                pass
+        self._file_watcher.fileChanged.connect(self._on_watched_file_changed)
+        self._file_watcher.directoryChanged.connect(self._on_watched_dir_changed)
 
         self.setMinimumSize(680, 480)
         self.create_resize_handles()
@@ -785,11 +803,32 @@ class ManageTasksWindow(BaseWindow):
             f"QPushButton {{ background: transparent; color: {_MUTED}; border: 1px solid {_MUTED}; "
             f"border-radius: 6px; padding: 4px 10px; font-size: 11px; }}"
         )
+        self._refresh_list()  # Rebuild rows so the left color bar also updates
 
     def _delete_task(self, task_id: str):
         if self._task_mgr:
             self._task_mgr.delete_task(task_id)
             self._refresh_list()
+
+    def _on_watched_file_changed(self, path: str):
+        """Reload tasks/functions from disk when tasks.json or functions.json changes externally."""
+        if self._task_mgr is not None:
+            try:
+                self._task_mgr.reload_from_disk()
+            except Exception:
+                pass
+        self._refresh_list()
+        # Re-add path: atomic saves (tmp → rename) cause the watcher to lose track of the file
+        try:
+            import os as _os
+            if _os.path.exists(path):
+                self._file_watcher.addPath(path)
+        except Exception:
+            pass
+
+    def _on_watched_dir_changed(self, _path: str):
+        """Refresh the list when the task-sessions directory changes."""
+        self._refresh_list()
 
     # ═══════════════════════════════════════════════════════════════════════════
     # PAGE 1 — Task Editor

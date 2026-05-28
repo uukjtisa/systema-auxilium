@@ -11,7 +11,6 @@ import traceback
 import code
 from core.logger import _make_logger, _NoOpLogger
 from core.path_syncer import get_syncer
-from contextlib import redirect_stdout, redirect_stderr
 
 
 # ─────────────────────────── Colored Logger Setup ────────────────────────────
@@ -128,7 +127,7 @@ class PythonInterpreter:
         log.debug("[PythonInterpreter.execute] last_result reset, stdout/stderr buffers ready")
 
         try:
-            with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
+            if True:  # output captured via thread-local _Tee — no global swap needed
                 # Detect if code has multiple lines or multiple statements
                 code_stripped = code_str.strip()
                 has_newlines  = '\n' in code_stripped
@@ -145,7 +144,15 @@ class PythonInterpreter:
                         log.debug("[PythonInterpreter.execute] Compiling code in 'exec' mode")
                         compiled = compile(code_str, '<input>', 'exec')
                         log.debug("[PythonInterpreter.execute] Compile succeeded — running exec()")
+                        if hasattr(sys.stdout, 'set_capture'):
+                            sys.stdout.set_capture(stdout_capture)
+                        if hasattr(sys.stderr, 'set_capture'):
+                            sys.stderr.set_capture(stderr_capture)
                         exec(compiled, self.interpreter.locals)
+                        if hasattr(sys.stdout, 'clear_capture'):
+                            sys.stdout.clear_capture()
+                        if hasattr(sys.stderr, 'clear_capture'):
+                            sys.stderr.clear_capture()
                         success = True
                         log.info("[PythonInterpreter.execute] exec() finished successfully")
 
@@ -193,7 +200,15 @@ class PythonInterpreter:
                 else:
                     log.info("[PythonInterpreter.execute] → SINGLE-LINE / REPL mode selected")
                     # Single line - use 'single' mode for REPL behavior
+                    if hasattr(sys.stdout, 'set_capture'):
+                        sys.stdout.set_capture(stdout_capture)
+                    if hasattr(sys.stderr, 'set_capture'):
+                        sys.stderr.set_capture(stderr_capture)
                     more = self.interpreter.runsource(code_str, '<input>', 'single')
+                    if hasattr(sys.stdout, 'clear_capture'):
+                        sys.stdout.clear_capture()
+                    if hasattr(sys.stderr, 'clear_capture'):
+                        sys.stderr.clear_capture()
 
                     if more:
                         log.warning("[PythonInterpreter.execute] runsource() returned more=True — "
@@ -211,6 +226,12 @@ class PythonInterpreter:
             log.error(f"[PythonInterpreter.execute] Outer exception caught: {type(e).__name__}: {e}")
             error = traceback.format_exc()
             success = False
+        finally:
+            # Always release the capture slot — even if exec threw an exception
+            if hasattr(sys.stdout, 'clear_capture'):
+                sys.stdout.clear_capture()
+            if hasattr(sys.stderr, 'clear_capture'):
+                sys.stderr.clear_capture()
 
         # Collect output
         stdout_val = stdout_capture.getvalue()
