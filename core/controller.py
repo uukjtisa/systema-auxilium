@@ -365,7 +365,8 @@ class AssistantController(QObject):
             'custom_script_path': '',
             'tool_execution_lockout': False,
             'system_prompt_hijacked': False,
-            'custom_system_prompt': ''
+            'custom_system_prompt': '',
+            'tool_execution_timeout_seconds': 300
         }
 
     def save_settings(self):
@@ -985,17 +986,13 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             log.debug("[AssistantController.send_message] Empty message — ignoring")
             return
 
-        # If in tool mode and user sends message, cancel tool mode first
+        # Reject messages during work mode — use the Stop button or timeout dialog instead
         if self.ai.tool_manager.in_work_mode:
-            log.warning("[AssistantController.send_message] Message received during work mode — "
-                        "canceling work mode")
-            self.log("User interrupted tool mode - canceling")
-            self.work_mode_timer.stop()
-            self.ai.tool_manager.in_work_mode = False
-            self.ai.tool_manager.last_work_output = None
-            # Show system message
+            log.warning("[AssistantController.send_message] Message rejected — input locked during work mode")
+            self.log("Input locked during work mode — use the Stop button to cancel.")
             if self._chat:
-                self._chat.add_system_message("⚡️ Tool mode canceled by new message")
+                self._chat.add_system_message("⏳ **Input locked** — work mode is active. Use the **Stop** button or timeout dialog to cancel.")
+            return
 
         # Prevent overlapping requests
         if self.is_processing:
@@ -1106,9 +1103,10 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
                  f"has_work_call={result.get('has_work_call', False)} | "
                  f"exited_work_mode={result.get('exited_work_mode', False)} | "
                  f"thinking={result.get('thinking', False)} ──")
-        self.ui.hide_thinking()
+        if not result.get('thinking'):
+            self.ui.hide_thinking()
         self.is_processing = False
-        log.debug("[AssistantController.handle_ai_response] is_processing=False | thinking hidden")
+        log.debug("[AssistantController.handle_ai_response] is_processing=False")
 
         # Debug mode: show COMPLETE raw AI response with detailed parsing
         if self.settings.get('debug_mode'):
@@ -1208,26 +1206,21 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
     def handle_work_mode_response(self, result):
         """Handle tool mode response from worker thread"""
         log.info(f"[AssistantController.handle_work_mode_response] ── Response received | "
-                 f"exited_work_mode={result.get('exited_work_mode', False)} | "
-                 f"has_work_call={result.get('has_work_call', False)} | "
-                 f"thinking={result.get('thinking', False)} ──")
-        self.is_processing = False
-        log.debug("[AssistantController.handle_work_mode_response] is_processing=False")
+                  f"exited_work_mode={result.get('exited_work_mode', False)} | "
+                  f"has_work_call={result.get('has_work_call', False)} | "
+                  f"thinking={result.get('thinking', False)} ──")
 
         # Debug mode: show everything that happened
         if self.settings.get('debug_mode'):
-            # Show work environment output first (if still in work mode)
             if self.ai.tool_manager.in_work_mode:
                 work_output = self.ai.tool_manager.last_work_output
                 if work_output:
                     self.ui.show_debug_message("tool", f"••• WORK ENVIRONMENT OUTPUT •••\n{work_output}")
 
-            # Show the ORIGINAL raw AI response
             raw_response = self.ai.last_raw_response
             if raw_response:
                 self.ui.show_debug_message("ai", f"••• RAW AI RESPONSE (Work Mode) •••\n{raw_response}")
 
-                # Show parsed info if available
                 if result.get('exited_work_mode'):
                     self.ui.show_debug_message("system",
                         f"••• EXITING WORK MODE •••\n"
@@ -1245,27 +1238,38 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
                       f"'{result['session_name']}'")
             self.set_session_name(result['session_name'])
 
-        # Update UI
+        # Show thinking bubble before the final summary when work mode exits
+        exited = result.get('exited_work_mode')
+        if exited:
+            self.ui.show_thinking()
+            from PyQt6.QtWidgets import QApplication
+            QApplication.processEvents()
+
         self.ui.handle_work_mode_update(result)
 
-        # Check if AI just exited tool mode — summary is already in the response
-        if result.get('exited_work_mode'):
+        # Check if AI just exited tool mode
+        if exited:
             self.log("AI exited tool mode")
             self.work_mode_timer.stop()
             self.ai.tool_manager.in_work_mode = False
-            # SESSION SAVE: Persist the completed work session
+            self.is_processing = False
+            self.ui.hide_thinking()
+            log.debug("[AssistantController.handle_work_mode_response] is_processing=False (work mode exited)")
             if not self.session_has_messages:
                 self.session_has_messages = True
             self._auto_save_session()
             return
 
         if result['thinking']:
-            # Still in tool mode - restart timer
+            # Still in tool mode — is_processing stays False to allow timer to fire
+            self.ui.set_work_state(True)
+            self.is_processing = False
             self.work_mode_timer.start()
         else:
             # Done with tool mode
             self.work_mode_timer.stop()
-            # SESSION SAVE: Persist session when work mode finishes
+            self.is_processing = False
+            log.debug("[AssistantController.handle_work_mode_response] is_processing=False (work mode done)")
             if not self.session_has_messages:
                 self.session_has_messages = True
             self._auto_save_session()

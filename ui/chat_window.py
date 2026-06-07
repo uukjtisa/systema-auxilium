@@ -4534,7 +4534,11 @@ class ChatWindow(BaseWindow):
 
         menu_btn.clicked.connect(lambda: self._show_message_menu(message_data))
 
-        self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
+        if self._thinking_bubble_widget is not None:
+            idx = self.chat_layout.indexOf(self._thinking_bubble_widget)
+            self.chat_layout.insertWidget(idx, message_widget)
+        else:
+            self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
         self._animate_message_in(message_widget,
                                  on_settled=lambda: self.scroll_to_widget(message_widget))
 
@@ -6031,7 +6035,11 @@ class ChatWindow(BaseWindow):
             # Restore focus so the user can type immediately without clicking
             self.input_field.text_input.setFocus()
         else:
-            self.input_field.setPlaceholderText("AI is working... please wait")
+            self.input_field.setPlaceholderText("Processing Request... please wait")
+
+    def set_input_placeholder(self, text):
+        """Update placeholder text on the input field."""
+        self.input_field.setPlaceholderText(text)
 
     def show_ai_message(self, message):
         if self.voice_enabled and not self.controller.ai.tool_manager.in_work_mode:
@@ -6318,8 +6326,12 @@ class ChatWindow(BaseWindow):
 
         toggle_btn.clicked.connect(_toggle)
 
-        # ── Insert at correct position (before _work_banner) ──────────────────
-        self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
+        # ── Insert before thinking bubble (or before input if no bubble) ───────
+        if self._thinking_bubble_widget is not None:
+            idx = self.chat_layout.indexOf(self._thinking_bubble_widget)
+            self.chat_layout.insertWidget(idx, message_widget)
+        else:
+            self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
         self._animate_message_in(message_widget,
                                  on_settled=lambda: self.scroll_to_widget(message_widget))
 
