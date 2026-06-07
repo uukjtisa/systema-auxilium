@@ -34,6 +34,7 @@ class ApprovalSignal(QObject):
     request_approval = pyqtSignal(str, str, object)  # code, execution_type, callback
     system_message   = pyqtSignal(str)               # text → chat window, main thread only
     close_approval_dialog = pyqtSignal(bool, str)  # approved, modified_code — closes active dialog
+    timeout_signal   = pyqtSignal(int, object, object, object)  # elapsed, done_event, result_holder, user_event — timeout prompt
 
 
 class ToolManager:
@@ -97,6 +98,7 @@ class ToolManager:
         self.approval_signal.request_approval.connect(self._show_approval_dialog_on_main_thread)
         self.approval_signal.system_message.connect(self._deliver_system_message)
         self.approval_signal.close_approval_dialog.connect(self._close_active_approval_dialog)
+        self.approval_signal.timeout_signal.connect(self._show_timeout_dialog_on_main_thread)
         self._active_approval_dialog = None
         self._get_android_bridge = None
         log.debug("[ToolManager.__init__] ApprovalSignal connected")
@@ -516,6 +518,73 @@ class ToolManager:
             traceback.print_exc()
             callback(True, code)
 
+    # ── Timeout handling ───────────────────────────────────────────────────────
+
+    def _show_timeout_dialog_on_main_thread(self, elapsed, exec_done_event, result_holder, user_event):
+        """
+        Slot — runs on main thread. Shows the timeout dialog and writes the user's
+        decision into result_holder, then sets user_event.
+        While the dialog is up, polls exec_done_event every 200ms so the dialog
+        auto-closes if execution finishes before the user responds.
+        """
+        log.info(f"[ToolManager._show_timeout_dialog_on_main_thread] elapsed={elapsed}s")
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtCore import QTimer
+        from ui.timeout_dialog import TimeoutDialog
+
+        parent = QApplication.activeWindow()
+
+        # If execution already finished while the signal was queued, bail
+        if exec_done_event.is_set():
+            log.info("[ToolManager._show_timeout_dialog_on_main_thread] Execution already done — skipping dialog")
+            result_holder.append(0)
+            user_event.set()
+            return
+
+        dialog = TimeoutDialog(elapsed, parent)
+
+        # Poll exec_done_event every 200ms to auto-close if execution finishes
+        _poll = QTimer()
+        _poll.setInterval(200)
+
+        def _check():
+            if exec_done_event.is_set():
+                _poll.stop()
+                log.info("[ToolManager._show_timeout_dialog_on_main_thread] Execution finished — closing dialog")
+                dialog.close()
+
+        _poll.timeout.connect(_check)
+        _poll.start()
+
+        try:
+            dialog.exec()
+        finally:
+            _poll.stop()
+
+        decision = dialog.result_value
+        log.info(f"[ToolManager._show_timeout_dialog_on_main_thread] User decision: {decision}")
+        result_holder.append(decision)
+        user_event.set()
+
+    def _handle_execution_timeout(self, thread_ident, done_event):
+        """
+        Called by PythonInterpreter when execution times out.
+        Blocks the worker thread until the user decides via the dialog on the main thread.
+        Returns: int — seconds to extend (0 = kill).
+        """
+        elapsed = self.settings_callback().get('tool_execution_timeout_seconds', 300) if self.settings_callback else 300
+        log.info(f"[ToolManager._handle_execution_timeout] Timeout — requesting user input | elapsed={elapsed}s")
+
+        result_holder = []       # main thread will append decision
+        user_event = threading.Event()
+
+        self.approval_signal.timeout_signal.emit(elapsed, done_event, result_holder, user_event)
+        user_event.wait()
+
+        decision = result_holder[0] if result_holder else 0
+        log.info(f"[ToolManager._handle_execution_timeout] Decision: {decision}")
+        return decision
+
     # ─────────────────────────────────────────────────────────────────────────
     # Run methods
     # ─────────────────────────────────────────────────────────────────────────
@@ -552,15 +621,28 @@ class ToolManager:
             log.info("[ToolManager.run_work_environment] Code was modified by user in approval dialog")
         code = modified_code
 
-        # Execute Python code
-        log.debug("[ToolManager.run_work_environment] → Executing via PythonInterpreter")
-        result = self.tools['python'].execute(code)
+        # Execute Python code (with optional timeout)
+        timeout = None
+        if self.settings_callback:
+            timeout = self.settings_callback().get('tool_execution_timeout_seconds', None)
+        log.debug(f"[ToolManager.run_work_environment] → Executing via PythonInterpreter | "
+                  f"timeout={timeout}s")
+        result = self.tools['python'].execute(
+            code,
+            timeout=timeout,
+            timeout_callback=self._handle_execution_timeout if timeout else None
+        )
         log.debug(f"[ToolManager.run_work_environment] Python result: success={result['success']} | "
                   f"stdout_len={len(result['stdout'])} | stderr_len={len(result['stderr'])} | "
-                  f"has_error={bool(result['error'])}")
+                  f"has_error={bool(result['error'])} | timed_out={result.get('timed_out', False)}")
 
         # Format output for AI to analyze
         output_parts = []
+
+        if result.get('timed_out'):
+            output_parts.append(
+                f"ERROR:\nCode execution was killed after exceeding the timeout of {timeout}s."
+            )
 
         if result['stdout']:
             output_parts.append(f"STDOUT:\n{result['stdout']}")
@@ -1033,6 +1115,25 @@ class ToolManager:
                 log.info(f"[ToolManager._execute_with_gui_support] ✓ GUI process launched | "
                          f"pid={process.pid} | script='{script_path}'")
                 print(f"GUI process started with PID: {process.pid}")
+
+                # ── GUI subprocess timeout warning ────────────────────────────
+                gui_timeout = None
+                if self.settings_callback:
+                    gui_timeout = self.settings_callback().get('tool_execution_timeout_seconds', None)
+                if gui_timeout:
+                    def _warn_gui_timeout(pid=process.pid, path=script_path, t=gui_timeout):
+                        log.warning(f"[ToolManager._execute_with_gui_support] GUI app (PID {pid}) "
+                                    f"still running after {t}s — script='{path}'")
+                        self.approval_signal.system_message.emit(
+                            f"⚠️ **GUI App Still Running**\n"
+                            f"The GUI application launched from `.generated/{os.path.basename(path)}` "
+                            f"(PID {pid}) is still running after {t} seconds.\n"
+                            f"Press **Stop** if you need to kill it, or leave it to run naturally."
+                        )
+                    threading.Timer(gui_timeout, _warn_gui_timeout, daemon=True).start()
+                    log.debug(f"[ToolManager._execute_with_gui_support] GUI timeout warning "
+                              f"set for {gui_timeout}s")
+                # ─────────────────────────────────────────────────────────────
 
                 return {
                     'success': True,

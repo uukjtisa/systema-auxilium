@@ -517,6 +517,15 @@ class FloatingWindow(QWidget):
         if self.android_bridge and self.android_bridge.isVisible():
             self.android_bridge.hide_thinking()
 
+    def set_work_state(self, working: bool):
+        """Switch between 'Working...' (code exec) and 'AI is thinking...' state."""
+        if self.chat_window:
+            placeholder = "Working..." if working else "AI is thinking..."
+            self.chat_window.set_input_placeholder(placeholder)
+            if working and hasattr(self.chat_window, '_work_banner'):
+                self.chat_window._work_banner.setText("⚙ Working…")
+                self.chat_window._work_banner.show()
+
     def show_ai_message(self, message):
         """Show AI message in chat window"""
         if self.chat_window:
