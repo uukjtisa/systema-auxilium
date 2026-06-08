@@ -2299,7 +2299,7 @@ class ChatWindow(BaseWindow):
         bottom_row_layout.addStretch()
 
         # ── RIGHT: voice + interrupt + send ──────────────────────────────────
-        self.voice_btn_inline = QPushButton("🎤")
+        self.voice_btn_inline = QPushButton("🎙️")
         self.voice_btn_inline.setFixedSize(30, 30)
         self.voice_btn_inline.setCheckable(True)
         self.voice_btn_inline.setToolTip("Toggle voice mode")
@@ -2341,8 +2341,9 @@ class ChatWindow(BaseWindow):
         self.voice_interrupt_btn.hide()
         bottom_row_layout.addWidget(self.voice_interrupt_btn)
 
-        self.interrupt_btn = QPushButton("⏹")
+        self.interrupt_btn = QPushButton("■")
         self.interrupt_btn.setFixedSize(30, 30)
+        self.interrupt_btn.setToolTip("Cancel AI response")
         self.interrupt_btn.setStyleSheet("""
             QPushButton {
                 background: rgba(234,67,53,0.18);
@@ -2358,20 +2359,29 @@ class ChatWindow(BaseWindow):
         self.interrupt_btn.hide()
         bottom_row_layout.addWidget(self.interrupt_btn)
 
-        self.send_btn = QPushButton("↑")
+        self.send_btn = QPushButton("➤")
         self.send_btn.setFixedSize(30, 30)
         self.send_btn.setStyleSheet("""
             QPushButton {
-                background-color: #58A6FF;
-                border: none;
+                background: rgba(255,255,255,0.08);
+                border: 1px solid rgba(255,255,255,0.15);
                 border-radius: 8px;
-                font-size: 16px;
-                color: white;
+                font-size: 14px;
+                color: #E6EDF3;
                 font-weight: bold;
             }
-            QPushButton:hover { background-color: #388BFD; }
-            QPushButton:pressed { background-color: #1F6FEB; }
-            QPushButton:disabled { background-color: #2D333B; color: #5F5F5F; }
+            QPushButton:hover {
+                background: rgba(255,255,255,0.15);
+                border-color: rgba(255,255,255,0.3);
+            }
+            QPushButton:pressed {
+                background: rgba(255,255,255,0.22);
+            }
+            QPushButton:disabled {
+                background: transparent;
+                border-color: rgba(255,255,255,0.05);
+                color: #5F5F5F;
+            }
         """)
         self.send_btn.clicked.connect(self.send_message)
         bottom_row_layout.addWidget(self.send_btn)
@@ -6564,7 +6574,66 @@ class ChatWindow(BaseWindow):
 
     def interrupt_response(self):
         """Interrupt current AI response and restore message to input"""
-        if not self.controller.is_processing and not self.controller.ai.tool_manager.in_work_mode:
+        if not self.controller.is_processing and not self.controller.ai.tool_manager.in_work_mode and not self.controller.ai.tool_manager.work_code_running:
+            return
+
+        # If in work mode, only show dialog when code is actively executing
+        if self.controller.ai.tool_manager.in_work_mode or self.controller.ai.tool_manager.work_code_running:
+            if not self.controller.ai.tool_manager.work_code_running:
+                # Button is disabled / no active code — fall through to normal cancel
+                pass
+            else:
+                from ui.timeout_dialog import WorkmodeInterruptDialog
+                from PyQt6.QtWidgets import QDialog
+                from PyQt6.QtCore import QTimer
+
+                dialog = WorkmodeInterruptDialog(self)
+
+                # Auto-dismiss if code finishes while dialog is open
+                _poll = QTimer()
+                _poll.setInterval(200)
+                def _check():
+                    if not self.controller.ai.tool_manager.work_code_running:
+                        _poll.stop()
+                        dialog.reject()
+                _poll.timeout.connect(_check)
+                _poll.start()
+
+                try:
+                    accepted = dialog.exec() == QDialog.DialogCode.Accepted
+                finally:
+                    _poll.stop()
+
+                if accepted:
+                    reason = dialog.reason_text
+
+                    error_msg = "ERROR:\nUser interrupted workmode. You must exit immediately."
+                    if reason:
+                        error_msg += f"\nReason: {reason}"
+                    else:
+                        error_msg += "\nNo specified reason. Just exit."
+
+                    self.controller.ai.tool_manager.last_work_output = error_msg
+
+                    # Terminate any running worker
+                    if (hasattr(self.controller, 'current_worker')
+                            and self.controller.current_worker
+                            and self.controller.current_worker.isRunning()):
+                        self.controller.current_worker.terminate()
+                        self.controller.current_worker.wait(1000)
+                        self.controller.is_processing = False
+
+                    self.controller.work_mode_timer.stop()
+
+                    # Show execution note for the interrupted code (like timeout does)
+                    exec_code = self.controller.ai.tool_manager.last_work_code
+                    if exec_code:
+                        self.add_code_execution_note(exec_code, error_msg)
+
+                    QTimer.singleShot(100, self.controller.auto_continue_work_mode)
+
+                    self.interrupt_btn.hide()
+                # else: dialog auto-dismissed or cancelled → workmode continues
             return
 
         success = self.controller.interrupt_request()
@@ -6606,6 +6675,14 @@ class ChatWindow(BaseWindow):
         self.set_input_enabled(False)
         self.send_btn.hide()
         self.interrupt_btn.show()
+        self.interrupt_btn.setEnabled(
+            self.controller.ai.tool_manager.work_code_running
+            if self.controller.ai.tool_manager.in_work_mode else True
+        )
+        self.interrupt_btn.setToolTip(
+            "Interrupt work" if self.controller.ai.tool_manager.in_work_mode
+            else "Cancel AI response"
+        )
         self.show_thinking_bubble()
         # Show work banner if already in work mode
         if hasattr(self, '_work_banner') and self.controller.ai.tool_manager.in_work_mode:

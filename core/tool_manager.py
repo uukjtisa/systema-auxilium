@@ -35,6 +35,7 @@ class ApprovalSignal(QObject):
     system_message   = pyqtSignal(str)               # text → chat window, main thread only
     close_approval_dialog = pyqtSignal(bool, str)  # approved, modified_code — closes active dialog
     timeout_signal   = pyqtSignal(int, object, object, object)  # elapsed, done_event, result_holder, user_event — timeout prompt
+    work_code_active = pyqtSignal(bool)                          # True when code execution starts, False when it finishes
 
 
 class ToolManager:
@@ -80,6 +81,8 @@ class ToolManager:
         self.in_work_mode = False
         self.last_work_output = None
         self.last_work_annotation = None  # set by parse_work_environment when bracket present
+        self.last_work_code = None        # set by run_work_environment before execution
+        self.work_code_running = False
         log.debug("[ToolManager.__init__] Work mode state: in_work_mode=False | last_work_output=None")
 
         # ── Violation tracking ────────────────────────────────────────────────
@@ -627,11 +630,18 @@ class ToolManager:
             timeout = self.settings_callback().get('tool_execution_timeout_seconds', None)
         log.debug(f"[ToolManager.run_work_environment] → Executing via PythonInterpreter | "
                   f"timeout={timeout}s")
-        result = self.tools['python'].execute(
-            code,
-            timeout=timeout,
-            timeout_callback=self._handle_execution_timeout if timeout else None
-        )
+        self.last_work_code = code
+        self.work_code_running = True
+        self.approval_signal.work_code_active.emit(True)
+        try:
+            result = self.tools['python'].execute(
+                code,
+                timeout=timeout,
+                timeout_callback=self._handle_execution_timeout if timeout else None
+            )
+        finally:
+            self.work_code_running = False
+            self.approval_signal.work_code_active.emit(False)
         log.debug(f"[ToolManager.run_work_environment] Python result: success={result['success']} | "
                   f"stdout_len={len(result['stdout'])} | stderr_len={len(result['stderr'])} | "
                   f"has_error={bool(result['error'])} | timed_out={result.get('timed_out', False)}")

@@ -171,6 +171,7 @@ class PythonInterpreter:
         while remaining > 0:
             done = done_event.wait(timeout=remaining)
             if done:
+                timed_out = False
                 break
             # Timeout hit — ask the callback what to do
             timed_out = True

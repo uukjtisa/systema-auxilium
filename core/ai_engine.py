@@ -807,6 +807,7 @@ class AIEngine:
             self.log(f"Work environment call detected")
 
             log.debug("[AIEngine._process_ai_response] → Calling tool_manager.run_work_environment()")
+            self.tool_manager.in_work_mode = True
             work_output = self.tool_manager.run_work_environment(code)
 
             if work_output == "EXITED_WORK_MODE":
@@ -828,7 +829,6 @@ class AIEngine:
             log.debug(f"[AIEngine._process_ai_response] Storing work output | "
                       f"length={len(work_output)} chars | in_work_mode → True")
             self.tool_manager.last_work_output = work_output
-            self.tool_manager.in_work_mode = True
 
             self.conversation_history.append({'role': 'assistant', 'content': ai_text})
             log.debug("[AIEngine._process_ai_response] Full ai_text (with JSON) appended to history")

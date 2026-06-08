@@ -119,6 +119,9 @@ class AssistantController(QObject):
         self.ai.tool_manager._get_chat = lambda: self._chat
         self.ai.tool_manager._get_android_bridge = lambda: getattr(getattr(self, 'ui', None), 'android_bridge', None)
 
+        # Track active code execution for interrupt button state
+        self.ai.tool_manager.approval_signal.work_code_active.connect(self._on_work_code_active)
+
         # ── Agent Image Attach ───────────────────────────────────────
         # Exposes attach_image() and take_screenshot() into the Python interpreter
         # namespace so the AI can call them from code execution on any thread.
@@ -1192,6 +1195,9 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
 
         if result['thinking']:
             log.debug("[AssistantController.handle_ai_response] thinking=True — starting work_mode_timer")
+            from PyQt6.QtCore import QTimer
+            if self._chat:
+                QTimer.singleShot(0, lambda: self._chat.interrupt_btn.setToolTip("Interrupt work"))
             # Show code execution widget for the FIRST work_environment call
             if result.get('has_work_call') and result.get('code'):
                 try:
@@ -1398,6 +1404,15 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             pass
 
         return interrupted
+
+    def _on_work_code_active(self, active):
+        """Slot: work code execution started or finished — update interrupt button state."""
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(0, lambda: self._update_interrupt_btn(active))
+
+    def _update_interrupt_btn(self, active):
+        if self._chat:
+            self._chat.interrupt_btn.setEnabled(active)
 
     # ═══════════════════════════════════════════════════════════
     # SESSION MANAGEMENT METHODS

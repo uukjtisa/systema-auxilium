@@ -100,35 +100,6 @@ def _load_output_raw() -> list:
         pass
     return []
 
-_OUTPUT_USAGE_FILE = _APP_ROOT / "data" / "token_usage_output.json"
-
-
-def log_output_tokens(token_count: int) -> None:
-    """Append an output token usage entry to the output log file."""
-    try:
-        _OUTPUT_USAGE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        entries = _load_output_raw()
-        entries.append({
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "n": int(token_count)
-        })
-        if len(entries) > 100_000:
-            entries = entries[-100_000:]
-        with open(_OUTPUT_USAGE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(entries, f)
-    except Exception:
-        pass
-
-
-def _load_output_raw() -> list:
-    try:
-        if _OUTPUT_USAGE_FILE.exists():
-            with open(_OUTPUT_USAGE_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-    except Exception:
-        pass
-    return []
-
 
 def get_output_usage_data(mode: str = "Daily") -> list:
     """Same bucketing as get_usage_data() but for output tokens."""
