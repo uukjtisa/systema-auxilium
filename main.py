@@ -63,9 +63,18 @@ class _Tee:
         """Called by the execution thread when done — restores normal routing."""
         self._local.capture = None
 
+    def set_bypass(self, enabled: bool = True) -> None:
+        """Ref-counted bypass flag.  While bypass_depth > 0 on this thread,
+        write() and flush() skip the capture buffer and go directly to the
+        real stream + log file — so logging infrastructure output never
+        pollutes user-code capture buffers."""
+        depth = getattr(self._local, '_bypass_depth', 0)
+        self._local._bypass_depth = max(0, depth + (1 if enabled else -1))
+
     def write(self, data):
+        bypass = getattr(self._local, '_bypass_depth', 0) > 0
         buf = getattr(self._local, 'capture', None)
-        if buf is not None:
+        if buf is not None and not bypass:
             buf.write(data)   # this thread is capturing — don't touch the log
             return
         # Normal path — mirror to real stream + log file
@@ -79,8 +88,9 @@ class _Tee:
             pass
 
     def flush(self):
+        bypass = getattr(self._local, '_bypass_depth', 0) > 0
         buf = getattr(self._local, 'capture', None)
-        if buf is not None:
+        if buf is not None and not bypass:
             try: buf.flush()
             except Exception: pass
             return

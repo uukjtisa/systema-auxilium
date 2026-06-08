@@ -4,6 +4,27 @@ core/logger.py
 
 import logging as _logging
 
+
+class _TeeBypassHandler(_logging.StreamHandler):
+    """StreamHandler that tells _Tee "this write is logging infrastructure,
+    not user code — never route it into the capture buffer."
+
+    Increments the per-thread bypass depth before emit() and decrements
+    it in finally, so the protection holds even if the formatter or
+    the write itself raises.  Falls back to plain StreamHandler behaviour
+    when the stream is not a _Tee (unit tests, no _setup_session_logger)."""
+    def emit(self, record: _logging.LogRecord) -> None:
+        stream = self.stream
+        tee = stream if hasattr(stream, 'set_bypass') else None
+        if tee is not None:
+            tee.set_bypass(True)
+        try:
+            super().emit(record)
+        finally:
+            if tee is not None:
+                tee.set_bypass(False)
+
+
 def _make_logger(name: str) -> _logging.Logger:
     """Create a vivid, colored terminal logger."""
     logger = _logging.getLogger(name)
@@ -33,7 +54,7 @@ def _make_logger(name: str) -> _logging.Logger:
             msg  = f"{lvl_color}{record.getMessage()}{_RESET}"
             return f"{ts} {sep} {lvl} {sep} {mod} {sep} {msg}"
 
-    h = _logging.StreamHandler()
+    h = _TeeBypassHandler()
     h.setFormatter(_ColorFmt())
     logger.addHandler(h)
     logger.setLevel(_logging.DEBUG)
