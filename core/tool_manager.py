@@ -88,6 +88,7 @@ class ToolManager:
         # ── Violation tracking ────────────────────────────────────────────────
         # Incremented each time the AI emits more than one code-execution tool
         # call in a single response (set_session_name is exempt).
+        self._exec_violations_lock = threading.Lock()
         self.exec_violations = 0
         log.debug("[ToolManager.__init__] exec_violations counter initialised to 0")
 
@@ -199,13 +200,11 @@ class ToolManager:
                 os.makedirs(self.generated_dir)
                 log.info(f"[ToolManager._ensure_generated_dir] ✓ Created .generated directory: "
                          f"'{self.generated_dir}'")
-                print(f"Created .generated directory at: {self.generated_dir}")
             else:
                 log.debug(f"[ToolManager._ensure_generated_dir] Directory already exists — no action")
         except Exception as e:
             log.error(f"[ToolManager._ensure_generated_dir] ✗ Could not create directory: "
                       f"{type(e).__name__}: {e}")
-            print(f"Warning: Could not create .generated directory: {e}")
 
     # ─────────────────────────────────────────────────────────────────────────
     # Public parse methods - Fence-based parsing (new format)
@@ -348,14 +347,16 @@ class ToolManager:
             return text, False, ""
 
         extras = matches[1:]
-        self.exec_violations += 1
+        with self._exec_violations_lock:
+            self.exec_violations += 1
+            _v = self.exec_violations
         dropped_names = [name for _, name in extras]
         violation_msg = (
             f"[POLICY] {len(extras)} extra code-execution tool call(s) were dropped "
             f"({', '.join(dropped_names)}). Only the first call was kept. "
-            f"Total violations this session: {self.exec_violations}."
+            f"Total violations this session: {_v}."
         )
-        log.warning(f"[ToolManager.enforce_single_exec_policy] ✗ POLICY VIOLATION #{self.exec_violations} — "
+        log.warning(f"[ToolManager.enforce_single_exec_policy] ✗ POLICY VIOLATION #{_v} — "
                     f"dropping {dropped_names}")
 
         # Notify the user via chat window (signal is thread-safe)
@@ -365,7 +366,7 @@ class ToolManager:
             f"first call was kept and executed. "
             "To reduce how often this happens, consider using a "
             "more capable model."
-            f"\nTotal violations this session: {self.exec_violations}"
+            f"\nTotal violations this session: {_v}"
         )
 
         for match, _ in reversed(extras):
@@ -438,9 +439,6 @@ class ToolManager:
         except Exception as e:
             log.error(f"[ToolManager._check_supervised_execution] ✗ Error showing approval dialog: "
                       f"{type(e).__name__}: {e}")
-            print(f"Error showing approval dialog: {e}")
-            import traceback
-            traceback.print_exc()
             # If dialog fails, approve by default (but log error)
             return True, code
 
@@ -473,7 +471,6 @@ class ToolManager:
             if not self.ai_engine:
                 log.warning("[ToolManager._show_approval_dialog_on_main_thread] No AI engine — "
                             "auto-approving (no explanation available)")
-                print("Warning: No AI engine available for code explanation")
                 callback(True, code)
                 return
 
@@ -516,9 +513,6 @@ class ToolManager:
         except Exception as e:
             log.error(f"[ToolManager._show_approval_dialog_on_main_thread] ✗ Exception: "
                       f"{type(e).__name__}: {e}")
-            print(f"Error in approval dialog: {e}")
-            import traceback
-            traceback.print_exc()
             callback(True, code)
 
     # ── Timeout handling ───────────────────────────────────────────────────────
@@ -597,6 +591,9 @@ class ToolManager:
         Execute code in work environment mode.
         AI will see the output and can chain more executions.
 
+        Wraps PythonInterpreter.execute() with work_code_running flag and
+        last_work_code tracking for interrupt/UI state propagation.
+
         Returns:
             str: Formatted output for AI
         """
@@ -607,7 +604,7 @@ class ToolManager:
         # Check for exit command
         if code.lower() == 'exit':
             log.info("[ToolManager.run_work_environment] Exit command detected — returning EXITED_WORK_MODE")
-            QTimer.singleShot(0, lambda: self._chat.set_session_list_locked(False)) # Extra call to make sure it unlocks the session list.
+            QTimer.singleShot(0, lambda: self._chat.set_session_list_locked(False)) # TODO: remove QTimer.singleShot workaround once session_list locking is on main thread
             self.in_work_mode = False
             return "EXITED_WORK_MODE"
 
@@ -1108,7 +1105,6 @@ class ToolManager:
                 # Save code to file
                 script_path = self._save_code_to_file(code)
                 log.debug(f"[ToolManager._execute_with_gui_support] GUI script saved: '{script_path}'")
-                print(f"Saved GUI script to: {script_path}")
 
                 # Launch in subprocess (non-blocking)
                 import sys
@@ -1124,7 +1120,6 @@ class ToolManager:
                 # Don't wait - let it run in background
                 log.info(f"[ToolManager._execute_with_gui_support] ✓ GUI process launched | "
                          f"pid={process.pid} | script='{script_path}'")
-                print(f"GUI process started with PID: {process.pid}")
 
                 # ── GUI subprocess timeout warning ────────────────────────────
                 gui_timeout = None

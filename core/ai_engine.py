@@ -807,6 +807,7 @@ class AIEngine:
             self.log(f"Work environment call detected")
 
             log.debug("[AIEngine._process_ai_response] → Calling tool_manager.run_work_environment()")
+            # Set BEFORE run_work_environment so interrupt_response() can detect active work
             self.tool_manager.in_work_mode = True
             work_output = self.tool_manager.run_work_environment(code)
 

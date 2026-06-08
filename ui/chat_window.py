@@ -18,6 +18,13 @@ from PyQt6.QtGui import QAction, QCursor, QRegion, QPixmap
 from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QFont
 from core.skill_manager import SkillManager as _SkillManagerType
 from ui.base_window import BaseWindow
+from core.logger import _make_logger, _NoOpLogger
+
+
+# ─────────────────────────── Colored Logger Setup ────────────────────────────
+_verbose = True
+log = _make_logger("ChatWindow") if _verbose else _NoOpLogger()
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 _SK_SURFACE  = "#161B22"
@@ -1397,7 +1404,7 @@ class ChatWindow(BaseWindow):
                 self._bot_avatar_size  = 32
                 self._user_avatar_size = 32
                 self._avatar_size_uniform = False
-        except:
+        except Exception:
             self.bot_avatar = '🤖'
             self.user_avatar = '👤'
             self.chat_zoom = 1.0
@@ -1481,7 +1488,7 @@ class ChatWindow(BaseWindow):
             with open(self.config_file, 'w') as f:
                 json.dump(config, f, indent=2)
         except Exception as e:
-            print(f"Error saving config: {e}")
+            log.error(f"[ChatWindow.save_config] Error saving config: {e}")
 
     def init_ui(self):
         """Initialize modern UI"""
@@ -2878,7 +2885,7 @@ class ChatWindow(BaseWindow):
                 PRESETS_FILE.write_text(_json.dumps(presets, indent=2, ensure_ascii=False), encoding='utf-8')
                 _load_saved_presets()
             except Exception as e:
-                print(f"[instructions] delete preset error: {e}")
+                log.error(f"[instructions] delete preset error: {e}")
 
         def _save_preset():
             text = text_edit.toPlainText().strip()
@@ -2892,7 +2899,7 @@ class ChatWindow(BaseWindow):
                     PRESETS_FILE.write_text(_json.dumps(presets, indent=2, ensure_ascii=False), encoding='utf-8')
                     _load_saved_presets()
                 except Exception as e:
-                    print(f"[instructions] save preset error: {e}")
+                    log.error(f"[instructions] save preset error: {e}")
 
         left_lay.addWidget(saved_presets_container)
         save_preset_btn = _chip("💾 Save current as preset", accent=True)
@@ -3457,7 +3464,7 @@ class ChatWindow(BaseWindow):
         try:
             html = markdown2.markdown(text, extras=["fenced-code-blocks", "tables", "break-on-newline"])
             return html
-        except:
+        except Exception:
             return text.replace('\n', '<br>')
 
     def render_markdown_with_code_blocks(self, text):
@@ -3535,7 +3542,7 @@ class ChatWindow(BaseWindow):
                     if msg.get("_type") == "memory_context":
                         _ctx_id = msg.get("_memory_context_id", "")
                         if not _ctx_id or not isinstance(_ctx_id, str):
-                            print(
+                            log.warning(
                                 f"[ChatWindow.render_loaded_messages] Skipping memory_context with invalid id: {_ctx_id!r}")
                         else:
                             self.add_memory_context_widget(
@@ -3558,7 +3565,7 @@ class ChatWindow(BaseWindow):
                     elif role == "assistant":
                         self.add_ai_message(content)
         except Exception as e:
-            print(f"[ChatWindow.render_loaded_messages] render_loaded_messages error: {e}")
+            log.error(f"[ChatWindow.render_loaded_messages] render_loaded_messages error: {e}")
 
     def _remove_tool_usage_format(self, content):
         """Remove tool usage JSON blocks from AI message"""
@@ -6066,7 +6073,7 @@ class ChatWindow(BaseWindow):
 
     def log(self, msg):
         """Helper for logging"""
-        print(f"[ChatWindow] {msg}")
+        log.info(f"[ChatWindow] {msg}")
 
     def on_voice_playback_started(self):
         """Called when TTS playback actually starts (from background thread)"""
@@ -6512,7 +6519,7 @@ class ChatWindow(BaseWindow):
             try:
                 self.controller.detach_memory_context(_cid)
             except Exception as e:
-                print(f"[ChatWindow._detach] Error calling detach_memory_context: {e}")
+                log.error(f"[ChatWindow._detach] Error calling detach_memory_context: {e}")
             # Remove widget from message_widgets tracking list
             self.message_widgets[:] = [
                 mw for mw in self.message_widgets if mw.get('widget') is not _w
@@ -6573,7 +6580,9 @@ class ChatWindow(BaseWindow):
         self.status_label.setText(f"{dots}")
 
     def interrupt_response(self):
-        """Interrupt current AI response and restore message to input"""
+        """Interrupt current AI response and restore message to input.
+        Workmode branch: shows WorkmodeInterruptDialog with auto-dismiss polling;
+        normal branch: delegates to controller.interrupt_request()."""
         if not self.controller.is_processing and not self.controller.ai.tool_manager.in_work_mode and not self.controller.ai.tool_manager.work_code_running:
             return
 
@@ -6669,7 +6678,9 @@ class ChatWindow(BaseWindow):
         self.voice_interrupt_btn.hide()
 
     def show_thinking(self):
-        """Show thinking animation"""
+        """Show thinking animation.
+        Interrupt btn enabled only when work_code_running is True during work mode;
+        tooltip toggles between 'Interrupt work' and 'Cancel AI response'."""
         self.start_thinking_animation()
         self.thinking_label_shown = True
         self.set_input_enabled(False)
@@ -6822,7 +6833,7 @@ class ChatWindow(BaseWindow):
             with open(self.config_file, 'w') as f:
                 json.dump(config, f, indent=2)
         except Exception as e:
-            print(f"Error saving window geometry: {e}")
+            log.error(f"[ChatWindow.save_window_geometry] Error saving window geometry: {e}")
 
     def load_window_geometry(self):
         """Load window size and position from config"""
@@ -6839,7 +6850,7 @@ class ChatWindow(BaseWindow):
                             geometry['height']
                         )
         except Exception as e:
-            print(f"Error loading window geometry: {e}")
+            log.error(f"[ChatWindow.load_window_geometry] Error loading window geometry: {e}")
 
     def eventFilter(self, obj, event):
         """Handle resize handle events and smooth scroll viewport events."""
@@ -7367,7 +7378,7 @@ class ChatWindow(BaseWindow):
                     except RuntimeError:
                         pass
         except Exception as e:
-            print(f"[ChatWindow.apply_theme] Error: {e}")
+            log.error(f"[ChatWindow.apply_theme] Error: {e}")
 
     def apply_glass_background(self, enabled: bool, opacity: float = 0.75):
         """Apply or remove the glass (frosted-translucent) theme.
@@ -7494,7 +7505,7 @@ class ChatWindow(BaseWindow):
                 self.apply_theme(theme_key)
 
         except Exception as e:
-            print(f"[ChatWindow.apply_glass_background] Error: {e}")
+            log.error(f"[ChatWindow.apply_glass_background] Error: {e}")
 
     def _apply_glass_from_settings(self):
         """Read glass and theme settings from controller and apply on startup."""
@@ -7509,7 +7520,7 @@ class ChatWindow(BaseWindow):
             if enabled:
                 self.apply_glass_background(enabled, opacity)
         except Exception as e:
-            print(f"[ChatWindow._apply_glass_from_settings] Error: {e}")
+            log.error(f"[ChatWindow._apply_glass_from_settings] Error: {e}")
 
     def _open_manage_tasks_window(self):
         """Open the task management window."""
@@ -7546,5 +7557,5 @@ class ChatWindow(BaseWindow):
                     "This Agent is now running with elevated system privileges and can perform high-level system "
                     "changes and tasks."
                 )
-        except:
-            pass
+        except Exception:
+            log.warning("[ChatWindow.check_admin_mode] Admin check failed", exc_info=True)

@@ -11,6 +11,11 @@ import threading
 
 DEFAULT_PORT = 1111
 
+from core.logger import _make_logger, _NoOpLogger
+
+_verbose = True
+log = _make_logger("AndroidBridge") if _verbose else _NoOpLogger()
+
 
 class AndroidBridge:
     """
@@ -74,20 +79,20 @@ class AndroidBridge:
             self._local_ip = "unknown"
         self._server.listen(1)
         threading.Thread(target=self._accept_loop, daemon=True).start()
-        print(f"[AndroidBridge] Listening on {self._local_ip}:{self._port}")
+        log.info(f"[AndroidBridge] Listening on {self._local_ip}:{self._port}")
 
     def _accept_loop(self):
         try:
             self._server.settimeout(None)  # block until phone connects
             conn, addr = self._server.accept()
-            print(f"[AndroidBridge] Phone connected from {addr}")
+            log.info(f"[AndroidBridge] Phone connected from {addr}")
             self._conn = conn
             self._conn.settimeout(None)
             threading.Thread(target=self._recv_loop, daemon=True).start()
             self.render_loaded_messages()   # replay current session into phone
         except Exception as exc:
             if not self._stop_event.is_set():
-                print(f"[AndroidBridge] accept failed: {exc}")
+                log.error(f"[AndroidBridge] accept failed: {exc}")
 
     def _recv_loop(self):
         buf = ""
@@ -109,7 +114,7 @@ class AndroidBridge:
             pass
         finally:
             self._conn = None
-            print("[AndroidBridge] Phone disconnected")
+            log.info("[AndroidBridge] Phone disconnected")
             if not self._stop_event.is_set():
                 threading.Thread(target=self._accept_loop, daemon=True).start()
 
@@ -145,7 +150,7 @@ class AndroidBridge:
                     bool(approved), msg.get("modified_code", "")
                 )
             except Exception as e:
-                print(f"[AndroidBridge] code_approval_result error: {e}")
+                log.error(f"[AndroidBridge] code_approval_result error: {e}")
         elif cmd == "manual_response_result":
             text = msg.get("text", "").strip()
             cb = self._pending_manual_response_cb
@@ -173,7 +178,7 @@ class AndroidBridge:
                     else:
                         sm.unload_skill(skill_name)
                 except Exception as e:
-                    print(f"[AndroidBridge] toggle_skill error: {e}")
+                    log.error(f"[AndroidBridge] toggle_skill error: {e}")
         elif cmd == "open_memory":
                     self._send_memories()
         elif cmd == "open_instructions":
@@ -182,7 +187,7 @@ class AndroidBridge:
             try:
                 self.controller.set_custom_instructions(msg.get("text", ""))
             except Exception as e:
-                print(f"[AndroidBridge] set_instructions error: {e}")
+                log.error(f"[AndroidBridge] set_instructions error: {e}")
         elif cmd == "open_names":
             self._send_names()
         elif cmd == "set_names":
@@ -191,7 +196,7 @@ class AndroidBridge:
                 self.controller.set_assistant_name(msg.get("asst_name", ""))
                 self.render_loaded_messages()
             except Exception as e:
-                print(f"[AndroidBridge] set_names error: {e}")
+                log.error(f"[AndroidBridge] set_names error: {e}")
         elif cmd == "upload_file":
             self._handle_file_upload(msg)
         elif cmd == "browse_files":
@@ -202,7 +207,7 @@ class AndroidBridge:
                 try:
                     self.controller.detach_memory_context(context_id)
                 except Exception as e:
-                    print(f"[AndroidBridge] detach_memory_context error: {e}")
+                    log.error(f"[AndroidBridge] detach_memory_context error: {e}")
 
     def _dispatch(self, cmd: dict):
         """Send a JSON command to Android (thread-safe). Identical to ChatWindowTUI._dispatch."""
@@ -236,7 +241,7 @@ class AndroidBridge:
                 "current_session_id": self.controller.current_session_id,
             })
         except Exception as e:
-            print(f"[AndroidBridge] _send_sessions_page error: {e}")
+            log.error(f"[AndroidBridge] _send_sessions_page error: {e}")
 
     def _remove_pinned_by_path(self, chat, path: str):
         """Remove a pinned image card from the PC chat window by path.
@@ -249,7 +254,7 @@ class AndroidBridge:
                     chat._remove_pinned_image(pi, notify=False)
                     return
         except Exception as e:
-            print(f"[AndroidBridge] _remove_pinned_by_path error: {e}")
+            log.error(f"[AndroidBridge] _remove_pinned_by_path error: {e}")
 
     def _send_skills(self):
         try:
@@ -290,14 +295,14 @@ class AndroidBridge:
             dest = self._received_dir / safe_name
             dest.write_bytes(raw)
             abs_path = str(dest.resolve())
-            print(f"[AndroidBridge] File received → {abs_path}")
+            log.info(f"[AndroidBridge] File received → {abs_path}")
             self._dispatch({
                 "cmd": "file_received",
                 "filename": safe_name,
                 "path": abs_path,
             })
         except Exception as e:
-            print(f"[AndroidBridge] _handle_file_upload error: {e}")
+            log.error(f"[AndroidBridge] _handle_file_upload error: {e}")
             self._dispatch({"cmd": "file_upload_error", "error": str(e)})
 
     def _send_file_list(self, path_str: str):
@@ -331,7 +336,7 @@ class AndroidBridge:
                 "entries": entries,
             })
         except Exception as e:
-            print(f"[AndroidBridge] _send_file_list error: {e}")
+            log.error(f"[AndroidBridge] _send_file_list error: {e}")
             self._dispatch({"cmd": "file_list_error", "error": str(e)})
 
     def _handle_file_upload(self, msg: dict):
@@ -347,7 +352,7 @@ class AndroidBridge:
             dest = self._received_dir / safe_name
             dest.write_bytes(raw)
             abs_path = str(dest.resolve())
-            print(f"[AndroidBridge] File received → {abs_path}")
+            log.info(f"[AndroidBridge] File received → {abs_path}")
             _img_exts = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif')
             if any(safe_name.lower().endswith(ext) for ext in _img_exts):
                 try:
@@ -356,13 +361,13 @@ class AndroidBridge:
                     if chat:
                         QTimer.singleShot(0, lambda p=abs_path: chat._handle_image_file_drop(p))
                 except Exception as e:
-                    print(f"[AndroidBridge] image routing error: {e}")
+                    log.error(f"[AndroidBridge] image routing error: {e}")
                 # Also notify Android so the attach dialog appears on phone too
                 self._dispatch({"cmd": "file_received", "filename": safe_name, "path": abs_path})
                 return
             self._dispatch({"cmd": "file_received", "filename": safe_name, "path": abs_path})
         except Exception as e:
-            print(f"[AndroidBridge] _handle_file_upload error: {e}")
+            log.error(f"[AndroidBridge] _handle_file_upload error: {e}")
             self._dispatch({"cmd": "file_upload_error", "error": str(e)})
 
     def _send_file_list(self, path_str: str):
@@ -420,7 +425,7 @@ class AndroidBridge:
                 "entries": entries,
             })
         except Exception as e:
-            print(f"[AndroidBridge] _send_file_list error: {e}")
+            log.error(f"[AndroidBridge] _send_file_list error: {e}")
             self._dispatch({"cmd": "file_list_error", "error": str(e)})
 
     def _send_memories(self):
@@ -550,7 +555,7 @@ class AndroidBridge:
                     elif role == "assistant":
                         self._dispatch({"cmd": "add_ai", "text": content})
         except Exception as e:
-            print(f"[AndroidBridge] render_loaded_messages error: {e}")
+            log.error(f"[AndroidBridge] render_loaded_messages error: {e}")
 
     def refresh_session_list(self):
         self._send_sessions_page(0, "")

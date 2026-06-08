@@ -337,7 +337,6 @@ class AssistantController(QObject):
         except Exception as e:
             log.error(f"[AssistantController.load_settings] ✗ Error loading settings: "
                       f"{type(e).__name__}: {e}")
-            print(f"Error loading settings: {e}")
 
         # FIRST-TIME LAUNCH DEFAULTS
         log.info("[AssistantController.load_settings] No settings file found — using first-time defaults")
@@ -1025,19 +1024,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
                           f"upgrading to generate_with_image")
 
         # Create worker thread
-        if image_paths:
-            log.debug("[AssistantController.send_message] Creating AIWorker for 'generate_with_image'...")
-            self.current_worker = AIWorker(self.ai, 'generate_with_image', user_message, image_paths)
-        else:
-            log.debug("[AssistantController.send_message] Creating AIWorker for 'generate'...")
-            self.current_worker = AIWorker(self.ai, 'generate', user_message)
-        self._request_generation += 1
-        _gen = self._request_generation
-        self.current_worker.response_ready.connect(
-            lambda result, g=_gen: self._dispatch_ai_response(result, g))
-        self.current_worker.error_occurred.connect(self.handle_ai_error)
-        self.current_worker.start()
-        log.debug("[AssistantController.send_message] AIWorker started")
+        self._create_and_start_worker('generate', user_message, image_paths)
 
     def send_message_with_image(self, user_message, image_paths):
         """Send user message with one or more image attachments."""
@@ -1073,15 +1060,20 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         self.ui.show_thinking()
 
         # Create worker thread with image list
-        log.debug("[AssistantController.send_message_with_image] Creating AIWorker for 'generate_with_image'...")
-        self.current_worker = AIWorker(self.ai, 'generate_with_image', user_message, image_paths)
+        self._create_and_start_worker('generate_with_image', user_message, image_paths)
+
+    def _create_and_start_worker(self, method, user_message, image_paths=None):
+        """Create an AIWorker, connect signals, and start it."""
+        if image_paths:
+            self.current_worker = AIWorker(self.ai, method, user_message, image_paths)
+        else:
+            self.current_worker = AIWorker(self.ai, method, user_message)
         self._request_generation += 1
         _gen = self._request_generation
         self.current_worker.response_ready.connect(
             lambda result, g=_gen: self._dispatch_ai_response(result, g))
         self.current_worker.error_occurred.connect(self.handle_ai_error)
         self.current_worker.start()
-        log.debug("[AssistantController.send_message_with_image] AIWorker started")
 
     def _dispatch_ai_response(self, result, generation):
         """Route a worker response to handle_ai_response only if it's still current."""
@@ -1193,6 +1185,8 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             self.work_mode_timer.stop()
             return
 
+        # ── First work call branch ───────────────────────────────────────────────
+        # Stores last_work_output, shows code execution note, starts work_mode_timer
         if result['thinking']:
             log.debug("[AssistantController.handle_ai_response] thinking=True — starting work_mode_timer")
             from PyQt6.QtCore import QTimer
@@ -1253,7 +1247,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
 
         self.ui.handle_work_mode_update(result)
 
-        # Check if AI just exited tool mode
+        # ── Exited work mode ─────────────────────────────────────────────────────
         if exited:
             self.log("AI exited tool mode")
             self.work_mode_timer.stop()
@@ -1266,13 +1260,14 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             self._auto_save_session()
             return
 
+        # ── Still in work mode ────────────────────────────────────────────────────
         if result['thinking']:
-            # Still in tool mode — is_processing stays False to allow timer to fire
+            # Still thinking — is_processing stays False to allow timer to fire
             self.ui.set_work_state(True)
             self.is_processing = False
             self.work_mode_timer.start()
         else:
-            # Done with tool mode
+            # Done with work mode (final result received)
             self.work_mode_timer.stop()
             self.is_processing = False
             log.debug("[AssistantController.handle_work_mode_response] is_processing=False (work mode done)")
@@ -1406,11 +1401,12 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         return interrupted
 
     def _on_work_code_active(self, active):
-        """Slot: work code execution started or finished — update interrupt button state."""
+        """Slot connected to ApprovalSignal.work_code_active — thread-safe delegation via QTimer.singleShot."""
         from PyQt6.QtCore import QTimer
         QTimer.singleShot(0, lambda: self._update_interrupt_btn(active))
 
     def _update_interrupt_btn(self, active):
+        """Enable/disable the interrupt button based on work code execution state."""
         if self._chat:
             self._chat.interrupt_btn.setEnabled(active)
 

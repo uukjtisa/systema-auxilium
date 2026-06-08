@@ -13,6 +13,11 @@ from ui.debug_window import DebugWindow
 import json
 import os
 import math
+from core.logger import _make_logger, _NoOpLogger
+
+
+_verbose = True
+log = _make_logger("FloatingWindow") if _verbose else _NoOpLogger()
 from pathlib import Path
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -192,7 +197,7 @@ class FloatingWindow(QWidget):
                     settings.update(loaded)
                     return settings
         except Exception as e:
-            print(f"Error loading settings: {e}")
+            log.error(f"[FloatingWindow.load_settings] Error loading settings: {e}")
         return self.DEFAULT_SETTINGS.copy()
 
     def save_settings(self):
@@ -205,7 +210,7 @@ class FloatingWindow(QWidget):
             with open(settings_file, 'w') as f:
                 json.dump(self.settings, f, indent=2)
         except Exception as e:
-            print(f"Error saving settings: {e}")
+            log.error(f"[FloatingWindow.save_settings] Error saving settings: {e}")
 
     # ── appearance ───────────────────────────────────────────────────────
 
@@ -551,7 +556,7 @@ class FloatingWindow(QWidget):
             if self.android_bridge is None:
                 self.android_bridge = AndroidBridge(self.controller)
             self.android_bridge.show()
-            print("[FloatingWindow] Android Bridge auto-started on startup")
+            log.info("[FloatingWindow] Android Bridge auto-started on startup")
 
     def open_chat(self):
         """Open chat window"""

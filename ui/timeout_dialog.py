@@ -186,7 +186,9 @@ class TimeoutDialog(QDialog):
 
 
 class WorkmodeInterruptDialog(QDialog):
-    """Dialog shown when user interrupts workmode."""
+    """Frameless dialog with reason input for workmode interrupt.
+    Auto-dismisses via 200ms poll when work_code_running goes False.
+    Returns reason_text on accept."""
 
     def __init__(self, parent=None):
         super().__init__(parent)

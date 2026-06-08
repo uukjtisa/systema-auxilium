@@ -60,7 +60,7 @@ class CustomInterpreter(code.InteractiveInterpreter):
         except SystemExit:
             log.warning("[CustomInterpreter.runcode] SystemExit raised during exec — re-raising")
             raise
-        except:
+        except Exception:
             log.error("[CustomInterpreter.runcode] Exception during exec — delegating to showtraceback()")
             self.showtraceback()
         finally:
