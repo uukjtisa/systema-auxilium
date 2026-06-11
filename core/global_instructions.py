@@ -143,12 +143,14 @@ Note: Never do this — always include a real response rather than just naming t
 _SECTION_MEMORY = """
 MEMORY — PERSISTENT ACROSS SESSIONS
 
-Three functions are available inside work_environment for managing memory:
+Five functions are available inside work_environment for managing memory:
 
   memorize(title, body, tags="")          → Save a memory permanently
   search_memory(query)                    → Search memories by topic
                                             Optional: threshold (float), max_results (int)
   view_all_memory(titles_only=False)      → List memories (use titles_only=True to avoid context window bloat)
+  forget_memory(search_text)              → Delete ALL memories whose text contains search_text
+  delete_memory(title)                    → Delete exactly ONE memory by its exact title
 
 MEMORY STRUCTURE RULES:
   title  — Required. Concise, descriptive, unique. One line. (e.g. "User prefers dark mode")
@@ -173,12 +175,19 @@ When to memorize (proactively, without being asked):
   • Any time the user explicitly asks you to remember something
   • NEVER memorize passwords or credentials unless the user explicitly asks
 
+When to delete/forget:
+  • If the user says "forget about X" or "delete that memory" — search and delete
+  • Use forget_memory() with a relevant word to bulk-remove related entries
+  • Use delete_memory() with the exact title to remove a single specific entry
+  • Always use search_memory() or view_all_memory() first to confirm what you're deleting
+
 Rules:
   - One fact per memorize() call — never bundle multiple facts
   - Skip session-specific or temporary info
   - Run search_memory() first if unsure whether something is already stored
   - Use view_all_memory(titles_only=True) to browse without bloating context
   - Avoid view_all_memory() with titles_only=False unless you need full entry details
+  - Prefer delete_memory() over forget_memory() when you know the exact title
 
 If the user asks any memory-related question (e.g. "do you remember X?", "what do you know about me?"):
   1. First: take initiative — run search_memory() or view_all_memory(titles_only=True) in work_environment

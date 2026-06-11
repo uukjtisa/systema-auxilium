@@ -2290,7 +2290,7 @@ class ChatWindow(BaseWindow):
         bottom_row_layout.addWidget(self.mode_dropdown)
 
         # ── Token estimate label ──────────────────────────────────────────────
-        self._token_count_lbl = QLabel("~0 token per message")
+        self._token_count_lbl = QLabel("~0 token per request")
         self._token_count_lbl.setStyleSheet(
             "QLabel { color: #3D4450; font-size: 9px; background: transparent; padding: 0 4px; }")
         self._token_count_lbl.setToolTip(
@@ -5678,7 +5678,7 @@ class ChatWindow(BaseWindow):
                 hist = getattr(ai, 'chat_history', []) or getattr(ai, 'conversation_history', [])
                 sys_tokens = estimate_tokens(getattr(ai, 'system_prompt', '') or '')
             total = estimate_next_message_tokens(text, hist) + sys_tokens
-            lbl = f"~{total/1000:.1f}k token per message" if total >= 1000 else f"~{total} token per message"
+            lbl = f"~{total/1000:.1f}k token per request" if total >= 1000 else f"~{total} token per request"
             if total > 50000:
                 color = "#FF6B6B"
             elif total > 20000:
