@@ -115,6 +115,10 @@ class AssistantController(QObject):
         )
         log.info("[AssistantController.__init__] AIEngine created")
 
+        # Wire skills changes to refresh memory block in system prompt
+        self.skill_manager.skills_changed.connect(self.refresh_memory_block)
+        self.skill_manager.loaded_skills_changed.connect(self.refresh_memory_block)
+
         # Wire chat window bridge into tool_manager so it can call add_system_message etc.
         self.ai.tool_manager._get_chat = lambda: self._chat
         self.ai.tool_manager._get_android_bridge = lambda: getattr(getattr(self, 'ui', None), 'android_bridge', None)
@@ -184,17 +188,9 @@ class AssistantController(QObject):
             except Exception as e:
                 return f"[take_screenshot] ERROR: {e}"
 
-        # Inject references into Python interpreter namespace
-        self.ai.tool_manager.tools['python'].namespace['controller'] = self
-        self.ai.tool_manager.tools['python'].namespace['attach_image_to_chat'] = _agent_attach_image
-        self.ai.tool_manager.tools['python'].namespace['take_screenshot'] = _agent_take_screenshot
-        self.ai.tool_manager.tools['python'].namespace['notify'] = self.notify
-        self.ai.tool_manager.tools['python'].namespace['memorize'] = self.memorize
-        self.ai.tool_manager.tools['python'].namespace['search_memory'] = self.search_memory
-        self.ai.tool_manager.tools['python'].namespace['view_all_memory'] = self.view_all_memory
-        self.ai.tool_manager.tools['python'].namespace['app_root'] = str(Path(__file__).resolve().parent.parent)
-        self.ai.tool_manager.tools['python'].namespace['skills_path'] = str(Path(__file__).resolve().parent.parent / "skills")
-        # ─────────────────────────────────────────────────────────────────────
+        self._agent_attach_image = _agent_attach_image
+        self._agent_take_screenshot = _agent_take_screenshot
+        self._inject_interpreter_namespaces()
 
         # Apply settings
         log.debug("[AssistantController.__init__] Applying AI provider settings...")
@@ -225,6 +221,12 @@ class AssistantController(QObject):
         self.work_mode_timer.timeout.connect(self.auto_continue_work_mode)
         self.work_mode_timer.setInterval(1000)
         log.debug("[AssistantController.__init__] work_mode_timer created | interval=1000ms")
+
+        # Live work-mode output streaming — polls the interpreter buffer while code runs
+        self._live_output_timer = QTimer()
+        self._live_output_timer.timeout.connect(self._poll_live_output)
+        self._live_output_timer.setInterval(120)
+        log.debug("[AssistantController.__init__] live_output_timer created | interval=120ms")
 
         # Track processing
         self.is_processing = False
@@ -360,6 +362,7 @@ class AssistantController(QObject):
             'vad_silero_threshold': 0.5,
             'supervised_execution': True,  # Default ON for safety
             'memory_enabled': True,
+            'memory_recall_mode': 'inject_all',  # 'inject_all' or 'rag'
             'memory_threshold': 0.4,  # float 0.0–1.0
             'memory_max_results': 5,
             'glass_background_enabled': False,
@@ -379,6 +382,7 @@ class AssistantController(QObject):
                 json.dump(self.settings, f, indent=2)
             self.log("Settings saved", "SUCCESS")
             log.info(f"[AssistantController.save_settings] ✓ Settings saved to '{self.settings_file}'")
+            self.refresh_memory_block()
         except Exception as e:
             log.error(f"[AssistantController.save_settings] ✗ Failed: {type(e).__name__}: {e}")
             self.log(f"Error saving settings: {e}", "ERROR")
@@ -709,6 +713,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         # Update AI engine
         self.ai.system_info = system_info_text
         self.ai.update_voice_settings(self.ai.voice_mode, self.ai.elevenlabs_enabled)
+        self.ai._inject_memories_into_prompt()
         log.info("[AssistantController._update_system_prompt] ✓ System prompt updated")
 
     def build_task_system_prompt(self, task_dict: dict) -> str:
@@ -1269,8 +1274,10 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         else:
             # Done with work mode (final result received)
             self.work_mode_timer.stop()
+            self.ai.tool_manager.in_work_mode = False
             self.is_processing = False
             log.debug("[AssistantController.handle_work_mode_response] is_processing=False (work mode done)")
+            QTimer.singleShot(0, self.ui.hide_thinking)
             if not self.session_has_messages:
                 self.session_has_messages = True
             self._auto_save_session()
@@ -1328,23 +1335,44 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         log.debug("[AssistantController.auto_continue_work_mode] Worker started")
 
     def interrupt_work_mode(self):
-        """Interrupt and cancel tool mode"""
+        """Interrupt and cancel tool mode.
+
+        Handles cancellation during the 'thinking' gap (code finished, AI
+        analyzing) or while awaiting the model's next step: terminates any
+        in-flight continuation worker, invalidates its pending response,
+        stops the timer, and clears all work-mode state. The original user
+        prompt is preserved in history (unlike interrupt_request())."""
         log.info(f"[AssistantController.interrupt_work_mode] in_work_mode="
                  f"{self.ai.tool_manager.in_work_mode}")
         if self.ai.tool_manager.in_work_mode:
             log.warning("[AssistantController.interrupt_work_mode] Interrupting tool mode by user")
             self.log("Tool mode interrupted by user")
             self.work_mode_timer.stop()
+
+            # Terminate the in-flight continuation worker if it's generating the
+            # next step ("awaiting AI model response"), then discard its result.
+            if getattr(self, 'current_worker', None) and self.current_worker.isRunning():
+                log.warning("[AssistantController.interrupt_work_mode] Terminating in-flight continuation worker")
+                self.current_worker.terminate()
+                self.current_worker.wait(1000)
+            self._request_generation += 1  # invalidate any late worker signal
+
             self.ai.tool_manager.in_work_mode = False
+            self.ai.tool_manager.work_code_running = False
             self.ai.tool_manager.last_work_output = None
             self.is_processing = False
 
             # Notify UI
             if self._chat:
+                try:
+                    self._chat.set_session_list_locked(False)
+                except Exception:
+                    pass
                 self._chat.add_system_message("⚡️ **Tool operation canceled**")
                 self._chat.hide_thinking()
                 self._chat.set_input_enabled(True)
 
+            self._auto_save_session()
             return True
         log.debug("[AssistantController.interrupt_work_mode] Not in work mode — nothing to interrupt")
         return False
@@ -1404,11 +1432,54 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         """Slot connected to ApprovalSignal.work_code_active — thread-safe delegation via QTimer.singleShot."""
         from PyQt6.QtCore import QTimer
         QTimer.singleShot(0, lambda: self._update_interrupt_btn(active))
+        QTimer.singleShot(0, lambda: self._update_live_output_stream(active))
+
+    def _update_live_output_stream(self, active):
+        """Start/stop the live work-mode output console (runs on the GUI thread).
+
+        On start: opens a transient streaming console and begins polling the
+        interpreter buffer. On stop: does a final flush and tears the console
+        down — the permanent collapsed note is added by the normal flow."""
+        if not self._chat:
+            return
+        if active:
+            code = self.ai.tool_manager.last_work_code or ""
+            try:
+                self._chat.start_live_output(code)
+            except Exception as e:
+                log.debug(f"[AssistantController._update_live_output_stream] start failed: {e}")
+            self._live_output_timer.start()
+        else:
+            self._live_output_timer.stop()
+            try:
+                self._poll_live_output()  # final flush of any tail output
+            except Exception:
+                pass
+            try:
+                self._chat.end_live_output()
+            except Exception:
+                pass
+
+    def _poll_live_output(self):
+        """Timer tick — pull current output from the interpreter into the live console."""
+        if not self._chat:
+            return
+        try:
+            interp = self.ai.tool_manager.tools.get('python')
+            if interp is None:
+                return
+            self._chat.update_live_output(interp.peek_live_output())
+        except Exception:
+            pass
 
     def _update_interrupt_btn(self, active):
-        """Enable/disable the interrupt button based on work code execution state."""
+        """Enable/disable the interrupt button based on work code execution state.
+
+        Stays enabled throughout work mode (not just while code is running) so the
+        user can cancel during the 'thinking' gap or while awaiting the next step."""
         if self._chat:
-            self._chat.interrupt_btn.setEnabled(active)
+            enabled = active or self.ai.tool_manager.in_work_mode
+            self._chat.interrupt_btn.setEnabled(enabled)
 
     # ═══════════════════════════════════════════════════════════
     # SESSION MANAGEMENT METHODS
@@ -1622,12 +1693,32 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         """Show the UI"""
         self.ui.show()
 
+    def _inject_interpreter_namespaces(self):
+        ns = self.ai.tool_manager.tools['python'].namespace
+        ns['controller'] = self
+        ns['attach_image_to_chat'] = self._agent_attach_image
+        ns['take_screenshot'] = self._agent_take_screenshot
+        ns['notify'] = self.notify
+        ns['memorize'] = self.memorize
+        ns['search_memory'] = self.search_memory
+        ns['view_all_memory'] = self.view_all_memory
+        ns['forget_memory'] = self.forget_memory
+        ns['delete_memory'] = self.delete_memory
+        ns['app_root'] = str(_APP_ROOT)
+        ns['skills_path'] = str(_APP_ROOT / "skills")
+
     def reset_python_interpreter(self):
-        """Reset the Python interpreter"""
+        """Reset the Python interpreter and reinject namespaces"""
         log.info("[AssistantController.reset_python_interpreter] Resetting Python interpreter...")
         self.ai.tool_manager.reset_python()
-        log.info("[AssistantController.reset_python_interpreter] ✓ Reset complete")
+        self._inject_interpreter_namespaces()
+        log.info("[AssistantController.reset_python_interpreter] ✓ Reset complete with namespace reinjection")
         self.log("Python interpreter reset", "SUCCESS")
+
+    def refresh_memory_block(self):
+        """Refresh the memory block in the system prompt after memories or settings change."""
+        if hasattr(self.ai, 'refresh_memory_block'):
+            self.ai.refresh_memory_block()
 
     # ── Memory namespace helpers ──────────────────────────────────────────────
 
@@ -1649,6 +1740,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         text = "\n\n".join(parts)
         success = self.memory_manager.memorize(text)
         if success:
+            self.refresh_memory_block()
             log.info(f"[AssistantController.memorize] ✓ Stored: '{title}'")
             return f"[memorize] ✓ Stored: \"{title}\""
         return "[memorize] ✗ Failed to store memory."
@@ -1684,6 +1776,48 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             else:
                 lines.append(f"  {i}. {m['text']}{edited}")
         return "\n".join(lines)
+
+    def forget_memory(self, search_text: str) -> str:
+        """Delete ALL memories whose text contains search_text.
+        Call from work_environment: forget_memory('text to find')"""
+        if not self.memory_manager or not self.memory_manager.is_ready:
+            return "[forget_memory] Memory manager not ready."
+        search_text = str(search_text).strip()
+        if not search_text:
+            return "[forget_memory] search_text is required."
+        all_memories = self.memory_manager.get_all()
+        matches = [m for m in all_memories if search_text.lower() in m['text'].lower()]
+        if not matches:
+            return f"[forget_memory] No memories found matching '{search_text}'"
+        deleted = 0
+        for m in matches:
+            self.memory_manager.delete(m['id'])
+            deleted += 1
+        self.refresh_memory_block()
+        log.info(f"[AssistantController.forget_memory] ✓ Deleted {deleted} memory/memories matching '{search_text}'")
+        return f"[forget_memory] ✓ Deleted {deleted} memory/memories matching '{search_text}'"
+
+    def delete_memory(self, title: str) -> str:
+        """Delete exactly ONE memory by its exact title.
+        Call from work_environment: delete_memory('Exact Title')"""
+        if not self.memory_manager or not self.memory_manager.is_ready:
+            return "[delete_memory] Memory manager not ready."
+        title = str(title).strip()
+        if not title:
+            return "[delete_memory] title is required."
+        all_memories = self.memory_manager.get_all()
+        match = None
+        for m in all_memories:
+            stored_title = m['text'].split('\n')[0].strip()
+            if title.lower() in stored_title.lower():
+                match = m
+                break
+        if not match:
+            return f"[delete_memory] No memory found with title '{title}'"
+        self.memory_manager.delete(match['id'])
+        self.refresh_memory_block()
+        log.info(f"[AssistantController.delete_memory] ✓ Deleted: '{title}'")
+        return f"[delete_memory] ✓ Deleted: \"{title}\""
 
     def detach_memory_context(self, context_id: str):
         """Remove a memory context ui_event from history, save session, and sync Android."""

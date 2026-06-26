@@ -969,6 +969,15 @@ class SettingsWindow(BaseWindow):
         _max_row.addWidget(self.memory_max_combo)
         mg_lay.addLayout(_max_row)
 
+        _recall_row = QHBoxLayout()
+        _recall_row.addWidget(_label("Memory recall mode:"))
+        self.memory_recall_mode_combo = QComboBox()
+        self.memory_recall_mode_combo.setStyleSheet(_COMBO)
+        self.memory_recall_mode_combo.addItem("Inject all into system prompt", 'inject_all')
+        self.memory_recall_mode_combo.addItem("RAG semantic recall", 'rag')
+        _recall_row.addWidget(self.memory_recall_mode_combo)
+        mg_lay.addLayout(_recall_row)
+
         open_mem_btn = QPushButton("🧠  Open Memory Manager")
         open_mem_btn.setStyleSheet(f"""
             QPushButton {{ background:#0E1F0E; border:1px solid #1E4A1E; border-radius:6px;
@@ -1357,6 +1366,11 @@ class SettingsWindow(BaseWindow):
             if self.memory_max_combo.itemData(i) == max_results:
                 self.memory_max_combo.setCurrentIndex(i)
                 break
+        recall_mode = self.controller.settings.get('memory_recall_mode', 'inject_all')
+        for i in range(self.memory_recall_mode_combo.count()):
+            if self.memory_recall_mode_combo.itemData(i) == recall_mode:
+                self.memory_recall_mode_combo.setCurrentIndex(i)
+                break
 
         # Load selected theme
         saved_theme = self.controller.settings.get('chat_theme', 'obsidian_blue')
@@ -1516,6 +1530,7 @@ class SettingsWindow(BaseWindow):
         self.controller.settings['prefilling_session_id'] = (
                 self.pf_session_combo.currentData() or '')
         self.controller.settings['memory_enabled'] = self.memory_enabled_checkbox.isChecked()
+        self.controller.settings['memory_recall_mode'] = self.memory_recall_mode_combo.currentData()
         self.controller.settings['memory_threshold'] = self.memory_threshold_combo.currentData()
         self.controller.settings['memory_max_results'] = self.memory_max_combo.currentData()
 

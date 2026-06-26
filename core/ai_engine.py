@@ -42,8 +42,8 @@ class AIEngine:
 
         self.log_callback = log_callback
         self.settings_callback = settings_callback
+        self.controller = controller
         if controller:
-            self.controller = controller
             log.debug(f"[AIEngine.__init__] Controller passed successfully! | {self.controller}")
         self.conversation_history = []
         log.debug("[AIEngine.__init__] conversation_history initialized (empty)")
@@ -78,6 +78,7 @@ class AIEngine:
             system_info=system_info, voice_mode=voice_mode, elevenlabs_enabled=elevenlabs_enabled,
             skills=skill_manager.get_skills() if skill_manager else []
         )
+        self.custom_system_prompt = ""
         log.info(f"[AIEngine.__init__] System prompt generated | length={len(self.system_prompt)} chars")
 
         self.last_raw_response = None
@@ -193,10 +194,15 @@ class AIEngine:
         return "\n".join(lines)
 
     def _get_effective_system_prompt(self) -> str:
-        """Return the system prompt enriched with any currently active skills."""
+        """Return the system prompt enriched with any currently active skills and memory block."""
         if self.system_prompt_hijacked and self.custom_system_prompt.strip():
-            return self.custom_system_prompt
-        return self.system_prompt + self._render_active_skills()
+            base = self.custom_system_prompt
+        else:
+            base = self.system_prompt + self._render_active_skills()
+        mem_block = self._get_memory_block(self.system_prompt)
+        if mem_block:
+            base = self._strip_memory_block(base) + f"\n\n{mem_block}"
+        return base
 
     # ═══════════════════════════════════════════════════════════════════════════
     # PROVIDER SETTERS
@@ -686,6 +692,18 @@ class AIEngine:
         self._clear_memory_context()
         self.last_raw_response = ai_text
 
+        # ── Unclosed-fence recovery ────────────────────────────────────────────────
+        # If the model forgot the closing ``` on a tool call, auto-close it so the
+        # call runs instead of leaking the raw block into chat.
+        ai_text, _recovered_tool = self.tool_manager.recover_unclosed_tool_fence(ai_text)
+        if _recovered_tool:
+            self.tool_manager.approval_signal.system_message.emit(
+                f"⚠️ **NOTICE:** Recovered a malformed `{_recovered_tool}` call "
+                f"(missing closing code fence). It was auto-completed and run. "
+                "If this happens often, consider a more capable model."
+            )
+        # ──────────────────────────────────────────────────────────────────────────
+
         # ── Single-exec guardrail ──────────────────────────────────────────────────
         ai_text, _violated, _ = self.tool_manager.enforce_single_exec_policy(ai_text)
         if _violated:
@@ -914,6 +932,16 @@ class AIEngine:
                   f"'{ai_text[:100].replace(chr(10), '↵')}'")
         self.last_raw_response = ai_text
 
+        # ── Unclosed-fence recovery ────────────────────────────────────────────────
+        ai_text, _recovered_tool = self.tool_manager.recover_unclosed_tool_fence(ai_text)
+        if _recovered_tool:
+            self.tool_manager.approval_signal.system_message.emit(
+                f"⚠️ **NOTICE:** Recovered a malformed `{_recovered_tool}` call "
+                f"(missing closing code fence). It was auto-completed and run. "
+                "If this happens often, consider a more capable model."
+            )
+        # ──────────────────────────────────────────────────────────────────────────
+
         # ── Single-exec guardrail ──────────────────────────────────────────────────
         ai_text, _violated, _ = self.tool_manager.enforce_single_exec_policy(ai_text)
         if _violated:
@@ -1127,30 +1155,116 @@ class AIEngine:
     # MEMORY METHODS
     # ═══════════════════════════════════════════════════════════════════════════
 
+    _MEM_BLOCK_START = "============================= SYSTEM MEMORY BLOCK ============================="
+    _MEM_BLOCK_END = "================================================================================="
+
+    def _strip_memory_block(self, text: str) -> str:
+        """Remove any existing memory block section from prompt text."""
+        start = text.find(self._MEM_BLOCK_START)
+        if start == -1:
+            return text
+        end = text.find(self._MEM_BLOCK_END, start)
+        if end == -1:
+            return text[:start]
+        return text[:start] + text[end + len(self._MEM_BLOCK_END):]
+
+    def _get_memory_block(self, text: str) -> str:
+        """Extract the memory block section from text, or empty string."""
+        start = text.find(self._MEM_BLOCK_START)
+        if start == -1:
+            return ""
+        end = text.find(self._MEM_BLOCK_END, start)
+        if end == -1:
+            return text[start:]
+        return text[start:end + len(self._MEM_BLOCK_END)]
+
+    def _build_memory_block(self) -> str | None:
+        """Build the memory block string from current memories, or None if not applicable."""
+        if not self.memory_manager or not self.memory_manager.is_ready:
+            return None
+
+        memory_enabled = True
+        memory_recall_mode = 'inject_all'
+        if self.settings_callback:
+            settings = self.settings_callback()
+            memory_enabled = settings.get('memory_enabled', True)
+            memory_recall_mode = settings.get('memory_recall_mode', 'inject_all')
+        if not memory_enabled or memory_recall_mode != 'inject_all':
+            return None
+
+        all_memories = self.memory_manager.get_all()
+        if not all_memories:
+            log.debug("[AIEngine._build_memory_block] No memories to inject")
+            return None
+
+        lines = "\n".join(
+            f"- {m['text']}" + ("\n\n" if m['text'].splitlines()[-1].startswith("Tags:") else "")
+            for m in all_memories
+        )
+        return (
+            f"\n\n{self._MEM_BLOCK_START}\n\n"
+            f"ALL MEMORIES:\n"
+            f"{lines}\n"
+            f"{self._MEM_BLOCK_END}"
+        )
+
+    def _inject_memories_into_prompt(self):
+        """Inject all memories into self.system_prompt if in inject_all mode.
+        Called after every system prompt rebuild. Strips any stale block first.
+        Compares old vs new — skips if unchanged, replaces if different."""
+        new_block = self._build_memory_block()
+
+        if new_block is None:
+            self.system_prompt = self._strip_memory_block(self.system_prompt)
+            return
+
+        old_block = self._get_memory_block(self.system_prompt)
+
+        if old_block == new_block:
+            log.debug("[AIEngine._inject_memories_into_prompt] Memory block unchanged — skipping")
+            return
+
+        self.system_prompt = self._strip_memory_block(self.system_prompt)
+        self.system_prompt += new_block
+        count = len(self.memory_manager.get_all() or []) if self.memory_manager else 0
+        log.info(f"[AIEngine._inject_memories_into_prompt] Injected {count} memories")
+
+    def refresh_memory_block(self):
+        """Public method — refresh the memory block. Call after memories or settings change."""
+        self._inject_memories_into_prompt()
+
     def _inject_memories(self, user_message: str):
-        """Perform semantic recall and store memory context as a persistent ui_event in history."""
-        self._pending_memory_context = ""  # no longer used, cleared for safety
+        """Perform semantic recall (RAG mode only). inject_all is already in the prompt."""
+        self._pending_memory_context = ""
 
         if not self.memory_manager or not self.memory_manager.is_ready:
             return
 
         memory_enabled = True
+        memory_recall_mode = 'inject_all'
         memory_threshold = 0.4
         memory_max = 5
 
         if self.settings_callback:
             settings = self.settings_callback()
             memory_enabled = settings.get('memory_enabled', True)
+            memory_recall_mode = settings.get('memory_recall_mode', 'inject_all')
             memory_threshold = float(settings.get('memory_threshold', 0.4))
             memory_max = int(settings.get('memory_max_results', 5))
 
         if not memory_enabled:
             return
 
+        if memory_recall_mode == 'rag':
+            self._inject_memories_rag(user_message, memory_threshold, memory_max)
+        # inject_all: memories already in system prompt, nothing to do here
+
+    def _inject_memories_rag(self, user_message: str, threshold: float, max_results: int):
+        """Perform semantic recall and store memory context as a persistent ui_event in history."""
         recalled = self.memory_manager.recall(
             query=user_message,
-            threshold=memory_threshold,
-            max_results=memory_max
+            threshold=threshold,
+            max_results=max_results
         )
 
         self._pending_memory_widget = None  # reset every call, not just when recalled

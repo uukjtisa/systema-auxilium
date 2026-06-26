@@ -143,12 +143,14 @@ Note: Never do this — always include a real response rather than just naming t
 _SECTION_MEMORY = """
 MEMORY — PERSISTENT ACROSS SESSIONS
 
-Three functions are available inside work_environment for managing memory:
+Five functions are available inside work_environment for managing memory:
 
   memorize(title, body, tags="")          → Save a memory permanently
   search_memory(query)                    → Search memories by topic
                                             Optional: threshold (float), max_results (int)
   view_all_memory(titles_only=False)      → List memories (use titles_only=True to avoid context window bloat)
+  forget_memory(search_text)              → Delete ALL memories whose text contains search_text
+  delete_memory(title)                    → Delete exactly ONE memory by its exact title
 
 MEMORY STRUCTURE RULES:
   title  — Required. Concise, descriptive, unique. One line. (e.g. "User prefers dark mode")
@@ -173,12 +175,19 @@ When to memorize (proactively, without being asked):
   • Any time the user explicitly asks you to remember something
   • NEVER memorize passwords or credentials unless the user explicitly asks
 
+When to delete/forget:
+  • If the user says "forget about X" or "delete that memory" — search and delete
+  • Use forget_memory() with a relevant word to bulk-remove related entries
+  • Use delete_memory() with the exact title to remove a single specific entry
+  • Always use search_memory() or view_all_memory() first to confirm what you're deleting
+
 Rules:
   - One fact per memorize() call — never bundle multiple facts
   - Skip session-specific or temporary info
   - Run search_memory() first if unsure whether something is already stored
   - Use view_all_memory(titles_only=True) to browse without bloating context
   - Avoid view_all_memory() with titles_only=False unless you need full entry details
+  - Prefer delete_memory() over forget_memory() when you know the exact title
 
 If the user asks any memory-related question (e.g. "do you remember X?", "what do you know about me?"):
   1. First: take initiative — run search_memory() or view_all_memory(titles_only=True) in work_environment
@@ -252,6 +261,49 @@ You execute Python code using execute_code when you do NOT need to see the outpu
 
     return ""
 
+_FILE_WRITE_GUIDE = r'''
+WRITING FILES WHOSE CONTENT IS CODE OR HAS TRICKY CHARACTERS
+(backslashes, quotes, or triple-quotes — e.g. generating a .py script):
+
+Do NOT embed that content as a Python string literal. Your work_environment code
+is compiled as Python FIRST, so a backslash, a " or a """ inside a literal breaks
+it with "unterminated string literal". Instead put the literal content in a #@FILE
+block and write it with write_file(). Block content is captured VERBATIM and is
+never parsed as Python.
+
+You may define MULTIPLE #@FILE blocks in ONE response and write them all in the
+same work call — each block becomes its own variable. Example writing two files:
+
+```work_environment: [Writing downloader.py and handler.py]
+write_file(r"D:\proj\downloader.py", downloader_src)
+write_file(r"D:\proj\handler.py", handler_src)
+print("wrote 2 files")
+
+#@FILE downloader_src
+import re
+URL_RE = r"https?://(?:www\.)\S+"
+TEMPLATE = """has "quotes", \ backslashes and triple-quotes — all fine"""
+#@ENDFILE
+
+#@FILE handler_src
+def handle(path):
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+#@ENDFILE
+```
+
+#@FILE rules:
+- A line `#@FILE <name>`, then the literal content, then a line `#@ENDFILE`.
+- <name> must be a valid Python identifier; it becomes a string variable you can
+  pass to write_file() or use directly. It can be anything as long as its a proper variable name, like my_source_code.
+- Define as MANY #@FILE blocks as you need in one response — one per file you want
+  to write. Each <name> must be unique. There is no limit.
+- Content is taken EXACTLY as written — no escaping, no quoting, ever.
+- write_file(path, content, mode="w") creates parent folders; pass bytes for binary.
+- Put all #@FILE blocks at the END of the fence, after your executable code.
+'''
+
+
 def _build_fence_syntax_section(
     include_workmode: bool = True,
     include_execute_code: bool = True,
@@ -297,7 +349,7 @@ IMPORTANT RULES:
 - ONLY ONE fence per response — work_environment OR execute_code, never both,
   never two work_environment fences. Each execution is ONE turn. Wait for output.
   set_session_name is exempt — it may appear anywhere alongside ONE code tool.
-
+""" + _FILE_WRITE_GUIDE + """
 
 CRITICAL: DO NOT ROLEPLAY EXECUTION!
 
@@ -339,7 +391,7 @@ IMPORTANT RULES:
 - Place tool fences at the END of your message
 - ALWAYS USE TOOL FENCES, NEVER JSON!!! ← CRITICAL
 - ONLY ONE work_environment fence per response. Each execution is ONE turn. Wait for output.
-
+""" + _FILE_WRITE_GUIDE + """
 
 CRITICAL: DO NOT ROLEPLAY EXECUTION!
 

@@ -440,32 +440,64 @@ class FloatingWindow(QWidget):
         if not self._drag_started:
             self.open_chat()
 
+    def _menu_style(self) -> str:
+        """VS Code-style dark context menu stylesheet."""
+        return """
+            QMenu {
+                background-color: #1e1e1e;
+                border: 1px solid #333;
+                border-radius: 6px;
+                padding: 4px 0;
+                font-size: 12px;
+                font-family: 'Segoe UI', system-ui, sans-serif;
+            }
+            QMenu::item {
+                padding: 6px 24px 6px 16px;
+                color: #ccc;
+            }
+            QMenu::item:selected {
+                background-color: #2a2d2e;
+                color: #fff;
+            }
+            QMenu::item:checked {
+                color: #58A6FF;
+            }
+            QMenu::separator {
+                height: 1px;
+                background: #333;
+                margin: 4px 8px;
+            }
+        """
+
     def show_context_menu(self, pos):
         """Show right-click menu"""
         menu = QMenu()
-        menu.addAction(QAction("💬 Open Chat", self, triggered=self.open_chat))
+        menu.setStyleSheet(self._menu_style())
+
+        menu.addAction(QAction("Open Chat", self, triggered=self.open_chat))
         # Android bridge toggle — label changes to show IP:port when active
         _bridge_on = self.android_bridge is not None and self.android_bridge.isVisible()
         if _bridge_on:
-            _phone_label = f"📱 Close Packet ({self.android_bridge.get_connection_info()})"
+            _phone_label = f"Close Packet ({self.android_bridge.get_connection_info()})"
         else:
-            _phone_label = "📱 Open Packet"
+            _phone_label = "Open Packet"
         menu.addAction(QAction(_phone_label, self, triggered=self.toggle_android_bridge))
-        menu.addAction(QAction("🎨 Appearance", self, triggered=self.open_appearance_settings))
-        menu.addAction(QAction("⚙️ Settings", self, triggered=self.open_settings))
+        menu.addAction(QAction("Appearance", self, triggered=self.open_appearance_settings))
+        menu.addAction(QAction("Settings", self, triggered=self.open_settings))
 
         # Debug toggle
-        debug_action = QAction("🔧 Debug Mode", self, checkable=True, triggered=self.toggle_debug)
+        debug_action = QAction("Debug Mode", self, checkable=True, triggered=self.toggle_debug)
         debug_action.setChecked(self.controller.get_debug_mode())
         menu.addAction(debug_action)
 
-        # "Open Debug Window" button - only shown if debug mode is enabled
+        # Debug Window button - only shown if debug mode is enabled
         if self.controller.get_debug_mode():
-            menu.addAction(QAction("🪟 Open Debug Window", self, triggered=self.open_debug_window))
+            menu.addAction(QAction("Debug Window", self, triggered=self.open_debug_window))
 
-        menu.addAction(QAction("🔄 Reset Python", self, triggered=self.reset_python))
-        menu.addAction(QAction("📥 Put in Tray", self, triggered=self.put_to_tray))
-        menu.addAction(QAction("🔴 Shutdown", self, triggered=self.shutdown_app))
+        menu.addAction(QAction("Reset Python", self, triggered=self.reset_python))
+        menu.addAction(QAction("Put in Tray", self, triggered=self.put_to_tray))
+        menu.addSeparator()
+        menu.addAction(QAction("Shutdown", self, triggered=self.shutdown_app))
         menu.exec(QCursor.pos())
 
     def toggle_debug(self):
@@ -476,7 +508,7 @@ class FloatingWindow(QWidget):
         if not current:  # Now enabled
             self.open_debug_window()
             if self.chat_window:
-                self.chat_window.add_system_message("🔧 Debug mode enabled - Tool conversations visible")
+                self.chat_window.add_system_message("Debug mode enabled - Tool conversations visible")
             self.update()
         else:  # Now disabled
             if self.debug_window:

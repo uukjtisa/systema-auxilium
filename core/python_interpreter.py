@@ -6,6 +6,7 @@ HANDLES ALL CODE FROM CODE EXECUTION TOOL CALLS
 """
 
 import sys
+import os
 import io
 import traceback
 import code
@@ -19,6 +20,27 @@ from core.path_syncer import get_syncer
 _verbose = True
 log = _make_logger("PythonInterpreter") if _verbose else _NoOpLogger()
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def _wm_write_file(path, content, mode=None, encoding="utf-8"):
+    """Write literal data to a file, creating parent directories as needed.
+
+    Always available inside work_environment / execute_code as write_file().
+    Designed to pair with #@FILE … #@ENDFILE literal blocks: the block content
+    is bound to a variable WITHOUT passing through Python's parser, so source
+    text containing backslashes, quotes or triple-quotes survives intact.
+    Accepts str (text mode) or bytes (binary mode). Returns the path written."""
+    p = os.fspath(path)
+    parent = os.path.dirname(p)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    if isinstance(content, (bytes, bytearray)):
+        with open(p, mode or "wb") as f:
+            f.write(content)
+    else:
+        with open(p, mode or "w", encoding=encoding) as f:
+            f.write(content)
+    return p
 
 
 class CustomInterpreter(code.InteractiveInterpreter):
@@ -86,8 +108,49 @@ class PythonInterpreter:
         # Create the interactive interpreter
         self.interpreter = CustomInterpreter(self.namespace)
         self.execution_count = 0
+        self._install_helpers()
+        # Live-output buffers — point at the currently-executing code's capture
+        # StringIOs so another thread (the GUI) can stream output as it runs.
+        self._live_stdout = None
+        self._live_stderr = None
+        # Thread id of the code currently running — lets another thread interrupt it.
+        self._current_exec_tid = None
         log.info("[PythonInterpreter.__init__] PythonInterpreter ready — "
                  "execution_count=0, interpreter attached")
+
+    def interrupt_current(self) -> bool:
+        """Raise KeyboardInterrupt in the currently-executing code thread, so a
+        running work-mode execution stops while preserving its partial output.
+        Returns True if an interrupt was delivered, False if nothing was running.
+        Safe to call from another thread (e.g. the GUI)."""
+        tid = self._current_exec_tid
+        if tid:
+            log.warning(f"[PythonInterpreter.interrupt_current] Interrupting exec thread {tid}")
+            self._async_raise(tid, KeyboardInterrupt)
+            return True
+        log.debug("[PythonInterpreter.interrupt_current] No execution in progress")
+        return False
+
+    def peek_live_output(self) -> str:
+        """Best-effort snapshot of the currently-executing code's stdout+stderr.
+        Safe to call from another thread (e.g. the GUI) while code runs — returns
+        '' when nothing is executing. Reads are tolerant of torn StringIO state."""
+        out = ""
+        try:
+            so = self._live_stdout
+            if so is not None:
+                out = so.getvalue()
+        except Exception:
+            pass
+        try:
+            se = self._live_stderr
+            if se is not None:
+                err = se.getvalue()
+                if err:
+                    out = f"{out}\n{err}" if out else err
+        except Exception:
+            pass
+        return out
 
     # ── Timeout/interrupt helpers ─────────────────────────────────────────────
 
@@ -232,6 +295,12 @@ class PythonInterpreter:
             stdout_capture = io.StringIO()
             stderr_capture = io.StringIO()
 
+        # Publish buffers for live streaming (GUI polls peek_live_output()).
+        self._live_stdout = stdout_capture
+        self._live_stderr = stderr_capture
+        # Publish this thread's id so interrupt_current() can stop it mid-run.
+        self._current_exec_tid = threading.get_ident()
+
         result = None
         error = None
         success = False
@@ -324,6 +393,12 @@ class PythonInterpreter:
                     log.debug(f"[PythonInterpreter._execute_inline] Captured last_result: "
                               f"type={type(result).__name__} | value={repr(result)[:80]}")
 
+        except KeyboardInterrupt:
+            # User interrupted a running work-mode execution — keep partial output.
+            log.warning("[PythonInterpreter._execute_inline] KeyboardInterrupt — "
+                        "execution interrupted by user")
+            error = "KeyboardInterrupt: execution interrupted by user"
+            success = False
         except Exception as e:
             log.error(f"[PythonInterpreter._execute_inline] Outer exception caught: "
                       f"{type(e).__name__}: {e}")
@@ -334,6 +409,10 @@ class PythonInterpreter:
                 sys.stdout.clear_capture()
             if hasattr(sys.stderr, 'clear_capture'):
                 sys.stderr.clear_capture()
+            # Stop publishing for live streaming — execution is finishing.
+            self._live_stdout = None
+            self._live_stderr = None
+            self._current_exec_tid = None
 
         stdout_val = stdout_capture.getvalue()
         stderr_val = stderr_capture.getvalue()
@@ -370,7 +449,24 @@ class PythonInterpreter:
         })
         self.interpreter = CustomInterpreter(self.namespace)
         self.execution_count = 0
+        self._install_helpers()
         log.info("[PythonInterpreter.reset] Reset complete — fresh interpreter attached, count=0")
+
+    def _install_helpers(self):
+        """Inject always-available work-environment helpers into the namespace."""
+        self.namespace['write_file'] = _wm_write_file
+
+    def inject_vars(self, mapping):
+        """Bind variables directly into the interpreter namespace as live objects,
+        bypassing the Python parser. Used for literal #@FILE data blocks so file
+        content (backslashes, quotes, triple-quotes) is never compiled as code."""
+        if not mapping:
+            return
+        try:
+            self.namespace.update(mapping)
+            log.info(f"[PythonInterpreter.inject_vars] Injected {list(mapping.keys())} into namespace")
+        except Exception as e:
+            log.warning(f"[PythonInterpreter.inject_vars] Failed: {type(e).__name__}: {e}")
 
     def get_namespace_info(self):
         """Get information about current namespace"""
