@@ -83,6 +83,7 @@ class ToolManager:
         self.last_work_annotation = None  # set by parse_work_environment when bracket present
         self.last_work_code = None        # set by run_work_environment before execution
         self.work_code_running = False
+        self._pending_interrupt_notice = None  # appended to output when user interrupts running code
         log.debug("[ToolManager.__init__] Work mode state: in_work_mode=False | last_work_output=None")
 
         # ── Violation tracking ────────────────────────────────────────────────
@@ -95,6 +96,12 @@ class ToolManager:
         # Settings and AI engine
         self.settings_callback = settings_callback
         self.ai_engine = ai_engine
+        # Override: None = defer to settings_callback; True/False = force on/off
+        self.supervised_execution = None
+        # Capability gates — enforced by run_work_environment/run_execute_code,
+        # not just narrated in the system prompt. Set by TaskAIEngine from task dict.
+        self.allow_workmode = True
+        self.allow_execute_code = True
 
         # Approval signal for main thread communication
         log.debug("[ToolManager.__init__] Creating ApprovalSignal and connecting to main thread handler")
@@ -248,6 +255,71 @@ class ToolManager:
                 return content, remaining
         return None
 
+    def recover_unclosed_tool_fence(self, text):
+        """Recover a tool call whose closing ``` fence the model forgot.
+
+        The #1 weak-model failure: the model opens ```work_environment but never
+        closes the fence, so the call is neither executed NOR stripped — the raw
+        block leaks into chat. Here we detect an *unbalanced* fence whose opening
+        tag is a known tool and auto-close it by appending a synthetic ```, so the
+        normal parsers can extract and run it (turning a leak into a real call).
+
+        Non-tool unclosed fences (e.g. ```python used for prose) are left alone —
+        those are legitimate formatting, not leaked tool syntax.
+
+        Returns (text, recovered_canonical_tool_name_or_None).
+        """
+        if not text or '```' not in text:
+            return text, None
+
+        fence_positions = [m.start() for m in re.finditer(r'```', text)]
+        # Balanced fences pair up left-to-right → nothing dangling.
+        if len(fence_positions) % 2 == 0:
+            return text, None
+
+        # Odd count → the last ``` is an unmatched opener. Is its tag a tool?
+        last = fence_positions[-1]
+        m = re.match(r'```[ \t]*([\w-]+)', text[last:])
+        if not m:
+            return text, None  # bare ``` with no tag — leave as prose
+        canonical = self._tool_keys_norm.get(self._norm_key(m.group(1)))
+        if not canonical:
+            return text, None  # unclosed non-tool fence (e.g. ```python) — legit prose
+
+        log.warning(f"[ToolManager.recover_unclosed_tool_fence] Auto-closing unclosed "
+                    f"'{canonical}' fence — model omitted the closing ``` (would have leaked)")
+        return (text.rstrip() + "\n```"), canonical
+
+    # Literal data blocks: #@FILE <name> … #@ENDFILE  (content captured verbatim)
+    _FILE_BLOCK_RE = re.compile(
+        r'^[ \t]*#@FILE[ \t]+(\w+)[ \t]*\r?\n(.*?)\r?\n[ \t]*#@ENDFILE[ \t]*$',
+        re.DOTALL | re.MULTILINE
+    )
+
+    def _extract_file_blocks(self, code):
+        """Pull #@FILE <name> … #@ENDFILE literal blocks out of code BEFORE it is
+        compiled, so their content is never parsed as Python. Each block's raw
+        text is bound to a namespace string variable <name> (use it with
+        write_file(path, <name>)). This is the fix for embedding source that
+        contains backslashes, quotes or triple-quotes — which otherwise break the
+        outer interpreter's parser with 'unterminated string literal' etc.
+
+        Returns (stripped_code, {name: content})."""
+        blocks = {}
+
+        def _grab(m):
+            name = m.group(1)
+            if name.isidentifier():
+                blocks[name] = m.group(2)
+                return ''  # remove the literal block from the executed code
+            return m.group(0)  # invalid identifier — leave untouched
+
+        stripped = self._FILE_BLOCK_RE.sub(_grab, code)
+        if blocks:
+            log.info(f"[ToolManager._extract_file_blocks] Extracted {len(blocks)} literal "
+                     f"block(s): {list(blocks.keys())}")
+        return stripped, blocks
+
     def parse_work_environment(self, text):
         """Parse work_environment fence from AI output. Returns (code, remaining_text) or None."""
         log.debug(f"[ToolManager.parse_work_environment] Parsing {len(text)} chars")
@@ -395,20 +467,24 @@ class ToolManager:
                  f"code_len={len(code)} | has_settings_callback={self.settings_callback is not None}")
 
         # Check if supervised execution is enabled
-        if self.settings_callback:
+        # self.supervised_execution overrides the settings_callback when set
+        if self.supervised_execution is not None:
+            supervised_enabled = self.supervised_execution
+            log.debug(f"[ToolManager._check_supervised_execution] supervised_execution (override)={supervised_enabled}")
+        elif self.settings_callback:
             settings = self.settings_callback()
             supervised_enabled = settings.get('supervised_execution', True)  # Default ON
-            log.debug(f"[ToolManager._check_supervised_execution] supervised_execution={supervised_enabled}")
-
-            if not supervised_enabled:
-                # Auto-approve if supervision is disabled
-                log.debug("[ToolManager._check_supervised_execution] Supervision disabled — auto-approving")
-                return True, code
+            log.debug(f"[ToolManager._check_supervised_execution] supervised_execution (from settings)={supervised_enabled}")
         else:
             # No settings callback, assume supervised mode
             supervised_enabled = True
             log.warning("[ToolManager._check_supervised_execution] No settings_callback — "
                         "assuming supervised=True")
+
+        if not supervised_enabled:
+            # Auto-approve if supervision is disabled
+            log.debug("[ToolManager._check_supervised_execution] Supervision disabled — auto-approving")
+            return True, code
 
         # Show approval dialog on main thread
         log.debug("[ToolManager._check_supervised_execution] Emitting request_approval signal to main thread")
@@ -430,7 +506,10 @@ class ToolManager:
 
             # Wait for approval (blocks worker thread, but not main thread)
             log.debug("[ToolManager._check_supervised_execution] Waiting for user approval (blocking worker thread)...")
-            approval_event.wait()
+            approved = approval_event.wait(timeout=300)
+            if not approved:
+                log.error("[ToolManager._check_supervised_execution] Approval wait timed out after 300s — denying by default")
+                return False, code
 
             log.info(f"[ToolManager._check_supervised_execution] User decision received | "
                      f"approved={approval_result['approved']}")
@@ -570,13 +649,22 @@ class ToolManager:
         Returns: int — seconds to extend (0 = kill).
         """
         elapsed = self.settings_callback().get('tool_execution_timeout_seconds', 300) if self.settings_callback else 300
-        log.info(f"[ToolManager._handle_execution_timeout] Timeout — requesting user input | elapsed={elapsed}s")
+        log.info(f"[ToolManager._handle_execution_timeout] Timeout after {elapsed}s")
+
+        if self.supervised_execution is False:
+            # Unattended context (background task) — nothing will ever answer
+            # this dialog. Fail closed: kill the execution.
+            log.warning(f"[ToolManager._handle_execution_timeout] Unattended context — "
+                        f"killing execution (no dialog to show)")
+            return 0
 
         result_holder = []       # main thread will append decision
         user_event = threading.Event()
 
         self.approval_signal.timeout_signal.emit(elapsed, done_event, result_holder, user_event)
-        user_event.wait()
+        if not user_event.wait(timeout=120):
+            log.error("[ToolManager._handle_execution_timeout] Dialog wait timed out — killing execution")
+            return 0
 
         decision = result_holder[0] if result_holder else 0
         log.info(f"[ToolManager._handle_execution_timeout] Decision: {decision}")
@@ -585,6 +673,28 @@ class ToolManager:
     # ─────────────────────────────────────────────────────────────────────────
     # Run methods
     # ─────────────────────────────────────────────────────────────────────────
+
+    def interrupt_running_code(self, notice: str = None) -> bool:
+        """Interrupt the work-mode code that is currently executing.
+
+        Raises KeyboardInterrupt in the interpreter's exec thread so the run
+        stops while keeping whatever it printed so far, and queues `notice`
+        to be appended to that captured output (so the AI learns it was
+        interrupted and why). The blocked worker then finishes its cycle
+        naturally — no thread is orphaned and work_code_active(False) fires
+        normally, tearing down the live console.
+
+        Returns True if an interrupt was delivered to a running execution."""
+        self._pending_interrupt_notice = notice
+        interp = self.tools.get('python')
+        if interp is not None and hasattr(interp, 'interrupt_current'):
+            delivered = interp.interrupt_current()
+            if not delivered:
+                # Nothing was running — don't leave a stale notice queued.
+                self._pending_interrupt_notice = None
+            return delivered
+        self._pending_interrupt_notice = None
+        return False
 
     def run_work_environment(self, code):
         """
@@ -608,6 +718,11 @@ class ToolManager:
             self.in_work_mode = False
             return "EXITED_WORK_MODE"
 
+        # Capability gate — real enforcement, not just prompt text
+        if not self.allow_workmode:
+            log.warning("[ToolManager.run_work_environment] Blocked — allow_workmode is False for this session")
+            return "ERROR:\nwork_environment is disabled for this session."
+
         # Check supervised execution (now properly on main thread)
         log.debug("[ToolManager.run_work_environment] Checking supervised execution...")
         approved, modified_code = self._check_supervised_execution(code, 'work_environment')
@@ -621,18 +736,25 @@ class ToolManager:
             log.info("[ToolManager.run_work_environment] Code was modified by user in approval dialog")
         code = modified_code
 
+        # Pull literal #@FILE blocks out before execution so their content is
+        # never parsed as Python. last_work_code keeps the full source (blocks
+        # included) for the UI note / history; only exec_code runs.
+        self.last_work_code = code
+        exec_code, _file_blocks = self._extract_file_blocks(code)
+        if _file_blocks:
+            self.tools['python'].inject_vars(_file_blocks)
+
         # Execute Python code (with optional timeout)
         timeout = None
         if self.settings_callback:
             timeout = self.settings_callback().get('tool_execution_timeout_seconds', None)
         log.debug(f"[ToolManager.run_work_environment] → Executing via PythonInterpreter | "
                   f"timeout={timeout}s")
-        self.last_work_code = code
         self.work_code_running = True
         self.approval_signal.work_code_active.emit(True)
         try:
             result = self.tools['python'].execute(
-                code,
+                exec_code,
                 timeout=timeout,
                 timeout_callback=self._handle_execution_timeout if timeout else None
             )
@@ -662,6 +784,12 @@ class ToolManager:
 
         if result['error']:
             output_parts.append(f"ERROR:\n{result['error']}")
+
+        # User interrupted the running code — append the notice so the partial
+        # output above is preserved and the AI sees why it stopped.
+        if self._pending_interrupt_notice:
+            output_parts.append(self._pending_interrupt_notice)
+            self._pending_interrupt_notice = None
 
         if not output_parts:
             output_parts.append(
@@ -703,6 +831,17 @@ class ToolManager:
         log.info(f"[ToolManager.run_execute_code] ── Executing code (no AI output) | "
                  f"code_len={len(code)} | preview='{code_preview}' ──")
         try:
+            # Capability gate — real enforcement, not just prompt text
+            if not self.allow_execute_code:
+                log.warning("[ToolManager.run_execute_code] Blocked — allow_execute_code is False for this session")
+                return {
+                    'success': False,
+                    'message': "Code execution is disabled for this session",
+                    'error': None,
+                    'stdout': '',
+                    'stderr': ''
+                }
+
             # Check supervised execution (now properly on main thread)
             log.debug("[ToolManager.run_execute_code] Checking supervised execution...")
             approved, modified_code = self._check_supervised_execution(code, 'execute_code')
@@ -836,8 +975,10 @@ class ToolManager:
     # ─────────────────────────────────────────────────────────────────────────
 
     def _norm_key(self, key):
-        """Normalise a key for fuzzy comparison (strip underscores, lowercase)."""
-        return key.replace('_', '').lower()
+        """Normalise a key for fuzzy comparison — strip underscores, hyphens and
+        spaces, then lowercase. So work_environment / work-environment /
+        'work environment' / WorkEnvironment all resolve to the same canonical key."""
+        return key.replace('_', '').replace('-', '').replace(' ', '').lower()
 
     def _find_canonical_tool_key(self, data):
         """

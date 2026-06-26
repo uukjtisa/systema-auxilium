@@ -261,6 +261,49 @@ You execute Python code using execute_code when you do NOT need to see the outpu
 
     return ""
 
+_FILE_WRITE_GUIDE = r'''
+WRITING FILES WHOSE CONTENT IS CODE OR HAS TRICKY CHARACTERS
+(backslashes, quotes, or triple-quotes — e.g. generating a .py script):
+
+Do NOT embed that content as a Python string literal. Your work_environment code
+is compiled as Python FIRST, so a backslash, a " or a """ inside a literal breaks
+it with "unterminated string literal". Instead put the literal content in a #@FILE
+block and write it with write_file(). Block content is captured VERBATIM and is
+never parsed as Python.
+
+You may define MULTIPLE #@FILE blocks in ONE response and write them all in the
+same work call — each block becomes its own variable. Example writing two files:
+
+```work_environment: [Writing downloader.py and handler.py]
+write_file(r"D:\proj\downloader.py", downloader_src)
+write_file(r"D:\proj\handler.py", handler_src)
+print("wrote 2 files")
+
+#@FILE downloader_src
+import re
+URL_RE = r"https?://(?:www\.)\S+"
+TEMPLATE = """has "quotes", \ backslashes and triple-quotes — all fine"""
+#@ENDFILE
+
+#@FILE handler_src
+def handle(path):
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+#@ENDFILE
+```
+
+#@FILE rules:
+- A line `#@FILE <name>`, then the literal content, then a line `#@ENDFILE`.
+- <name> must be a valid Python identifier; it becomes a string variable you can
+  pass to write_file() or use directly. It can be anything as long as its a proper variable name, like my_source_code.
+- Define as MANY #@FILE blocks as you need in one response — one per file you want
+  to write. Each <name> must be unique. There is no limit.
+- Content is taken EXACTLY as written — no escaping, no quoting, ever.
+- write_file(path, content, mode="w") creates parent folders; pass bytes for binary.
+- Put all #@FILE blocks at the END of the fence, after your executable code.
+'''
+
+
 def _build_fence_syntax_section(
     include_workmode: bool = True,
     include_execute_code: bool = True,
@@ -306,7 +349,7 @@ IMPORTANT RULES:
 - ONLY ONE fence per response — work_environment OR execute_code, never both,
   never two work_environment fences. Each execution is ONE turn. Wait for output.
   set_session_name is exempt — it may appear anywhere alongside ONE code tool.
-
+""" + _FILE_WRITE_GUIDE + """
 
 CRITICAL: DO NOT ROLEPLAY EXECUTION!
 
@@ -348,7 +391,7 @@ IMPORTANT RULES:
 - Place tool fences at the END of your message
 - ALWAYS USE TOOL FENCES, NEVER JSON!!! ← CRITICAL
 - ONLY ONE work_environment fence per response. Each execution is ONE turn. Wait for output.
-
+""" + _FILE_WRITE_GUIDE + """
 
 CRITICAL: DO NOT ROLEPLAY EXECUTION!
 

@@ -94,17 +94,18 @@ class TaskAIEngine:
         re.DOTALL
     )
 
-    def __init__(self, controller):
+    def __init__(self, controller, task: dict | None = None):
         self._controller = controller
+        self._task = task or {}
         self._engine = None
-        self._pending_context_images = []  # image paths queued by agent, flushed each work step
+        self._pending_context_images = []
+        self._images_lock = threading.Lock()
         self._init_engine()
 
     def _init_engine(self):
         """Spin up a private AIEngine instance using current controller settings."""
         try:
             from core.ai_engine import AIEngine
-            s = self._controller.settings
             self._engine = AIEngine(
                 settings_callback=lambda: self._controller.settings,
             )
@@ -112,75 +113,96 @@ class TaskAIEngine:
             self._engine.tool_manager._get_chat = lambda: None
             self._engine.tool_manager._get_android_bridge = lambda: None
             self._engine.tool_manager.supervised_execution = False
+            perms = self._task.get('permissions', {})
+            self._engine.tool_manager.allow_workmode = perms.get('allow_workmode', False)
+            self._engine.tool_manager.allow_execute_code = perms.get('allow_execute_code', False)
+            self._inject_task_namespace()
             log.info("[TaskAIEngine._init_engine] ✓ Dedicated AIEngine instance created")
-            # ── Screen-capture tools for the task agent's Python namespace ────
-            _task_ai_ref = self
-
-            def _task_take_screenshot(save_path=None):
-                """Take a screenshot and queue it to be passed as an image to the
-                AI on the next work step via chat_image(). Returns the saved path."""
-                import uuid
-                try:
-                    from PIL import ImageGrab
-                    if save_path is None:
-                        _temp_dir = _APP_ROOT / "data" / "temp"
-                        _temp_dir.mkdir(parents=True, exist_ok=True)
-                        save_path = str(_temp_dir / f"task_shot_{uuid.uuid4().hex[:12]}.png")
-                    ImageGrab.grab().save(save_path)
-                    _task_ai_ref._pending_context_images.append(save_path)
-                    return save_path
-                except Exception as _e1:
-                    try:
-                        import pyautogui, uuid
-                        if save_path is None:
-                            _temp_dir = _APP_ROOT / "data" / "temp"
-                            _temp_dir.mkdir(parents=True, exist_ok=True)
-                            save_path = str(_temp_dir / f"task_shot_{uuid.uuid4().hex[:12]}.png")
-                        pyautogui.screenshot(save_path)
-                        _task_ai_ref._pending_context_images.append(save_path)
-                        return save_path
-                    except Exception as _e2:
-                        return f"[take_screenshot ERROR] {_e2}"
-
-            def _attach_image_to_context(path):
-                """Queue an existing image file to be passed to chat_image() on the next work step."""
-                import os
-                if not os.path.isfile(path):
-                    return f"[attach_image_to_context] File not found: {path}"
-                _task_ai_ref._pending_context_images.append(path)
-                return f"[attach_image_to_context] Queued: {path}"
-
-            self._engine.tool_manager.tools['python'].namespace['take_screenshot'] = _task_take_screenshot
-            self._engine.tool_manager.tools['python'].namespace['attach_image_to_context'] = _attach_image_to_context
-            # ─────────────────────────────────────────────────────────────────
-
         except Exception as e:
             log.error(f"[TaskAIEngine._init_engine] ✗ {type(e).__name__}: {e}")
             self._engine = None
 
+    def _inject_task_namespace(self):
+        """(Re-)inject everything the task's Python tool needs. Idempotent and
+        cheap — safe to call every ping. Covers explicit reinit after a
+        run_full_ping timeout AND a silent PythonInterpreter.reset() from a
+        killed code-execution timeout."""
+        ns = self._engine.tool_manager.tools['python'].namespace
+
+        # Shared resources, delegated back to the main controller
+        ns['controller'] = self._controller
+        ns['notify'] = getattr(self._controller, 'notify', None)
+        ns['memorize'] = self._controller.memorize
+        ns['search_memory'] = self._controller.search_memory
+        ns['view_all_memory'] = self._controller.view_all_memory
+        ns['forget_memory'] = self._controller.forget_memory
+        ns['delete_memory'] = self._controller.delete_memory
+        ns['app_root'] = str(_APP_ROOT)
+        ns['skills_path'] = str(_APP_ROOT / "skills")
+
+        # Task-specific overrides — queue into _pending_context_images for
+        # run_full_ping's own chat_image() pipeline, not the main session's
+        # bridge_attach_image_signal flow.
+        _task_ai_ref = self
+
+        def _task_take_screenshot(save_path=None):
+            import uuid
+            try:
+                from PIL import ImageGrab
+                if save_path is None:
+                    _temp_dir = _APP_ROOT / "data" / "temp"
+                    _temp_dir.mkdir(parents=True, exist_ok=True)
+                    save_path = str(_temp_dir / f"task_shot_{uuid.uuid4().hex[:12]}.png")
+                ImageGrab.grab().save(save_path)
+                _task_ai_ref._queue_image(save_path)
+                return save_path
+            except Exception:
+                try:
+                    import pyautogui, uuid
+                    if save_path is None:
+                        _temp_dir = _APP_ROOT / "data" / "temp"
+                        _temp_dir.mkdir(parents=True, exist_ok=True)
+                        save_path = str(_temp_dir / f"task_shot_{uuid.uuid4().hex[:12]}.png")
+                    pyautogui.screenshot(save_path)
+                    _task_ai_ref._queue_image(save_path)
+                    return save_path
+                except Exception as _e2:
+                    return f"[take_screenshot ERROR] {_e2}"
+
+        def _attach_image_to_context(path):
+            import os
+            if not os.path.isfile(path):
+                return f"[attach_image_to_context] File not found: {path}"
+            _task_ai_ref._queue_image(path)
+            return f"[attach_image_to_context] Queued: {path}"
+
+        ns['take_screenshot'] = _task_take_screenshot
+        ns['attach_image_to_context'] = _attach_image_to_context
+
+        # Conditionally expose attach_image_to_chat for tasks with the permission
+        if self._task.get('permissions', {}).get('inject_image_tools', False):
+            ns['attach_image_to_chat'] = self._controller._agent_attach_image
+
+    def _queue_image(self, path: str):
+        with self._images_lock:
+            self._pending_context_images.append(path)
+
+    def _drain_images(self) -> list:
+        with self._images_lock:
+            pending = list(self._pending_context_images)
+            self._pending_context_images.clear()
+        return pending
+
     def _sync_settings(self):
-        """Copy all current provider/model settings from controller into our engine."""
+        """Copy only what AIEngine actually reads. If you add a setting AIEngine
+        dispatches on, add it here too, and nowhere else."""
         if self._engine is None:
             self._init_engine()
         if self._engine is None:
             return
         s = self._controller.settings
-        self._engine.api_key                = s.get('api_key', '')
-        self._engine.gemini_api_key         = s.get('gemini_api_key', '')
-        self._engine.ai_provider            = s.get('ai_provider', 'anthropic')
-        self._engine.anthropic_model        = s.get('anthropic_model', 'claude-sonnet-4-5-20250929')
-        self._engine.anthropic_temperature  = float(s.get('anthropic_temperature', 1.0))
-        self._engine.anthropic_max_tokens   = int(s.get('anthropic_max_tokens', 8192))
-        self._engine.anthropic_auto_tokens  = bool(s.get('anthropic_auto_tokens', True))
-        self._engine.gemini_model           = s.get('gemini_model', 'gemini-2.5-flash')
-        self._engine.gemini_temperature     = float(s.get('gemini_temperature', 1.0))
-        self._engine.gemini_max_tokens      = int(s.get('gemini_max_tokens', 8192))
-        self._engine.gemini_auto_tokens     = bool(s.get('gemini_auto_tokens', True))
-        self._engine.gemini_top_p           = s.get('gemini_top_p', None)
-        self._engine.gemini_top_k           = s.get('gemini_top_k', None)
-        self._engine.puter_model            = s.get('puter_model', 'gpt-4o-mini')
-        self._engine.puter_timeout          = int(s.get('puter_timeout', 30))
-        self._engine.custom_script_path     = s.get('custom_script_path', '')
+        self._engine.custom_script_path = s.get('custom_script_path', '')
+        self._engine.ai_provider = s.get('ai_provider', 'custom_script')
 
     def call(self, system_prompt: str, history: list) -> str | None:
         """Call the AI using the same provider the user has configured (raw, no tool processing)."""
@@ -203,6 +225,11 @@ class TaskAIEngine:
         if self._engine is None:
             log.error("[TaskAIEngine.run_full_ping] No engine available")
             return None, [], history
+
+        # Re-inject namespace (covers silent PythonInterpreter.reset() from a
+        # killed timeout, and any other path that wiped the namespace since
+        # the last ping or _init_engine call).
+        self._inject_task_namespace()
 
         # Inject task system prompt (includes full user system prompt + task context)
         self._engine.system_prompt_hijacked = True
@@ -233,14 +260,13 @@ class TaskAIEngine:
         iteration = 0
         while result.get('thinking') and iteration < max_iterations:
             iteration += 1
+            import time
+            if iteration > 1:
+                time.sleep(1.5)  # courtesy delay between provider calls
             try:
-                if self._pending_context_images:
-                    # Agent queued images via take_screenshot() or attach_image_to_context().
-                    # Do this work step manually so we can pass them into chat_image().
-                    # _call_provider(images=...) → _http_custom_script → chat_image(sys, convo, images)
+                pending = self._drain_images()
+                if pending:
                     import os as _os
-                    pending = list(self._pending_context_images)
-                    self._pending_context_images.clear()
                     work_prompt = self._engine.tool_manager.get_work_mode_prompt()
                     self._engine.conversation_history.append({'role': 'system', 'content': work_prompt})
                     ai_text = self._engine._call_provider(images=pending)
@@ -267,13 +293,16 @@ class TaskAIEngine:
                 log.info(f"[TaskAIEngine.run_full_ping] Work mode exited after {iteration} iteration(s)")
                 break
 
-        # Cleanup any leftover queued images that never got flushed (e.g. agent
-        # queued on the last step then exited before another iteration ran)
-        import os as _os
-        for _p in self._pending_context_images:
-            try: _os.remove(_p)
+        # Cleanup: if loop ended because of max_iterations (not a clean exit),
+        # reset the dangling in_work_mode flag so next ping starts fresh.
+        if iteration >= max_iterations and self._engine.tool_manager.in_work_mode:
+            log.warning(f"[TaskAIEngine.run_full_ping] Hit max_iterations={max_iterations} without exiting work mode")
+            self._engine.tool_manager.in_work_mode = False
+
+        # Cleanup any leftover queued images that never got flushed
+        for _p in self._drain_images():
+            try: import os as _os; _os.remove(_p)
             except Exception: pass
-        self._pending_context_images.clear()
 
         final_text = '\n'.join(r for r in all_responses if r)
         return final_text or None, send_main_calls, list(self._engine.conversation_history)
@@ -343,11 +372,7 @@ class TaskThread(threading.Thread):
         self._send_main = send_main_callback   # fn(str) → appends to main session
         self._set_inactive = set_inactive_callback   # fn(task_id) → marks task inactive after one-shot
         self._stop_event = threading.Event()
-        self._ai = TaskAIEngine(controller)
-        # Inject shared references into task AI's Python interpreter namespace
-        _py_ns = self._ai._engine.tool_manager.tools['python'].namespace
-        _py_ns['controller'] = controller
-        _py_ns['notify'] = controller.notify if hasattr(controller, 'notify') else None
+        self._ai = TaskAIEngine(controller, task)
         self._sessions_root = _APP_ROOT / "data" / "task-sessions"
         self._sessions_root.mkdir(parents=True, exist_ok=True)
         log.info(f"[TaskThread.__init__] Ready | task='{task['name']}' id={task['id'][:8]}")

@@ -238,7 +238,7 @@ class WorkmodeInterruptDialog(QDialog):
         icon_lbl = QLabel("\U0001F6D1")
         icon_lbl.setStyleSheet(f"font-size: 24px; background: transparent;")
         title_row.addWidget(icon_lbl)
-        title = QLabel("Work Mode Interrupted")
+        title = QLabel("Stop ongoing work?")
         title.setStyleSheet(f"font-size: 16px; font-weight: 600; color: {_TEXT}; background: transparent;")
         title_row.addWidget(title)
         title_row.addStretch()
@@ -246,8 +246,7 @@ class WorkmodeInterruptDialog(QDialog):
 
         # Description
         desc = QLabel(
-            "User interrupted workmode. You must exit immediately "
-            "and summarize everything."
+            "(Optional) Write a reason for the Agent to exit."
         )
         desc.setWordWrap(True)
         desc.setStyleSheet(

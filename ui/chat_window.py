@@ -1186,11 +1186,37 @@ class CodeBlockWidget(QWidget):
                                       self.scroll_area.height())
             event.accept()
 
+    def _effective_max_width(self) -> int:
+        """Upper bound for manual resize. Never wider than the visible bubble —
+        otherwise the block (and its resize grip) gets dragged off-screen and
+        becomes impossible to grab back. Falls back to self.max_width."""
+        avail = self.max_width
+        chat = self._find_chat_window()
+        if chat is not None and hasattr(chat, '_bubble_max_width'):
+            try:
+                # bubble inner width minus content_wrapper margins + a little slack
+                avail = min(avail, chat._bubble_max_width() - 28)
+            except Exception:
+                pass
+        return max(self.min_width, int(avail))
+
+    def clamp_width(self):
+        """Re-clamp a manually-resized block so it never exceeds the visible
+        bubble — e.g. after the window is shrunk. No-op if already within range."""
+        try:
+            if self.main_container.width() > 0:
+                max_w = self._effective_max_width()
+                if self.main_container.width() > max_w:
+                    self.main_container.setFixedWidth(max_w)
+        except Exception:
+            pass
+
     def _corner_move(self, event):
         if self.is_resizing:
             dx    = event.globalPosition().x() - self.resize_start_pos.x()
             dy    = event.globalPosition().y() - self.resize_start_pos.y()
-            new_w = max(self.min_width,  min(self.resize_start_size[0] + dx, self.max_width))
+            max_w = self._effective_max_width()
+            new_w = max(self.min_width,  min(self.resize_start_size[0] + dx, max_w))
             new_h = max(self.min_height, min(self.resize_start_size[1] + dy, self.max_height))
             # Fix the outer container width so header + scroll + bar all follow
             self.main_container.setFixedWidth(int(new_w))
@@ -1253,6 +1279,191 @@ class CodeBlockWidget(QWidget):
                 background-color: {self._CB_ACCENT3};
             }}
         """)
+
+
+class TableBlockWidget(QWidget):
+    """Renders a markdown pipe-table as horizontally-scrollable HTML so wide
+    tables are never truncated by the message-bubble width cap. Tall tables
+    scroll vertically; wide tables scroll horizontally — content is never cut."""
+
+    _MAX_HEIGHT = 460
+
+    def __init__(self, table_md, theme, render_fn, parent=None):
+        super().__init__(parent)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 6, 0, 0)
+        root.setSpacing(0)
+
+        base     = theme.get('base', '#0D1117')
+        elevated = theme.get('elevated', '#21262D')
+        border   = theme.get('border', '#30363D')
+        accent   = theme.get('accent', '#58A6FF')
+        text_col = '#E6EDF3'
+
+        self.is_resizing = False
+        self.min_width, self.max_width = 300, 1200
+        self.min_height, self.max_height = 44, 800
+
+        frame = QFrame()
+        frame.setStyleSheet(
+            f"QFrame {{ background: {base}; border: 1px solid {border}; border-radius: 8px; }}")
+        self._frame = frame
+        fl = QVBoxLayout(frame)
+        fl.setContentsMargins(0, 0, 0, 0)
+        fl.setSpacing(0)
+
+        # markdown2 → <table>…; add visible borders (Qt rich text honours attrs)
+        html = render_fn(table_md)
+        html = html.replace('<table>', '<table border="1" cellspacing="0" cellpadding="6">')
+        styled = (
+            "<style>"
+            f"table {{ border-collapse: collapse; color: {text_col}; }}"
+            f"th {{ background-color: {elevated}; color: {accent}; }}"
+            f"th, td {{ border: 1px solid {border}; padding: 4px 10px; }}"
+            "</style>" + html
+        )
+
+        self.view = QTextEdit()
+        self.view.setReadOnly(True)
+        self.view.setHtml(styled)
+        self.view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)   # wide → horizontal scroll
+        self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.view.setFrameShape(QTextEdit.Shape.NoFrame)
+        self.view.setStyleSheet(f"""
+            QTextEdit {{ background: transparent; border: none; color: {text_col}; }}
+            QScrollBar:horizontal {{ background: transparent; height: 7px; border: none; }}
+            QScrollBar::handle:horizontal {{ background: {border}; border-radius: 3px; min-width: 24px; }}
+            QScrollBar:vertical {{ background: transparent; width: 7px; border: none; }}
+            QScrollBar::handle:vertical {{ background: {border}; border-radius: 3px; min-height: 24px; }}
+            QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; border: none; background: none; }}
+            QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+        """)
+
+        # Size height to content (capped); overflow scrolls instead of clipping.
+        doc = self.view.document()
+        doc.setDocumentMargin(8)
+        content_h = int(doc.size().height()) + 6
+        self.view.setFixedHeight(min(max(content_h, 44), self._MAX_HEIGHT))
+
+        fl.addWidget(self.view)
+
+        # ── Footer: wrap toggle (left) + resize grip (right) ──────────────────
+        # Both styled from the table's own theme colours (accent / border).
+        grip_row = QWidget()
+        grip_row.setStyleSheet("background: transparent;")
+        grip_row.setFixedHeight(28)
+        grl = QHBoxLayout(grip_row)
+        grl.setContentsMargins(8, 0, 8, 4)
+        grl.setSpacing(6)
+
+        _chip_style = f"""
+            QPushButton {{
+                background: {elevated};
+                color: {accent};
+                font-size: 10px; font-weight: 600;
+                padding: 2px 9px;
+                border: 1px solid {border};
+                border-radius: 4px;
+            }}
+            QPushButton:hover {{ border-color: {accent}; }}
+            QPushButton:checked {{ border-color: {accent}; background: {base}; }}
+        """
+        self.wrap_btn = QPushButton("↵ Wrap")
+        self.wrap_btn.setCheckable(True)
+        self.wrap_btn.setChecked(False)
+        self.wrap_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.wrap_btn.setStyleSheet(_chip_style)
+        self.wrap_btn.clicked.connect(self._toggle_wrap)
+        grl.addWidget(self.wrap_btn)
+
+        grl.addStretch()
+
+        self.corner_grip = QLabel("⤡  Resize")
+        self.corner_grip.setStyleSheet(f"""
+            QLabel {{
+                background: {elevated};
+                color: {accent};
+                font-size: 10px; font-weight: 700;
+                padding: 2px 8px;
+                border: 1px solid {border};
+                border-radius: 4px;
+            }}
+            QLabel:hover {{ border-color: {accent}; }}
+        """)
+        self.corner_grip.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        self.corner_grip.mousePressEvent   = self._corner_press
+        self.corner_grip.mouseMoveEvent    = self._corner_move
+        self.corner_grip.mouseReleaseEvent = self._corner_release
+        grl.addWidget(self.corner_grip)
+        fl.addWidget(grip_row)
+
+        root.addWidget(frame)
+
+    def _toggle_wrap(self):
+        """Toggle between horizontal-scroll (NoWrap, default) and wrap-to-fit —
+        same behaviour as the code-block wrap button."""
+        if self.wrap_btn.isChecked():
+            self.view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+            self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.wrap_btn.setText("↵ Wrap ✓")
+        else:
+            self.view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+            self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            self.wrap_btn.setText("↵ Wrap")
+
+    # ── Corner resize (width + height), clamped to the visible bubble ─────────
+
+    def _find_chat_window(self):
+        p = self.parent()
+        while p:
+            if p.__class__.__name__ == 'ChatWindow':
+                return p
+            p = p.parent()
+        return None
+
+    def _effective_max_width(self) -> int:
+        """Never wider than the visible bubble, so the grip can't go off-screen."""
+        avail = self.max_width
+        chat = self._find_chat_window()
+        if chat is not None and hasattr(chat, '_bubble_max_width'):
+            try:
+                avail = min(avail, chat._bubble_max_width() - 28)
+            except Exception:
+                pass
+        return max(self.min_width, int(avail))
+
+    def clamp_width(self):
+        """Re-clamp a manually-resized table after the window shrinks."""
+        try:
+            if self._frame.width() > 0:
+                max_w = self._effective_max_width()
+                if self._frame.width() > max_w:
+                    self._frame.setFixedWidth(max_w)
+        except Exception:
+            pass
+
+    def _corner_press(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.is_resizing = True
+            self.resize_start_pos  = event.globalPosition()
+            self.resize_start_size = (self._frame.width(), self.view.height())
+            event.accept()
+
+    def _corner_move(self, event):
+        if self.is_resizing:
+            dx = event.globalPosition().x() - self.resize_start_pos.x()
+            dy = event.globalPosition().y() - self.resize_start_pos.y()
+            max_w = self._effective_max_width()
+            new_w = max(self.min_width,  min(self.resize_start_size[0] + dx, max_w))
+            new_h = max(self.min_height, min(self.resize_start_size[1] + dy, self.max_height))
+            self._frame.setFixedWidth(int(new_w))
+            self.view.setFixedHeight(int(new_h))
+            event.accept()
+
+    def _corner_release(self, event):
+        self.is_resizing = False
+        event.accept()
 
 
 class ChatWindow(BaseWindow):
@@ -2559,8 +2770,51 @@ class ChatWindow(BaseWindow):
         self._sidebar_resize_active = False
         event.accept()
 
+    # ── Responsive message bubbles ────────────────────────────────────────────
+
+    def _bubble_max_width(self) -> int:
+        """Max width for a message bubble — responsive to the chat viewport but
+        capped so bubbles never span an ultra-wide window (readability). Grows
+        and shrinks with the window; scales the cap with the chat zoom level."""
+        try:
+            vw = self.chat_scroll_area.viewport().width()
+        except Exception:
+            vw = 0
+        if vw <= 0:
+            vw = 800
+        zoom = getattr(self, 'chat_zoom', 1.0) or 1.0
+        cap = int(900 * zoom)             # readable upper bound (capped)
+        responsive = int(vw * 0.82)       # ~82% of the available width
+        return max(320, min(responsive, cap))
+
+    def _reflow_bubbles(self):
+        """Re-apply the responsive max width to every existing bubble. Cheap —
+        setMaximumWidth only triggers a relayout when the value actually changes."""
+        if not hasattr(self, 'message_widgets'):
+            return
+        maxw = self._bubble_max_width()
+        for md in self.message_widgets:
+            b = md.get('main_container_widget')
+            if b is not None:
+                try:
+                    b.setMaximumWidth(maxw)
+                except RuntimeError:
+                    pass  # widget was deleted
+            # Re-clamp any manually-resized code blocks so they can't stay wider
+            # than the (possibly shrunk) bubble and push their grip off-screen.
+            w = md.get('widget')
+            if w is not None:
+                try:
+                    for cb in w.findChildren(CodeBlockWidget):
+                        cb.clamp_width()
+                    for tb in w.findChildren(TableBlockWidget):
+                        tb.clamp_width()
+                except RuntimeError:
+                    pass
+
     def resizeEvent(self, event):
-        """Keep sidebar height in sync with container on window resize."""
+        """Keep sidebar height in sync with container on window resize, and
+        reflow message bubbles so they track the new width."""
         super().resizeEvent(event)
         # sidebar height tracks container
         if self.sidebar_visible and self.sidebar.isVisible():
@@ -2568,6 +2822,7 @@ class ChatWindow(BaseWindow):
             self.sidebar.setGeometry(0, 0, self._sidebar_w, container_h)
         if hasattr(self, '_session_list_overlay') and hasattr(self, '_session_list_body'):
             self._session_list_overlay.setGeometry(self._session_list_body.rect())
+        self._reflow_bubbles()
 
     def _animate_sidebar(self, show: bool):
         """Slide the sidebar in (show=True) or out (show=False)."""
@@ -3498,6 +3753,66 @@ class ChatWindow(BaseWindow):
 
         return parts
 
+    def _is_table_separator(self, line):
+        """True if `line` is a markdown table separator row (e.g. |---|:--:|)."""
+        import re
+        s = line.strip()
+        if '-' not in s or '|' not in s:
+            return False
+        cells = [c.strip() for c in s.strip('|').split('|')]
+        cells = [c for c in cells if c != '']
+        if not cells:
+            return False
+        return all(re.fullmatch(r':?-+:?', c) for c in cells)
+
+    def _split_text_and_tables(self, md):
+        """Split a markdown chunk into ordered ('text', md) / ('table', md) parts,
+        pulling out pipe-tables so each can render in its own scrollable widget."""
+        lines = md.split('\n')
+        out, buf = [], []
+        n = len(lines)
+
+        def flush():
+            if buf:
+                chunk = '\n'.join(buf)
+                if chunk.strip():
+                    out.append(('text', chunk))
+                buf.clear()
+
+        i = 0
+        while i < n:
+            # A table = a row containing '|' immediately followed by a separator row.
+            if '|' in lines[i] and i + 1 < n and self._is_table_separator(lines[i + 1]):
+                start = i
+                j = i + 2
+                while j < n and lines[j].strip() and '|' in lines[j]:
+                    j += 1
+                flush()
+                out.append(('table', '\n'.join(lines[start:j])))
+                i = j
+            else:
+                buf.append(lines[i])
+                i += 1
+        flush()
+        return out
+
+    def _split_message_parts(self, text):
+        """Split a message into ordered ('text', md) / ('code', lang, code) /
+        ('table', md) parts. Code and tables are pulled out of the prose so each
+        renders in its own scrollable widget. Always returns a list. Tables
+        inside code fences are NOT extracted (code is split out first)."""
+        import re
+        parts = []
+        last_end = 0
+        for match in re.finditer(r'```(\w+)?\n(.*?)```', text, re.DOTALL):
+            if match.start() > last_end:
+                parts.extend(self._split_text_and_tables(text[last_end:match.start()]))
+            parts.append(('code', match.group(1) or 'text', match.group(2)))
+            last_end = match.end()
+        if last_end < len(text):
+            parts.extend(self._split_text_and_tables(text[last_end:]))
+        return parts
+
     def clear_chat(self):
         """Clear chat history WITH notification"""
         self._clear_chat_internal()
@@ -4229,7 +4544,7 @@ class ChatWindow(BaseWindow):
         message_layout.addStretch()
 
         main_container_widget = QWidget()
-        main_container_widget.setMaximumWidth(int(600 * self.chat_zoom))
+        main_container_widget.setMaximumWidth(self._bubble_max_width())
         main_container_widget.setStyleSheet("background: transparent;")
         main_container = QVBoxLayout(main_container_widget)
         main_container.setSpacing(4)
@@ -4402,6 +4717,7 @@ class ChatWindow(BaseWindow):
         message_layout.addWidget(avatar, alignment=Qt.AlignmentFlag.AlignTop)
 
         main_container_widget = QWidget()
+        main_container_widget.setMaximumWidth(self._bubble_max_width())
         main_container_widget.setStyleSheet("background: transparent;")
         main_container = QVBoxLayout(main_container_widget)
         main_container.setSpacing(4)
@@ -4426,7 +4742,7 @@ class ChatWindow(BaseWindow):
         content_wrapper_layout.setContentsMargins(10, 10, 10, 10)
         content_wrapper_layout.setSpacing(8)
 
-        parts = self.render_markdown_with_code_blocks(display_message)
+        parts = self._split_message_parts(display_message)
         first_text_label = None
         all_text_labels = []
         fsize = self._get_msg_font_size()
@@ -4459,6 +4775,9 @@ class ChatWindow(BaseWindow):
                 elif part[0] == 'code':
                     code_widget = CodeBlockWidget(part[1], part[2])
                     content_wrapper_layout.addWidget(code_widget)
+                elif part[0] == 'table':
+                    table_widget = TableBlockWidget(part[1], self._t(), self.render_markdown)
+                    content_wrapper_layout.addWidget(table_widget)
         else:
             text_label = QLabel()
             text_label.setTextFormat(Qt.TextFormat.RichText)
@@ -6227,6 +6546,110 @@ class ChatWindow(BaseWindow):
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, outer)
         self.scroll_to_bottom()
 
+    def start_live_output(self, code: str, annotation: str = None):
+        """Show a transient, live-updating console while work-mode code runs.
+
+        Streams stdout/stderr as the code executes. Removed by end_live_output()
+        when execution finishes — the permanent collapsed note is added separately
+        by the normal completion flow, so this widget is purely a live preview and
+        is never persisted to history."""
+        from PyQt6.QtWidgets import QFrame, QHBoxLayout, QVBoxLayout, QLabel, QTextEdit
+        from PyQt6.QtGui import QFont
+
+        # Only one live console at a time — replace any stale one.
+        self.end_live_output()
+
+        _tc = self._t()
+        if annotation is None:
+            try:
+                annotation = self.controller.ai.tool_manager.last_work_annotation or ""
+            except Exception:
+                annotation = ""
+
+        wrapper = QFrame()
+        wrapper.setStyleSheet("QFrame { background-color: transparent; padding: 4px 16px; }")
+        lay = QVBoxLayout(wrapper)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+
+        header = QFrame()
+        header.setStyleSheet(f"""
+            QFrame {{
+                background-color: {_tc['elevated']};
+                border: 1px solid {_tc['accent']};
+                border-radius: 8px;
+            }}
+        """)
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(12, 6, 10, 6)
+        hl.setSpacing(8)
+        label_txt = annotation if annotation else "Running code"
+        first_line = (code.strip().splitlines()[0] if code.strip() else "no code")
+        preview = first_line[:60] + ("…" if len(first_line) > 60 else "")
+        title = QLabel(
+            f"<span style='color:{_tc['accent']};font-size:11px;'>▶ {label_txt}</span>"
+            f"&nbsp;&nbsp;<span style='color:#5F6368;'>·</span>&nbsp;&nbsp;"
+            f"<span style='font-family:monospace;font-size:10px;color:#8B949E;'>{preview}</span>")
+        title.setTextFormat(Qt.TextFormat.RichText)
+        title.setStyleSheet("background: transparent; border: none;")
+        hl.addWidget(title, stretch=1)
+        lay.addWidget(header)
+
+        mono = QFont('Consolas', 9)
+        if not mono.exactMatch():
+            mono = QFont('Courier New', 9)
+        out = QTextEdit()
+        out.setReadOnly(True)
+        out.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        out.setFont(mono)
+        out.setStyleSheet(
+            f"QTextEdit {{ background: {_tc['deep']}; color: #8FBC8F; "
+            f"border: 1px solid {_tc['border']}; border-radius: 6px; padding: 6px 10px; }}")
+        out.setFrameShape(QTextEdit.Shape.NoFrame)
+        out.setPlaceholderText("Waiting for output…")
+        out.setFixedHeight(120)
+        lay.addWidget(out)
+
+        # Insert before the thinking bubble (or before input if none)
+        if self._thinking_bubble_widget is not None:
+            idx = self.chat_layout.indexOf(self._thinking_bubble_widget)
+            self.chat_layout.insertWidget(idx, wrapper)
+        else:
+            self.chat_layout.insertWidget(self.chat_layout.count() - 1, wrapper)
+
+        self._live_exec_widget = wrapper
+        self._live_exec_output = out
+        self._live_exec_last = None
+        self.scroll_to_widget(wrapper)
+
+    def update_live_output(self, text: str):
+        """Push the latest streamed output into the live console (no-op if unchanged)."""
+        out = getattr(self, '_live_exec_output', None)
+        if out is None:
+            return
+        if text == getattr(self, '_live_exec_last', None):
+            return
+        self._live_exec_last = text
+        # Preserve scroll-at-bottom behavior so the newest output stays visible
+        sb = out.verticalScrollBar()
+        at_bottom = sb.value() >= sb.maximum() - 4
+        out.setPlainText(text)
+        if at_bottom:
+            sb.setValue(sb.maximum())
+
+    def end_live_output(self):
+        """Remove the transient live console (the permanent note is added separately)."""
+        w = getattr(self, '_live_exec_widget', None)
+        if w is not None:
+            try:
+                self.chat_layout.removeWidget(w)
+                w.deleteLater()
+            except Exception:
+                pass
+        self._live_exec_widget = None
+        self._live_exec_output = None
+        self._live_exec_last = None
+
     def add_code_execution_note(self, code: str, output: str, save_to_history: bool = True, annotation: str = None):
         """Compact inline code-execution note — styled like a system message.
         Saves itself to conversation_history as a ui_event so it persists across reloads."""
@@ -6589,8 +7012,11 @@ class ChatWindow(BaseWindow):
         # If in work mode, only show dialog when code is actively executing
         if self.controller.ai.tool_manager.in_work_mode or self.controller.ai.tool_manager.work_code_running:
             if not self.controller.ai.tool_manager.work_code_running:
-                # Button is disabled / no active code — fall through to normal cancel
-                pass
+                # In work mode but no code is actively running — this is the
+                # "thinking" gap (AI analyzing the last output) or we're awaiting
+                # the model's next step. Cleanly cancel the whole work-mode
+                # operation (interrupt_work_mode handles UI teardown).
+                self.controller.interrupt_work_mode()
             else:
                 from ui.timeout_dialog import WorkmodeInterruptDialog
                 from PyQt6.QtWidgets import QDialog
@@ -6616,32 +7042,30 @@ class ChatWindow(BaseWindow):
                 if accepted:
                     reason = dialog.reason_text
 
-                    error_msg = "ERROR:\nUser interrupted workmode. You must exit immediately."
+                    notice = "ERROR:\nUser interrupted workmode. You must exit immediately."
                     if reason:
-                        error_msg += f"\nReason: {reason}"
+                        notice += f"\nReason: {reason}"
                     else:
-                        error_msg += "\nNo specified reason. Just exit."
+                        notice += "\nNo specified reason. Just exit."
 
-                    self.controller.ai.tool_manager.last_work_output = error_msg
-
-                    # Terminate any running worker
-                    if (hasattr(self.controller, 'current_worker')
-                            and self.controller.current_worker
-                            and self.controller.current_worker.isRunning()):
-                        self.controller.current_worker.terminate()
-                        self.controller.current_worker.wait(1000)
-                        self.controller.is_processing = False
-
-                    self.controller.work_mode_timer.stop()
-
-                    # Show execution note for the interrupted code (like timeout does)
-                    exec_code = self.controller.ai.tool_manager.last_work_code
-                    if exec_code:
-                        self.add_code_execution_note(exec_code, error_msg)
-
-                    QTimer.singleShot(100, self.controller.auto_continue_work_mode)
-
-                    self.interrupt_btn.hide()
+                    # Interrupt the *running code* (not the worker): partial output
+                    # is preserved and the notice is appended to it by
+                    # run_work_environment, so both you and the AI can see where it
+                    # stopped. The worker then finishes its cycle naturally — the
+                    # AI analyzes the interrupted output and exits. No orphaned
+                    # thread, and work_code_active(False) fires to clear the live
+                    # console.
+                    delivered = self.controller.ai.tool_manager.interrupt_running_code(notice)
+                    if not delivered:
+                        # Code already finished between accept and here — fall back
+                        # to a clean work-mode cancel so we never get stuck.
+                        self.controller.interrupt_work_mode()
+                    else:
+                        # Keep the stop button — it now cancels the AI's exit
+                        # response. A second click hard-cancels the whole op.
+                        self.interrupt_btn.show()
+                        self.interrupt_btn.setEnabled(True)
+                        self.interrupt_btn.setToolTip("Cancel AI response")
                 # else: dialog auto-dismissed or cancelled → workmode continues
             return
 
@@ -6686,10 +7110,9 @@ class ChatWindow(BaseWindow):
         self.set_input_enabled(False)
         self.send_btn.hide()
         self.interrupt_btn.show()
-        self.interrupt_btn.setEnabled(
-            self.controller.ai.tool_manager.work_code_running
-            if self.controller.ai.tool_manager.in_work_mode else True
-        )
+        # Always cancellable while shown — including the work-mode "thinking" gap
+        # (code finished, AI analyzing) and while awaiting the model's next step.
+        self.interrupt_btn.setEnabled(True)
         self.interrupt_btn.setToolTip(
             "Interrupt work" if self.controller.ai.tool_manager.in_work_mode
             else "Cancel AI response"
@@ -7085,14 +7508,8 @@ class ChatWindow(BaseWindow):
                     lbl.setStyleSheet(style)
                 except RuntimeError:
                     pass
-            # Also update main_container_widget max width for user bubbles
-            if role == 'user':
-                mcw = md.get('main_container_widget')
-                if mcw:
-                    try:
-                        mcw.setMaximumWidth(int(600 * self.chat_zoom))
-                    except RuntimeError:
-                        pass
+        # Re-apply responsive bubble widths (the cap scales with zoom)
+        self._reflow_bubbles()
 
     # ═══════════════════════════════════════════════════════════════════════════
     # GLASS BUBBLE HELPER

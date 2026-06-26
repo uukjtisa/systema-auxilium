@@ -222,6 +222,12 @@ class AssistantController(QObject):
         self.work_mode_timer.setInterval(1000)
         log.debug("[AssistantController.__init__] work_mode_timer created | interval=1000ms")
 
+        # Live work-mode output streaming — polls the interpreter buffer while code runs
+        self._live_output_timer = QTimer()
+        self._live_output_timer.timeout.connect(self._poll_live_output)
+        self._live_output_timer.setInterval(120)
+        log.debug("[AssistantController.__init__] live_output_timer created | interval=120ms")
+
         # Track processing
         self.is_processing = False
         self._request_generation = 0  # incremented on each new request and on cancel
@@ -1329,23 +1335,44 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         log.debug("[AssistantController.auto_continue_work_mode] Worker started")
 
     def interrupt_work_mode(self):
-        """Interrupt and cancel tool mode"""
+        """Interrupt and cancel tool mode.
+
+        Handles cancellation during the 'thinking' gap (code finished, AI
+        analyzing) or while awaiting the model's next step: terminates any
+        in-flight continuation worker, invalidates its pending response,
+        stops the timer, and clears all work-mode state. The original user
+        prompt is preserved in history (unlike interrupt_request())."""
         log.info(f"[AssistantController.interrupt_work_mode] in_work_mode="
                  f"{self.ai.tool_manager.in_work_mode}")
         if self.ai.tool_manager.in_work_mode:
             log.warning("[AssistantController.interrupt_work_mode] Interrupting tool mode by user")
             self.log("Tool mode interrupted by user")
             self.work_mode_timer.stop()
+
+            # Terminate the in-flight continuation worker if it's generating the
+            # next step ("awaiting AI model response"), then discard its result.
+            if getattr(self, 'current_worker', None) and self.current_worker.isRunning():
+                log.warning("[AssistantController.interrupt_work_mode] Terminating in-flight continuation worker")
+                self.current_worker.terminate()
+                self.current_worker.wait(1000)
+            self._request_generation += 1  # invalidate any late worker signal
+
             self.ai.tool_manager.in_work_mode = False
+            self.ai.tool_manager.work_code_running = False
             self.ai.tool_manager.last_work_output = None
             self.is_processing = False
 
             # Notify UI
             if self._chat:
+                try:
+                    self._chat.set_session_list_locked(False)
+                except Exception:
+                    pass
                 self._chat.add_system_message("⚡️ **Tool operation canceled**")
                 self._chat.hide_thinking()
                 self._chat.set_input_enabled(True)
 
+            self._auto_save_session()
             return True
         log.debug("[AssistantController.interrupt_work_mode] Not in work mode — nothing to interrupt")
         return False
@@ -1405,11 +1432,54 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         """Slot connected to ApprovalSignal.work_code_active — thread-safe delegation via QTimer.singleShot."""
         from PyQt6.QtCore import QTimer
         QTimer.singleShot(0, lambda: self._update_interrupt_btn(active))
+        QTimer.singleShot(0, lambda: self._update_live_output_stream(active))
+
+    def _update_live_output_stream(self, active):
+        """Start/stop the live work-mode output console (runs on the GUI thread).
+
+        On start: opens a transient streaming console and begins polling the
+        interpreter buffer. On stop: does a final flush and tears the console
+        down — the permanent collapsed note is added by the normal flow."""
+        if not self._chat:
+            return
+        if active:
+            code = self.ai.tool_manager.last_work_code or ""
+            try:
+                self._chat.start_live_output(code)
+            except Exception as e:
+                log.debug(f"[AssistantController._update_live_output_stream] start failed: {e}")
+            self._live_output_timer.start()
+        else:
+            self._live_output_timer.stop()
+            try:
+                self._poll_live_output()  # final flush of any tail output
+            except Exception:
+                pass
+            try:
+                self._chat.end_live_output()
+            except Exception:
+                pass
+
+    def _poll_live_output(self):
+        """Timer tick — pull current output from the interpreter into the live console."""
+        if not self._chat:
+            return
+        try:
+            interp = self.ai.tool_manager.tools.get('python')
+            if interp is None:
+                return
+            self._chat.update_live_output(interp.peek_live_output())
+        except Exception:
+            pass
 
     def _update_interrupt_btn(self, active):
-        """Enable/disable the interrupt button based on work code execution state."""
+        """Enable/disable the interrupt button based on work code execution state.
+
+        Stays enabled throughout work mode (not just while code is running) so the
+        user can cancel during the 'thinking' gap or while awaiting the next step."""
         if self._chat:
-            self._chat.interrupt_btn.setEnabled(active)
+            enabled = active or self.ai.tool_manager.in_work_mode
+            self._chat.interrupt_btn.setEnabled(enabled)
 
     # ═══════════════════════════════════════════════════════════
     # SESSION MANAGEMENT METHODS
