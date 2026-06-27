@@ -505,8 +505,11 @@ class AIEngine:
         the rest of the engine processes it exactly like a compat response."""
         import traceback
         system_prompt, convo = self._extract_system_and_convo(messages)
+        # Keep the native tools list in lockstep with the prompt. Hijacked prompts
+        # are background tasks, which disable session naming — so don't offer
+        # set_session_name there (it would contradict the task prompt).
         tools = self.tool_manager.get_canonical_tools(
-            include_session_naming=True,
+            include_session_naming=not self.system_prompt_hijacked,
             include_skills=bool(self.skill_manager),
         )
         try:
