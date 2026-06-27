@@ -264,9 +264,9 @@ When it finishes you'll have helper scripts in the project root:
 - **Windows:** `run.bat`, `open_env.bat`, `add_autostart.bat`, `remove_autostart.bat`
 - **Linux / macOS:** `run.sh`, `open_env.sh`, `add_autostart.sh`, `remove_autostart.sh`
 
-`setup.py` then offers to tuck itself into `setup-scripts/` (defaults to **yes** for a
-clean root — answer **no** to keep it handy for re-runs). The original per-platform
-scripts (`setup.bat`, `setup.sh`, `setup_macOS.sh`) live in `setup-scripts/` for reference.
+`setup.py` then offers to tuck itself into a `setup-scripts/` folder (defaults to **yes**
+for a clean root — answer **no** to keep it handy for re-runs). `setup.py` is fully
+self-contained; it replaces the old per-platform `setup.bat` / `setup.sh` / `setup_macOS.sh`.
 
 Tested on **Windows 11**, **Windows 10**, and **Kali Linux** (Python 3.10). The macOS path is untested.
 

@@ -11,8 +11,6 @@ OS and performs the matching setup:
   3. Install dependencies from requirements.txt into the venv.
   4. Verify the venv's Python version.
 
-The original platform scripts are archived under  setup-scripts/  for reference.
-
 Run it with any system Python:
     python setup.py        (Windows)
     python3 setup.py       (Linux / macOS)
@@ -31,8 +29,7 @@ VENV = ROOT / ".venv"
 SYSTEM = platform.system()          # 'Windows' | 'Linux' | 'Darwin'
 IS_WIN = SYSTEM == "Windows"
 IS_MAC = SYSTEM == "Darwin"
-ARCHIVE_DIR = ROOT / "setup-scripts"
-LEGACY_SCRIPTS = ["setup.bat", "setup.sh", "setup_macOS.sh"]
+ARCHIVE_DIR = ROOT / "setup-scripts"   # created on demand only if the user hides setup.py
 
 
 def banner(text):
@@ -316,21 +313,8 @@ def verify():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Archive legacy scripts + optionally hide this setup.py
+# Optionally hide this setup.py after a successful run
 # ──────────────────────────────────────────────────────────────────────────────
-
-def archive_legacy_scripts():
-    moved = []
-    for name in LEGACY_SCRIPTS:
-        src = ROOT / name
-        if src.exists():
-            ARCHIVE_DIR.mkdir(exist_ok=True)
-            shutil.move(str(src), str(ARCHIVE_DIR / name))
-            moved.append(name)
-    if moved:
-        print(f"Archived legacy scripts → {ARCHIVE_DIR.name}/ : {', '.join(moved)}")
-        print()
-
 
 def _ask_yes_no(question, default_yes=True):
     suffix = "[Y/n]" if default_yes else "[y/N]"
@@ -390,7 +374,6 @@ def main():
             print("Grant it in System Settings → Privacy & Security → Accessibility.")
     print()
 
-    archive_legacy_scripts()
     maybe_hide_self()
 
 
