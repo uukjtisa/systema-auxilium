@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
 from PyQt6.QtCore import Qt, QPoint, QTimer, QRect, QRectF
 from PyQt6.QtGui import QRegion, QPainter, QColor, QFont, QPen
 from ui.base_window import BaseWindow
+from ui import theme as _theme
 
 
 class _TokenGraphCanvas(QWidget):
@@ -20,6 +21,17 @@ class _TokenGraphCanvas(QWidget):
         super().__init__(parent)
         self._data = []
         self._mode = "Daily"
+        # Paint palette (overridden by set_palette to follow the active theme).
+        self._c_bg = "#161B22"
+        self._c_grid = "#21262D"
+        self._c_accent = "#58A6FF"
+        self._c_accent_dim = "#1A2D4A"
+        self._c_muted = "#555555"
+
+    def set_palette(self, bg, grid, accent, accent_dim, muted):
+        self._c_bg, self._c_grid = bg, grid
+        self._c_accent, self._c_accent_dim, self._c_muted = accent, accent_dim, muted
+        self.update()
 
     def set_data(self, data, mode):
         self._data = data
@@ -35,10 +47,10 @@ class _TokenGraphCanvas(QWidget):
         graph_w = w - pad_l - pad_r
         graph_h = h - pad_t - pad_b
 
-        painter.fillRect(0, 0, w, h, QColor("#161B22"))
+        painter.fillRect(0, 0, w, h, QColor(self._c_bg))
 
         if not self._data:
-            painter.setPen(QColor("#555"))
+            painter.setPen(QColor(self._c_muted))
             painter.setFont(QFont("Segoe UI", 9))
             painter.drawText(QRectF(0, 0, w, h),
                              Qt.AlignmentFlag.AlignCenter,
@@ -54,7 +66,7 @@ class _TokenGraphCanvas(QWidget):
         bar_w = max(2, min(int(gap * 0.65), 48))
 
         # Grid lines
-        painter.setPen(QPen(QColor("#21262D"), 1))
+        painter.setPen(QPen(QColor(self._c_grid), 1))
         for i in range(1, 4):
             y = pad_t + graph_h - int(graph_h * i / 3)
             painter.drawLine(pad_l, y, pad_l + graph_w, y)
@@ -62,7 +74,7 @@ class _TokenGraphCanvas(QWidget):
         def _fmt(v):
             return f"{v//1000}k" if v >= 1000 else str(v)
 
-        painter.setPen(QColor("#555"))
+        painter.setPen(QColor(self._c_muted))
         painter.setFont(QFont("Segoe UI", 7))
         for i in range(0, 4):
             v = int(max_val * i / 3)
@@ -71,8 +83,8 @@ class _TokenGraphCanvas(QWidget):
                              Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                              _fmt(v))
 
-        accent = QColor("#58A6FF")
-        accent_dim = QColor("#1A2D4A")
+        accent = QColor(self._c_accent)
+        accent_dim = QColor(self._c_accent_dim)
         for i, (lbl, val) in enumerate(self._data):
             x = pad_l + int(i * gap) + int((gap - bar_w) / 2)
             bar_h = max(2, int(graph_h * val / max_val))
@@ -81,7 +93,7 @@ class _TokenGraphCanvas(QWidget):
             painter.fillRect(x, y, bar_w, bar_h, accent)
             # X label — only show every other label if crowded
             if n <= 16 or i % max(1, n // 12) == 0:
-                painter.setPen(QColor("#555"))
+                painter.setPen(QColor(self._c_muted))
                 lbl_short = lbl[-5:] if len(lbl) > 5 else lbl
                 painter.drawText(QRectF(x - gap / 2, pad_t + graph_h + 3, gap * 2, pad_b),
                                  Qt.AlignmentFlag.AlignCenter, lbl_short)
@@ -144,20 +156,27 @@ class SettingsWindow(BaseWindow):
         # Apply rounded mask
         self.apply_rounded_mask()
         self.create_resize_handles()
+        self._sync_glass()
+
+    def _sync_glass(self):
+        """No-op by design: the Settings window always stays opaque for the
+        readability of its dense forms, so the glass overlay never applies here.
+        (It's intentionally excluded from the glass window checklist.)"""
+        return
+
+    def _palette(self):
+        """Return the active theme's colours as the 7-tuple this window uses:
+        (base, surface, elevated, border, accent, text, muted)."""
+        p = _theme.current_palette(self.controller)
+        return p['bg'], p['surface'], p['surface2'], p['border'], p['accent'], p['text'], p['muted']
 
     def init_ui(self):
         """Initialize tabbed settings UI"""
         from PyQt6.QtWidgets import QTabWidget, QSlider, QRadioButton, QButtonGroup, QGridLayout
         from PyQt6.QtCore import Qt as _Qt
 
-        # ── Palette ─────────────────────────────────────────────────────────
-        _BASE    = "#0D1117"
-        _SURFACE = "#161B22"
-        _ELEV    = "#21262D"
-        _BORDER  = "#30363D"
-        _ACCENT  = "#58A6FF"
-        _TEXT    = "#E6EDF3"
-        _MUTED   = "#8B949E"
+        # ── Palette (from the active theme) ─────────────────────────────────
+        _BASE, _SURFACE, _ELEV, _BORDER, _ACCENT, _TEXT, _MUTED = self._palette()
 
         _INPUT = f"""
             QLineEdit, QTextEdit {{
@@ -200,7 +219,7 @@ class SettingsWindow(BaseWindow):
                 color: {_TEXT};
             }}
             QPushButton:hover {{
-                background-color: #2D333B;
+                background-color: {_theme.lighten(_ELEV, 0.10)};
                 border-color: {_ACCENT};
                 color: {_ACCENT};
             }}
@@ -213,10 +232,10 @@ class SettingsWindow(BaseWindow):
                 padding: 8px 20px;
                 font-size: 12px;
                 font-weight: 600;
-                color: #000d1a;
+                color: {_theme.darken(_ACCENT, 0.80)};
             }}
-            QPushButton:hover {{ background-color: #79BFFF; }}
-            QPushButton:pressed {{ background-color: #388BFD; }}
+            QPushButton:hover {{ background-color: {_theme.lighten(_ACCENT, 0.20)}; }}
+            QPushButton:pressed {{ background-color: {_theme.darken(_ACCENT, 0.15)}; }}
         """
         _GROUP = f"""
             QGroupBox {{
@@ -340,6 +359,7 @@ class SettingsWindow(BaseWindow):
 
         # ── Tab widget ───────────────────────────────────────────────────────
         tabs = QTabWidget()
+        self._tabs = tabs
         tabs.setStyleSheet(f"""
             QTabWidget::pane {{
                 border: none;
@@ -541,6 +561,13 @@ class SettingsWindow(BaseWindow):
         self._tok_out_summary_lbl = QLabel("")
         self._tok_out_summary_lbl.setStyleSheet(f"color: {_MUTED}; font-size: 9px;")
         tg_lay.addWidget(self._tok_out_summary_lbl)
+
+        # Theme the graph canvases (bg / grid / bars) to the active palette.
+        # All values must be hex — QColor() can't parse CSS rgba() strings.
+        _grid = _theme.lighten(_ELEV, 0.10)
+        _accent_dim = _theme.darken(_ACCENT, 0.60)
+        for _cv in (self._tok_canvas, self._tok_out_canvas):
+            _cv.set_palette(_ELEV, _grid, _ACCENT, _accent_dim, _MUTED)
 
         ai_lay.addWidget(tok_group)
 
@@ -893,13 +920,53 @@ class SettingsWindow(BaseWindow):
         glass_group.setStyleSheet(_GROUP)
         gl_lay = QVBoxLayout(glass_group)
         gl_lay.addWidget(_info_box(
-            "Applies a semi-transparent frosted effect over the chat area, "
-            "letting your desktop wallpaper show through. "
-            "Works on top of whichever main theme is selected."))
+            "Applies a semi-transparent frosted effect that lets your desktop "
+            "wallpaper show through, on top of whichever theme is selected. "
+            "Text-heavy panels (sidebar, logs, cards) stay frosted-opaque so "
+            "they remain readable.\n\n"
+            "Use the checklist below to choose which windows get the overlay. "
+            "The Settings window is intentionally excluded — it always stays "
+            "opaque for readability."))
 
         self.glass_enabled_checkbox = QCheckBox("Enable glass background")
         self.glass_enabled_checkbox.setStyleSheet(_CHECK)
         gl_lay.addWidget(self.glass_enabled_checkbox)
+
+        # ── Per-window checklist ──────────────────────────────────────────────
+        gl_lay.addWidget(_label("Apply glass to these windows:", muted=True, top_margin=6))
+        self.glass_window_checkboxes = {}
+        for _wkey in _theme.GLASS_WINDOWS:
+            _cb = QCheckBox(_theme.GLASS_WINDOW_LABELS.get(_wkey, _wkey))
+            _cb.setStyleSheet(_CHECK)
+            self.glass_window_checkboxes[_wkey] = _cb
+            if _wkey == 'chat':
+                # Chat row carries an extra "(sidebar)" sub-toggle so the sidebar
+                # can stay solid even when the rest of the chat window is glass.
+                _row = QHBoxLayout()
+                _row.setContentsMargins(0, 0, 0, 0)
+                _row.setSpacing(10)
+                _row.addWidget(_cb)
+                self.glass_sidebar_checkbox = QCheckBox("(sidebar)")
+                self.glass_sidebar_checkbox.setStyleSheet(_CHECK)
+                _row.addWidget(self.glass_sidebar_checkbox)
+                _row.addStretch()
+                gl_lay.addLayout(_row)
+            else:
+                gl_lay.addWidget(_cb)
+
+        # Disable the checklist when the master glass toggle is off; the sidebar
+        # sub-toggle additionally requires the Chat window to be checked.
+        def _sync_glass_checklist_enabled():
+            on = self.glass_enabled_checkbox.isChecked()
+            for _cb in self.glass_window_checkboxes.values():
+                _cb.setEnabled(on)
+            if hasattr(self, 'glass_sidebar_checkbox'):
+                self.glass_sidebar_checkbox.setEnabled(
+                    on and self.glass_window_checkboxes['chat'].isChecked())
+        self.glass_enabled_checkbox.toggled.connect(lambda _=None: _sync_glass_checklist_enabled())
+        self.glass_window_checkboxes['chat'].toggled.connect(
+            lambda _=None: _sync_glass_checklist_enabled())
+        self._sync_glass_checklist_enabled = _sync_glass_checklist_enabled
 
         _op_row = QHBoxLayout()
         _op_row.addWidget(_label("Opacity:"))
@@ -1114,11 +1181,9 @@ class SettingsWindow(BaseWindow):
             return
         self._selected_theme = key
         # Update all card borders
-        _ACCENT  = "#58A6FF"
-        _BORDER  = "#30363D"
+        _, _, _ELEV, _BORDER, _ACCENT, _, _ = self._palette()
         for k, c in self._theme_cards.items():
             try:
-                _ELEV = "#21262D"
                 c.setStyleSheet(f"""
                     QFrame {{
                         background: {_ELEV};
@@ -1381,7 +1446,7 @@ class SettingsWindow(BaseWindow):
                     btn.setChecked(True)
                     break
         if hasattr(self, '_theme_cards'):
-            _ACCENT = "#58A6FF"; _BORDER = "#30363D"; _ELEV = "#21262D"
+            _, _, _ELEV, _BORDER, _ACCENT, _, _ = self._palette()
             for k, c in self._theme_cards.items():
                 try:
                     c.setStyleSheet(
@@ -1397,6 +1462,15 @@ class SettingsWindow(BaseWindow):
         glass_opacity = self.controller.settings.get('glass_background_opacity', 0.75)
         self.glass_opacity_slider.setValue(int(glass_opacity * 100))
         self.glass_opacity_value_label.setText(f"{int(glass_opacity * 100)}%")
+        # Per-window glass checklist
+        _glass_wins = _theme.glass_windows(self.controller)
+        for _wkey, _cb in getattr(self, 'glass_window_checkboxes', {}).items():
+            _cb.setChecked(_wkey in _glass_wins)
+        if hasattr(self, 'glass_sidebar_checkbox'):
+            self.glass_sidebar_checkbox.setChecked(
+                self.controller.settings.get('glass_chat_sidebar', True))
+        if hasattr(self, '_sync_glass_checklist_enabled'):
+            self._sync_glass_checklist_enabled()
 
         if input_device is not None:
             index = self.input_device_combo.findData(input_device)
@@ -1534,28 +1608,31 @@ class SettingsWindow(BaseWindow):
         self.controller.settings['memory_threshold'] = self.memory_threshold_combo.currentData()
         self.controller.settings['memory_max_results'] = self.memory_max_combo.currentData()
 
-        # Save selected theme
+        # Save selected theme (broadcast happens at the end, after all widget
+        # reads + persistence, so the live retint can't disturb this save).
         theme = getattr(self, '_selected_theme', 'obsidian_blue')
         self.controller.settings['chat_theme'] = theme
-        try:
-            chat_win = getattr(getattr(self.controller, 'ui', None), 'chat_window', None)
-            if chat_win and hasattr(chat_win, 'apply_theme'):
-                chat_win.apply_theme(theme)
-        except Exception:
-            pass
 
         # Save glass background settings
         glass_enabled = self.glass_enabled_checkbox.isChecked()
         glass_opacity = self.glass_opacity_slider.value() / 100.0
+        glass_windows = [
+            _wkey for _wkey, _cb in getattr(self, 'glass_window_checkboxes', {}).items()
+            if _cb.isChecked()
+        ]
         self.controller.settings['glass_background_enabled'] = glass_enabled
         self.controller.settings['glass_background_opacity'] = glass_opacity
+        self.controller.settings['glass_windows'] = glass_windows
+        if hasattr(self, 'glass_sidebar_checkbox'):
+            self.controller.settings['glass_chat_sidebar'] = self.glass_sidebar_checkbox.isChecked()
 
-        # Apply glass background to chat window immediately
+        # Apply glass to the chat window immediately — gated by its checklist entry.
         try:
             if hasattr(self.controller, 'ui') and self.controller.ui:
                 chat_win = getattr(self.controller.ui, 'chat_window', None)
                 if chat_win and hasattr(chat_win, 'apply_glass_background'):
-                    chat_win.apply_glass_background(glass_enabled, glass_opacity)
+                    chat_glass = glass_enabled and ('chat' in glass_windows)
+                    chat_win.apply_glass_background(chat_glass, glass_opacity)
         except Exception as _ge:
             pass
 
@@ -1574,7 +1651,19 @@ class SettingsWindow(BaseWindow):
         # Apply to voice handler
         self.controller.set_vad_aggressiveness(vad_level)
 
-        # Show confirmation
+        # Broadcast the theme to every open window (incl. this one) for instant
+        # unity. Done last so the live retint can't disturb any widget reads.
+        try:
+            if hasattr(self.controller, 'broadcast_theme'):
+                self.controller.broadcast_theme(theme)
+            else:
+                chat_win = getattr(getattr(self.controller, 'ui', None), 'chat_window', None)
+                if chat_win and hasattr(chat_win, 'apply_theme'):
+                    chat_win.apply_theme(theme)
+        except Exception:
+            pass
+
+        # Show confirmation (footer was just rebuilt by the retint — safe)
         self.show_status_message("✓ Settings saved successfully!")
 
     def _set_tok_graph_mode(self, mode):
@@ -1625,26 +1714,53 @@ class SettingsWindow(BaseWindow):
         self.setMask(region)
 
     def showEvent(self, event):
-        """Sync container background to the current chat window theme on show."""
+        """Sync container background to the active theme on show."""
         super().showEvent(event)
         try:
             self._refresh_tok_graph()
         except Exception:
             pass
         try:
-            ui = getattr(self.controller, 'ui', None)
-            chat_win = getattr(ui, 'chat_window', None) if ui else None
-            if chat_win and hasattr(chat_win, '_t'):
-                t = chat_win._t()
-                self.container.setStyleSheet(f"""
-                    QWidget#container {{
-                        background-color: {t['base']};
-                        border-radius: 12px;
-                    }}
-                    QWidget {{ color: #E6EDF3; font-family: 'Segoe UI', system-ui, sans-serif; }}
-                    QScrollArea {{ background-color: {t['surface']}; }}
-                    QScrollArea > QWidget {{ background-color: {t['surface']}; }}
-                """)
+            p = _theme.current_palette(self.controller)
+            self.container.setStyleSheet(f"""
+                QWidget#container {{
+                    background-color: {p['bg']};
+                    border-radius: 12px;
+                }}
+                QWidget {{ color: {p['text']}; font-family: 'Segoe UI', system-ui, sans-serif; }}
+                QScrollArea {{ background-color: {p['surface']}; }}
+                QScrollArea > QWidget {{ background-color: {p['surface']}; }}
+            """)
         except Exception:
             pass
+
+    def apply_theme(self, theme_key=None):
+        """Live-retint the settings window. Rebuilds the tabbed UI in place from
+        the active theme, preserving the current tab and re-loading values."""
+        try:
+            saved_tab = self._tabs.currentIndex() if hasattr(self, '_tabs') else 0
+            old = self.container
+            self.layout().removeWidget(old)
+            old.deleteLater()
+
+            p = _theme.current_palette(self.controller)
+            self.container = QWidget()
+            self.container.setObjectName("container")
+            self.container.setAutoFillBackground(True)
+            self.container.setStyleSheet(f"""
+                QWidget#container {{ background-color: {p['bg']}; border-radius: 12px; }}
+                QWidget {{ color: {p['text']}; font-family: 'Segoe UI', system-ui, sans-serif; }}
+            """)
+            self.init_ui()
+            self.load_settings()
+            self.layout().addWidget(self.container)
+            if hasattr(self, '_tabs') and 0 <= saved_tab < self._tabs.count():
+                self._tabs.setCurrentIndex(saved_tab)
+            # Repopulate the token graph — the rebuild creates fresh empty canvases
+            # and showEvent won't fire (the window is already visible on retint).
+            self._refresh_tok_graph()
+            self.apply_rounded_mask()
+            self._sync_glass()
+        except Exception as e:
+            print(f"[SettingsWindow.apply_theme] {e}")
 

@@ -17,28 +17,53 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QPoint, QRect, QTimer
 from PyQt6.QtGui import QRegion
+from ui import theme as _theme
 
 
-# ── Shared combo style (self-contained, no external reference needed) ─────────
-_COMBO_STYLE = """
-    QComboBox {
-        background-color: #0D1117;
-        border: 1px solid rgba(88, 166, 255, 0.18);
-        border-radius: 5px;
-        color: #E6EDF3;
-        padding: 4px 8px;
-        font-size: 12px;
-        min-width: 200px;
-    }
-    QComboBox:hover { border-color: rgba(88, 166, 255, 0.45); }
-    QComboBox::drop-down { border: none; width: 20px; }
-    QComboBox QAbstractItemView {
-        background-color: #161B22;
-        border: 1px solid rgba(88, 166, 255, 0.18);
-        color: #E6EDF3;
-        selection-background-color: #21262D;
-    }
-"""
+# ── Theme palette (rebound per active theme by _refresh_palette) ──────────────
+_BG       = "#0D1117"
+_SURFACE  = "#161B22"
+_SURFACE2 = "#21262D"
+_BORDER   = "#30363D"
+_ACCENT   = "#58A6FF"
+_TEXT     = "#E6EDF3"
+_MUTED    = "#8B949E"
+_GREEN    = "#3FB950"
+_RED      = "#F28B82"
+
+_COMBO_STYLE = ""  # rebuilt by _refresh_palette()
+
+
+def _refresh_palette(controller):
+    """Rebind module colour constants + composed styles to the active theme.
+    Styling reads these globals at call time, so refreshing before (re)building
+    retints the whole window."""
+    global _BG, _SURFACE, _SURFACE2, _BORDER, _ACCENT, _TEXT, _MUTED, _GREEN, _RED
+    global _COMBO_STYLE
+    p = _theme.current_palette(controller)
+    _BG, _SURFACE, _SURFACE2 = p['bg'], p['surface'], p['surface2']
+    _BORDER, _ACCENT = p['border'], p['accent']
+    _TEXT, _MUTED = p['text'], p['muted']
+    _GREEN, _RED = p['green'], p['red']
+    _COMBO_STYLE = f"""
+        QComboBox {{
+            background-color: {_BG};
+            border: 1px solid {_theme.rgba(_ACCENT, 0.18)};
+            border-radius: 5px;
+            color: {_TEXT};
+            padding: 4px 8px;
+            font-size: 12px;
+            min-width: 200px;
+        }}
+        QComboBox:hover {{ border-color: {_theme.rgba(_ACCENT, 0.45)}; }}
+        QComboBox::drop-down {{ border: none; width: 20px; }}
+        QComboBox QAbstractItemView {{
+            background-color: {_SURFACE};
+            border: 1px solid {_theme.rgba(_ACCENT, 0.18)};
+            color: {_TEXT};
+            selection-background-color: {_SURFACE2};
+        }}
+    """
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -49,6 +74,7 @@ class MemoryWindow(QWidget):
         super().__init__()
         self.controller = controller
         self.memory_manager = controller.memory_manager
+        _refresh_palette(controller)   # match active theme before building UI
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
@@ -71,25 +97,25 @@ class MemoryWindow(QWidget):
         self.container = QWidget()
         self.container.setObjectName("container")
         self.container.setAutoFillBackground(True)
-        self.container.setStyleSheet("""
-            QWidget#container {
-                background-color: #161B22;
+        self.container.setStyleSheet(f"""
+            QWidget#container {{
+                background-color: {_SURFACE};
                 border-radius: 12px;
-            }
-            QWidget {
-                color: #E6EDF3;
+            }}
+            QWidget {{
+                color: {_TEXT};
                 font-family: 'Segoe UI', -apple-system, system-ui, sans-serif;
-            }
-            QScrollArea { background: transparent; border: none; }
-            QScrollArea > QWidget > QWidget { background: transparent; }
-            QScrollBar:vertical {
+            }}
+            QScrollArea {{ background: transparent; border: none; }}
+            QScrollArea > QWidget > QWidget {{ background: transparent; }}
+            QScrollBar:vertical {{
                 background: transparent; width: 6px; border-radius: 3px;
-            }
-            QScrollBar::handle:vertical {
-                background: #21262D; border-radius: 3px; min-height: 20px;
-            }
-            QScrollBar::handle:vertical:hover { background: #30363D; }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            }}
+            QScrollBar::handle:vertical {{
+                background: {_SURFACE2}; border-radius: 3px; min-height: 20px;
+            }}
+            QScrollBar::handle:vertical:hover {{ background: {_BORDER}; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
         """)
 
         wrapper = QVBoxLayout(self)
@@ -100,6 +126,7 @@ class MemoryWindow(QWidget):
         self._apply_rounded_mask()
         self._create_resize_handles()
         self.refresh_memories()
+        self._sync_glass()
 
     # ── UI Construction ───────────────────────────────────────────────────────
 
@@ -115,13 +142,13 @@ class MemoryWindow(QWidget):
     def _make_header(self):
         header = QFrame()
         header.setFixedHeight(54)
-        header.setStyleSheet("""
-            QFrame {
-                background-color: #161B22;
+        header.setStyleSheet(f"""
+            QFrame {{
+                background-color: {_SURFACE};
                 border-top-left-radius: 12px;
                 border-top-right-radius: 12px;
-                border-bottom: 1px solid rgba(88, 166, 255, 0.18);
-            }
+                border-bottom: 1px solid {_theme.rgba(_ACCENT, 0.18)};
+            }}
         """)
         hl = QHBoxLayout(header)
         hl.setContentsMargins(16, 0, 12, 0)
@@ -137,20 +164,20 @@ class MemoryWindow(QWidget):
         hl.addSpacing(10)
 
         title = QLabel("Memory Manager")
-        title.setStyleSheet("""
+        title.setStyleSheet(f"""
             font-size: 13px; font-weight: 600;
-            color: #E6EDF3; background: transparent; border: none;
+            color: {_TEXT}; background: transparent; border: none;
         """)
 
         close_btn = QPushButton("×")
         close_btn.setFixedSize(28, 28)
         close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        close_btn.setStyleSheet("""
-            QPushButton {
+        close_btn.setStyleSheet(f"""
+            QPushButton {{
                 background: transparent; border: none;
-                color: #8B949E; font-size: 18px; border-radius: 5px;
-            }
-            QPushButton:hover { background: #EA4335; color: white; }
+                color: {_MUTED}; font-size: 18px; border-radius: 5px;
+            }}
+            QPushButton:hover {{ background: #EA4335; color: white; }}
         """)
         close_btn.clicked.connect(self.close)
 
@@ -166,8 +193,8 @@ class MemoryWindow(QWidget):
     def _make_status_bar(self):
         bar = QFrame()
         bar.setFixedHeight(36)
-        bar.setStyleSheet("""
-            QFrame { background-color: #0D1117; border-bottom: 1px solid rgba(88, 166, 255, 0.12); }
+        bar.setStyleSheet(f"""
+            QFrame {{ background-color: {_BG}; border-bottom: 1px solid {_theme.rgba(_ACCENT, 0.12)}; }}
         """)
         hl = QHBoxLayout(bar)
         hl.setContentsMargins(16, 0, 16, 0)
@@ -176,7 +203,7 @@ class MemoryWindow(QWidget):
         self.ready_dot.setStyleSheet("font-size: 9px; background: transparent;")
 
         self.status_label = QLabel()
-        self.status_label.setStyleSheet("color: #8B949E; font-size: 11px; background: transparent;")
+        self.status_label.setStyleSheet(f"color: {_MUTED}; font-size: 11px; background: transparent;")
 
         hl.addWidget(self.ready_dot)
         hl.addSpacing(6)
@@ -202,13 +229,13 @@ class MemoryWindow(QWidget):
     def _make_footer(self):
         footer = QFrame()
         footer.setFixedHeight(56)
-        footer.setStyleSheet("""
-            QFrame {
-                background-color: #0D1117;
-                border-top: 1px solid rgba(88, 166, 255, 0.12);
+        footer.setStyleSheet(f"""
+            QFrame {{
+                background-color: {_BG};
+                border-top: 1px solid {_theme.rgba(_ACCENT, 0.12)};
                 border-bottom-left-radius: 12px;
                 border-bottom-right-radius: 12px;
-            }
+            }}
         """)
         hl = QHBoxLayout(footer)
         hl.setContentsMargins(16, 0, 16, 0)
@@ -229,31 +256,31 @@ class MemoryWindow(QWidget):
         btn = QPushButton(text)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         if danger:
-            btn.setStyleSheet("""
-                QPushButton {
+            btn.setStyleSheet(f"""
+                QPushButton {{
                     background: transparent;
-                    border: 1px solid rgba(242, 139, 130, 0.35);
-                    border-radius: 6px; color: #F28B82;
+                    border: 1px solid {_theme.rgba(_RED, 0.35)};
+                    border-radius: 6px; color: {_RED};
                     font-size: 12px; padding: 6px 14px;
-                }
-                QPushButton:hover {
-                    background: rgba(242, 139, 130, 0.1);
-                    border-color: #F28B82;
-                }
+                }}
+                QPushButton:hover {{
+                    background: {_theme.rgba(_RED, 0.1)};
+                    border-color: {_RED};
+                }}
             """)
         else:
-            btn.setStyleSheet("""
-                QPushButton {
+            btn.setStyleSheet(f"""
+                QPushButton {{
                     background: transparent;
-                    border: 1px solid #30363D;
-                    border-radius: 6px; color: #8B949E;
+                    border: 1px solid {_BORDER};
+                    border-radius: 6px; color: {_MUTED};
                     font-size: 12px; padding: 6px 14px;
-                }
-                QPushButton:hover {
-                    background: rgba(88, 166, 255, 0.08);
-                    border-color: rgba(88, 166, 255, 0.35);
-                    color: #E6EDF3;
-                }
+                }}
+                QPushButton:hover {{
+                    background: {_theme.rgba(_ACCENT, 0.08)};
+                    border-color: {_theme.rgba(_ACCENT, 0.35)};
+                    color: {_TEXT};
+                }}
             """)
         return btn
 
@@ -285,28 +312,28 @@ class MemoryWindow(QWidget):
 
     def _update_status(self, ready: bool, count: int):
         if ready:
-            self.ready_dot.setStyleSheet("font-size: 10px; color: #3FB950; background: transparent;")
+            self.ready_dot.setStyleSheet(f"font-size: 10px; color: {_GREEN}; background: transparent;")
             self.status_label.setText(f"{count} {'memory' if count == 1 else 'memories'} stored")
         else:
-            self.ready_dot.setStyleSheet("font-size: 10px; color: #F28B82; background: transparent;")
+            self.ready_dot.setStyleSheet(f"font-size: 10px; color: {_RED}; background: transparent;")
             self.status_label.setText("Memory system unavailable")
 
     def _show_empty(self, message: str):
         lbl = QLabel(message)
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl.setStyleSheet("color: #30363D; font-size: 13px; background: transparent; padding: 40px;")
+        lbl.setStyleSheet(f"color: {_MUTED}; font-size: 13px; background: transparent; padding: 40px;")
         lbl.setWordWrap(True)
         self.list_layout.insertWidget(0, lbl)
 
     def _make_card(self, mem: dict) -> QFrame:
         card = QFrame()
-        card.setStyleSheet("""
-            QFrame {
-                background-color: #21262D;
-                border: 1px solid rgba(88, 166, 255, 0.12);
+        card.setStyleSheet(f"""
+            QFrame {{
+                background-color: {_SURFACE2};
+                border: 1px solid {_theme.rgba(_ACCENT, 0.12)};
                 border-radius: 8px;
-            }
-            QFrame:hover { border-color: rgba(88, 166, 255, 0.28); }
+            }}
+            QFrame:hover {{ border-color: {_theme.rgba(_ACCENT, 0.28)}; }}
         """)
 
         vl = QVBoxLayout(card)
@@ -318,12 +345,12 @@ class MemoryWindow(QWidget):
         text_edit.setReadOnly(True)
         text_edit.setFixedHeight(72)
         text_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        text_edit.setStyleSheet("""
-            QTextEdit {
+        text_edit.setStyleSheet(f"""
+            QTextEdit {{
                 background: transparent; border: none;
-                color: #C9D1D9; font-size: 13px;
-                selection-background-color: rgba(88, 166, 255, 0.25);
-            }
+                color: {_TEXT}; font-size: 13px;
+                selection-background-color: {_theme.rgba(_ACCENT, 0.25)};
+            }}
         """)
 
         date_str = mem.get("created_at", "")
@@ -336,7 +363,7 @@ class MemoryWindow(QWidget):
                 pass
         edited_tag = "  ✏ edited" if mem.get("edited") else ""
         date_lbl = QLabel(f"📅 {date_str}{edited_tag}")
-        date_lbl.setStyleSheet("color: #30363D; font-size: 11px; background: transparent;")
+        date_lbl.setStyleSheet(f"color: {_MUTED}; font-size: 11px; background: transparent;")
 
         edit_btn   = QPushButton("Edit")
         save_btn   = QPushButton("Save")
@@ -347,31 +374,31 @@ class MemoryWindow(QWidget):
             btn.setFixedHeight(24)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
 
-        edit_btn.setStyleSheet("""
-            QPushButton { background: rgba(63, 185, 80, 0.08); border: 1px solid rgba(63, 185, 80, 0.25);
-                border-radius: 4px; color: #3FB950; font-size: 11px; padding: 0 10px; }
-            QPushButton:hover { background: rgba(63, 185, 80, 0.16); border-color: #3FB950; }
+        edit_btn.setStyleSheet(f"""
+            QPushButton {{ background: {_theme.rgba(_GREEN, 0.08)}; border: 1px solid {_theme.rgba(_GREEN, 0.25)};
+                border-radius: 4px; color: {_GREEN}; font-size: 11px; padding: 0 10px; }}
+            QPushButton:hover {{ background: {_theme.rgba(_GREEN, 0.16)}; border-color: {_GREEN}; }}
         """)
-        save_btn.setStyleSheet("""
-            QPushButton { background: rgba(88, 166, 255, 0.08); border: 1px solid rgba(88, 166, 255, 0.25);
-                border-radius: 4px; color: #58A6FF; font-size: 11px; padding: 0 10px; }
-            QPushButton:hover { background: rgba(88, 166, 255, 0.16); border-color: #58A6FF; }
+        save_btn.setStyleSheet(f"""
+            QPushButton {{ background: {_theme.rgba(_ACCENT, 0.08)}; border: 1px solid {_theme.rgba(_ACCENT, 0.25)};
+                border-radius: 4px; color: {_ACCENT}; font-size: 11px; padding: 0 10px; }}
+            QPushButton:hover {{ background: {_theme.rgba(_ACCENT, 0.16)}; border-color: {_ACCENT}; }}
         """)
-        delete_btn.setStyleSheet("""
-            QPushButton { background: rgba(242, 139, 130, 0.06); border: 1px solid rgba(242, 139, 130, 0.22);
-                border-radius: 4px; color: #F28B82; font-size: 11px; padding: 0 10px; }
-            QPushButton:hover { background: rgba(242, 139, 130, 0.14); border-color: #F28B82; }
+        delete_btn.setStyleSheet(f"""
+            QPushButton {{ background: {_theme.rgba(_RED, 0.06)}; border: 1px solid {_theme.rgba(_RED, 0.22)};
+                border-radius: 4px; color: {_RED}; font-size: 11px; padding: 0 10px; }}
+            QPushButton:hover {{ background: {_theme.rgba(_RED, 0.14)}; border-color: {_RED}; }}
         """)
 
         mem_id = mem["id"]
 
         def on_edit():
             text_edit.setReadOnly(False)
-            text_edit.setStyleSheet("""
-                QTextEdit {
-                    background: #0D1117; border: 1px solid rgba(88, 166, 255, 0.40);
-                    border-radius: 4px; color: #E6EDF3; font-size: 13px;
-                }
+            text_edit.setStyleSheet(f"""
+                QTextEdit {{
+                    background: {_BG}; border: 1px solid {_theme.rgba(_ACCENT, 0.40)};
+                    border-radius: 4px; color: {_TEXT}; font-size: 13px;
+                }}
             """)
             text_edit.setFocus()
             edit_btn.setVisible(False)
@@ -382,11 +409,11 @@ class MemoryWindow(QWidget):
             if new_text and self.memory_manager:
                 if self.memory_manager.update(mem_id, new_text):
                     text_edit.setReadOnly(True)
-                    text_edit.setStyleSheet("""
-                        QTextEdit {
+                    text_edit.setStyleSheet(f"""
+                        QTextEdit {{
                             background: transparent; border: none;
-                            color: #C9D1D9; font-size: 13px;
-                        }
+                            color: {_TEXT}; font-size: 13px;
+                        }}
                     """)
                     save_btn.setVisible(False)
                     edit_btn.setVisible(True)
@@ -437,14 +464,14 @@ class MemoryWindow(QWidget):
         dialog.setText(f"Delete all {count} {'memory' if count == 1 else 'memories'}?\n\nThis cannot be undone.")
         dialog.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
         dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
-        dialog.setStyleSheet("""
-            QMessageBox { background-color: #1e1e1e; color: #e8e8e8; }
-            QPushButton {
-                background: #2a2a2a; border: 1px solid #444;
-                border-radius: 5px; color: #ccc;
+        dialog.setStyleSheet(f"""
+            QMessageBox {{ background-color: {_SURFACE}; color: {_TEXT}; }}
+            QPushButton {{
+                background: {_SURFACE2}; border: 1px solid {_BORDER};
+                border-radius: 5px; color: {_TEXT};
                 padding: 6px 16px; min-width: 70px;
-            }
-            QPushButton:hover { background: #3a3a3a; }
+            }}
+            QPushButton:hover {{ background: {_theme.lighten(_SURFACE2, 0.1)}; }}
         """)
         if dialog.exec() == QMessageBox.StandardButton.Yes:
             if self.memory_manager:
@@ -476,26 +503,27 @@ class MemoryWindow(QWidget):
             )
             # refs keys: 'enabled_checkbox', 'threshold_combo', 'max_combo'
         """
+        _refresh_palette(controller)
         group = QGroupBox("🧠 Memory")
-        group.setStyleSheet("""
-            QGroupBox {
-                color: #ccc; border: 1px solid #333; border-radius: 8px;
+        group.setStyleSheet(f"""
+            QGroupBox {{
+                color: {_TEXT}; border: 1px solid {_BORDER}; border-radius: 8px;
                 margin-top: 8px; padding-top: 8px; font-weight: 600;
-            }
-            QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 4px; }
+            }}
+            QGroupBox::title {{ subcontrol-origin: margin; left: 12px; padding: 0 4px; }}
         """)
         layout = QVBoxLayout(group)
         layout.setSpacing(10)
 
         enabled_cb = QCheckBox("Enable persistent memory (RAG)")
-        enabled_cb.setStyleSheet("color: #ccc;")
+        enabled_cb.setStyleSheet(f"color: {_TEXT};")
         enabled_cb.setChecked(controller.settings.get('memory_enabled', True))
         layout.addWidget(enabled_cb)
 
         # Threshold row
         thr_row = QHBoxLayout()
         thr_lbl = QLabel("Similarity threshold:")
-        thr_lbl.setStyleSheet("color: #aaa; font-size: 12px;")
+        thr_lbl.setStyleSheet(f"color: {_MUTED}; font-size: 12px;")
         thr_combo = QComboBox()
         for label, val in [
             ("0.3 – More memories (less strict)", 0.3),
@@ -518,7 +546,7 @@ class MemoryWindow(QWidget):
         # Max results row
         max_row = QHBoxLayout()
         max_lbl = QLabel("Max memories per message:")
-        max_lbl.setStyleSheet("color: #aaa; font-size: 12px;")
+        max_lbl.setStyleSheet(f"color: {_MUTED}; font-size: 12px;")
         max_combo = QComboBox()
         for n in [3, 5, 8, 10, 15]:
             max_combo.addItem(str(n), n)
@@ -535,13 +563,13 @@ class MemoryWindow(QWidget):
         # Open manager button
         open_btn = QPushButton("Open Memory Manager →")
         open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        open_btn.setStyleSheet("""
-            QPushButton {
-                background: #1a2a1a; border: 1px solid #2a4a2a;
-                border-radius: 6px; color: #7ec87e;
+        open_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {_theme.rgba(_ACCENT, 0.08)}; border: 1px solid {_theme.rgba(_ACCENT, 0.30)};
+                border-radius: 6px; color: {_ACCENT};
                 font-size: 12px; padding: 6px 12px;
-            }
-            QPushButton:hover { background: #223322; }
+            }}
+            QPushButton:hover {{ background: {_theme.rgba(_ACCENT, 0.16)}; }}
         """)
         open_btn.clicked.connect(open_callback)
         layout.addWidget(open_btn)
@@ -552,6 +580,45 @@ class MemoryWindow(QWidget):
             'max_combo':        max_combo,
         }
         return group, refs
+
+    def apply_theme(self, theme_key=None):
+        """Live-retint the memory window. Refreshes the palette and rebuilds the
+        container in place."""
+        try:
+            _refresh_palette(self.controller)
+            old = self.container
+            self.layout().removeWidget(old)
+            old.deleteLater()
+            self.container = QWidget()
+            self.container.setObjectName("container")
+            self.container.setAutoFillBackground(True)
+            self.container.setStyleSheet(f"""
+                QWidget#container {{ background-color: {_SURFACE}; border-radius: 12px; }}
+                QWidget {{ color: {_TEXT}; }}
+            """)
+            self._build_ui()
+            self.layout().addWidget(self.container)
+            self.refresh_memories()
+            self._apply_rounded_mask()
+            self._sync_glass()
+        except Exception as e:
+            print(f"[MemoryWindow.apply_theme] {e}")
+
+    def _sync_glass(self):
+        """Overlay a translucent backdrop when glass mode is on (cards stay solid)."""
+        try:
+            if not _theme.glass_enabled_for(self.controller, 'memory'):
+                return
+            _, op = _theme.glass_state(self.controller)
+            bd = _theme.glass_backdrop(op)
+            self.container.setStyleSheet(
+                f"QWidget#container {{ background-color: {bd}; border-radius: 12px; }}"
+                f"QWidget {{ color: {_TEXT}; }}"
+            )
+            if hasattr(self, 'scroll_area'):
+                self.scroll_area.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        except Exception as e:
+            print(f"[MemoryWindow._sync_glass] {e}")
 
     # ── Drag ──────────────────────────────────────────────────────────────────
 

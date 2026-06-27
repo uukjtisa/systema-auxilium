@@ -10,8 +10,43 @@ from PyQt6.QtGui import QFont, QRegion
 from datetime import datetime
 from core.hot_reload import reload_module
 from ui.base_window import BaseWindow
+from ui import theme as _theme
 import sys
 import ctypes
+
+
+# ── Theme palette (rebound per active theme by _refresh_palette) ──────────────
+_BG       = "#0a0a0a"
+_SURFACE  = "#1a1a1a"
+_SURFACE2 = "#111111"
+_BORDER   = "#30363D"
+_ACCENT   = "#00ff00"
+_ACCENT_DIM = "#00cc00"
+_TEXT     = "#E8EFF8"
+_MUTED    = "#888888"
+_FAINT    = "#333333"
+_RED      = "#ff4444"
+_GREEN    = "#34D058"
+
+# Functional per-message colours — kept stable across themes so each message
+# type stays recognisable at a glance.
+_MSG_COLORS = {'system': '#888888', 'ai': '#00ffff', 'tool': '#ffff00', 'user': '#ff00ff'}
+
+
+def _refresh_palette(controller):
+    """Rebind module-level colour constants to the active theme. Called at the
+    top of __init__ and from apply_theme(); styling reads these globals at build
+    time, so refreshing before (re)building retints the whole window."""
+    global _BG, _SURFACE, _SURFACE2, _BORDER, _ACCENT, _ACCENT_DIM
+    global _TEXT, _MUTED, _FAINT, _RED, _GREEN
+    p = _theme.current_palette(controller)
+    _BG, _SURFACE, _SURFACE2 = p['bg'], p['surface'], p['surface2']
+    _BORDER, _ACCENT = p['border'], p['accent']
+    _ACCENT_DIM = _theme.darken(p['accent'], 0.18)
+    _TEXT, _MUTED = p['text'], p['muted']
+    _FAINT = _theme.darken(p['muted'], 0.45)
+    _RED, _GREEN = p['red'], p['green']
+
 
 class DebugWindow(BaseWindow):
     """Debug window showing tool conversations"""
@@ -19,6 +54,7 @@ class DebugWindow(BaseWindow):
     def __init__(self, controller):
         super().__init__()
         self.controller = controller
+        _refresh_palette(controller)   # match active theme before building UI
 
         # NEW: Track if launched from CMD
         self.launched_from_cmd = hasattr(sys, 'frozen') or sys.stdout is not None
@@ -50,14 +86,14 @@ class DebugWindow(BaseWindow):
 
         # Main container for rounded corners
         self.container = QWidget()
-        self.container.setStyleSheet("""
-            QWidget#container {
-                background-color: #1a1a1a;
+        self.container.setStyleSheet(f"""
+            QWidget#container {{
+                background-color: {_SURFACE};
                 border-radius: 12px;
-            }
-            QWidget {
-                color: #00ff00;
-            }
+            }}
+            QWidget {{
+                color: {_TEXT};
+            }}
         """)
         self.container.setObjectName("container")
 
@@ -71,6 +107,7 @@ class DebugWindow(BaseWindow):
         # Apply rounded mask
         self.apply_rounded_mask()
         self.create_resize_handles()
+        self._sync_glass()
 
     def init_ui(self):
         """Initialize UI"""
@@ -84,11 +121,11 @@ class DebugWindow(BaseWindow):
         header_bar.mousePressEvent = self.header_mouse_press
         header_bar.mouseMoveEvent = self.header_mouse_move
         header_bar.mouseReleaseEvent = self.header_mouse_release
-        header_bar.setStyleSheet("""
-            QFrame {
-                background-color: #1a1a1a;
-                border-bottom: 1px solid #00ff00;
-            }
+        header_bar.setStyleSheet(f"""
+            QFrame {{
+                background-color: {_SURFACE};
+                border-bottom: 1px solid {_BORDER};
+            }}
         """)
 
         header_layout = QHBoxLayout(header_bar)
@@ -96,26 +133,23 @@ class DebugWindow(BaseWindow):
 
         # Title
         title = QLabel("🔧 Debug - Full AI/Tool Exchanges")
-        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #00ff00;")
+        title.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {_TEXT};")
         header_layout.addWidget(title)
 
         header_layout.addStretch()
 
+        _icon_btn = f"""
+            QPushButton {{
+                background: transparent; border: none; border-radius: 6px;
+                font-size: 16px; color: {_MUTED};
+            }}
+            QPushButton:hover {{ background: {_SURFACE2}; color: {_TEXT}; }}
+        """
+
         # Clear button
         clear_btn = QPushButton("🗑️")
         clear_btn.setFixedSize(32, 32)
-        clear_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                border: none;
-                border-radius: 6px;
-                font-size: 16px;
-                color: #00ff00;
-            }
-            QPushButton:hover {
-                background: #2A2A2A;
-            }
-        """)
+        clear_btn.setStyleSheet(_icon_btn)
         clear_btn.clicked.connect(self.clear_debug)
         clear_btn.setToolTip("Clear debug log")
         header_layout.addWidget(clear_btn)
@@ -124,18 +158,7 @@ class DebugWindow(BaseWindow):
         if self.launched_from_cmd:
             self.cmd_toggle_btn = QPushButton("🪟")
             self.cmd_toggle_btn.setFixedSize(32, 32)
-            self.cmd_toggle_btn.setStyleSheet("""
-                QPushButton {
-                    background: transparent;
-                    border: none;
-                    border-radius: 6px;
-                    font-size: 16px;
-                    color: #00ff00;
-                }
-                QPushButton:hover {
-                    background: #2A2A2A;
-                }
-            """)
+            self.cmd_toggle_btn.setStyleSheet(_icon_btn)
             self.cmd_toggle_btn.clicked.connect(self.toggle_cmd_window)
             self.cmd_toggle_btn.setToolTip("Toggle CMD window")
             header_layout.addWidget(self.cmd_toggle_btn)
@@ -143,54 +166,26 @@ class DebugWindow(BaseWindow):
         # Minimize button
         minimize_btn = QPushButton("−")
         minimize_btn.setFixedSize(32, 32)
-        minimize_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                border: none;
-                border-radius: 6px;
-                font-size: 18px;
-                color: #00ff00;
-            }
-            QPushButton:hover {
-                background: #2A2A2A;
-            }
-        """)
+        minimize_btn.setStyleSheet(_icon_btn.replace("font-size: 16px", "font-size: 18px"))
         minimize_btn.clicked.connect(self.showMinimized)
         header_layout.addWidget(minimize_btn)
 
         # Maximize button
         self.maximize_btn = QPushButton("□")
         self.maximize_btn.setFixedSize(32, 32)
-        self.maximize_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                border: none;
-                border-radius: 6px;
-                font-size: 16px;
-                color: #00ff00;
-            }
-            QPushButton:hover {
-                background: #2A2A2A;
-            }
-        """)
+        self.maximize_btn.setStyleSheet(_icon_btn)
         self.maximize_btn.clicked.connect(self.toggle_maximize)
         header_layout.addWidget(self.maximize_btn)
 
         # Close button
         close_btn = QPushButton("×")
         close_btn.setFixedSize(32, 32)
-        close_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                border: none;
-                border-radius: 6px;
-                font-size: 22px;
-                color: #00ff00;
-            }
-            QPushButton:hover {
-                background: #EA4335;
-                color: white;
-            }
+        close_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; border: none; border-radius: 6px;
+                font-size: 22px; color: {_MUTED};
+            }}
+            QPushButton:hover {{ background: #EA4335; color: white; }}
         """)
         close_btn.clicked.connect(self.hide)
         header_layout.addWidget(close_btn)
@@ -204,40 +199,37 @@ class DebugWindow(BaseWindow):
 
         # Info label
         info = QLabel("All raw exchanges between AI and tools are shown here")
-        info.setStyleSheet("color: #888; font-size: 10pt; margin: 5px 0;")
+        info.setStyleSheet(f"color: {_MUTED}; font-size: 10pt; margin: 5px 0;")
         content_layout.addWidget(info)
 
         # Filter section
         filter_layout = QHBoxLayout()
         filter_label = QLabel("Filters:")
-        filter_label.setStyleSheet("color: #00ff00; font-weight: bold;")
+        filter_label.setStyleSheet(f"color: {_ACCENT}; font-weight: bold;")
         filter_layout.addWidget(filter_label)
 
-        # User checkbox
+        # Filter checkboxes — keep the functional per-type colours
         self.user_checkbox = QCheckBox("👤 User")
-        self.user_checkbox.setChecked(True)
-        self.user_checkbox.setStyleSheet("color: #ff00ff;")
+        self.user_checkbox.setChecked(self.filters.get('user', True))
+        self.user_checkbox.setStyleSheet(f"color: {_MSG_COLORS['user']};")
         self.user_checkbox.stateChanged.connect(lambda: self.update_filter('user', self.user_checkbox.isChecked()))
         filter_layout.addWidget(self.user_checkbox)
 
-        # AI checkbox
         self.ai_checkbox = QCheckBox("🤖 AI")
-        self.ai_checkbox.setChecked(True)
-        self.ai_checkbox.setStyleSheet("color: #00ffff;")
+        self.ai_checkbox.setChecked(self.filters.get('ai', True))
+        self.ai_checkbox.setStyleSheet(f"color: {_MSG_COLORS['ai']};")
         self.ai_checkbox.stateChanged.connect(lambda: self.update_filter('ai', self.ai_checkbox.isChecked()))
         filter_layout.addWidget(self.ai_checkbox)
 
-        # Tool checkbox
         self.tool_checkbox = QCheckBox("🔧 Tool")
-        self.tool_checkbox.setChecked(True)
-        self.tool_checkbox.setStyleSheet("color: #ffff00;")
+        self.tool_checkbox.setChecked(self.filters.get('tool', True))
+        self.tool_checkbox.setStyleSheet(f"color: {_MSG_COLORS['tool']};")
         self.tool_checkbox.stateChanged.connect(lambda: self.update_filter('tool', self.tool_checkbox.isChecked()))
         filter_layout.addWidget(self.tool_checkbox)
 
-        # System checkbox
         self.system_checkbox = QCheckBox("⚙️ System")
-        self.system_checkbox.setChecked(True)
-        self.system_checkbox.setStyleSheet("color: #888888;")
+        self.system_checkbox.setChecked(self.filters.get('system', True))
+        self.system_checkbox.setStyleSheet(f"color: {_MSG_COLORS['system']};")
         self.system_checkbox.stateChanged.connect(lambda: self.update_filter('system', self.system_checkbox.isChecked()))
         filter_layout.addWidget(self.system_checkbox)
 
@@ -245,23 +237,23 @@ class DebugWindow(BaseWindow):
 
         # System Prompt viewer button
         sys_prompt_btn = QPushButton("📋 View System Prompt")
-        sys_prompt_btn.setStyleSheet("""
-            QPushButton {
-                background: #111;
-                border: 1px solid #00aa00;
+        sys_prompt_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {_SURFACE2};
+                border: 1px solid {_ACCENT_DIM};
                 border-radius: 5px;
-                color: #00cc00;
+                color: {_ACCENT};
                 font-size: 9pt;
                 padding: 3px 10px;
-            }
-            QPushButton:hover {
-                background: #1a2a1a;
-                border-color: #00ff00;
-                color: #00ff00;
-            }
-            QPushButton:pressed {
-                background: #0a150a;
-            }
+            }}
+            QPushButton:hover {{
+                background: {_theme.rgba(_ACCENT, 0.12)};
+                border-color: {_ACCENT};
+                color: {_ACCENT};
+            }}
+            QPushButton:pressed {{
+                background: {_theme.rgba(_ACCENT, 0.20)};
+            }}
         """)
         sys_prompt_btn.setToolTip("Show the full system prompt that will be sent to the API (base + all loaded skills)")
         sys_prompt_btn.clicked.connect(self.show_system_prompt)
@@ -271,17 +263,17 @@ class DebugWindow(BaseWindow):
         # Debug display
         self.debug_display = QTextEdit()
         self.debug_display.setReadOnly(True)
-        self.debug_display.setStyleSheet("""
-            QTextEdit {
-                background-color: #0a0a0a;
-                border: 1px solid #00ff00;
+        self.debug_display.setStyleSheet(f"""
+            QTextEdit {{
+                background-color: {_BG};
+                border: 1px solid {_BORDER};
                 border-radius: 5px;
                 padding: 10px;
                 font-family: 'Courier New', monospace;
                 font-size: 10px;
-                color: #00ff00;
+                color: {_TEXT};
                 line-height: 1.4;
-            }
+            }}
         """)
         self.debug_display.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         content_layout.addWidget(self.debug_display)
@@ -293,6 +285,67 @@ class DebugWindow(BaseWindow):
 
         # Welcome message
         self.add_message("system", "╔══ DEBUG MODE ACTIVE ══╗\nAll AI/Tool exchanges will appear here in full detail")
+
+    def apply_theme(self, theme_key=None):
+        """Live-retint the window to the active theme. Refreshes the palette and
+        rebuilds the container in place, preserving the current debug log and
+        the Hot Reload panel's open/closed state."""
+        try:
+            _refresh_palette(self.controller)
+            saved_html = self.debug_display.toHtml() if hasattr(self, 'debug_display') else None
+            saved_hr_open = getattr(self, '_hr_panel_open', False)
+
+            old = self.container
+            self.layout().removeWidget(old)
+            old.deleteLater()
+
+            self.container = QWidget()
+            self.container.setObjectName("container")
+            self.container.setStyleSheet(f"""
+                QWidget#container {{ background-color: {_SURFACE}; border-radius: 12px; }}
+                QWidget {{ color: {_TEXT}; }}
+            """)
+            self.init_ui()
+            self.layout().addWidget(self.container)
+
+            if saved_html is not None:
+                self.debug_display.setHtml(saved_html)
+                self.scroll_to_bottom()
+            if saved_hr_open and hasattr(self, '_hr_body'):
+                self._hr_panel_open = True
+                self._hr_body.setVisible(True)
+                self._hr_toggle_label.setText("▼  ⚡ Hot Reload")
+
+            self.apply_rounded_mask()
+            self._sync_glass()
+        except Exception as e:
+            try:
+                self.add_message("system", f"[apply_theme] error: {e}")
+            except Exception:
+                pass
+
+    def _sync_glass(self):
+        """Overlay a translucent backdrop when glass mode is on (the log area
+        goes frosted; messages stay readable)."""
+        try:
+            if not _theme.glass_enabled_for(self.controller, 'debug'):
+                return
+            _, op = _theme.glass_state(self.controller)
+            bd = _theme.glass_backdrop(op)
+            panel = _theme.glass_panel(op)
+            self.container.setStyleSheet(
+                f"QWidget#container {{ background-color: {bd}; border-radius: 12px; }}"
+                f"QWidget {{ color: {_TEXT}; }}"
+            )
+            # Log view → frosted near-opaque panel so the text stays readable
+            if hasattr(self, 'debug_display'):
+                self.debug_display.setStyleSheet(
+                    f"QTextEdit {{ background-color: {panel}; border: 1px solid {_BORDER};"
+                    f" border-radius: 5px; padding: 10px; font-family: 'Courier New', monospace;"
+                    f" font-size: 10px; color: {_TEXT}; line-height: 1.4; }}"
+                )
+        except Exception as e:
+            print(f"[DebugWindow._sync_glass] {e}")
 
     # ── HOT RELOAD ────────────────────────────────────────────────────────────
 
@@ -420,12 +473,12 @@ class DebugWindow(BaseWindow):
 
         # ── Collapsible header ────────────────────────────────────────────────
         header = QFrame()
-        header.setStyleSheet("""
-            QFrame {
-                background-color: #0f0f0f;
-                border-top: 1px solid #00ff00;
-                border-bottom: 1px solid #1a1a1a;
-            }
+        header.setStyleSheet(f"""
+            QFrame {{
+                background-color: {_SURFACE2};
+                border-top: 1px solid {_BORDER};
+                border-bottom: 1px solid {_SURFACE};
+            }}
         """)
         header.setFixedHeight(36)
         header.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -434,17 +487,17 @@ class DebugWindow(BaseWindow):
         h_lay.setContentsMargins(14, 0, 14, 0)
 
         self._hr_toggle_label = QLabel("▶  ⚡ Hot Reload")
-        self._hr_toggle_label.setStyleSheet("color: #00ff00; font-size: 11px; font-weight: bold;")
+        self._hr_toggle_label.setStyleSheet(f"color: {_ACCENT}; font-size: 11px; font-weight: bold;")
         h_lay.addWidget(self._hr_toggle_label)
         h_lay.addStretch()
 
         hint = QLabel("click to expand")
-        hint.setStyleSheet("color: #333; font-size: 9px;")
+        hint.setStyleSheet(f"color: {_FAINT}; font-size: 9px;")
         h_lay.addWidget(hint)
 
         # ── Body (hidden by default) ──────────────────────────────────────────
         self._hr_body = QFrame()
-        self._hr_body.setStyleSheet("QFrame { background-color: #0a0a0a; border-top: none; }")
+        self._hr_body.setStyleSheet(f"QFrame {{ background-color: {_BG}; border-top: none; }}")
         self._hr_body.hide()
 
         body_layout = QVBoxLayout(self._hr_body)
@@ -476,15 +529,13 @@ class DebugWindow(BaseWindow):
 
     def _build_reload_row(self, parent_layout, label, module_path, hook_name, disabled):
         """Build one row for the hot reload panel. Returns dict of row widgets."""
-        _G = "#00ff00"
-        _R = "#ff4444"
-        _M = "#333333"
+        _M = _FAINT
 
         row_frame = QFrame()
         row_frame.setStyleSheet(f"""
             QFrame {{
-                background-color: {'#111' if not disabled else '#0d0d0d'};
-                border: 1px solid {'#1e1e1e' if not disabled else '#161616'};
+                background-color: {_SURFACE2 if not disabled else _BG};
+                border: 1px solid {_BORDER if not disabled else _theme.darken(_BORDER, 0.25)};
                 border-radius: 4px;
             }}
         """)
@@ -496,14 +547,14 @@ class DebugWindow(BaseWindow):
         # File label
         name_lbl = QLabel(label)
         name_lbl.setStyleSheet(
-            f"color: {'#888' if disabled else '#c8c8c8'}; font-size: 11px; "
+            f"color: {_MUTED if disabled else _TEXT}; font-size: 11px; "
             f"font-family: 'Courier New'; min-width: 180px;"
         )
         row_lay.addWidget(name_lbl)
 
         # Module path (dim)
         path_lbl = QLabel(module_path)
-        path_lbl.setStyleSheet("color: #2a2a2a; font-size: 9px; font-family: 'Courier New';")
+        path_lbl.setStyleSheet(f"color: {_FAINT}; font-size: 9px; font-family: 'Courier New';")
         row_lay.addWidget(path_lbl, stretch=1)
 
         # Status label
@@ -518,20 +569,20 @@ class DebugWindow(BaseWindow):
         btn.setEnabled(not disabled)
         btn.setStyleSheet(f"""
             QPushButton {{
-                background: {'transparent' if disabled else '#161616'};
-                border: 1px solid {'#1a1a1a' if disabled else '#2a2a2a'};
+                background: {'transparent' if disabled else _SURFACE2};
+                border: 1px solid {_theme.darken(_BORDER, 0.3) if disabled else _BORDER};
                 border-radius: 4px;
-                color: {'#2a2a2a' if disabled else '#00cc00'};
+                color: {_FAINT if disabled else _ACCENT};
                 font-size: 10px;
                 padding: 0 10px;
             }}
             QPushButton:hover:enabled {{
-                background: #1a2a1a;
-                border-color: #00ff00;
-                color: #00ff00;
+                background: {_theme.rgba(_ACCENT, 0.12)};
+                border-color: {_ACCENT};
+                color: {_ACCENT};
             }}
             QPushButton:pressed:enabled {{
-                background: #0a1a0a;
+                background: {_theme.rgba(_ACCENT, 0.20)};
             }}
         """)
 
@@ -546,16 +597,16 @@ class DebugWindow(BaseWindow):
         tb_text = QTextEdit()
         tb_text.setReadOnly(True)
         tb_text.setFixedHeight(120)
-        tb_text.setStyleSheet("""
-            QTextEdit {
-                background: #0d0000;
-                border: 1px solid #3a0000;
+        tb_text.setStyleSheet(f"""
+            QTextEdit {{
+                background: {_theme.rgba(_RED, 0.08)};
+                border: 1px solid {_theme.rgba(_RED, 0.35)};
                 border-radius: 3px;
-                color: #ff6666;
+                color: {_theme.lighten(_RED, 0.2)};
                 font-size: 9px;
                 font-family: 'Courier New';
                 padding: 4px;
-            }
+            }}
         """)
         tb_lay.addWidget(tb_text)
 
@@ -596,19 +647,19 @@ class DebugWindow(BaseWindow):
 
     def _run_reload(self, module_path, hook_name, widgets):
         """Execute a reload and update the row's status widgets."""
-        _G = "#00ff00"
-        _R = "#ff4444"
+        _G = _GREEN
+        _R = _RED
 
         widgets['btn'].setEnabled(False)
         widgets['status_lbl'].setText("reloading…")
-        widgets['status_lbl'].setStyleSheet("color: #888; font-size: 10px; font-family: 'Courier New'; min-width: 120px;")
+        widgets['status_lbl'].setStyleSheet(f"color: {_MUTED}; font-size: 10px; font-family: 'Courier New'; min-width: 120px;")
 
         success, message = reload_module(module_path)
         self._hr_status[module_path] = (success, message)
 
         if success:
-            widgets['row_frame'].setStyleSheet("""
-                QFrame { background-color: #0a140a; border: 1px solid #1a3a1a; border-radius: 4px; }
+            widgets['row_frame'].setStyleSheet(f"""
+                QFrame {{ background-color: {_theme.rgba(_GREEN, 0.08)}; border: 1px solid {_theme.rgba(_GREEN, 0.35)}; border-radius: 4px; }}
             """)
             widgets['status_lbl'].setText(message)
             widgets['status_lbl'].setStyleSheet(f"color: {_G}; font-size: 10px; font-family: 'Courier New'; min-width: 120px;")
@@ -623,8 +674,8 @@ class DebugWindow(BaseWindow):
                     import traceback as _tb
                     self.add_message("system", f"[hot_reload] post-hook error:\n{_tb.format_exc()}")
         else:
-            widgets['row_frame'].setStyleSheet("""
-                QFrame { background-color: #140a0a; border: 1px solid #3a1a1a; border-radius: 4px; }
+            widgets['row_frame'].setStyleSheet(f"""
+                QFrame {{ background-color: {_theme.rgba(_RED, 0.08)}; border: 1px solid {_theme.rgba(_RED, 0.35)}; border-radius: 4px; }}
             """)
             short = message.split('\n')[0]
             widgets['status_lbl'].setText(short)
@@ -652,13 +703,13 @@ class DebugWindow(BaseWindow):
         dlg = QDialog(self)
         dlg.setWindowTitle("Full System Prompt")
         dlg.setMinimumSize(760, 600)
-        dlg.setStyleSheet("""
-            QDialog {
-                background-color: #111;
-            }
-            QLabel {
-                color: #00ff00;
-            }
+        dlg.setStyleSheet(f"""
+            QDialog {{
+                background-color: {_SURFACE};
+            }}
+            QLabel {{
+                color: {_TEXT};
+            }}
         """)
 
         lay = QVBoxLayout(dlg)
@@ -670,28 +721,28 @@ class DebugWindow(BaseWindow):
             f"📋  Full Effective System Prompt  —  "
             f"{char_count:,} chars  ·  ~{token_estimate:,} tokens est."
         )
-        header.setStyleSheet("color: #00ff00; font-size: 11pt; font-weight: bold;")
+        header.setStyleSheet(f"color: {_ACCENT}; font-size: 11pt; font-weight: bold;")
         lay.addWidget(header)
 
         sub = QLabel("Base system prompt + all currently loaded skills (frontmatter stripped), exactly as sent to the API.")
-        sub.setStyleSheet("color: #666; font-size: 9pt;")
+        sub.setStyleSheet(f"color: {_MUTED}; font-size: 9pt;")
         lay.addWidget(sub)
 
         # Text view
         txt = QTextEdit()
         txt.setReadOnly(True)
         txt.setPlainText(prompt)
-        txt.setStyleSheet("""
-            QTextEdit {
-                background-color: #0a0a0a;
-                border: 1px solid #00ff00;
+        txt.setStyleSheet(f"""
+            QTextEdit {{
+                background-color: {_BG};
+                border: 1px solid {_BORDER};
                 border-radius: 5px;
                 padding: 10px;
                 font-family: 'Courier New', monospace;
                 font-size: 9pt;
-                color: #ccffcc;
+                color: {_TEXT};
                 line-height: 1.4;
-            }
+            }}
         """)
         lay.addWidget(txt)
 
@@ -699,16 +750,16 @@ class DebugWindow(BaseWindow):
         btn_row = QHBoxLayout()
 
         copy_btn = QPushButton("📋 Copy to Clipboard")
-        copy_btn.setStyleSheet("""
-            QPushButton {
-                background: #161616;
-                border: 1px solid #2a4a2a;
+        copy_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {_SURFACE2};
+                border: 1px solid {_BORDER};
                 border-radius: 5px;
-                color: #00cc00;
+                color: {_ACCENT};
                 font-size: 10pt;
                 padding: 6px 16px;
-            }
-            QPushButton:hover { background: #1a2a1a; border-color: #00ff00; color: #00ff00; }
+            }}
+            QPushButton:hover {{ background: {_theme.rgba(_ACCENT, 0.12)}; border-color: {_ACCENT}; color: {_ACCENT}; }}
         """)
         def _copy():
             QApplication.clipboard().setText(prompt)
@@ -717,16 +768,16 @@ class DebugWindow(BaseWindow):
         copy_btn.clicked.connect(_copy)
 
         close_btn = QPushButton("Close")
-        close_btn.setStyleSheet("""
-            QPushButton {
+        close_btn.setStyleSheet(f"""
+            QPushButton {{
                 background: transparent;
-                border: 1px solid #333;
+                border: 1px solid {_BORDER};
                 border-radius: 5px;
-                color: #888;
+                color: {_MUTED};
                 font-size: 10pt;
                 padding: 6px 16px;
-            }
-            QPushButton:hover { border-color: #888; color: #ccc; }
+            }}
+            QPushButton:hover {{ border-color: {_MUTED}; color: {_TEXT}; }}
         """)
         close_btn.clicked.connect(dlg.accept)
 
@@ -748,13 +799,6 @@ class DebugWindow(BaseWindow):
 
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
-        colors = {
-            'system': '#888888',
-            'ai': '#00ffff',
-            'tool': '#ffff00',
-            'user': '#ff00ff'
-        }
-
         icons = {
             'system': '⚙️',
             'ai': '🤖',
@@ -762,17 +806,17 @@ class DebugWindow(BaseWindow):
             'user': '👤'
         }
 
-        color = colors.get(sender, '#00ff00')
+        color = _MSG_COLORS.get(sender, _ACCENT)
         icon = icons.get(sender, '•')
 
         message_escaped = message.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
         html = f'''
-        <div style="margin: 10px 0; padding: 10px; background: rgba(0,255,0,0.05); border-left: 4px solid {color}; border-radius: 3px;">
+        <div style="margin: 10px 0; padding: 10px; background: {_theme.rgba(color, 0.06)}; border-left: 4px solid {color}; border-radius: 3px;">
             <div style="color: {color}; font-weight: bold; margin-bottom: 8px;">
-                {icon} {sender.upper()} <span style="color: #555; font-size: 8pt; font-weight: normal;">[{timestamp}]</span>
+                {icon} {sender.upper()} <span style="color: {_MUTED}; font-size: 8pt; font-weight: normal;">[{timestamp}]</span>
             </div>
-            <div style="color: #00ff00; white-space: pre-wrap; font-size: 9pt; font-family: 'Courier New', monospace;">
+            <div style="color: {_TEXT}; white-space: pre-wrap; font-size: 9pt; font-family: 'Courier New', monospace;">
 {message_escaped}
             </div>
         </div>

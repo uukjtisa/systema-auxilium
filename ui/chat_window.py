@@ -18,6 +18,7 @@ from PyQt6.QtGui import QAction, QCursor, QRegion, QPixmap
 from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QFont
 from core.skill_manager import SkillManager as _SkillManagerType
 from ui.base_window import BaseWindow
+from ui.theme import THEMES as _SHARED_THEMES
 from core.logger import _make_logger, _NoOpLogger
 
 
@@ -7548,79 +7549,9 @@ class ChatWindow(BaseWindow):
     # THEME APPLICATION
     # ═══════════════════════════════════════════════════════════════════════════
 
-    _THEMES = {
-        'obsidian_blue': {
-            'base':    '#0D1117', 'surface': '#161B22', 'elevated': '#21262D',
-            'border':  '#30363D', 'accent':  '#58A6FF', 'deep': '#0D1117',
-            'input_card': '#1C2128', 'input_card_border': '#2D333B',
-        },
-        'onyx': {
-            'base':    '#18181B', 'surface': '#1C1C1F', 'elevated': '#27272A',
-            'border':  '#3F3F46', 'accent':  '#6366F1', 'deep': '#101013',
-            'input_card': '#1C1C20', 'input_card_border': '#3A3A40',
-        },
-        'carbon': {
-            'base':    '#111214', 'surface': '#1E1F22', 'elevated': '#2B2D31',
-            'border':  '#3B3D43', 'accent':  '#5865F2', 'deep': '#0B0C0E',
-            'input_card': '#1A1B1E', 'input_card_border': '#35373D',
-        },
-        'midnight_rose': {
-            'base':    '#120F1A', 'surface': '#1D1825', 'elevated': '#2A2436',
-            'border':  '#3E3556', 'accent':  '#A78BFA', 'deep': '#0C0910',
-            'input_card': '#1A1625', 'input_card_border': '#382E50',
-        },
-        'emerald': {
-            'base':    '#0D1210', 'surface': '#131A15', 'elevated': '#1C2B1F',
-            'border':  '#274D30', 'accent':  '#3FB950', 'deep': '#090E0B',
-            'input_card': '#162019', 'input_card_border': '#243D28',
-        },
-        'copper': {
-            'base':    '#110D09', 'surface': '#1A1310', 'elevated': '#261D17',
-            'border':  '#4A3020', 'accent':  '#E8834A', 'deep': '#0D0A07',
-            'input_card': '#201812', 'input_card_border': '#3D2818',
-        },
-        'crimson': {
-            'base':    '#120A0A', 'surface': '#1C1010', 'elevated': '#2A1515',
-            'border':  '#4D1F1F', 'accent':  '#FF4C4C', 'deep': '#0D0707',
-            'input_card': '#201212', 'input_card_border': '#3D1A1A',
-        },
-        'arctic': {
-            'base':    '#0A0E12', 'surface': '#111620', 'elevated': '#192030',
-            'border':  '#243348', 'accent':  '#67E8F9', 'deep': '#070B0F',
-            'input_card': '#141D2C', 'input_card_border': '#1F2E42',
-        },
-        'golden': {
-            'base':    '#0F0D08', 'surface': '#19160A', 'elevated': '#252010',
-            'border':  '#473D18', 'accent':  '#F5C518', 'deep': '#0A0905',
-            'input_card': '#1E1A0D', 'input_card_border': '#3A3214',
-        },
-        'slate': {
-            'base':    '#0C0E12', 'surface': '#141820', 'elevated': '#1E2330',
-            'border':  '#2C3444', 'accent':  '#94A3B8', 'deep': '#090B0F',
-            'input_card': '#181D28', 'input_card_border': '#252D3E',
-        },
-        # ── Monochrome dark series ────────────────────────────────────────────
-        'void': {
-            'base':    '#000000', 'surface': '#090909', 'elevated': '#111111',
-            'border':  '#1c1c1c', 'accent':  '#555555', 'deep': '#000000',
-            'input_card': '#0d0d0d', 'input_card_border': '#1c1c1c',
-        },
-        'mono_obsidian': {
-            'base':    '#0a0a0a', 'surface': '#101010', 'elevated': '#171717',
-            'border':  '#222222', 'accent':  '#666666', 'deep': '#060606',
-            'input_card': '#131313', 'input_card_border': '#222222',
-        },
-        'mono_charcoal': {
-            'base':    '#0e0e10', 'surface': '#141416', 'elevated': '#1c1c1f',
-            'border':  '#252528', 'accent':  '#606063', 'deep': '#0b0b0d',
-            'input_card': '#181819', 'input_card_border': '#252528',
-        },
-        'ember': {
-            'base':    '#0f0d0b', 'surface': '#161310', 'elevated': '#1e1a16',
-            'border':  '#2a2520', 'accent':  '#6e665c', 'deep': '#0c0a08',
-            'input_card': '#1a1714', 'input_card_border': '#2a2520',
-        },
-    }
+    # Palette now lives in ui/theme.py (single source of truth shared by every
+    # window). Kept as a class attribute so existing self._THEMES references work.
+    _THEMES = _SHARED_THEMES
 
     def _t(self) -> dict:
         """Return the current live theme dict — always in sync with the last apply_theme call."""
@@ -7698,31 +7629,8 @@ class ChatWindow(BaseWindow):
                                 border-top: 1px solid {t['border']};
                             }}
                         """)
-            # Sidebar
-            if hasattr(self, 'sidebar'):
-                self.sidebar.setStyleSheet(f"""
-                    QFrame#sidebar {{
-                        background-color: {t['base']};
-                        border-right: 1px solid {t['border']};
-                        border-top-left-radius: 12px;
-                        border-bottom-left-radius: 12px;
-                    }}
-                """)
-                from PyQt6.QtWidgets import QWidget as _QW, QFrame as _QF2, QLineEdit as _QLE
-                for w in self.sidebar.findChildren(_QW):
-                    if w.objectName() == "sidebarContent":
-                        w.setStyleSheet(f"QWidget#sidebarContent {{ background-color: {t['base']}; }}")
-                    elif w.objectName() == "sidebarHero":
-                        w.setStyleSheet(f"QFrame#sidebarHero {{ background-color: {t['base']}; border-bottom: 1px solid {t['border']}; }}")
-                for inp in self.sidebar.findChildren(_QLE):
-                    try:
-                        inp.setStyleSheet(f"""
-                            QLineEdit {{ background: {t['elevated']}; border: 1px solid {t['border']};
-                                border-radius: 6px; padding: 0 8px; font-size: 10px; color: #8B949E; }}
-                            QLineEdit:focus {{ border-color: rgba(88,166,255,0.45); color: #E6EDF3; }}
-                        """)
-                    except RuntimeError:
-                        pass
+            # Sidebar (solid themed styling)
+            self._apply_sidebar_theme()
             # Input card — use stored reference first, then fallback search
             from PyQt6.QtWidgets import QFrame as _QF
             _ic = getattr(self, '_input_card_ref', None)
@@ -7794,8 +7702,43 @@ class ChatWindow(BaseWindow):
                                                         """)
                     except RuntimeError:
                         pass
+
+            # If glass mode is active, re-apply it on top so a theme change
+            # (e.g. the settings-Save broadcast) doesn't revert to solid surfaces.
+            if getattr(self, '_glass_enabled', False):
+                self.apply_glass_background(True, getattr(self, '_glass_opacity', 0.75))
         except Exception as e:
             log.error(f"[ChatWindow.apply_theme] Error: {e}")
+
+    def _apply_sidebar_theme(self):
+        """Apply the solid, themed styling to the sidebar. Used by apply_theme,
+        and by the glass path when the sidebar is opted OUT of the overlay."""
+        if not hasattr(self, 'sidebar'):
+            return
+        t = self._t()
+        self.sidebar.setStyleSheet(f"""
+            QFrame#sidebar {{
+                background-color: {t['base']};
+                border-right: 1px solid {t['border']};
+                border-top-left-radius: 12px;
+                border-bottom-left-radius: 12px;
+            }}
+        """)
+        from PyQt6.QtWidgets import QWidget as _QW, QLineEdit as _QLE
+        for w in self.sidebar.findChildren(_QW):
+            if w.objectName() == "sidebarContent":
+                w.setStyleSheet(f"QWidget#sidebarContent {{ background-color: {t['base']}; }}")
+            elif w.objectName() == "sidebarHero":
+                w.setStyleSheet(f"QFrame#sidebarHero {{ background-color: {t['base']}; border-bottom: 1px solid {t['border']}; }}")
+        for inp in self.sidebar.findChildren(_QLE):
+            try:
+                inp.setStyleSheet(f"""
+                    QLineEdit {{ background: {t['elevated']}; border: 1px solid {t['border']};
+                        border-radius: 6px; padding: 0 8px; font-size: 10px; color: #8B949E; }}
+                    QLineEdit:focus {{ border-color: rgba(88,166,255,0.45); color: #E6EDF3; }}
+                """)
+            except RuntimeError:
+                pass
 
     def apply_glass_background(self, enabled: bool, opacity: float = 0.75):
         """Apply or remove the glass (frosted-translucent) theme.
@@ -7912,6 +7855,38 @@ class ChatWindow(BaseWindow):
                     }
                 """)
 
+                # ── sidebar: frost it only if the user opted the sidebar in.
+                #    Otherwise leave it solid-themed (its own checklist sub-toggle).
+                _sidebar_glass = True
+                try:
+                    _sidebar_glass = bool(self.controller.settings.get('glass_chat_sidebar', True))
+                except Exception:
+                    pass
+                if hasattr(self, 'sidebar') and _sidebar_glass:
+                    # frosted near-opaque panel so the sidebar text stays readable
+                    panel_a = max(0.86, min(0.96, op + 0.18))
+                    panel_rgba = f"rgba(20,20,22,{panel_a:.2f})"
+                    self.sidebar.setStyleSheet(f"""
+                        QFrame#sidebar {{
+                            background-color: {panel_rgba};
+                            border-right: 1px solid rgba(50, 50, 50, 0.5);
+                            border-top-left-radius: 12px;
+                            border-bottom-left-radius: 12px;
+                        }}
+                    """)
+                    from PyQt6.QtWidgets import QWidget as _QW2
+                    for w in self.sidebar.findChildren(_QW2):
+                        if w.objectName() == "sidebarContent":
+                            w.setStyleSheet("QWidget#sidebarContent { background-color: transparent; }")
+                        elif w.objectName() == "sidebarHero":
+                            w.setStyleSheet(
+                                "QFrame#sidebarHero { background-color: transparent;"
+                                " border-bottom: 1px solid rgba(50, 50, 50, 0.5); }"
+                            )
+                else:
+                    # sidebar opted out of glass → keep it solid + themed
+                    self._apply_sidebar_theme()
+
                 # ── message bubbles stay solid — no change needed ─────────────
 
             else:
@@ -7931,11 +7906,11 @@ class ChatWindow(BaseWindow):
             # Apply theme first so _current_theme_key is set
             theme_key = settings.get('chat_theme', 'obsidian_blue')
             self.apply_theme(theme_key)
-            # Then apply glass on top if enabled
-            enabled = settings.get('glass_background_enabled', False)
+            # Then apply glass on top if enabled AND the chat window is opted in
+            from ui import theme as _theme
             opacity = float(settings.get('glass_background_opacity', 0.75))
-            if enabled:
-                self.apply_glass_background(enabled, opacity)
+            if _theme.glass_enabled_for(self.controller, 'chat'):
+                self.apply_glass_background(True, opacity)
         except Exception as e:
             log.error(f"[ChatWindow._apply_glass_from_settings] Error: {e}")
 
