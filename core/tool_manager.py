@@ -236,6 +236,11 @@ class ToolManager:
                  "file', 'Counting desktop files'). ALWAYS include it — it is shown to the user "
                  "as this step's title.",
                  False),
+                ('message_to_user',
+                 "Optional. A short user-facing message to show WHILE this runs (e.g. 'Let me "
+                 "check that for you…'). A native tool call shows no text on its own, so put any "
+                 "words meant for the user here.",
+                 False),
             ],
         },
         'execute_code': {
@@ -244,6 +249,13 @@ class ToolManager:
                 "effects (launch a process, write a file, send a notification)."
             ),
             'param': ('code', 'The Python code to execute. Output is not returned to you.'),
+            'extra_params': [
+                ('message_to_user',
+                 "Optional. A short user-facing message to show alongside this action (e.g. "
+                 "'Opening your Downloads folder! 📁'). A native tool call shows no text on its "
+                 "own, so put any words meant for the user here.",
+                 False),
+            ],
         },
         'set_session_name': {
             'description': "Set a short, descriptive title for the current conversation.",
@@ -315,6 +327,13 @@ class ToolManager:
             body = args.get(pname, '')
             if not isinstance(body, str):
                 body = str(body)
+            # Optional user-facing message. A native tool call carries no visible
+            # text on its own, so the model passes any words for the user via
+            # message_to_user — emit it as plain text BEFORE the fence so the
+            # existing pipeline surfaces it (exactly like text-before-a-fence in
+            # compat mode).
+            msg = args.get('message_to_user', '')
+            prefix = (msg.strip() + "\n\n") if isinstance(msg, str) and msg.strip() else ""
             # work_environment carries an optional annotation. Native tool calls
             # have no fence text to hold it, so fold it back into the annotated
             # fence form (```work_environment: [label]) — otherwise the UI step
@@ -322,9 +341,9 @@ class ToolManager:
             if name == 'work_environment':
                 annotation = args.get('annotation', '')
                 if isinstance(annotation, str) and annotation.strip():
-                    parts.append(f"```{name}: [{annotation.strip()}]\n{body}\n```")
+                    parts.append(f"{prefix}```{name}: [{annotation.strip()}]\n{body}\n```")
                     continue
-            parts.append(f"```{name}\n{body}\n```")
+            parts.append(f"{prefix}```{name}\n{body}\n```")
         return "\n\n".join(parts)
 
     # ─────────────────────────────────────────────────────────────────────────

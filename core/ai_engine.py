@@ -1234,6 +1234,41 @@ class AIEngine:
             }
 
         else:
+            # No work_environment call — but the model commonly fires an
+            # execute_code call as a final fire-and-forget action (launch an app,
+            # play media) right as it leaves work mode. Run it here; otherwise the
+            # reconstructed fence just renders and NEVER executes.
+            execute_call = self.tool_manager.parse_execute_code(ai_text)
+            if execute_call:
+                code, visible_text = execute_call
+                log.info(f"[AIEngine._process_work_mode_response] execute_code on work-mode exit | "
+                         f"code_len={len(code)}")
+                self.tool_manager.in_work_mode = False
+                # Slim the last work-mode ping (same as the other exit paths).
+                for entry in reversed(self.conversation_history):
+                    if entry.get('role') == 'system' and entry.get('_is_work_prompt'):
+                        prev_output = entry.get('_work_output', '')
+                        entry['content'] = WORK_MODE_OUTPUT_ONLY_PROMPT.format(work_output=prev_output)
+                        del entry['_is_work_prompt']
+                        break
+                result = self.tool_manager.run_execute_code(code, self.log_callback)
+                log.info(f"[AIEngine._process_work_mode_response] execute_code result: "
+                         f"success={result['success']}")
+                self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+                response_text = visible_text
+                if not result['success'] and result.get('error'):
+                    response_text = response_text + f"\n\n```Error\n{result['error']}\n```"
+                return {
+                    'response': response_text,
+                    'has_work_call': False,
+                    'in_work_mode': False,
+                    'thinking': False,
+                    'executed': True,
+                    'execution_success': result['success'],
+                    'session_name': session_name,
+                    'exited_work_mode': True,
+                }
+
             log.info("[AIEngine._process_work_mode_response] No more work_environment calls — "
                      "AI is done, clearing in_work_mode (skills persist)")
             self.tool_manager.in_work_mode = False
