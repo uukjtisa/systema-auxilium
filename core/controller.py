@@ -779,6 +779,13 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         _allow_exec_code = perms.get('allow_execute_code',  False)
         _any_code        = _allow_workmode or _allow_exec_code
 
+        # Match the active Tool Calling Mode. Tasks run through their own AIEngine
+        # whose _call_provider already dispatches natively when the setting is
+        # 'native' — but the task prompt is hijacked, so if we DON'T build the
+        # native variant here, the agent gets a fence-heavy prompt that fights the
+        # native channel (fence leaks). Build the matching prompt so both agree.
+        _native = (self.settings.get('tool_calling_mode', 'compat') == 'native')
+
         base_prompt = _gsp(
             is_task_session_prompt=True,
             system_info                = system_info,
@@ -795,6 +802,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             include_image_tools        = perms.get('inject_image_tools',    False),
             include_controller_ref     = perms.get('inject_controller_ref', False),
             include_notify_tool        = perms.get('inject_notify_tool',    False),
+            native_tools               = _native,       # native mode → fence-free prompt
         )
 
         # ── Permissions block ─────────────────────────────────────────────────
@@ -810,13 +818,32 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         perm_block = '\n'.join(perm_lines)
 
         # ── Task context block ────────────────────────────────────────────────
+        # How the agent reaches the user's main chat depends on whether it can run
+        # code. With code execution it calls the send_message_main() function in its
+        # Python namespace — works identically in compat AND native tool modes.
+        # Read-only tasks (no code execution) fall back to the JSON-on-its-own-line
+        # form since they can't call a Python function.
+        if _any_code:
+            send_main_block = (
+                f"Sending a message to the main chat session:\n"
+                f"  Call the send_message_main(message) function from inside work_environment "
+                f"(or execute_code). It is available in your Python namespace. Example:\n"
+                f"    send_message_main(\"Your Discord friend just messaged you.\")\n"
+                f"  Delivers immediately. Do NOT write it as a code fence or JSON in your reply "
+                f"text — just call the function in your executed code.\n\n"
+            )
+        else:
+            send_main_block = (
+                f"To send a message to the main chat session, emit EXACTLY this JSON on its own line:\n"
+                f'{{"tool": "send_message_main", "input": "your message to the user"}}\n\n'
+            )
+
         task_section = (
             f"\n\n=== BACKGROUND TASK CONTEXT ===\n"
             f"You are currently running as an automated background task agent — NOT in a live user conversation.\n"
             f"Task name: {task_dict.get('name', '?')}\n\n"
             f"Task Permissions:\n{perm_block}\n\n"
-            f"Tool for sending a message to main chat session, emit EXACTLY this JSON on its own line:\n"
-            f'{{"tool": "send_message_main", "input": "your message to the user"}}\n\n'
+            f"{send_main_block}"
             f"Only message the user when something genuinely needs their attention.\n"
             f"Each ping message has a timestamp appended for your temporal awareness.\n"
             f"=== END BACKGROUND TASK CONTEXT ===\n"

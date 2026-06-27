@@ -128,5 +128,44 @@
     },
     "id": "00000000-0000-0000-0000-000000000003",
     "created_at": "2026-01-01T00:00:00.000000"
+  },
+  {
+    "name": "Example - Discord Agent",
+    "active": true,
+    "instruction": "{{read_discord_event()}}\n\nExtra information:\nThe user's Discord account is your_discord_handle, if they mention or message you, you already know who that is.\n\nDO NOT ALERT THE MAIN SESSION, THIS IS A BACKGROUND TASK",
+    "interval_minutes": 30,
+    "ping_mode": "startup_relative",
+    "ping_interval_mode": "script_trigger",
+    "use_specific_ping_times": false,
+    "specific_ping_times": [],
+    "script_name": "discord_listener.py",
+    "script_poll_ms": 100,
+    "daily_schedule": {
+      "whole_day": true,
+      "start": "00:00",
+      "end": "21:00"
+    },
+    "permissions": {
+      "allow_workmode": true,
+      "allow_execute_code": true,
+      "inject_image_tools": true,
+      "inject_controller_ref": false,
+      "inject_notify_tool": false
+    },
+    "max_work_iterations": 20,
+    "unlimited_work_iterations": true,
+    "loaded_skills": [
+      "discord-agent"
+    ],
+    "limit_session_messages": {
+      "enabled": false,
+      "max_messages": 10
+    },
+    "one_time_schedule": {
+      "enabled": false,
+      "datetimes": []
+    },
+    "id": "08630232-04c0-4bad-845e-142bb3c0d8bd",
+    "created_at": "2026-05-26T16:44:22.676632"
   }
 ]

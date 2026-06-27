@@ -115,10 +115,15 @@ class TaskAIEngine:
         re.DOTALL
     )
 
-    def __init__(self, controller, task: dict | None = None):
+    def __init__(self, controller, task: dict | None = None, send_main_callback=None):
         self._controller = controller
         self._task = task or {}
         self._engine = None
+        # Delivery channel for the send_message_main() namespace function. Lets the
+        # task agent push a message to the main chat from INSIDE work_environment
+        # Python code — works identically in compat and native mode (it's just a
+        # function call, not a fenced/JSON tool the model has to format as text).
+        self._send_main_callback = send_main_callback
         self._pending_context_images = []
         self._images_lock = threading.Lock()
         self._init_engine()
@@ -203,6 +208,23 @@ class TaskAIEngine:
 
         ns['take_screenshot'] = _task_take_screenshot
         ns['attach_image_to_context'] = _attach_image_to_context
+
+        # send_message_main — the ONE supported way for a task agent to message the
+        # user's main chat. A plain namespace function so it works in BOTH tool
+        # modes (the old "{"tool":"send_message_main",...}" JSON-in-text approach
+        # breaks under native, where the model is told never to write tool calls as
+        # text). Delivers immediately when called from work_environment/execute_code.
+        def _send_message_main(message):
+            try:
+                cb = _task_ai_ref._send_main_callback
+                if cb is None:
+                    return "[send_message_main] No delivery channel available."
+                cb(str(message))
+                return "[send_message_main] Delivered to the main chat."
+            except Exception as _e:
+                return f"[send_message_main ERROR] {_e}"
+
+        ns['send_message_main'] = _send_message_main
 
         # Conditionally expose attach_image_to_chat for tasks with the permission
         if self._task.get('permissions', {}).get('inject_image_tools', False):
@@ -399,7 +421,9 @@ class TaskThread(threading.Thread):
         self._set_inactive = set_inactive_callback   # fn(task_id) → marks task inactive after one-shot
         self._stop_event = threading.Event()
         self._ping_lock = threading.Lock()   # serializes scheduled + manual pings per task
-        self._ai = TaskAIEngine(controller, task)
+        # Pass _safe_send_main so the agent's send_message_main() namespace function
+        # can deliver to the main chat from inside its Python execution.
+        self._ai = TaskAIEngine(controller, task, send_main_callback=self._safe_send_main)
         self._sessions_root = _APP_ROOT / "data" / "task-sessions"
         self._sessions_root.mkdir(parents=True, exist_ok=True)
         log.info(f"[TaskThread.__init__] Ready | task='{task['name']}' id={task['id'][:8]}")

@@ -8,6 +8,44 @@ Global Instructions - AI system prompts
 # get_system_prompt() assembles them conditionally via boolean flags.
 # All flags default to True so no existing callers are affected.
 
+# Shown ONLY in native tool-calling mode. Placed FIRST (frames everything) and
+# echoed at the end. Counters the fence mandates that the behavioural sections
+# still contain, so the model invokes the real native tools instead of writing
+# ```fence``` blocks as text.
+_SECTION_NATIVE_TOOLS_HEADER = """
+NATIVE TOOL CALLING IS ACTIVE — READ FIRST (OVERRIDES FENCE INSTRUCTIONS BELOW)
+
+Your tools are provided to you as NATIVE function-calling tools:
+  - work_environment(code, annotation, message_to_user)   run Python and SEE its
+                                         output (work mode). annotation = a short
+                                         3-6 word label of what the code does
+                                         (ALWAYS provide it).
+  - execute_code(code, message_to_user)  run Python fire-and-forget (no output shown)
+  - set_session_name(name)      title the conversation
+  - load_skill(skill_name)      load a skill's instructions
+  - unload_skill(skill_name)    unload a skill
+
+TALKING TO THE USER: a native tool call shows NO visible text on its own. To say
+something to the user in the SAME turn as a tool call (e.g. "Let me check that…",
+"Opening it now! 📁"), pass your words in the `message_to_user` argument — it is
+shown to the user alongside the action. Use it whenever you'd normally narrate.
+
+INVOKE THEM VIA YOUR NATIVE TOOL-CALL MECHANISM. Do NOT write code fences like
+```work_environment ...``` as text, and IGNORE any instruction below that says to
+"use the fence format", "always put tool calls inside tool fences", or "never use
+JSON". Those rules are for a different mode and DO NOT APPLY to you.
+
+Everything else below — WHEN and WHY to use each tool, staying in work mode,
+chaining steps, directory-safety, memory rules, and session-naming timing — STILL
+FULLY APPLIES. Only the invocation METHOD changes: emit a native tool call, not text.
+"""
+
+_SECTION_NATIVE_TOOLS_FOOTER = """
+REMINDER — NATIVE TOOL CALLING: invoke work_environment / execute_code /
+set_session_name / load_skill / unload_skill as NATIVE tool calls. Disregard every
+"use fences / never use JSON" instruction above — those do not apply in this mode.
+"""
+
 _SECTION_TOOL_FORMAT = """
 TOOL CALL FORMAT  (CRITICAL — READ CAREFULLY)
 
@@ -92,22 +130,16 @@ def _build_tool_table(
     """Build the AVAILABLE TOOLS table dynamically based on which sections are active."""
     rows = []
     if include_workmode:
-        rows.append("│ work_environment     │ Python code to run (you SEE output)      │")
+        rows.append("- work_environment: Python code to run (you SEE output)")
     if include_execute_code:
-        rows.append("│ execute_code         │ Python code to run (you DON'T see output)│")
+        rows.append("- execute_code: Python code to run (you DON'T see output)")
     if include_session_naming:
-        rows.append("│ set_session_name     │ Short title for this conversation        │")
+        rows.append("- set_session_name: Short title for this conversation")
 
     if not rows:
         return "(no interactive tools available in this context)"
 
-    header = (
-        "┌──────────────────────┬──────────────────────────────────────────┐\n"
-        "│ tool name            │ what \"input\" contains                    │\n"
-        "├──────────────────────┼──────────────────────────────────────────┤"
-    )
-    footer = "└──────────────────────┴──────────────────────────────────────────┘"
-    return header + "\n" + "\n".join(rows) + "\n" + footer
+    return "(format below is  - tool name: what \"input\" contains)\n" + "\n".join(rows)
 
 _SECTION_SESSION_NAMING = """
 SESSION NAMING TOOL
@@ -669,6 +701,134 @@ MUST REMEMBER:
 """
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# NATIVE-MODE SECTION VARIANTS
+# ------------------------------------------------------------------------------
+# When native function-calling is active, the model invokes tools through the
+# provider's tools API — NOT via code fences. These variants carry the SAME
+# behavioural rules as their compat counterparts but contain ZERO fence examples
+# or "use the fence format / never use JSON" mandates, which otherwise push the
+# model back into writing fences as text (observed with Cloudflare Kimi). Built
+# mostly by surgical .replace() so the two stay in lockstep automatically.
+# ══════════════════════════════════════════════════════════════════════════════
+
+_SECTION_SESSION_NAMING_NATIVE = """
+SESSION NAMING TOOL
+
+Call the set_session_name tool (argument: the title) to name the conversation.
+
+**SESSION NAMING RULES:**
+- Use ONLY ONCE per session after determining the conversation topic.
+- Must accompany a normal reply to the user — NEVER call it with no reply.
+- Must be used by your 2nd–4th response at the latest.
+- Can be combined freely with a code-execution tool call in the same turn.
+- If the topic isn't clear yet, use a best-guess title anyway — never skip it.
+
+**GOOD USAGE:**
+User: "What are dogs actually for?"
+Assistant: replies normally ("Dogs serve many purposes! They're companions,
+workers, and helpers...") AND in the same turn makes a set_session_name call with
+the title "What are Dogs For".
+
+**BAD USAGE:** calling set_session_name with no actual reply to the user.
+Always include a real response — never only name the session.
+"""
+
+_SECTION_MEMORY_NATIVE = _SECTION_MEMORY.replace(
+    """Example usage:
+```work_environment: [Storing memory]
+result = memorize(
+    title="User prefers concise responses",
+    body="The user explicitly stated they dislike long explanations and prefer short, direct answers. Apply this to all responses.", #NO NEW LINES
+    tags="preferences, communication style, response format"
+)
+print(result)
+```""",
+    """Example usage — make a work_environment tool call whose code is:
+    result = memorize(
+        title="User prefers concise responses",
+        body="The user explicitly stated they dislike long explanations and prefer short, direct answers. Apply this to all responses.", #NO NEW LINES
+        tags="preferences, communication style, response format"
+    )
+    print(result)""",
+)
+
+_SECTION_WORK_MODE_NATIVE = _SECTION_WORK_MODE.replace(
+    "  Each turn = ONE work_environment fence. Never more than one per response.",
+    "  Each turn = ONE work_environment tool call. Never more than one per response.",
+)
+
+_SECTION_EXECUTE_CODE_MODE_NATIVE = """
+EXECUTE_CODE MODE — ALWAYS ASK USER!
+
+When using execute_code:
+1. Explain what you're doing BEFORE the tool call
+2. Make the execute_code tool call (its argument is the Python code to run)
+3. Ask the user to confirm it worked AFTER
+
+Example:
+Say "I'll open your Downloads folder now! 📁", then make an execute_code call whose
+code is:  import os; os.startfile(r'C:\\Users\\...\\Downloads')
+then ask "Did the folder open successfully?"
+
+Use emojis to be friendly: ✨ 📁 🎵 😊 😁 etc.
+"""
+
+_SECTION_MUST_REMEMBER_NATIVE = """
+MUST REMEMBER:
+- DO NOT ROLEPLAY — actually MAKE THE TOOL CALL when you say you'll do something
+- ENSURE STDOUT — Use print() when gathering information in work_environment
+- work_environment = See output, chain calls, exit when complete
+- ALWAYS pass the `annotation` argument to work_environment — a short 3-6 word label of what the code does (it becomes the step's title shown to the user)
+- execute_code = Don't see output, ask user if it worked
+- ONE code-execution tool call per message
+- YOU MUST NAME THE SESSION SO THE USER KNOWS WHAT CONVERSATION THINGS HAPPENED, AND IS EASY FOR THE USER TO GET BACK TO.
+- set_session_name is EXEMPT from the one-tool limit — call it WHEN THE TOPIC IS SIGNIFICANTLY CHANGED, DO NOT USE IT ALL OVER YOUR RESPONSES, THIS IS NOT A CHORE!
+- STAY IN WORK MODE until task is COMPLETE
+- Chain 3-10+ tool calls for complex tasks
+- Invoke tools as NATIVE function calls — NEVER write a tool call as text, a code fence, or JSON in your message body
+- To speak to the user in the SAME turn as a tool call, use the `message_to_user` argument — a bare tool call shows no text
+- Be friendly and descriptive!
+- YOU MUST SET THE SESSION NAME AS SOON AS POSSIBLE — no later than your 4th response!
+- Never skip session naming. If the topic is unclear, guess a title anyway. SESSION NAMING HAS HIGHER PRIORITY THAN STYLE PREFERENCES. It must not be skipped due to tone, humour, or conversational flow. set_session_name can be called ANYWHERE in the turn alongside any code tool. There are no ordering restrictions.\n
+"""
+
+_SECTION_IMAGE_TOOLS_NATIVE = _SECTION_IMAGE_TOOLS.replace(
+    """FLOW EXAMPLE — assessing screen state:
+```work_environment: [Taking screenshot to assess system state]
+path = take_screenshot()
+attach_image_to_chat(path)
+print(f"Screenshot captured and pinned: {path}")
+```""",
+    """FLOW EXAMPLE — assessing screen state. Make a work_environment tool call whose code is:
+    path = take_screenshot()
+    attach_image_to_chat(path)
+    print(f"Screenshot captured and pinned: {path}")""",
+)
+
+_SECTION_IMAGE_TOOLS_TASK_NATIVE = _SECTION_IMAGE_TOOLS_TASK.replace(
+    """FLOW EXAMPLE — checking screen state during a task:
+```work_environment: [Taking screenshot to assess current state]
+path = take_screenshot()
+print(f"Screenshot queued for context: {path}")
+```""",
+    """FLOW EXAMPLE — checking screen state during a task. Make a work_environment tool call whose code is:
+    path = take_screenshot()
+    print(f"Screenshot queued for context: {path}")""",
+)
+
+_SECTION_CONTROLLER_REF_NATIVE = _SECTION_CONTROLLER_REF.replace(
+    """Examples:
+```work_environment: [Checking current session]
+print(controller.current_session_id)
+print(controller.settings.get('ai_provider'))
+```""",
+    """Examples — make a work_environment tool call whose code is:
+    print(controller.current_session_id)
+    print(controller.settings.get('ai_provider'))""",
+)
+
+
 def get_system_prompt(
         is_task_session_prompt: bool = False,
         system_info: str = "",
@@ -688,6 +848,9 @@ def get_system_prompt(
         include_image_tools: bool = False,
         include_controller_ref: bool = False,
         include_notify_tool: bool = False,
+        # Native function-calling mode: drops the fence-syntax sections and adds a
+        # native-invocation override so the model uses real tool calls, not fences.
+        native_tools: bool = False,
 ):
     """
     Generate system prompt with optional modular sections.
@@ -696,6 +859,12 @@ def get_system_prompt(
     non-interactive agents (e.g. background tasks, skill loaders).
     All sections are ON by default so existing callers see no change.
     """
+
+    # Native mode implies the fence-format/syntax sections are pointless (tools
+    # travel through the provider's function-calling channel instead).
+    if native_tools:
+        include_tool_format = False
+        include_fence_syntax = False
 
     voice_instructions = ""
     if voice_mode:
@@ -727,6 +896,10 @@ Use these sparingly and naturally.
     skills_block = ""
     if skills:
         loaded_names = {s['name'] for s in skills if s.get('is_loaded')}
+
+        # Compact list (no padded table). Shows the FULL description with no
+        # trailing-space bloat, and only flags the loaded ones — writing the
+        # load state on every row would waste tokens since most are unloaded.
         lines = [
             "",
             "",
@@ -734,37 +907,49 @@ Use these sparingly and naturally.
             "",
             "Skills give you deep, specific instructions for certain tasks.",
             "You can load or unload skills at ANY time — inside or outside work_environment.",
+            "Format below is  - name [LOADED]: when to use  (the [LOADED] tag appears only on active skills).",
             "",
-            "┌──────────────────────┬──────────────────────────────────────────┬───────────┐",
-            "│ skill name           │ when to use                              │ Is Loaded │",
-            "├──────────────────────┼──────────────────────────────────────────┼───────────┤",
         ]
         for s in skills:
-            name = s['name'][:20].ljust(20)
-            desc = s['description'][:40]
-            loaded_flag = "true " if s.get('is_loaded') else "false"
-            lines.append(f"│ {name} │ {desc:<40} │ {loaded_flag:<9} │")
-        lines += [
-            "└──────────────────────┴──────────────────────────────────────────┴───────────┘",
-            "",
-            "HOW TO LOAD A SKILL:",
-            "  Use the load_skill fence:",
-            "  ```load_skill",
-            "  skill_name",
-            "  ```",
-            "  The skill's full instructions will be injected into your system context.",
-            "  Works inside AND outside work_environment.",
-            "  ⚠ Do NOT load a skill that already shows Is Loaded = true — it's already active!",
-            "",
-            "HOW TO UNLOAD A SKILL:",
-            "  Use the unload_skill fence:",
-            "  ```unload_skill",
-            "  skill_name",
-            "  ```",
-            "  Removes the skill from your active context.",
-            "  Works inside AND outside work_environment.",
-            "  ⚠ Do NOT unload a skill that shows Is Loaded = false — it isn't loaded!\n",
-        ]
+            flag = " [LOADED]" if s.get('is_loaded') else ""
+            desc = (s.get('description', '') or "").strip()
+            lines.append(f"- {s['name']}{flag}: {desc}")
+        if native_tools:
+            lines += [
+                "",
+                "HOW TO LOAD A SKILL:",
+                "  Call the load_skill tool with the skill name.",
+                "  The skill's full instructions will be injected into your system context.",
+                "  Works inside AND outside work_environment.",
+                "  ⚠ Do NOT load a skill that already shows [LOADED] — it's already active!",
+                "",
+                "HOW TO UNLOAD A SKILL:",
+                "  Call the unload_skill tool with the skill name.",
+                "  Removes the skill from your active context.",
+                "  Works inside AND outside work_environment.",
+                "  ⚠ Do NOT unload a skill that is not [LOADED] — it isn't loaded!\n",
+            ]
+        else:
+            lines += [
+                "",
+                "HOW TO LOAD A SKILL:",
+                "  Use the load_skill fence:",
+                "  ```load_skill",
+                "  skill_name",
+                "  ```",
+                "  The skill's full instructions will be injected into your system context.",
+                "  Works inside AND outside work_environment.",
+                "  ⚠ Do NOT load a skill that already shows Is Loaded = true — it's already active!",
+                "",
+                "HOW TO UNLOAD A SKILL:",
+                "  Use the unload_skill fence:",
+                "  ```unload_skill",
+                "  skill_name",
+                "  ```",
+                "  Removes the skill from your active context.",
+                "  Works inside AND outside work_environment.",
+                "  ⚠ Do NOT unload a skill that shows Is Loaded = false — it isn't loaded!\n",
+            ]
         skills_block = "\n".join(lines)
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -779,7 +964,13 @@ Use these sparingly and naturally.
         _skill_path_rule = ""
 
     # ── Assemble modular sections ─────────────────────────────────────────────
+    # In native mode, swap each fence-laden section for its fence-free variant.
+    def _pick(native_variant, compat_variant):
+        return native_variant if native_tools else compat_variant
+
     body_parts = []
+    if native_tools:
+        body_parts.append(_SECTION_NATIVE_TOOLS_HEADER)
     if include_tool_format:
         body_parts.append(_SECTION_TOOL_FORMAT.format(
             tool_table=_build_tool_table(
@@ -789,8 +980,8 @@ Use these sparingly and naturally.
                 include_execute_code=include_execute_code_rules,
             )
         ))
-    if include_session_naming:    body_parts.append(_SECTION_SESSION_NAMING)
-    if include_memory:            body_parts.append(_SECTION_MEMORY)
+    if include_session_naming:    body_parts.append(_pick(_SECTION_SESSION_NAMING_NATIVE, _SECTION_SESSION_NAMING))
+    if include_memory:            body_parts.append(_pick(_SECTION_MEMORY_NATIVE, _SECTION_MEMORY))
     if include_execution_tools:
         _et = _build_execution_tools_section(
             include_workmode=include_work_mode_rules,
@@ -805,13 +996,14 @@ Use these sparingly and naturally.
         )
         if _fs:
             body_parts.append(_fs)
-    if include_work_mode_rules:   body_parts.append(_SECTION_WORK_MODE)
-    if include_execute_code_rules: body_parts.append(_SECTION_EXECUTE_CODE_MODE)
-    if include_image_tools and not is_task_session_prompt:       body_parts.append(_SECTION_IMAGE_TOOLS)
-    if include_image_tools and is_task_session_prompt: body_parts.append(_SECTION_IMAGE_TOOLS_TASK)
-    if include_controller_ref:    body_parts.append(_SECTION_CONTROLLER_REF)
+    if include_work_mode_rules:   body_parts.append(_pick(_SECTION_WORK_MODE_NATIVE, _SECTION_WORK_MODE))
+    if include_execute_code_rules: body_parts.append(_pick(_SECTION_EXECUTE_CODE_MODE_NATIVE, _SECTION_EXECUTE_CODE_MODE))
+    if include_image_tools and not is_task_session_prompt:       body_parts.append(_pick(_SECTION_IMAGE_TOOLS_NATIVE, _SECTION_IMAGE_TOOLS))
+    if include_image_tools and is_task_session_prompt: body_parts.append(_pick(_SECTION_IMAGE_TOOLS_TASK_NATIVE, _SECTION_IMAGE_TOOLS_TASK))
+    if include_controller_ref:    body_parts.append(_pick(_SECTION_CONTROLLER_REF_NATIVE, _SECTION_CONTROLLER_REF))
     if include_notify_tool:       body_parts.append(_SECTION_NOTIFY_TOOL)
-    if include_must_remember:     body_parts.append(_SECTION_MUST_REMEMBER)
+    if include_must_remember:     body_parts.append(_pick(_SECTION_MUST_REMEMBER_NATIVE, _SECTION_MUST_REMEMBER))
+    if native_tools:              body_parts.append(_SECTION_NATIVE_TOOLS_FOOTER)
 
     preamble_parts = filter(None, [
         "You a Systema Auxilium AI Agent - An Operating System Assistant.",
@@ -889,6 +1081,49 @@ VERY CRITICAL: WHEN YOU ARE GONNA EXIT, IN YOUR RESPONSE, THERE MUST BE A REPORT
 """
 
 WORK_MODE_PROMPT = "<SYSTEM_MESSAGE>\n" + _WORK_CONTINUATION_BLOCK + "</SYSTEM_MESSAGE>"
+
+# Native tool-calling variant — same decision logic, but invocation is via native
+# tool calls instead of ```fences```. Used when Tool Calling Mode = Native.
+_WORK_CONTINUATION_BLOCK_NATIVE = """\
+This is your internal workspace. The user CANNOT see this.
+
+Previous execution output:
+{work_output}
+
+---DECISION TIME---
+1. Do I have ALL information needed?
+2. Could I provide a more complete answer?
+3. Are there follow-up checks needed?
+4. What was the user's original request?
+
+IF YOU NEED MORE INFO → run more code!
+IF TASK IS INCOMPLETE → run more code!
+IF YOU HAVE EVERYTHING → exit!
+
+Options (use your NATIVE tool calls — do NOT write code fences as text):
+- More code:   call the work_environment tool with your Python in the `code` argument.
+- Exit:        call the work_environment tool with code = "exit", and put your
+               report/summary and message to the user in your reply text.
+- Load skill:  call the load_skill tool with the skill name (only if not loaded).
+- Unload skill: call the unload_skill tool with the skill name (only if loaded).
+
+---
+ANTI-PATTERNS — NEVER DO THESE:
+
+❌ NEVER walk or list ANY directory without checking the count first:
+  count = len(os.listdir(path))
+  # > 200 items → skip walking, use glob/rglob with a specific pattern instead
+
+❌ NEVER walk or list the skills directory — it floods your context and is never useful.
+  Search precisely instead.
+---
+
+VERY IMPORTANT: Don't rush! Chain executions for complete answers if you feel you are not yet ready!
+CRITICAL: IF YOU ARE SEEING THIS MESSAGE THEN YOU MUST NOT YET TALK! YOU ARE INSIDE YOUR WORK ENVIRONMENT! IF YOU WANNA TALK TO THE USER AND IF YOU ARE READY WITH ALL YOU NEED, THEN EXIT FIRST (call work_environment with code = "exit")!
+VERY CRITICAL: WHEN YOU EXIT, YOUR REPLY MUST CONTAIN A REPORT / SUMMARY OF WHAT YOU HAVE DONE!
+"""
+
+WORK_MODE_PROMPT_NATIVE = "<SYSTEM_MESSAGE>\n" + _WORK_CONTINUATION_BLOCK_NATIVE + "</SYSTEM_MESSAGE>"
 
 # Slim version stored in history for all but the latest work-mode ping.
 # Once the AI has seen the full instructions once, prior entries are replaced

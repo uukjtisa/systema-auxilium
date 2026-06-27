@@ -192,7 +192,7 @@ import subprocess, sys, json
 task = {
     "name": "Morning Briefing",
     "active": False,
-    "instruction": "Send a good morning email to trescariasa2007@gmail.com with today's date and a motivational message.",
+    "instruction": "Send a good morning email to you@example.com with today's date and a motivational message.",
     "interval_minutes": 1440,
     "ping_mode": "schedule_relative",
     "ping_interval_mode": "timed",
@@ -241,7 +241,7 @@ if result.returncode != 0:
 - `id` and `created_at` are injected by the script. Never include them in the task dict.
 - To use a new function in a task's `{{...}}` block, register it with `add_function.py` first, then reference it by name in the instruction.
 - For script-trigger tasks, YOU must also create the script file and place it in `{app_root}/data/tasks/interval-scripts/`. Remind the user to verify the path after creation.
-- A task AI can push messages to the main chat window by emitting `{"tool": "send_message_main", "input": "..."}` anywhere in its response — the task manager intercepts and dispatches it.
+- A task AI pushes messages to the main chat window by calling the `send_message_main("...")` function, which is available in its Python namespace — it just calls it from inside `work_environment` (or `execute_code`). This works in both Compatibility and Native tool-calling modes and delivers immediately. (Read-only tasks with no code execution instead emit `{"tool": "send_message_main", "input": "..."}` on its own line, since they can't run a function.)
 
 ---
 

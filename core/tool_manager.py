@@ -214,6 +214,139 @@ class ToolManager:
                       f"{type(e).__name__}: {e}")
 
     # ─────────────────────────────────────────────────────────────────────────
+    # Canonical tool registry  (single source of truth for tool schemas)
+    #
+    # Every tool takes ONE string input (the fence content in compat mode, or a
+    # single named argument in native mode). This registry maps each tool to a
+    # description + that one parameter, so native_adapters can render it into the
+    # OpenAI / Anthropic / Gemini function-calling formats. The compat fence docs
+    # in global_instructions remain the prompt-side rendering of the same tools.
+    # ─────────────────────────────────────────────────────────────────────────
+    _CANONICAL_TOOLS = {
+        'work_environment': {
+            'description': (
+                "Run Python in a persistent workspace and SEE its output (stdout + the last "
+                "expression's value). Use for multi-step tasks where you must observe results "
+                "before continuing. The namespace persists across calls within a work session."
+            ),
+            'param': ('code', 'The Python code to execute. You receive its stdout and return value.'),
+            'extra_params': [
+                ('annotation',
+                 "A short 3-6 word label describing what this code does (e.g. 'Reading config "
+                 "file', 'Counting desktop files'). ALWAYS include it — it is shown to the user "
+                 "as this step's title.",
+                 False),
+                ('message_to_user',
+                 "Optional. A short user-facing message to show WHILE this runs (e.g. 'Let me "
+                 "check that for you…'). A native tool call shows no text on its own, so put any "
+                 "words meant for the user here.",
+                 False),
+            ],
+        },
+        'execute_code': {
+            'description': (
+                "Run Python fire-and-forget — you will NOT see the output. Use only for side "
+                "effects (launch a process, write a file, send a notification)."
+            ),
+            'param': ('code', 'The Python code to execute. Output is not returned to you.'),
+            'extra_params': [
+                ('message_to_user',
+                 "Optional. A short user-facing message to show alongside this action (e.g. "
+                 "'Opening your Downloads folder! 📁'). A native tool call shows no text on its "
+                 "own, so put any words meant for the user here.",
+                 False),
+            ],
+        },
+        'set_session_name': {
+            'description': "Set a short, descriptive title for the current conversation.",
+            'param': ('name', 'A short title — just a few words.'),
+        },
+        'load_skill': {
+            'description': (
+                "Load a skill's full instructions into your context. Use when the task matches an "
+                "available skill that is not already loaded."
+            ),
+            'param': ('skill_name', 'The exact name of the skill to load.'),
+        },
+        'unload_skill': {
+            'description': "Remove a previously loaded skill from your context to free space.",
+            'param': ('skill_name', 'The exact name of the skill to unload.'),
+        },
+    }
+
+    def get_canonical_tools(self, include_session_naming: bool = True,
+                            include_skills: bool = True) -> list:
+        """Return the active tools as canonical schema dicts (name/description/
+        parameters), gated by the same capability flags the prompt uses. Feed the
+        result to core.native_adapters.to_<dialect>_tools() for native mode."""
+        active = []
+        if self.allow_workmode:
+            active.append('work_environment')
+        if self.allow_execute_code:
+            active.append('execute_code')
+        if include_session_naming:
+            active.append('set_session_name')
+        if include_skills:
+            active += ['load_skill', 'unload_skill']
+
+        out = []
+        for name in active:
+            spec = self._CANONICAL_TOOLS[name]
+            pname, pdesc = spec['param']
+            props = {pname: {'type': 'string', 'description': pdesc}}
+            required = [pname]
+            for (ename, edesc, ereq) in spec.get('extra_params', []):
+                props[ename] = {'type': 'string', 'description': edesc}
+                if ereq:
+                    required.append(ename)
+            out.append({
+                'name': name,
+                'description': spec['description'],
+                'parameters': {
+                    'type': 'object',
+                    'properties': props,
+                    'required': required,
+                },
+            })
+        return out
+
+    def tool_calls_to_fences(self, tool_calls: list) -> str:
+        """Reconstruct canonical fence text from normalized native tool calls
+        (each {"name","arguments"}). This lets native-mode responses flow through
+        the exact same fence-parsing pipeline as compat mode — the engine never
+        has to branch on tool format below _call_provider."""
+        parts = []
+        for call in (tool_calls or []):
+            name = call.get('name')
+            spec = self._CANONICAL_TOOLS.get(name)
+            if not spec:
+                log.warning(f"[ToolManager.tool_calls_to_fences] Unknown tool '{name}' — skipped")
+                continue
+            pname = spec['param'][0]
+            args = call.get('arguments', {}) or {}
+            body = args.get(pname, '')
+            if not isinstance(body, str):
+                body = str(body)
+            # Optional user-facing message. A native tool call carries no visible
+            # text on its own, so the model passes any words for the user via
+            # message_to_user — emit it as plain text BEFORE the fence so the
+            # existing pipeline surfaces it (exactly like text-before-a-fence in
+            # compat mode).
+            msg = args.get('message_to_user', '')
+            prefix = (msg.strip() + "\n\n") if isinstance(msg, str) and msg.strip() else ""
+            # work_environment carries an optional annotation. Native tool calls
+            # have no fence text to hold it, so fold it back into the annotated
+            # fence form (```work_environment: [label]) — otherwise the UI step
+            # title defaults to a generic "code executed".
+            if name == 'work_environment':
+                annotation = args.get('annotation', '')
+                if isinstance(annotation, str) and annotation.strip():
+                    parts.append(f"{prefix}```{name}: [{annotation.strip()}]\n{body}\n```")
+                    continue
+            parts.append(f"{prefix}```{name}\n{body}\n```")
+        return "\n\n".join(parts)
+
+    # ─────────────────────────────────────────────────────────────────────────
     # Public parse methods - Fence-based parsing (new format)
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -932,14 +1065,23 @@ class ToolManager:
     # ─────────────────────────────────────────────────────────────────────────
 
     def get_work_mode_prompt(self):
-        """Get the prompt for work mode continuation"""
+        """Get the prompt for work mode continuation. In native tool-calling mode
+        the variant that instructs native tool calls (not fences) is used."""
         log.debug(f"[ToolManager.get_work_mode_prompt] Building work mode prompt | "
                   f"has_last_output={self.last_work_output is not None}")
-        from core.global_instructions import WORK_MODE_PROMPT
+        from core.global_instructions import WORK_MODE_PROMPT, WORK_MODE_PROMPT_NATIVE
 
+        native = False
+        try:
+            s = self.settings_callback() if self.settings_callback else None
+            native = (s or {}).get('tool_calling_mode', 'compat') == 'native'
+        except Exception:
+            native = False
+
+        template = WORK_MODE_PROMPT_NATIVE if native else WORK_MODE_PROMPT
         output = self.last_work_output or "No previous output"
-        prompt = WORK_MODE_PROMPT.format(work_output=output)
-        log.debug(f"[ToolManager.get_work_mode_prompt] Prompt built | length={len(prompt)}")
+        prompt = template.format(work_output=output)
+        log.debug(f"[ToolManager.get_work_mode_prompt] Prompt built | native={native} | length={len(prompt)}")
         return prompt
 
     def reset_python(self):
