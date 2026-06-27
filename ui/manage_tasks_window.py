@@ -14,6 +14,7 @@ from PyQt6.QtCore import Qt, QTime, QDateTime, QPoint, QThread, pyqtSignal, QTim
 from PyQt6.QtGui import QFont, QSyntaxHighlighter, QTextCharFormat, QColor
 import re
 from ui.base_window import BaseWindow
+from ui import theme as _theme
 
 # ─────────────────────────── Colored Logger Setup ────────────────────────────
 _verbose = True
@@ -94,6 +95,37 @@ _CHECK = f"""
 """
 _SEC = f"color: {_ACCENT}; font-size: 10px; font-weight: 700; letter-spacing: 1.5px;"
 _LBL = f"color: {_TEXT}; font-size: 12px;"
+
+
+def _refresh_palette(controller):
+    """Rebind the module-level colour constants + composed stylesheets to match
+    the user's currently selected theme (controller.settings['chat_theme']).
+
+    The defaults above keep this module importable standalone; this is called at
+    the top of ManageTasksWindow.__init__ so the window is built in the active
+    theme. All styling here reads these globals at call time, so refreshing them
+    before the UI is built is enough to retheme the whole window.
+    """
+    global _BG, _SURFACE, _SURFACE2, _BORDER, _ACCENT, _TEXT, _MUTED
+    global _RED, _GREEN, _YELLOW, _PURPLE, _GLOW, _GLOW_GN
+    global _BTN, _BTN_ACCENT, _BTN_RED, _BTN_GHOST, _INPUT, _CHECK, _SEC, _LBL
+
+    p = _theme.current_palette(controller)
+    _BG, _SURFACE, _SURFACE2 = p['bg'], p['surface'], p['surface2']
+    _BORDER, _ACCENT = p['border'], p['accent']
+    _TEXT, _MUTED = p['text'], p['muted']
+    _RED, _GREEN, _YELLOW, _PURPLE = p['red'], p['green'], p['yellow'], p['purple']
+    _GLOW = p['glow']
+    _GLOW_GN = _theme.rgba(p['green'], 0.15)
+
+    _BTN        = _theme.btn(p)
+    _BTN_ACCENT = _theme.btn_accent(p)
+    _BTN_RED    = _theme.btn_red(p)
+    _BTN_GHOST  = _theme.btn_ghost(p)
+    _INPUT      = _theme.input_qss(p)
+    _CHECK      = _theme.check_qss(p)
+    _SEC = f"color: {_ACCENT}; font-size: 10px; font-weight: 700; letter-spacing: 1.5px;"
+    _LBL = f"color: {_TEXT}; font-size: 12px;"
 
 
 class _PythonHighlighter(QSyntaxHighlighter):
@@ -342,6 +374,7 @@ class ManageTasksWindow(BaseWindow):
 
     def __init__(self, controller, parent=None):
         super().__init__(parent)
+        _refresh_palette(controller)   # match the active app theme before building UI
         self._skill_manager = getattr(controller, 'skill_manager', None)
         self._init_chrome_state()
         self._controller = controller
@@ -382,7 +415,8 @@ class ManageTasksWindow(BaseWindow):
         root.setSpacing(0)
 
         # ── Draggable title bar ───────────────────────────────────────────────
-        root.addWidget(self._build_title_bar())
+        self._title_bar = self._build_title_bar()
+        root.addWidget(self._title_bar)
 
         # ── Stack: 0=list  1=editor  2=session viewer ────────────────────────
         self._stack = QStackedWidget()
@@ -415,6 +449,7 @@ class ManageTasksWindow(BaseWindow):
 
         self.setMinimumSize(680, 480)
         self.create_resize_handles()
+        self._sync_glass()
 
     # ═══════════════════════════════════════════════════════════════════════════
     # WINDOW CHROME
@@ -476,6 +511,67 @@ class ManageTasksWindow(BaseWindow):
         super().resizeEvent(event)
         if hasattr(self, 'resize_handles'):
             self.position_resize_handles()
+
+    def apply_theme(self, theme_key=None):
+        """Live-retint the whole window to the active theme.
+
+        Called by controller.broadcast_theme() the instant the user saves a new
+        theme in Settings. Refreshes the palette, then rebuilds the title bar and
+        stacked pages in place (preserving the current page) so every surface,
+        button and input picks up the new colours.
+        """
+        try:
+            _refresh_palette(self._controller)
+            # Container surface
+            self.container.setStyleSheet(f"""
+                QWidget#mtContainer {{
+                    background-color: {_SURFACE};
+                    border-radius: 12px;
+                }}
+            """)
+            root = self.container.layout()
+            # Replace the title bar
+            new_bar = self._build_title_bar()
+            root.replaceWidget(self._title_bar, new_bar)
+            self._title_bar.deleteLater()
+            self._title_bar = new_bar
+            # Rebuild the stacked pages, keeping the current page selected
+            idx = self._stack.currentIndex()
+            while self._stack.count():
+                w = self._stack.widget(0)
+                self._stack.removeWidget(w)
+                w.deleteLater()
+            self._stack.addWidget(self._build_list_page())    # 0
+            self._stack.addWidget(self._build_editor_page())  # 1
+            self._stack.addWidget(self._build_viewer_page())  # 2
+            self._stack.setCurrentIndex(idx if 0 <= idx <= 2 else 0)
+            self._refresh_list()
+            self._sync_glass()
+        except Exception as e:
+            log.error(f"[ManageTasksWindow.apply_theme] {e}")
+
+    def _sync_glass(self):
+        """If glass mode is on, overlay a translucent backdrop on the window so
+        the desktop shows through behind the content panels (cards stay solid)."""
+        try:
+            if not _theme.glass_enabled_for(self._controller, 'manage_tasks'):
+                return
+            _, op = _theme.glass_state(self._controller)
+            bd = _theme.glass_backdrop(op)
+            self.container.setStyleSheet(
+                f"QWidget#mtContainer {{ background-color: {bd}; border-radius: 12px; }}"
+            )
+            self._title_bar.setStyleSheet(
+                f"QFrame {{ background: {bd}; border-top-left-radius: 12px;"
+                f" border-top-right-radius: 12px;"
+                f" border-bottom: 1px solid rgba(50,50,50,0.5); }}"
+            )
+            for i in range(self._stack.count()):
+                pg = self._stack.widget(i)
+                if pg is not None:
+                    pg.setStyleSheet("background: transparent;")
+        except Exception as e:
+            log.error(f"[ManageTasksWindow._sync_glass] {e}")
 
     # ═══════════════════════════════════════════════════════════════════════════
     # PAGE 0 — Task List
@@ -696,6 +792,19 @@ class ManageTasksWindow(BaseWindow):
         active_btn.clicked.connect(lambda _, tid=task_id, btn=active_btn: self._toggle_task_active(tid, btn))
         top.addWidget(active_btn)
 
+        ping_btn = QPushButton("⚡ Ping")
+        ping_btn.setFixedHeight(26)
+        ping_btn.setStyleSheet(
+            f"QPushButton {{ background: {_GLOW}; color: {_ACCENT}; "
+            f"border: 1px solid rgba(79,158,248,0.45); "
+            f"border-radius: 8px; padding: 4px 12px; font-size: 11px; font-weight: 600; }}"
+            f"QPushButton:hover {{ background: rgba(79,158,248,0.22); }}"
+        )
+        ping_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        ping_btn.setToolTip("Fire an immediate test ping — edit the prompt, then send it to the AI now.")
+        ping_btn.clicked.connect(lambda _, t=task: self._open_manual_ping_dialog(t))
+        top.addWidget(ping_btn)
+
         prompt_btn = QPushButton("👁  Task System Prompt")
         prompt_btn.setStyleSheet(_BTN)
         prompt_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -730,6 +839,11 @@ class ManageTasksWindow(BaseWindow):
         vl.addWidget(sess_panel)
         return wrapper
 
+    # Past this many session rows the inline list switches to a scroll area so a
+    # task with months of history never balloons the card.
+    _SESSIONS_VISIBLE_CAP = 6
+    _SESSION_ROW_H = 34
+
     def _populate_sessions_panel(self, layout: QVBoxLayout, task_id: str):
         # Clear existing
         while layout.count():
@@ -747,33 +861,105 @@ class ManageTasksWindow(BaseWindow):
             return
 
         sessions = self._task_mgr.get_task_sessions(task_id)
+        sessions = sorted(sessions, reverse=True)   # newest first
 
-        # Clear all button
-        clear_btn = QPushButton("✕  Clear All Sessions")
-        clear_btn.setStyleSheet(_BTN_RED)
-        clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        clear_btn.clicked.connect(lambda: self._clear_all_sessions(task_id, layout))
-        layout.addWidget(clear_btn)
+        # ── Header: count + Clear All ─────────────────────────────────────────
+        head = QHBoxLayout()
+        head.setContentsMargins(2, 0, 2, 0)
+        count_lbl = QLabel(f"{len(sessions)} session{'s' if len(sessions) != 1 else ''}")
+        count_lbl.setStyleSheet(f"color: {_MUTED}; font-size: 10px; font-weight: 600; background: transparent;")
+        head.addWidget(count_lbl)
+        head.addStretch()
+        if sessions:
+            clear_btn = QPushButton("✕  Clear all")
+            clear_btn.setFixedHeight(24)
+            clear_btn.setStyleSheet(_BTN_RED)
+            clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            clear_btn.clicked.connect(lambda: self._clear_all_sessions(task_id, layout))
+            head.addWidget(clear_btn)
+        layout.addLayout(head)
 
         if not sessions:
-            layout.addWidget(QLabel("No sessions yet."))
+            empty = QLabel("No sessions yet — fire a ⚡ Ping to start one.")
+            empty.setStyleSheet(f"color: {_MUTED}; font-size: 11px; padding: 8px 2px; background: transparent;")
+            layout.addWidget(empty)
             return
 
+        # ── Rows (capped height → scrolls when long) ──────────────────────────
+        rows_host = QWidget()
+        rows_host.setStyleSheet("background: transparent;")
+        rows_vl = QVBoxLayout(rows_host)
+        rows_vl.setContentsMargins(0, 0, 0, 0)
+        rows_vl.setSpacing(4)
         for date_str in sessions:
-            row = QHBoxLayout()
-            lbl = QLabel(date_str)
-            lbl.setStyleSheet(f"color: {_TEXT}; font-size: 12px; background: transparent;")
-            lbl.setCursor(Qt.CursorShape.PointingHandCursor)
-            lbl.mousePressEvent = lambda e, tid=task_id, d=date_str: self._view_session(tid, d)
-            row.addWidget(lbl, stretch=1)
+            rows_vl.addWidget(self._build_session_row(task_id, date_str, layout))
+        rows_vl.addStretch()
 
-            x_btn = QPushButton("✕")
-            x_btn.setFixedSize(24, 24)
-            x_btn.setStyleSheet(_BTN_RED)
-            x_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            x_btn.clicked.connect(lambda _, tid=task_id, d=date_str, lo=layout: self._delete_session(tid, d, lo))
-            row.addWidget(x_btn)
-            layout.addLayout(row)
+        if len(sessions) > self._SESSIONS_VISIBLE_CAP:
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setWidget(rows_host)
+            scroll.setFixedHeight(self._SESSIONS_VISIBLE_CAP * (self._SESSION_ROW_H + 4))
+            scroll.setStyleSheet(
+                "QScrollArea { border: none; background: transparent; }"
+                f"QScrollBar:vertical {{ background: transparent; width: 8px; margin: 2px; }}"
+                f"QScrollBar::handle:vertical {{ background: {_BORDER}; border-radius: 4px; min-height: 24px; }}"
+                f"QScrollBar::handle:vertical:hover {{ background: {_MUTED}; }}"
+                "QScrollBar::add-line, QScrollBar::sub-line { height: 0; }"
+            )
+            layout.addWidget(scroll)
+        else:
+            layout.addWidget(rows_host)
+
+    def _build_session_row(self, task_id: str, date_str: str, panel_layout: QVBoxLayout) -> QWidget:
+        """One clickable session row inside the sessions dropdown."""
+        row = QWidget()
+        row.setObjectName("sessRow")
+        row.setFixedHeight(self._SESSION_ROW_H)
+        row.setCursor(Qt.CursorShape.PointingHandCursor)
+        row.setStyleSheet(
+            f"QWidget#sessRow {{ background: {_SURFACE}; border: 1px solid {_BORDER}; border-radius: 7px; }}"
+            f"QWidget#sessRow:hover {{ background: {_SURFACE2}; border-color: rgba(79,158,248,0.4); }}"
+        )
+        rl = QHBoxLayout(row)
+        rl.setContentsMargins(12, 0, 6, 0)
+        rl.setSpacing(8)
+
+        lbl = QLabel(self._format_session_date(date_str))
+        lbl.setStyleSheet(f"color: {_TEXT}; font-size: 12px; font-weight: 600; background: transparent; border: none;")
+        rl.addWidget(lbl)
+        rl.addStretch()
+
+        x_btn = QPushButton("✕")
+        x_btn.setFixedSize(22, 22)
+        x_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {_MUTED}; border: none; "
+            f"border-radius: 5px; font-size: 13px; font-weight: 700; padding: 0; }}"
+            f"QPushButton:hover {{ background: {_RED}; color: #ffffff; }}"
+        )
+        x_btn.setToolTip("Delete this session")
+        x_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        x_btn.clicked.connect(lambda _, tid=task_id, d=date_str, lo=panel_layout: self._delete_session(tid, d, lo))
+        rl.addWidget(x_btn)
+
+        # Click anywhere on the row (except the ✕) opens the viewer.
+        row.mousePressEvent = lambda e, tid=task_id, d=date_str: self._view_session(tid, d)
+        return row
+
+    @staticmethod
+    def _format_session_date(date_str: str) -> str:
+        """'2026-06-27' → 'Sat, Jun 27 2026' (falls back to raw on parse error)."""
+        try:
+            from datetime import datetime as _dt
+            d = _dt.strptime(date_str, "%Y-%m-%d")
+            today = _dt.now().date()
+            if d.date() == today:
+                return f"Today · {d.strftime('%b %d')}"
+            if (today - d.date()).days == 1:
+                return f"Yesterday · {d.strftime('%b %d')}"
+            return d.strftime("%a, %b %d %Y")
+        except Exception:
+            return date_str
 
     def _clear_all_sessions(self, task_id: str, layout: QVBoxLayout):
         if self._task_mgr:
@@ -912,7 +1098,7 @@ class ManageTasksWindow(BaseWindow):
             return grp
 
         # ── Helper: section card ──────────────────────────────────────────────
-        def _card(*inner_widgets):
+        def _card(*inner_widgets, title=None, icon=None):
             card = QWidget()
             card.setObjectName("editorCard")
             card.setStyleSheet(
@@ -920,8 +1106,19 @@ class ManageTasksWindow(BaseWindow):
                 f" border: 1px solid {_BORDER}; }}"
             )
             cl = QVBoxLayout(card)
-            cl.setContentsMargins(18, 16, 18, 16)
+            cl.setContentsMargins(18, 14, 18, 16)
             cl.setSpacing(12)
+            if title:
+                hdr = QLabel(f"{icon + '  ' if icon else ''}{title}")
+                hdr.setStyleSheet(
+                    f"color: {_TEXT}; font-size: 12px; font-weight: 700; "
+                    f"letter-spacing: 0.4px; background: transparent; border: none;"
+                )
+                cl.addWidget(hdr)
+                sep = QFrame()
+                sep.setFixedHeight(1)
+                sep.setStyleSheet(f"background: {_BORDER}; border: none;")
+                cl.addWidget(sep)
             for w in inner_widgets:
                 if isinstance(w, QWidget):
                     cl.addWidget(w)
@@ -941,6 +1138,7 @@ class ManageTasksWindow(BaseWindow):
         fl.addWidget(_card(
             _field("TASK NAME", self._f_name),
             self._f_active_editor,
+            title="Identity", icon="🪪",
         ))
 
         # ══ CARD 2: Instruction ═══════════════════════════════════════════════
@@ -983,11 +1181,10 @@ class ManageTasksWindow(BaseWindow):
             ),
             verify_row,
             self._verify_result_box,
+            title="Instruction", icon="📝",
         ))
 
         # ══ CARD 2b: Functions Library ════════════════════════════════════════
-        fn_header_lbl = QLabel("FUNCTIONS LIBRARY")
-        fn_header_lbl.setStyleSheet(_SEC)
         fn_hint_lbl = QLabel(
             "Write reusable multi-line Python functions. Reference them in instructions with {{ my_func() }}. "
             "Functions are shared across all tasks."
@@ -1037,7 +1234,7 @@ class ManageTasksWindow(BaseWindow):
         self._fn_code_editor.setMinimumHeight(130)
         self._fn_code_editor.setTabStopDistance(28)
         self._fn_code_editor.setStyleSheet(
-            f"QTextEdit {{ background: #0D1117; color: {_TEXT}; border: 1px solid {_BORDER};"
+            f"QTextEdit {{ background: {_BG}; color: {_TEXT}; border: 1px solid {_BORDER};"
             f" border-radius: 6px; padding: 6px 8px; font-size: 12px;"
             f" font-family: 'Courier New', 'Consolas', monospace; }}"
             f"QTextEdit:focus {{ border-color: {_ACCENT}; }}"
@@ -1089,11 +1286,11 @@ class ManageTasksWindow(BaseWindow):
         ))
 
         fl.addWidget(_card(
-            fn_header_lbl,
             fn_hint_lbl,
             self._fn_list_widget,
             add_fn_btn,
             self._fn_editor_panel,
+            title="Function Library", icon="🧰",
         ))
 
         # ══ CARD 3: Schedule ══════════════════════════════════════════════════
@@ -1197,8 +1394,6 @@ class ManageTasksWindow(BaseWindow):
         ptl.addLayout(self._ping_times_list_layout)
 
         # ── Card 3: Daily Session Schedule ────────────────────────────────────
-        schedule_lbl = QLabel("DAILY SESSION SCHEDULE")
-        schedule_lbl.setStyleSheet(_SEC)
         schedule_hint = QLabel(
             "Sets the daily active window for this task. "
             "A fresh session starts when the window opens each day."
@@ -1207,16 +1402,13 @@ class ManageTasksWindow(BaseWindow):
         schedule_hint.setWordWrap(True)
 
         self._daily_schedule_card = _card(
-            schedule_lbl,
             schedule_hint,
             self._f_whole_day,
             time_row,
+            title="Daily Session Schedule", icon="🗓️",
         )
         fl.addWidget(self._daily_schedule_card)
 
-        # ── Card 4: Ping Interval ─────────────────────────────────────────────
-        ping_interval_lbl = QLabel("PING INTERVAL")
-        ping_interval_lbl.setStyleSheet(_SEC)
 
         _SEG_ON = (
             f"QPushButton {{ background: {_ACCENT}; color: #0D1117; border: 1px solid {_ACCENT};"
@@ -1396,16 +1588,14 @@ class ManageTasksWindow(BaseWindow):
         self._set_ping_interval_mode_ui = _seg_select_mode
 
         fl.addWidget(_card(
-            ping_interval_lbl,
             seg_row,
             self._timed_interval_section,
             self._ping_times_panel,
             self._script_trigger_section,
+            title="Ping Interval", icon="⏱️",
         ))
 
         # ══ CARD 3b: One-Time Schedule ════════════════════════════════════════
-        one_time_lbl = QLabel("ONE TIME SCHEDULE")
-        one_time_lbl.setStyleSheet(_SEC)
         one_time_hint = QLabel(
             "Fire once at a specific date and time. Add backup times in case the primary is missed — "
             "whichever time fires and completes first will immediately deactivate this task. "
@@ -1462,15 +1652,13 @@ class ManageTasksWindow(BaseWindow):
         )
 
         fl.addWidget(_card(
-            one_time_lbl,
             one_time_hint,
             self._f_one_time_enabled,
             self._one_time_dt_panel,
+            title="One-Time Schedule", icon="📌",
         ))
 
         # ══ CARD 4: Permissions ═══════════════════════════════════════════════
-        perm_lbl = QLabel("AGENT PERMISSIONS")
-        perm_lbl.setStyleSheet(_SEC)
         perm_hint = QLabel("Controls what the agent is allowed to do during each ping.")
         perm_hint.setStyleSheet(f"color: {_MUTED}; font-size: 10px;")
 
@@ -1542,15 +1730,14 @@ class ManageTasksWindow(BaseWindow):
                    self._f_perm_controller_ref, self._f_perm_notify_tool):
             cb.setStyleSheet(_CHECK)
 
-        fl.addWidget(_card(perm_lbl, perm_hint,
+        fl.addWidget(_card(perm_hint,
                            self._f_perm_workmode, _iter_row,
                            self._f_perm_exec_code,
                            self._f_perm_image_tools,
-                           self._f_perm_controller_ref, self._f_perm_notify_tool))
+                           self._f_perm_controller_ref, self._f_perm_notify_tool,
+                           title="Agent Permissions", icon="🔐"))
 
         # ══ CARD 5: Pre-loaded Skills ══════════════════════════════════════════
-        skills_lbl = QLabel("PRE-LOADED SKILLS")
-        skills_lbl.setStyleSheet(_SEC)
         skills_hint = QLabel(
             "These skills will be injected into the agent's system prompt automatically "
             "at the start of every ping session — no load_skill call needed."
@@ -1583,11 +1770,10 @@ class ManageTasksWindow(BaseWindow):
             )
         self._skill_toggle_btn.clicked.connect(_toggle_skill_panel)
 
-        fl.addWidget(_card(skills_lbl, skills_hint, self._skill_toggle_btn, self._skill_checklist_panel))
+        fl.addWidget(_card(skills_hint, self._skill_toggle_btn, self._skill_checklist_panel,
+                           title="Pre-loaded Skills", icon="🧩"))
 
         # ══ CARD 6: Context / Memory ══════════════════════════════════════════
-        limit_lbl = QLabel("SESSION CONTEXT LIMIT")
-        limit_lbl.setStyleSheet(_SEC)
         limit_hint = QLabel("Cap how many prior messages are fed back to the AI each ping to save tokens.")
         limit_hint.setStyleSheet(f"color: {_MUTED}; font-size: 10px;")
         limit_hint.setWordWrap(True)
@@ -1611,7 +1797,8 @@ class ManageTasksWindow(BaseWindow):
         limit_row.setEnabled(False)
         self._f_limit_enabled.toggled.connect(limit_row.setEnabled)
 
-        fl.addWidget(_card(limit_lbl, limit_hint, self._f_limit_enabled, limit_row))
+        fl.addWidget(_card(limit_hint, self._f_limit_enabled, limit_row,
+                           title="Session Context Limit", icon="🧠"))
 
         fl.addStretch()
         scroll.setWidget(form)
@@ -1633,7 +1820,7 @@ class ManageTasksWindow(BaseWindow):
         bar = QWidget()
         bar.setStyleSheet(
             f"background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            f"stop:0 #131D2E, stop:1 {_SURFACE});"
+            f"stop:0 {_SURFACE2}, stop:1 {_SURFACE});"
             f"border-bottom: 1px solid {_BORDER};"
         )
         bar.setFixedHeight(52)
@@ -1712,6 +1899,7 @@ class ManageTasksWindow(BaseWindow):
             item = layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+        self._viewer_pending = None   # widget cleared above; drop stale ref
 
         history = session.get('chat_history', [])
         self._viewer_msg_count = len(history)
@@ -1719,6 +1907,7 @@ class ManageTasksWindow(BaseWindow):
         self._viewer_title.setText(f"{task_name}  ·  {date_str}")
 
         self._render_session_bubbles(history)
+        self._update_viewer_pending(history)
 
         # Show live indicator and start timers
         self._viewer_live_dot.setVisible(True)
@@ -1850,12 +2039,53 @@ class ManageTasksWindow(BaseWindow):
             new_msgs = history[self._viewer_msg_count:]
             self._viewer_msg_count = len(history)
             self._render_session_bubbles(new_msgs)
+            self._update_viewer_pending(history)
             # Scroll to bottom
             QTimer.singleShot(60, lambda: self._viewer_area.verticalScrollBar().setValue(
                 self._viewer_area.verticalScrollBar().maximum()
             ))
         except Exception:
             pass
+
+    def _update_viewer_pending(self, history: list):
+        """
+        Show a 'Agent is working…' pill at the bottom of the viewer whenever the
+        most recent entry is a ping/system message with no agent reply yet. Lets
+        manual ⚡ Ping tests read as 'thinking' instead of looking empty/broken.
+        """
+        # Tear down any existing pending pill.
+        existing = getattr(self, '_viewer_pending', None)
+        if existing is not None:
+            existing.deleteLater()
+            self._viewer_pending = None
+
+        # Determine whether we're awaiting an agent reply.
+        last_role = None
+        for m in reversed(history):
+            if m.get('content'):
+                last_role = m.get('role')
+                break
+        awaiting = last_role in ('system', 'user')   # ping went out, no assistant turn yet
+        if not awaiting:
+            return
+
+        pill = QFrame()
+        pill.setObjectName("viewerPending")
+        pill.setStyleSheet(f"""
+            QFrame#viewerPending {{
+                background: {_SURFACE2};
+                border: 1px dashed rgba(79,158,248,0.45);
+                border-radius: 10px;
+            }}
+        """)
+        pl = QHBoxLayout(pill)
+        pl.setContentsMargins(14, 9, 14, 9)
+        lbl = QLabel("🤖  Agent is working…")
+        lbl.setStyleSheet(f"color: {_ACCENT}; font-size: 11px; font-weight: 600; background: transparent; border: none;")
+        pl.addWidget(lbl)
+        pl.addStretch()
+        self._viewer_body_layout.insertWidget(self._viewer_body_layout.count() - 1, pill)
+        self._viewer_pending = pill
 
     def _close_viewer(self):
         """Stop live-refresh timers and go back to the task list."""
@@ -1956,6 +2186,100 @@ class ManageTasksWindow(BaseWindow):
         _fl.addWidget(_copy_btn)
         _fl.addStretch()
         _fl.addWidget(_close_btn)
+        ol.addLayout(_fl)
+
+        dlg.exec()
+
+    def _open_manual_ping_dialog(self, task: dict):
+        """
+        Mini confirmation/editor for firing an immediate test ping.
+
+        Pops a small window prefilled with the task's instruction. The user can
+        tweak the prompt (or leave it) and hit Send — the ping fires right away,
+        unscheduled, and we open that day's session viewer so the result streams
+        in live. Handy when scripted pings render nothing and you just want to
+        poke the AI.
+        """
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QTextEdit, QPushButton, QLabel
+
+        task_id = task['id']
+        task_name = task.get('name', '?')
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Manual Ping")
+        dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        dlg.resize(560, 420)
+
+        outer = QWidget(dlg)
+        outer.setObjectName("mpOuter")
+        outer.setStyleSheet(f"""
+            QWidget#mpOuter {{
+                background: {_SURFACE};
+                border-radius: 12px;
+                border: 1px solid {_BORDER};
+            }}
+        """)
+        _dlg_vl = QVBoxLayout(dlg)
+        _dlg_vl.setContentsMargins(0, 0, 0, 0)
+        _dlg_vl.addWidget(outer)
+
+        ol = QVBoxLayout(outer)
+        ol.setContentsMargins(20, 16, 20, 16)
+        ol.setSpacing(10)
+
+        # Header
+        _title = QLabel(f"⚡ Manual Ping  ·  {task_name}")
+        _title.setStyleSheet(f"color: {_TEXT}; font-size: 14px; font-weight: 700;")
+        ol.addWidget(_title)
+
+        _sub = QLabel("Fires one immediate, unscheduled ping. Edit the prompt below "
+                      "or send as-is to test the AI.")
+        _sub.setWordWrap(True)
+        _sub.setStyleSheet(f"color: {_MUTED}; font-size: 11px;")
+        ol.addWidget(_sub)
+
+        # Prompt editor (prefilled with the task instruction)
+        editor = QTextEdit()
+        editor.setPlainText(task.get('instruction', ''))
+        editor.setPlaceholderText("Prompt to send to the AI for this test ping…")
+        editor.setStyleSheet(f"""
+            QTextEdit {{
+                background: {_BG}; color: {_TEXT};
+                border: 1px solid {_BORDER}; border-radius: 8px;
+                padding: 10px; font-size: 12px;
+            }}
+            QTextEdit:focus {{ border-color: {_ACCENT}; }}
+        """)
+        ol.addWidget(editor, stretch=1)
+
+        # Footer
+        _fl = QHBoxLayout()
+        _cancel = QPushButton("Cancel")
+        _cancel.setStyleSheet(_BTN_GHOST)
+        _cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        _cancel.clicked.connect(dlg.reject)
+        _send = QPushButton("⚡ Send Ping")
+        _send.setStyleSheet(_BTN_ACCENT)
+        _send.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        def _fire():
+            text = editor.toPlainText().strip()
+            override = text if text else None
+            try:
+                date_str = self._controller.task_manager.fire_manual_ping(task_id, override)
+            except Exception as e:
+                QMessageBox.warning(self, "Manual Ping Failed", str(e))
+                return
+            dlg.accept()
+            if date_str:
+                # Open the session viewer so the live result streams in.
+                QTimer.singleShot(250, lambda: self._view_session(task_id, date_str))
+
+        _send.clicked.connect(_fire)
+        _fl.addStretch()
+        _fl.addWidget(_cancel)
+        _fl.addWidget(_send)
         ol.addLayout(_fl)
 
         dlg.exec()

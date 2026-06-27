@@ -12,6 +12,7 @@ from PyQt6.QtCore import Qt, QTimer, QPoint, QRect, QRectF, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen, QFont, QRegion, QImage, QPolygonF, QBrush, QLinearGradient
 import math
 from ui.base_window import BaseWindow
+from ui import theme as _theme
 
 # ── ColorPicker2D (unchanged) ────────────────────────────────────────────────
 
@@ -509,149 +510,7 @@ class AppearanceSettingsWindow(BaseWindow):
 
         # Main container
         self.container = QWidget()
-        self.container.setStyleSheet("""
-            QWidget#container {
-                background-color: #161B22;
-                border-radius: 12px;
-            }
-            QWidget {
-                color: #E6EDF3;
-                font-family: 'Segoe UI', -apple-system, system-ui, sans-serif;
-            }
-            QLabel {
-                color: #E6EDF3;
-            }
-            QGroupBox {
-                color: #E6EDF3;
-                border: 1px solid rgba(88, 166, 255, 0.18);
-                border-radius: 8px;
-                margin-top: 10px;
-                padding-top: 10px;
-                font-weight: 600;
-                font-size: 11px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
-                color: #8B949E;
-            }
-            QPushButton {
-                background-color: transparent;
-                color: #E6EDF3;
-                border: 1px solid #30363D;
-                border-radius: 6px;
-                padding: 7px 14px;
-                font-weight: 500;
-            }
-            QPushButton:hover {
-                background-color: rgba(88, 166, 255, 0.08);
-                border-color: rgba(88, 166, 255, 0.4);
-                color: #58A6FF;
-            }
-            QPushButton:pressed {
-                background-color: rgba(88, 166, 255, 0.14);
-            }
-            QLineEdit {
-                background-color: #0D1117;
-                color: #E6EDF3;
-                border: 1px solid rgba(88, 166, 255, 0.18);
-                border-radius: 5px;
-                padding: 5px 8px;
-            }
-            QLineEdit:focus {
-                border-color: rgba(88, 166, 255, 0.55);
-            }
-            QSlider::groove:horizontal {
-                height: 4px;
-                background: #21262D;
-                border-radius: 2px;
-            }
-            QSlider::handle:horizontal {
-                background: #58A6FF;
-                border: none;
-                width: 14px;
-                margin: -5px 0;
-                border-radius: 7px;
-            }
-            QSlider::handle:horizontal:hover {
-                background: #79BBFF;
-            }
-            QSlider::sub-page:horizontal {
-                background: rgba(88, 166, 255, 0.35);
-                border-radius: 2px;
-            }
-            QRadioButton {
-                color: #E6EDF3;
-                spacing: 8px;
-            }
-            QRadioButton::indicator {
-                width: 16px;
-                height: 16px;
-                border-radius: 8px;
-                border: 2px solid #30363D;
-                background: #0D1117;
-            }
-            QRadioButton::indicator:checked {
-                background: #58A6FF;
-                border-color: #58A6FF;
-            }
-            QCheckBox {
-                color: #E6EDF3;
-                spacing: 8px;
-            }
-            QCheckBox::indicator {
-                width: 15px;
-                height: 15px;
-                border-radius: 3px;
-                border: 2px solid #30363D;
-                background: #0D1117;
-            }
-            QCheckBox::indicator:checked {
-                background: #58A6FF;
-                border-color: #58A6FF;
-            }
-            QComboBox, QFontComboBox {
-                background-color: #0D1117;
-                color: #E6EDF3;
-                border: 1px solid rgba(88, 166, 255, 0.18);
-                border-radius: 5px;
-                padding: 5px 8px;
-            }
-            QComboBox:hover, QFontComboBox:hover {
-                border-color: rgba(88, 166, 255, 0.4);
-            }
-            QComboBox::drop-down, QFontComboBox::drop-down {
-                border: none;
-            }
-            QComboBox::down-arrow, QFontComboBox::down-arrow {
-                image: none;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 5px solid #8B949E;
-                margin-right: 6px;
-            }
-            QScrollArea {
-                border: none;
-                background-color: #161B22;
-            }
-            QScrollBar:vertical {
-                background: transparent;
-                width: 6px;
-                border-radius: 3px;
-            }
-            QScrollBar::handle:vertical {
-                background: #21262D;
-                border-radius: 3px;
-                min-height: 20px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: #30363D;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0px;
-            }
-        """)
+        self.container.setStyleSheet(self._container_qss())
         self.container.setObjectName("container")
 
         self.init_ui()
@@ -662,6 +521,257 @@ class AppearanceSettingsWindow(BaseWindow):
 
         self.apply_rounded_mask()
         self.create_resize_handles()
+        self._sync_glass()
+
+    # ── Theme integration ────────────────────────────────────────────────
+
+    def _palette(self):
+        """Resolved palette for the active app theme."""
+        ctrl = getattr(self.floating_window, 'controller', None)
+        if ctrl is not None:
+            return _theme.current_palette(ctrl)
+        return _theme.resolve_palette(_theme.THEMES[_theme.DEFAULT_THEME_KEY])
+
+    def _acc_lbl(self, min_width=36):
+        """Accent-coloured value readout label style."""
+        return f"color: {self._palette()['accent']}; min-width: {min_width}px;"
+
+    def _hint_lbl(self):
+        """Muted italic hint label style."""
+        return f"color: {self._palette()['muted']}; font-style: italic; font-size: 11px;"
+
+    def _container_qss(self):
+        """Full container stylesheet built from the active theme."""
+        p = self._palette()
+        acc = p['accent']
+        return f"""
+            QWidget#container {{
+                background-color: {p['surface']};
+                border-radius: 12px;
+            }}
+            QWidget {{
+                color: {p['text']};
+                font-family: 'Segoe UI', -apple-system, system-ui, sans-serif;
+            }}
+            QLabel {{ color: {p['text']}; }}
+            QGroupBox {{
+                color: {p['text']};
+                border: 1px solid {_theme.rgba(acc, 0.18)};
+                border-radius: 8px;
+                margin-top: 10px;
+                padding-top: 10px;
+                font-weight: 600;
+                font-size: 11px;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+                color: {p['muted']};
+            }}
+            QPushButton {{
+                background-color: transparent;
+                color: {p['text']};
+                border: 1px solid {p['border']};
+                border-radius: 6px;
+                padding: 7px 14px;
+                font-weight: 500;
+            }}
+            QPushButton:hover {{
+                background-color: {_theme.rgba(acc, 0.08)};
+                border-color: {_theme.rgba(acc, 0.4)};
+                color: {acc};
+            }}
+            QPushButton:pressed {{
+                background-color: {_theme.rgba(acc, 0.14)};
+            }}
+            QLineEdit {{
+                background-color: {p['bg']};
+                color: {p['text']};
+                border: 1px solid {_theme.rgba(acc, 0.18)};
+                border-radius: 5px;
+                padding: 5px 8px;
+            }}
+            QLineEdit:focus {{
+                border-color: {_theme.rgba(acc, 0.55)};
+            }}
+            QSlider::groove:horizontal {{
+                height: 4px;
+                background: {p['surface2']};
+                border-radius: 2px;
+            }}
+            QSlider::handle:horizontal {{
+                background: {acc};
+                border: none;
+                width: 14px;
+                margin: -5px 0;
+                border-radius: 7px;
+            }}
+            QSlider::handle:horizontal:hover {{
+                background: {_theme.lighten(acc, 0.20)};
+            }}
+            QSlider::sub-page:horizontal {{
+                background: {_theme.rgba(acc, 0.35)};
+                border-radius: 2px;
+            }}
+            QRadioButton {{
+                color: {p['text']};
+                spacing: 8px;
+            }}
+            QRadioButton::indicator {{
+                width: 16px;
+                height: 16px;
+                border-radius: 8px;
+                border: 2px solid {p['border']};
+                background: {p['bg']};
+            }}
+            QRadioButton::indicator:checked {{
+                background: {acc};
+                border-color: {acc};
+            }}
+            QCheckBox {{
+                color: {p['text']};
+                spacing: 8px;
+            }}
+            QCheckBox::indicator {{
+                width: 15px;
+                height: 15px;
+                border-radius: 3px;
+                border: 2px solid {p['border']};
+                background: {p['bg']};
+            }}
+            QCheckBox::indicator:checked {{
+                background: {acc};
+                border-color: {acc};
+            }}
+            QComboBox, QFontComboBox {{
+                background-color: {p['bg']};
+                color: {p['text']};
+                border: 1px solid {_theme.rgba(acc, 0.18)};
+                border-radius: 5px;
+                padding: 5px 8px;
+            }}
+            QComboBox:hover, QFontComboBox:hover {{
+                border-color: {_theme.rgba(acc, 0.4)};
+            }}
+            QComboBox::drop-down, QFontComboBox::drop-down {{
+                border: none;
+            }}
+            QComboBox::down-arrow, QFontComboBox::down-arrow {{
+                image: none;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid {p['muted']};
+                margin-right: 6px;
+            }}
+            QScrollArea {{
+                border: none;
+                background-color: {p['surface']};
+            }}
+            QScrollBar:vertical {{
+                background: transparent;
+                width: 6px;
+                border-radius: 3px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {p['surface2']};
+                border-radius: 3px;
+                min-height: 20px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: {p['border']};
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0px;
+            }}
+        """
+
+    def _nav_btn_ss(self):
+        p = self._palette()
+        return f"""
+            QPushButton {{
+                text-align: left; padding: 7px 10px; border-radius: 6px;
+                border: none; background: transparent; color: {p['muted']};
+                font-size: 12px;
+                font-family: 'Segoe UI', -apple-system, system-ui, sans-serif;
+            }}
+            QPushButton:checked {{
+                background: {p['surface']}; color: {p['text']};
+                border: 1px solid {p['border']};
+            }}
+            QPushButton:hover:!checked {{
+                background: {_theme.rgba(p['muted'], 0.08)};
+                color: {_theme.lighten(p['text'], 0.0)};
+            }}
+        """
+
+    def _section_title_ss(self):
+        p = self._palette()
+        return (
+            f"font-size: 10px; font-weight: 600; color: {p['muted']};"
+            f" letter-spacing: 0.06em; text-transform: uppercase;"
+            f" border-bottom: 1px solid {p['surface2']}; padding-bottom: 5px; margin-bottom: 2px;"
+        )
+
+    def apply_theme(self, theme_key=None):
+        """Live-retint the appearance window. Rebuilds the UI in place from the
+        active theme, preserving the current nav page."""
+        try:
+            saved_page = self._stack.currentIndex() if hasattr(self, '_stack') else 0
+            old = self.container
+            self.layout().removeWidget(old)
+            old.deleteLater()
+            self.container = QWidget()
+            self.container.setObjectName("container")
+            self.container.setStyleSheet(self._container_qss())
+            self.init_ui()
+            self.layout().addWidget(self.container)
+            if hasattr(self, '_stack') and 0 <= saved_page < self._stack.count():
+                self._switch_page(saved_page)
+            self.apply_rounded_mask()
+            self._sync_glass()
+        except Exception as e:
+            print(f"[AppearanceSettingsWindow.apply_theme] {e}")
+
+    def _sync_glass(self):
+        """Overlay a frosted-glass backdrop when glass mode is on. This window's
+        body / sidebar / stack / header / footer all paint solid surfaces that
+        otherwise cover the container, so they're made transparent here and the
+        container is given a readable frosted panel that shows through them."""
+        try:
+            ctrl = getattr(self.floating_window, 'controller', None)
+            if ctrl is None:
+                return
+            if not _theme.glass_enabled_for(ctrl, 'appearance'):
+                return
+            _, op = _theme.glass_state(ctrl)
+            panel = _theme.glass_panel(op)   # readable frosted (dense forms)
+            p = self._palette()
+            self.container.setStyleSheet(
+                f"QWidget#container {{ background-color: {panel}; border-radius: 12px; }}"
+                f"QWidget {{ color: {p['text']}; font-family: 'Segoe UI', system-ui, sans-serif; }}"
+            )
+            # Transparent-ize the structural surfaces so the frosted container
+            # shows through uniformly (keep the sidebar's separator line).
+            for _w in (getattr(self, '_body_widget', None),
+                       getattr(self, '_header_bar', None),
+                       getattr(self, '_footer_widget', None),
+                       getattr(self, '_stack', None)):
+                if _w is not None:
+                    _w.setStyleSheet("background: transparent;")
+            if getattr(self, '_sidebar_widget', None) is not None:
+                self._sidebar_widget.setStyleSheet(
+                    f"QWidget {{ background: transparent; border-right: 1px solid {p['border']}; }}"
+                )
+            from PyQt6.QtWidgets import QScrollArea
+            for sa in self.container.findChildren(QScrollArea):
+                sa.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+                if sa.viewport():
+                    sa.viewport().setStyleSheet("background: transparent;")
+                if sa.widget():
+                    sa.widget().setStyleSheet("background: transparent;")
+        except Exception as e:
+            print(f"[AppearanceSettingsWindow._sync_glass] {e}")
 
     # ── Windows 10 transparent background fix ────────────────────────────
 
@@ -674,49 +784,22 @@ class AppearanceSettingsWindow(BaseWindow):
     # ── UI construction ──────────────────────────────────────────────────
 
     # ── Shared nav button style ──────────────────────────────────────────
-    _NAV_BTN_SS = """
-        QPushButton {
-            text-align: left;
-            padding: 7px 10px;
-            border-radius: 6px;
-            border: none;
-            background: transparent;
-            color: #8B949E;
-            font-size: 12px;
-            font-family: 'Segoe UI', -apple-system, system-ui, sans-serif;
-        }
-        QPushButton:checked {
-            background: #161B22;
-            color: #E6EDF3;
-            border: 1px solid #30363D;
-        }
-        QPushButton:hover:!checked {
-            background: rgba(139, 148, 158, 0.08);
-            color: #C9D1D9;
-        }
-    """
-
-    _SECTION_TITLE_SS = (
-        "font-size: 10px; font-weight: 600; color: #8B949E;"
-        " letter-spacing: 0.06em; text-transform: uppercase;"
-        " border-bottom: 1px solid #21262D; padding-bottom: 5px; margin-bottom: 2px;"
-    )
-
     def _make_scroll_page(self):
         """Return (QScrollArea, QVBoxLayout) for a content page."""
+        p = self._palette()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setStyleSheet(
-            "QScrollArea { background: #0D1117; border: none; }"
-            "QScrollBar:vertical { background: transparent; width: 6px; border-radius: 3px; }"
-            "QScrollBar::handle:vertical { background: #21262D; border-radius: 3px; min-height: 20px; }"
-            "QScrollBar::handle:vertical:hover { background: #30363D; }"
-            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
+            f"QScrollArea {{ background: {p['bg']}; border: none; }}"
+            f"QScrollBar:vertical {{ background: transparent; width: 6px; border-radius: 3px; }}"
+            f"QScrollBar::handle:vertical {{ background: {p['surface2']}; border-radius: 3px; min-height: 20px; }}"
+            f"QScrollBar::handle:vertical:hover {{ background: {p['border']}; }}"
+            f"QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}"
         )
-        scroll.viewport().setStyleSheet("background: #0D1117;")
+        scroll.viewport().setStyleSheet(f"background: {p['bg']};")
         inner = QWidget()
-        inner.setStyleSheet("background: #0D1117; color: #E6EDF3;")
+        inner.setStyleSheet(f"background: {p['bg']}; color: {p['text']};")
         vbox = QVBoxLayout(inner)
         vbox.setContentsMargins(20, 18, 20, 18)
         vbox.setSpacing(18)
@@ -725,7 +808,7 @@ class AppearanceSettingsWindow(BaseWindow):
 
     def _section_label(self, text):
         lbl = QLabel(text.upper())
-        lbl.setStyleSheet(self._SECTION_TITLE_SS)
+        lbl.setStyleSheet(self._section_title_ss())
         return lbl
 
     def _switch_page(self, index):
@@ -740,17 +823,19 @@ class AppearanceSettingsWindow(BaseWindow):
 
         # ── Header bar ──────────────────────────────────────────────────────
         header_bar = QFrame()
+        self._header_bar = header_bar      # ref for glass overlay
         header_bar.setFixedHeight(44)
         header_bar.mousePressEvent = self.header_mouse_press
         header_bar.mouseMoveEvent = self.header_mouse_move
         header_bar.mouseReleaseEvent = self.header_mouse_release
-        header_bar.setStyleSheet("""
-            QFrame {
-                background-color: #161B22;
-                border-bottom: 1px solid #21262D;
+        _p = self._palette()
+        header_bar.setStyleSheet(f"""
+            QFrame {{
+                background-color: {_p['surface']};
+                border-bottom: 1px solid {_p['surface2']};
                 border-top-left-radius: 12px;
                 border-top-right-radius: 12px;
-            }
+            }}
         """)
         header_layout = QHBoxLayout(header_bar)
         header_layout.setContentsMargins(14, 0, 10, 0)
@@ -765,8 +850,8 @@ class AppearanceSettingsWindow(BaseWindow):
         header_layout.addSpacing(10)
         title = QLabel("Appearance Settings")
         title.setStyleSheet(
-            "font-size: 12.5px; font-weight: 600; color: #E6EDF3;"
-            " letter-spacing: 0.01em; background: transparent;"
+            f"font-size: 12.5px; font-weight: 600; color: {_p['text']};"
+            f" letter-spacing: 0.01em; background: transparent;"
         )
         header_layout.addWidget(title)
         header_layout.addStretch(1)
@@ -774,12 +859,12 @@ class AppearanceSettingsWindow(BaseWindow):
         for symbol, size, slot in [("−", 17, self.showMinimized), ("×", 19, self.hide)]:
             b = QPushButton(symbol)
             b.setFixedSize(26, 26)
-            b.setStyleSheet("""
-                QPushButton {
+            b.setStyleSheet(f"""
+                QPushButton {{
                     background: transparent; border: none; border-radius: 5px;
-                    color: #8B949E; padding: 0;
-                }
-                QPushButton:hover { background: #21262D; color: #E6EDF3; }
+                    color: {_p['muted']}; padding: 0;
+                }}
+                QPushButton:hover {{ background: {_p['surface2']}; color: {_p['text']}; }}
             """)
             b.setFont(QFont("Segoe UI", size))
             b.clicked.connect(slot)
@@ -789,16 +874,18 @@ class AppearanceSettingsWindow(BaseWindow):
 
         # ── Body: sidebar + stacked content ─────────────────────────────────
         body = QWidget()
-        body.setStyleSheet("background: #0D1117;")
+        self._body_widget = body           # ref for glass overlay
+        body.setStyleSheet(f"background: {_p['bg']};")
         body_layout = QHBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(0)
 
         # ── Sidebar ──
         sidebar = QWidget()
+        self._sidebar_widget = sidebar     # ref for glass overlay
         sidebar.setFixedWidth(172)
         sidebar.setStyleSheet(
-            "QWidget { background: #0D1117; border-right: 1px solid #21262D; }"
+            f"QWidget {{ background: {_p['bg']}; border-right: 1px solid {_p['surface2']}; }}"
         )
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(10, 14, 10, 14)
@@ -810,7 +897,7 @@ class AppearanceSettingsWindow(BaseWindow):
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.setChecked(i == 0)
-            btn.setStyleSheet(self._NAV_BTN_SS)
+            btn.setStyleSheet(self._nav_btn_ss())
             btn.clicked.connect(lambda _checked, idx=i: self._switch_page(idx))
             self._nav_buttons.append(btn)
             sidebar_layout.addWidget(btn)
@@ -820,17 +907,18 @@ class AppearanceSettingsWindow(BaseWindow):
 
         # ── Stacked pages ──
         self._stack = QStackedWidget()
-        self._stack.setStyleSheet("background: #0D1117;")
+        self._stack.setStyleSheet(f"background: {_p['bg']};")
         body_layout.addWidget(self._stack, stretch=1)
 
         layout.addWidget(body, stretch=1)
 
         # ── Footer ──────────────────────────────────────────────────────────
         footer = QFrame()
+        self._footer_widget = footer       # ref for glass overlay
         footer.setFixedHeight(50)
         footer.setStyleSheet(
-            "QFrame { background: #0D1117; border-top: 1px solid #21262D;"
-            " border-bottom-left-radius: 12px; border-bottom-right-radius: 12px; }"
+            f"QFrame {{ background: {_p['bg']}; border-top: 1px solid {_p['surface2']};"
+            f" border-bottom-left-radius: 12px; border-bottom-right-radius: 12px; }}"
         )
         footer_layout = QHBoxLayout(footer)
         footer_layout.setContentsMargins(18, 0, 18, 0)
@@ -848,20 +936,20 @@ class AppearanceSettingsWindow(BaseWindow):
 
         apply_btn = QPushButton("Apply")
         apply_btn.clicked.connect(self.apply_settings)
-        apply_btn.setStyleSheet("""
-            QPushButton {
-                background-color: rgba(88, 166, 255, 0.14);
-                color: #58A6FF;
+        apply_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {_theme.rgba(_p['accent'], 0.14)};
+                color: {_p['accent']};
                 font-weight: 600;
-                border: 1px solid rgba(88, 166, 255, 0.40);
+                border: 1px solid {_theme.rgba(_p['accent'], 0.40)};
                 border-radius: 6px;
                 padding: 7px 16px;
-            }
-            QPushButton:hover {
-                background-color: rgba(88, 166, 255, 0.24);
-                border-color: #58A6FF;
-                color: #79BBFF;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {_theme.rgba(_p['accent'], 0.24)};
+                border-color: {_p['accent']};
+                color: {_theme.lighten(_p['accent'], 0.20)};
+            }}
         """)
         footer_layout.addWidget(apply_btn)
         layout.addWidget(footer)
@@ -916,18 +1004,19 @@ class AppearanceSettingsWindow(BaseWindow):
         for i, emoji in enumerate(self.EMOJI_OPTIONS):
             btn = QPushButton(emoji)
             btn.setFixedSize(44, 44)
-            btn.setStyleSheet("""
-                QPushButton {
+            _pe = self._palette()
+            btn.setStyleSheet(f"""
+                QPushButton {{
                     font-size: 22px; padding: 0;
-                    background: #161B22;
-                    border: 1px solid #21262D;
+                    background: {_pe['surface']};
+                    border: 1px solid {_pe['surface2']};
                     border-radius: 6px;
-                }
-                QPushButton:hover {
-                    background: rgba(88,166,255,0.1);
-                    border-color: rgba(88,166,255,0.45);
-                }
-                QPushButton:pressed { background: rgba(88,166,255,0.18); }
+                }}
+                QPushButton:hover {{
+                    background: {_theme.rgba(_pe['accent'],0.1)};
+                    border-color: {_theme.rgba(_pe['accent'],0.45)};
+                }}
+                QPushButton:pressed {{ background: {_theme.rgba(_pe['accent'],0.18)}; }}
             """)
             btn.clicked.connect(lambda _checked, e=emoji: self.select_emoji(e))
             emoji_grid.addWidget(btn, i // cols, i % cols)
@@ -995,7 +1084,7 @@ class AppearanceSettingsWindow(BaseWindow):
         self.icon_font_size_slider.setValue(self.settings.get('icon_font_size', 32))
         fs_row.addWidget(self.icon_font_size_slider)
         self.icon_font_size_label = QLabel(f"{self.settings.get('icon_font_size', 32)}px")
-        self.icon_font_size_label.setStyleSheet("color: #58A6FF; min-width: 36px;")
+        self.icon_font_size_label.setStyleSheet(self._acc_lbl(36))
         fs_row.addWidget(self.icon_font_size_label)
         self.icon_font_size_slider.valueChanged.connect(self.on_icon_font_size_changed)
         vbox.addLayout(fs_row)
@@ -1042,7 +1131,7 @@ class AppearanceSettingsWindow(BaseWindow):
         vbox.addWidget(self.bg_preview, alignment=Qt.AlignmentFlag.AlignCenter)
 
         hint = QLabel("Green handles = drag to resize background")
-        hint.setStyleSheet("color: #8B949E; font-style: italic; font-size: 11px;")
+        hint.setStyleSheet(self._hint_lbl())
         vbox.addWidget(hint)
 
         vbox.addStretch()
@@ -1084,7 +1173,7 @@ class AppearanceSettingsWindow(BaseWindow):
         self.opacity_slider.setValue(self.settings['background_color'][3])
         op_row.addWidget(self.opacity_slider)
         self.opacity_label = QLabel(f"{self.settings['background_color'][3]}")
-        self.opacity_label.setStyleSheet("color: #58A6FF; min-width: 30px;")
+        self.opacity_label.setStyleSheet(self._acc_lbl(30))
         op_row.addWidget(self.opacity_label)
         self.opacity_slider.valueChanged.connect(lambda v: self.opacity_label.setText(str(v)))
         bcc_vbox.addLayout(op_row)
@@ -1132,7 +1221,7 @@ class AppearanceSettingsWindow(BaseWindow):
         self.grad_opacity_slider.setValue(c2[3] if len(c2) > 3 else 200)
         go_row.addWidget(self.grad_opacity_slider)
         self.grad_opacity_label = QLabel(str(self.grad_opacity_slider.value()))
-        self.grad_opacity_label.setStyleSheet("color: #58A6FF; min-width: 30px;")
+        self.grad_opacity_label.setStyleSheet(self._acc_lbl(30))
         go_row.addWidget(self.grad_opacity_label)
         self.grad_opacity_slider.valueChanged.connect(
             lambda v: self.grad_opacity_label.setText(str(v))
@@ -1146,7 +1235,7 @@ class AppearanceSettingsWindow(BaseWindow):
         self.grad_dir_slider.setValue(self.settings.get('gradient_direction', 0))
         gd_row.addWidget(self.grad_dir_slider)
         self.grad_dir_label = QLabel(f"{self.settings.get('gradient_direction', 0)}°")
-        self.grad_dir_label.setStyleSheet("color: #58A6FF; min-width: 30px;")
+        self.grad_dir_label.setStyleSheet(self._acc_lbl(30))
         gd_row.addWidget(self.grad_dir_label)
         self.grad_dir_slider.valueChanged.connect(
             lambda v: self.grad_dir_label.setText(f"{v}°")
@@ -1170,7 +1259,7 @@ class AppearanceSettingsWindow(BaseWindow):
         self.bg_w_slider.setValue(self.settings.get('bg_width', self.settings['size']))
         bg_w_row.addWidget(self.bg_w_slider)
         self.bg_w_label = QLabel(f"{self.bg_w_slider.value()}px")
-        self.bg_w_label.setStyleSheet("color: #58A6FF; min-width: 36px;")
+        self.bg_w_label.setStyleSheet(self._acc_lbl(36))
         bg_w_row.addWidget(self.bg_w_label)
         self.bg_w_slider.valueChanged.connect(self.on_bg_size_changed)
         vbox.addLayout(bg_w_row)
@@ -1182,7 +1271,7 @@ class AppearanceSettingsWindow(BaseWindow):
         self.bg_h_slider.setValue(self.settings.get('bg_height', self.settings['size']))
         bg_h_row.addWidget(self.bg_h_slider)
         self.bg_h_label = QLabel(f"{self.bg_h_slider.value()}px")
-        self.bg_h_label.setStyleSheet("color: #58A6FF; min-width: 36px;")
+        self.bg_h_label.setStyleSheet(self._acc_lbl(36))
         bg_h_row.addWidget(self.bg_h_label)
         self.bg_h_slider.valueChanged.connect(self.on_bg_size_changed)
         vbox.addLayout(bg_h_row)
@@ -1196,7 +1285,7 @@ class AppearanceSettingsWindow(BaseWindow):
         self.size_slider.setValue(self.settings['size'])
         sz_row.addWidget(self.size_slider)
         self.size_label = QLabel(f"{self.settings['size']}px")
-        self.size_label.setStyleSheet("color: #58A6FF; min-width: 36px;")
+        self.size_label.setStyleSheet(self._acc_lbl(36))
         sz_row.addWidget(self.size_label)
         self.size_slider.valueChanged.connect(self.on_size_changed)
         vbox.addLayout(sz_row)
@@ -1251,7 +1340,7 @@ class AppearanceSettingsWindow(BaseWindow):
         hc_vbox.addWidget(self.hitbox_preview, alignment=Qt.AlignmentFlag.AlignCenter)
 
         info_lbl = QLabel("Red = clickable area  |  Green dot = drag to offset  |  Drag edges to resize")
-        info_lbl.setStyleSheet("color: #8B949E; font-style: italic; font-size: 11px;")
+        info_lbl.setStyleSheet(self._hint_lbl())
         hc_vbox.addWidget(info_lbl)
 
         hc_vbox.addWidget(self._section_label("Dimensions"))
@@ -1279,7 +1368,7 @@ class AppearanceSettingsWindow(BaseWindow):
             row.addWidget(slider)
             lbl_name = attr.replace('_slider', '_label')
             lbl = QLabel(f"{val}px")
-            lbl.setStyleSheet("color: #58A6FF; min-width: 36px;")
+            lbl.setStyleSheet(self._acc_lbl(36))
             row.addWidget(lbl)
             setattr(self, attr, slider)
             setattr(self, lbl_name, lbl)

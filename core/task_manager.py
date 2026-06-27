@@ -44,15 +44,17 @@ def _resolve_instruction(instruction: str, interpreter=None, functions: list = N
     """
     pattern = re.compile(r'\{\{(.*?)\}\}', re.DOTALL)
     errors = []
+    inject_errors = []
     interp = interpreter if interpreter is not None else PythonInterpreter()
 
-    # Pre-inject saved functions so {{ my_func() }} works in instruction blocks
+    # Pre-inject saved functions so {{ my_func() }} works in instruction blocks.
+    # Errors here used to be swallowed silently; now we keep them so a {{ block }}
+    # that fails because its helper never defined gets a real explanation.
     if functions:
         for _fn in functions:
-            try:
-                interp.execute(_fn['code'])
-            except Exception:
-                pass
+            result = interp.execute(_fn['code'])
+            if result.get('error'):
+                inject_errors.append(f"[function '{_fn.get('name', '?')}'] {result['error']}")
 
     def _run_block(match):
         code = match.group(1).strip()
@@ -70,8 +72,27 @@ def _resolve_instruction(instruction: str, interpreter=None, functions: list = N
         return '\n'.join(parts) if parts else ''
 
     resolved = pattern.sub(_run_block, instruction)
+
     if errors:
-        return instruction, '\n'.join(errors)
+        # A {{ block }} hard-failed → skip the ping and report. Prefix any failed
+        # function injections since they're the likely root cause.
+        combined = errors[:]
+        if inject_errors:
+            combined = ["Function library load errors (likely root cause):",
+                        *inject_errors, "", "Instruction block errors:", *errors]
+        return instruction, '\n'.join(combined)
+
+    if inject_errors:
+        # No block hard-failed, but a saved function failed to load. Don't kill
+        # the ping — surface it as a visible banner so it's never silent (the
+        # interpreter swallows runtime errors in single-line {{ }} blocks, so a
+        # broken helper would otherwise just render as empty).
+        banner = ("⚠️ Function library load warning — some saved functions "
+                  "failed to load and may be unavailable in {{ }} blocks:\n  "
+                  + "\n  ".join(inject_errors))
+        log.warning(f"[_resolve_instruction] {banner}")
+        return f"{banner}\n\n{resolved}", None
+
     return resolved, None
 
 
@@ -113,6 +134,10 @@ class TaskAIEngine:
             self._engine.tool_manager._get_chat = lambda: None
             self._engine.tool_manager._get_android_bridge = lambda: None
             self._engine.tool_manager.supervised_execution = False
+            # Resilience: retry transient provider failures so a single hiccup
+            # doesn't kill an unattended background ping (main session uses 0).
+            self._engine.provider_max_retries = 3
+            self._engine.provider_retry_backoff = 3.0
             perms = self._task.get('permissions', {})
             self._engine.tool_manager.allow_workmode = perms.get('allow_workmode', False)
             self._engine.tool_manager.allow_execute_code = perms.get('allow_execute_code', False)
@@ -204,14 +229,6 @@ class TaskAIEngine:
         self._engine.custom_script_path = s.get('custom_script_path', '')
         self._engine.ai_provider = s.get('ai_provider', 'custom_script')
 
-    def call(self, system_prompt: str, history: list) -> str | None:
-        """Call the AI using the same provider the user has configured (raw, no tool processing)."""
-        self._sync_settings()
-        if self._engine is None:
-            log.error("[TaskAIEngine.call] No engine available")
-            return None
-        return self._engine.raw_call(system_prompt, history)
-
     def run_full_ping(self, ping_content: str, history: list, task_system_prompt: str, max_iterations: int = 20) -> tuple:
         """
         Run a full ping using the same pipeline as the main session:
@@ -240,29 +257,45 @@ class TaskAIEngine:
         # Restore session history into the engine
         self._engine.conversation_history = list(history)
 
+        import time
         all_responses = []
         send_main_calls = []
 
-        # First call — generate_response handles tool calls internally
+        def _record(res: dict):
+            """Capture a step's response + any send_message_main call. Skips hard
+            provider-error sentinels so a transient outage isn't surfaced as the
+            agent's 'reply'."""
+            resp = (res or {}).get('response') or ''
+            if not resp or self._is_provider_error(res):
+                return
+            all_responses.append(resp)
+            send_msg, _ = self.extract_send_message_main(resp)
+            if send_msg:
+                send_main_calls.append(send_msg)
+
+        # First call — generate_response handles tool calls internally.
+        # (Provider-level transient retries already happen inside _call_provider.)
         try:
             result = self._engine.generate_response(ping_content)
         except Exception as e:
             log.error(f"[TaskAIEngine.run_full_ping] generate_response failed: {e}")
+            self._reset_work_mode()
             return None, [], list(self._engine.conversation_history)
+        _record(result)
 
-        if result.get('response'):
-            all_responses.append(result['response'])
-            send_msg, _ = self.extract_send_message_main(result['response'])
-            if send_msg:
-                send_main_calls.append(send_msg)
-
-        # Work mode continuation loop (mirrors controller.auto_continue_work_mode)
+        # Work mode continuation loop. A single failed step (provider error or
+        # exception) no longer kills the ping — it's retried a few times; only
+        # repeated back-to-back failures end the ping (with partial output kept).
         iteration = 0
+        consecutive_failures = 0
+        MAX_STEP_FAILURES = 2
         while result.get('thinking') and iteration < max_iterations:
             iteration += 1
-            import time
             if iteration > 1:
                 time.sleep(1.5)  # courtesy delay between provider calls
+
+            step_failed = False
+            step_result = None
             try:
                 pending = self._drain_images()
                 if pending:
@@ -274,30 +307,43 @@ class TaskAIEngine:
                         try: _os.remove(_p)
                         except Exception: pass
                     if not ai_text:
-                        log.error("[TaskAIEngine.run_full_ping] No response during image work step")
-                        break
-                    result = self._engine._process_work_mode_response(ai_text)
+                        step_failed = True
+                    else:
+                        step_result = self._engine._process_work_mode_response(ai_text)
                 else:
-                    result = self._engine.continue_work_mode()
+                    step_result = self._engine.continue_work_mode()
+                    if self._is_provider_error(step_result):
+                        step_failed = True
             except Exception as e:
-                log.error(f"[TaskAIEngine.run_full_ping] continue_work_mode failed: {e}")
-                break
+                log.error(f"[TaskAIEngine.run_full_ping] work step failed: {type(e).__name__}: {e}")
+                step_failed = True
 
-            if result.get('response'):
-                all_responses.append(result['response'])
-                send_msg, _ = self.extract_send_message_main(result['response'])
-                if send_msg:
-                    send_main_calls.append(send_msg)
+            if step_failed:
+                consecutive_failures += 1
+                if consecutive_failures > MAX_STEP_FAILURES:
+                    log.error(f"[TaskAIEngine.run_full_ping] {consecutive_failures} consecutive step "
+                              f"failures — ending ping with partial output (iter {iteration})")
+                    break
+                log.warning(f"[TaskAIEngine.run_full_ping] work step failed "
+                            f"({consecutive_failures}/{MAX_STEP_FAILURES}) — retrying after backoff")
+                time.sleep(3.0 * consecutive_failures)
+                # `result` is left unchanged (still thinking=True) so the loop retries.
+                continue
+
+            consecutive_failures = 0
+            result = step_result
+            _record(result)
 
             if result.get('exited_work_mode'):
                 log.info(f"[TaskAIEngine.run_full_ping] Work mode exited after {iteration} iteration(s)")
                 break
 
-        # Cleanup: if loop ended because of max_iterations (not a clean exit),
-        # reset the dangling in_work_mode flag so next ping starts fresh.
         if iteration >= max_iterations and self._engine.tool_manager.in_work_mode:
-            log.warning(f"[TaskAIEngine.run_full_ping] Hit max_iterations={max_iterations} without exiting work mode")
-            self._engine.tool_manager.in_work_mode = False
+            log.warning(f"[TaskAIEngine.run_full_ping] Hit max_iterations={max_iterations} without clean exit")
+
+        # Always clear a dangling work-mode flag so a broken ping never poisons
+        # the next one (covers max-iterations AND repeated-failure exits).
+        self._reset_work_mode()
 
         # Cleanup any leftover queued images that never got flushed
         for _p in self._drain_images():
@@ -306,6 +352,21 @@ class TaskAIEngine:
 
         final_text = '\n'.join(r for r in all_responses if r)
         return final_text or None, send_main_calls, list(self._engine.conversation_history)
+
+    @staticmethod
+    def _is_provider_error(result: dict) -> bool:
+        """True when a step result is the 'no response from provider' sentinel
+        (i.e. the provider failed even after retries), not a real agent reply."""
+        resp = (result or {}).get('response') or ''
+        return resp.startswith('Error: No response')
+
+    def _reset_work_mode(self):
+        """Clear the engine's work-mode flag, guarded."""
+        try:
+            if self._engine and self._engine.tool_manager.in_work_mode:
+                self._engine.tool_manager.in_work_mode = False
+        except Exception:
+            pass
 
     def extract_send_message_main(self, text: str) -> tuple:
         """
@@ -320,41 +381,6 @@ class TaskAIEngine:
         msg = match.group(1).replace('\\"', '"').replace('\\n', '\n')
         cleaned = self._SEND_MSG_RE.sub('', text).strip()
         return msg, cleaned
-
-
-def _group_history_logical(history: list) -> list:
-    """
-    Groups chat history into logical units for message-limit counting.
-    A consecutive run of assistant messages that all contain a
-    ```work_environment block (the full tool session, including the final
-    exit step) counts as ONE logical unit — not counted individually.
-    Ping messages (system role) and normal assistant replies each count as one.
-    Returns a list of groups; each group is a list of message dicts.
-    Session history is never modified — this only affects counting/display.
-    """
-    groups = []
-    i = 0
-    while i < len(history):
-        msg = history[i]
-        role = msg.get('role', '')
-        content = msg.get('content', '')
-        if role == 'assistant' and '```work_environment' in content:
-            # Start of a work sequence — collect all consecutive work messages
-            group = [msg]
-            i += 1
-            while i < len(history):
-                nxt = history[i]
-                if (nxt.get('role') == 'assistant'
-                        and '```work_environment' in nxt.get('content', '')):
-                    group.append(nxt)
-                    i += 1
-                else:
-                    break
-            groups.append(group)
-        else:
-            groups.append([msg])
-            i += 1
-    return groups
 
 
 # ── Task Thread ───────────────────────────────────────────────────────────────
@@ -372,6 +398,7 @@ class TaskThread(threading.Thread):
         self._send_main = send_main_callback   # fn(str) → appends to main session
         self._set_inactive = set_inactive_callback   # fn(task_id) → marks task inactive after one-shot
         self._stop_event = threading.Event()
+        self._ping_lock = threading.Lock()   # serializes scheduled + manual pings per task
         self._ai = TaskAIEngine(controller, task)
         self._sessions_root = _APP_ROOT / "data" / "task-sessions"
         self._sessions_root.mkdir(parents=True, exist_ok=True)
@@ -451,24 +478,11 @@ class TaskThread(threading.Thread):
             start = datetime.strptime(sched.get('start', '00:00'), '%H:%M')
             target = now.replace(hour=start.hour, minute=start.minute, second=0, microsecond=0)
             if target <= now:
-                target = target.replace(day=target.day + 1)
+                # +1 day via timedelta — `replace(day=day+1)` overflows at month end.
+                target = target + timedelta(days=1)
             return (target - now).total_seconds()
         except Exception:
             return 0
-
-    def _seconds_until_window_end(self) -> float:
-        sched = self._task.get('daily_schedule', {})
-        if sched.get('whole_day', False):
-            now = datetime.now()
-            end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=0)
-            return max(0.0, (end_of_day - now).total_seconds())
-        try:
-            now = datetime.now()
-            end = datetime.strptime(sched.get('end', '23:59'), '%H:%M')
-            target = now.replace(hour=end.hour, minute=end.minute, second=0, microsecond=0)
-            return max(0.0, (target - now).total_seconds())
-        except Exception:
-            return 86400.0
 
     # ── History builder ───────────────────────────────────────────────────────
 
@@ -482,26 +496,6 @@ class TaskThread(threading.Thread):
         return history
 
     # ── Main loop ─────────────────────────────────────────────────────────────
-
-    def _load_skill_content(self, skill_name: str) -> str | None:
-        """
-        Load the instruction content of a skill by name.
-        Tries skill_manager API first, then falls back to common file paths on disk.
-        Returns the skill instruction text, or None if not found.
-        """
-        # ── Try skill_manager API ─────────────────────────────────────────────
-        if self._skill_manager is not None:
-            fn = getattr(self._skill_manager, 'get_skill_content', None)
-            if callable(fn):
-                try:
-                    content = fn(skill_name, "TaskThread._load_skill_content")
-                    if content:
-                        return str(content)
-                except Exception:
-                    pass
-
-        log.warning(f"[TaskThread._load_skill_content] Skill '{skill_name}' content not found anywhere")
-        return None
 
     def _next_specific_ping_seconds(self) -> float | None:
         """
@@ -562,9 +556,11 @@ class TaskThread(threading.Thread):
 
     def _get_ping_interval_mode(self) -> str:
         """
-        Return the effective ping interval mode.
-        Reads unambiguous 'ping_interval_mode' first; falls back to legacy
-        boolean fields so old task files continue to work.
+        WHAT triggers a ping → 'timed' | 'specific_times' | 'script_trigger'.
+
+        This is a different axis from _get_interval_anchor() (which only matters
+        when this returns 'timed'). Reads the unambiguous 'ping_interval_mode'
+        key first; falls back to the legacy boolean so old task files still work.
         """
         task = self._task
         mode = task.get('ping_interval_mode', '')
@@ -574,13 +570,63 @@ class TaskThread(threading.Thread):
             return 'specific_times'
         return 'timed'
 
-    def _fire_ping_now(self, task: dict, task_id: str, session: dict, today: str):
+    def _get_interval_anchor(self) -> str:
         """
-        Resolve the instruction, call the AI, and dispatch send_message_main calls.
-        Returns (response_text, send_main_calls).
-        Shared by the timed loop and the script trigger loop.
+        For 'timed' mode only: what the interval clock is anchored to →
+        'schedule' (slots aligned to the window's start time) or
+        'startup'  (fixed delay measured from when the task thread started).
+
+        Distinct from _get_ping_interval_mode(); persisted as the legacy
+        'ping_mode' key ('schedule_relative' / 'startup_relative').
         """
-        instruction = task.get('instruction', '')
+        return 'schedule' if self._task.get('ping_mode') == 'schedule_relative' else 'startup'
+
+    # ── Ping assembly helpers ───────────────────────────────────────────────
+
+    def _safe_send_main(self, message: str):
+        """Dispatch a message to the main session, swallowing transport errors."""
+        try:
+            self._send_main(message)
+        except Exception as e:
+            log.error(f"[TaskThread._safe_send_main] {e}")
+
+    def _make_ping_content(self, resolved_instruction: str) -> str:
+        """Wrap a resolved instruction in the automated-task ping envelope."""
+        return (
+            f"<SYSTEM_AUTOMATED_TASK_PING>\nTHIS IS AN AUTOMATED "
+            f"SYSTEM MESSAGE, YOUR TASK IS STATED BELOW:\n\n{resolved_instruction}\n{_now_stamp()}\n\n"
+            f"</SYSTEM_AUTOMATED_TASK_PING>"
+        )
+
+    def _execute_ping(self, session: dict, task_id: str, today: str,
+                      override_instruction: str | None = None) -> bool:
+        """
+        Single source of truth for running one task ping end-to-end:
+
+            resolve {{code}} → build system prompt + history → wrap ping
+            → run the AI (resilient work-mode loop) → dispatch send_message_main
+            → persist the engine's new messages into the session.
+
+        Used by ALL drivers (one-shot, timed loop, script trigger, manual ping)
+        so the prompt/ping pipeline lives in exactly one place. The whole run is
+        serialized behind ``_ping_lock`` so a manual ping can never overlap a
+        scheduled one on the same task engine.
+
+        ``override_instruction`` — when given, replaces the task's stored
+        instruction for this single ping (used by the manual "⚡ Ping" tester).
+
+        Returns True if the ping produced a response, False if it was skipped
+        (code-block error) or produced nothing.
+        """
+        with self._ping_lock:
+            return self._execute_ping_locked(session, task_id, today, override_instruction)
+
+    def _execute_ping_locked(self, session: dict, task_id: str, today: str,
+                             override_instruction: str | None = None) -> bool:
+        task = self._task
+
+        # 1. Resolve {{code}} blocks in the instruction (shares the task's interp).
+        instruction = override_instruction if override_instruction is not None else task.get('instruction', '')
         _fns = []
         try:
             _fns = self._controller.task_manager.get_functions()
@@ -592,31 +638,75 @@ class TaskThread(threading.Thread):
             functions=_fns,
         )
         if error:
-            log.error(f"[TaskThread._fire_ping_now] Code block error in '{task['name']}': "
-                      f"{error[:200]}")
-            try:
-                self._send_main(
-                    f"⚠️ **Task '{task['name']}' — code block error, ping skipped.**\n\n"
-                    f"```\n{error}\n```"
-                )
-            except Exception as _e:
-                log.error(f"[TaskThread._fire_ping_now] send_main failed: {_e}")
-            return None, []
+            log.error(f"[TaskThread._execute_ping] Code block error in '{task['name']}': {error[:200]}")
+            self._safe_send_main(
+                f"⚠️ **Task '{task['name']}' — code block error, ping skipped.**\n\n"
+                f"```\n{error}\n```"
+            )
+            return False
 
+        # 2. Rebuild prompt + history fresh each ping (picks up live user edits).
         system_prompt = self._build_system_prompt()
         api_history   = self._build_api_history(session)
-        ping_content  = (
-            f"<SYSTEM_AUTOMATED_TASK_PING>\nTHIS IS AN AUTOMATED "
-            f"SYSTEM MESSAGE, YOUR TASK IS STATED BELOW:\n\n{resolved}\n{_now_stamp()}\n\n"
-            f"</SYSTEM_AUTOMATED_TASK_PING>"
-        )
+        api_hist_len  = len(api_history)
+
+        # 3. Record the ping into the session, then run the AI.
+        ping_content = self._make_ping_content(resolved)
         session['chat_history'].append({'role': 'system', 'content': ping_content})
+
         _unlimited = task.get('unlimited_work_iterations', False)
         _max_iter  = 999999 if _unlimited else task.get('max_work_iterations', 20)
         response_text, send_main_calls, engine_history = self._ai.run_full_ping(
             ping_content, api_history, system_prompt, max_iterations=_max_iter
         )
-        return response_text, send_main_calls, engine_history, len(api_history)
+
+        # 4. Dispatch any user-facing messages the agent emitted.
+        for msg in send_main_calls:
+            self._safe_send_main(msg)
+
+        # 5. Persist the engine's new assistant/work messages into the session.
+        for _msg in engine_history[api_hist_len:]:
+            if _msg.get('role') in ('assistant', 'system'):
+                session['chat_history'].append(dict(_msg))
+        # Stamp the last assistant entry with the finish time.
+        for _i in range(len(session['chat_history']) - 1, -1, -1):
+            if session['chat_history'][_i].get('role') == 'assistant':
+                session['chat_history'][_i]['content'] += f"\n{_now_stamp()}"
+                break
+
+        self._save_session(session, task_id, today)
+        log.info(f"[TaskThread._execute_ping] Ping complete for task='{task['name']}'")
+        return response_text is not None
+
+    def fire_manual_ping(self, custom_instruction: str | None = None) -> str:
+        """
+        Fire one immediate, unscheduled ping (the "⚡ Ping" tester).
+
+        Runs in its own daemon thread so the caller (UI) never blocks. The actual
+        run still goes through ``_execute_ping`` → ``_ping_lock``, so it queues
+        safely behind any in-flight scheduled ping instead of clobbering it.
+
+        Returns the date_str of the session it writes into, so the UI can open
+        that session viewer to watch the live result.
+        """
+        today = date.today().isoformat()
+
+        def _run():
+            try:
+                task_id = self._task['id']
+                session = self._load_session(task_id, today) or self._new_session()
+                self._save_session(session, task_id, today)   # ensure the file exists for the viewer
+                self._execute_ping(session, task_id, today,
+                                   override_instruction=custom_instruction)
+            except Exception as e:
+                log.error(f"[TaskThread.fire_manual_ping] {e}", exc_info=True)
+                self._safe_send_main(
+                    f"⚠️ **Task '{self._task['name']}' — manual ping failed.**\n\n```\n{e}\n```"
+                )
+
+        threading.Thread(target=_run, daemon=True,
+                         name=f"ManualPing-{self._task['id'][:8]}").start()
+        return today
 
     def _run_script_trigger_loop(self):
         """
@@ -644,6 +734,11 @@ class TaskThread(threading.Thread):
                 f"[TaskThread._run_script_trigger_loop] Script not found: "
                 f"'{script_name}' — task '{task['name']}' will not poll."
             )
+            self._safe_send_main(
+                f"⚠️ **Task '{task['name']}' — trigger script not found.**\n\n"
+                f"Expected `{script_name or '(none set)'}` in the interval-scripts folder. "
+                f"This task will not poll until the script exists. Edit the task to pick a valid script."
+            )
             return
 
         log.info(
@@ -651,20 +746,49 @@ class TaskThread(threading.Thread):
             f"task='{task['name']}' script='{script_name}' poll={poll_ms}ms"
         )
 
-        _script_busy   = threading.Event()   # set = script sub-thread running
-        _ping_busy     = threading.Event()   # set = AI ping running
+        # _script_busy — only one fire_ping() sub-thread runs at a time (no pile-up).
+        # _ping_busy   — only one AI ping at a time; triggers arriving mid-ping are
+        #                discarded so a fast-firing script can't queue a backlog.
+        #                (Mutual exclusion against MANUAL pings is guaranteed
+        #                separately by self._ping_lock inside _execute_ping.)
+        _script_busy   = threading.Event()
+        _ping_busy     = threading.Event()
         _trigger_lock  = threading.Lock()
         _trigger_ready = [False]             # written by script thread, read by main loop
+        _err_state     = {'last': None}      # last surfaced script error (for throttling)
+
+        def _report_script_error(msg: str):
+            """Push a script error to the main chat — but only once per distinct
+            error, so a persistently broken script doesn't spam every poll tick.
+            Re-reports if the error text changes (e.g. after the user edits it)."""
+            if msg == _err_state['last']:
+                return
+            _err_state['last'] = msg
+            log.error(f"[TaskThread._run_script_trigger_loop] {msg}")
+            self._safe_send_main(
+                f"⚠️ **Task '{task['name']}' — trigger script error**  (`{script_name}`)\n\n"
+                f"```\n{msg}\n```\n_Polling continues; fix the script and this will clear._"
+            )
+
+        def _clear_script_error():
+            if _err_state['last'] is not None:
+                _err_state['last'] = None
+                self._safe_send_main(
+                    f"✅ **Task '{task['name']}' — trigger script recovered** (`{script_name}`)."
+                )
 
         def _call_script():
             """Execute fire_ping() once; posts True to _trigger_ready if fired."""
+            import traceback as _tb
             try:
                 code_src = script_path.read_text(encoding='utf-8')
                 ns: dict = {}
                 exec(compile(code_src, str(script_path), 'exec'), ns)
                 fn = ns.get('fire_ping')
                 if callable(fn):
-                    if fn() is True:
+                    fired = fn() is True
+                    _clear_script_error()   # ran cleanly
+                    if fired:
                         with _trigger_lock:
                             _trigger_ready[0] = True
                         log.debug(
@@ -672,15 +796,12 @@ class TaskThread(threading.Thread):
                             f"fire_ping() → True in '{script_name}'"
                         )
                 else:
-                    log.warning(
-                        f"[TaskThread._run_script_trigger_loop] "
-                        f"'{script_name}' has no fire_ping() callable."
+                    _report_script_error(
+                        f"Script '{script_name}' defines no callable fire_ping(). "
+                        f"Expected:  def fire_ping() -> bool"
                     )
-            except Exception as _e:
-                log.error(
-                    f"[TaskThread._run_script_trigger_loop] "
-                    f"Script error in '{script_name}': {type(_e).__name__}: {_e}"
-                )
+            except Exception:
+                _report_script_error(_tb.format_exc().strip())
             finally:
                 _script_busy.clear()
 
@@ -728,31 +849,7 @@ class TaskThread(threading.Thread):
                         session = self._new_session()
                         self._save_session(session, task_id, today)
 
-                    response_text, send_main_calls, engine_history, api_hist_len = self._fire_ping_now(
-                        task, task_id, session, today
-                    )
-                    for msg in send_main_calls:
-                        try:
-                            self._send_main(msg)
-                        except Exception as _e:
-                            log.error(
-                                f"[TaskThread._run_script_trigger_loop] "
-                                f"send_main failed: {_e}"
-                            )
-                    # Save AI messages from engine history (assistant + system work mode)
-                    for _msg in engine_history[api_hist_len:]:
-                        if _msg.get('role') in ('assistant', 'system'):
-                            session['chat_history'].append(dict(_msg))
-                    # Stamp the last assistant entry with the finish time
-                    for _i in range(len(session['chat_history']) - 1, -1, -1):
-                        if session['chat_history'][_i].get('role') == 'assistant':
-                            session['chat_history'][_i]['content'] += f"\n{_now_stamp()}"
-                            break
-                    self._save_session(session, task_id, today)
-                    log.info(
-                        f"[TaskThread._run_script_trigger_loop] Ping complete for "
-                        f"task='{task['name']}'"
-                    )
+                    self._execute_ping(session, task_id, today)
                 except Exception as _e:
                     log.error(
                         f"[TaskThread._run_script_trigger_loop] Ping error: "
@@ -812,58 +909,12 @@ class TaskThread(threading.Thread):
             if self._stop_event.is_set():
                 return
 
-            # ── Fire the ping ─────────────────────────────────────────────────
+            # ── Fire the ping (unified pipeline) ──────────────────────────────
             today = date.today().isoformat()
             session = self._load_session(task_id, today) or self._new_session()
             self._save_session(session, task_id, today)
-            instruction = task.get('instruction', '')
-            _fns = []
-            try:
-                _fns = self._controller.task_manager.get_functions()
-            except Exception:
-                pass
-            resolved, error = _resolve_instruction(
-                instruction, self._ai._engine.tool_manager.tools['python'], functions=_fns
-            )
-            if error:
-                log.error(f"[TaskThread.run] One-shot code block error: {error[:200]}")
-                try:
-                    self._send_main(
-                        f"⚠️ **Task '{task['name']}' one-shot — code block error.**\n\n```\n{error}\n```"
-                    )
-                except Exception:
-                    pass
-            else:
-                system_prompt = self._build_system_prompt()
-                api_history = self._build_api_history(session)
-                ping_content = (
-                    f"<SYSTEM_AUTOMATED_TASK_PING>\nTHIS IS AN AUTOMATED "
-                    f"SYSTEM MESSAGE, YOUR TASK IS STATED BELOW:\n\n{resolved}\n{_now_stamp()}\n\n"
-                    f"</SYSTEM_AUTOMATED_TASK_PING>"
-                )
-                session['chat_history'].append({'role': 'system', 'content': ping_content})
-                _unlimited = task.get('unlimited_work_iterations', False)
-                _max_iter  = 999999 if _unlimited else task.get('max_work_iterations', 20)
-                response_text, send_main_calls, engine_history = self._ai.run_full_ping(
-                    ping_content, api_history, system_prompt, max_iterations=_max_iter
-                )
-                # Dispatch all messages — run_full_ping is fully done by this point
-                for msg in send_main_calls:
-                    try:
-                        self._send_main(msg)
-                    except Exception as e:
-                        log.error(f"[TaskThread.run] One-shot send_main failed: {e}")
-                # Save AI messages from engine history (assistant + system work mode)
-                for _msg in engine_history[len(api_history):]:
-                    if _msg.get('role') in ('assistant', 'system'):
-                        session['chat_history'].append(dict(_msg))
-                # Stamp the last assistant entry with the finish time
-                for _i in range(len(session['chat_history']) - 1, -1, -1):
-                    if session['chat_history'][_i].get('role') == 'assistant':
-                        session['chat_history'][_i]['content'] += f"\n{_now_stamp()}"
-                        break
-                self._save_session(session, task_id, today)
-                log.info(f"[TaskThread.run] One-shot ping complete for task='{task['name']}'")
+            self._execute_ping(session, task_id, today)
+            log.info(f"[TaskThread.run] One-shot ping complete for task='{task['name']}'")
             # ── AI is fully done — NOW mark inactive ──────────────────────────
             if self._set_inactive:
                 self._set_inactive(task_id)
@@ -908,8 +959,7 @@ class TaskThread(threading.Thread):
                 log.info(f"[TaskThread.run] Next specific ping in {wait_sec:.0f}s")
                 self._stop_event.wait(wait_sec)
             else:
-                use_sched_rel = task.get('ping_mode', 'startup_relative') == 'schedule_relative'
-                if use_sched_rel:
+                if self._get_interval_anchor() == 'schedule':
                     wait_sec = self._next_schedule_relative_seconds()
                     log.info(f"[TaskThread.run] Schedule-relative: next ping in {wait_sec:.0f}s")
                 else:
@@ -932,71 +982,8 @@ class TaskThread(threading.Thread):
             if date.today().isoformat() != today:
                 continue
 
-            # ── Resolve {{code}} blocks in instruction ───────────────────────
-            instruction = task.get('instruction', '')
-            _fns = []
-            try:
-                _fns = self._controller.task_manager.get_functions()
-            except Exception:
-                pass
-            resolved, error = _resolve_instruction(instruction, self._ai._engine.tool_manager.tools['python'],
-                                                   functions=_fns)
-            if error:
-                log.error(f"[TaskThread.run] Code block error in '{task['name']}': {error[:200]}")
-                err_msg = (
-                    f"⚠️ **Task '{task['name']}' — code block error, ping skipped.**\n\n"
-                    f"```\n{error}\n```"
-                )
-                try:
-                    self._send_main(err_msg)
-                except Exception as e:
-                    log.error(f"[TaskThread.run] Failed to forward error: {e}")
-                continue
-
-            # ── Rebuild system prompt now (picks up any user changes since last ping) ─
-            system_prompt = self._build_system_prompt()
-
-            # ── Build history BEFORE appending ping (generate_response appends it) ──
-            api_history = self._build_api_history(session)
-
-            # ── Append ping to session record ─────────────────────────────────
-            ping_content = f"<SYSTEM_AUTOMATED_TASK_PING>\nTHIS IS AN AUTOMATED " \
-                           f"SYSTEM MESSAGE, YOUR TASK IS STATED BELOW:\n\n{resolved}\n{_now_stamp()}\n\n" \
-                           f"</SYSTEM_AUTOMATED_TASK_PING>"
-            session['chat_history'].append({'role': 'system', 'content': ping_content})
-
-            # ── Resolve configured iteration limit ────────────────────────────
-            _unlimited = task.get('unlimited_work_iterations', False)
-            _max_iter  = 999999 if _unlimited else task.get('max_work_iterations', 20)
-
-            # ── Call AI with full tool support (work_environment, execute_code, etc.) ──
-            response_text, send_main_calls, engine_history = self._ai.run_full_ping(
-                ping_content, api_history, system_prompt, max_iterations=_max_iter
-            )
-
-            if response_text is None:
-                log.warning(f"[TaskThread.run] AI returned None for task '{task['name']}'")
-                continue
-
-            # ── Dispatch all send_message_main calls ──────────────────────────
-            for send_msg in send_main_calls:
-                try:
-                    self._send_main(send_msg)
-                    log.info(f"[TaskThread.run] send_message_main dispatched")
-                except Exception as e:
-                    log.error(f"[TaskThread.run] send_message_main failed: {e}")
-
-            # ── Save AI messages from engine history (assistant + system work mode) ──
-            for _msg in engine_history[len(api_history):]:
-                if _msg.get('role') in ('assistant', 'system'):
-                    session['chat_history'].append(dict(_msg))
-            # Stamp the last assistant entry with the finish time
-            for _i in range(len(session['chat_history']) - 1, -1, -1):
-                if session['chat_history'][_i].get('role') == 'assistant':
-                    session['chat_history'][_i]['content'] += f"\n{_now_stamp()}"
-                    break
-            self._save_session(session, task_id, today)
-            log.info(f"[TaskThread.run] Ping complete for task='{task['name']}'")
+            # ── Run the ping through the unified pipeline ─────────────────────
+            self._execute_ping(session, task_id, today)
         log.info(f"[TaskThread.run] Thread exiting for task='{task['name']}'")
 
 
@@ -1217,6 +1204,32 @@ class TaskManager:
         t = self._threads.pop(task_id, None)
         if t:
             t.stop()
+
+    def fire_manual_ping(self, task_id: str, instruction: str | None = None) -> str | None:
+        """
+        Fire an immediate, unscheduled ping for a task — the "⚡ Ping" tester.
+
+        Reuses the task's running thread when active (so it shares the same
+        engine/session state); for an inactive task it spins up a transient,
+        un-started thread just to run the one ping. Returns the session date_str
+        the ping writes into (so the UI can open that viewer), or None on failure.
+        """
+        thread = self._threads.get(task_id)
+        if thread is None:
+            task = next((t for t in self._tasks if t['id'] == task_id), None)
+            if task is None:
+                log.error(f"[TaskManager.fire_manual_ping] Unknown task id={task_id}")
+                return None
+            # Transient thread: never .start()-ed, only used to drive one ping.
+            thread = TaskThread(
+                task=task,
+                controller=self._controller,
+                skill_manager=getattr(self._controller, 'skill_manager', None),
+                send_main_callback=self._send_to_main,
+                set_inactive_callback=self.set_task_inactive,
+            )
+        log.info(f"[TaskManager.fire_manual_ping] Manual ping requested for task id={task_id[:8]}")
+        return thread.fire_manual_ping(instruction)
 
     def start(self):
         """Start all task threads. Call once after controller is ready."""

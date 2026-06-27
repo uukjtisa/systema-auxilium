@@ -317,6 +317,40 @@ class AssistantController(QObject):
         """
         return getattr(getattr(self, 'ui', None), 'chat_window', None) or None
 
+    def broadcast_theme(self, theme_key: str):
+        """Live-apply a theme to every open window so the whole app stays in
+        visual unity. Safe to call from the settings-save path; each window's
+        apply_theme() is guarded so a missing/closed window is skipped.
+
+        Windows live in two places: the FloatingWindow (settings, appearance,
+        debug) and the ChatWindow (its cached task / memory sub-windows).
+        """
+        floating = getattr(self, 'ui', None)
+        chat = self._chat
+
+        targets = [chat, floating]
+        if floating is not None:
+            targets += [
+                getattr(floating, 'settings_window', None),
+                getattr(floating, 'appearance_window', None),
+                getattr(floating, 'debug_window', None),
+            ]
+        if chat is not None:
+            targets += [
+                getattr(chat, '_tasks_window', None),
+                getattr(chat, '_memory_window', None),
+            ]
+
+        for win in targets:
+            if win is None:
+                continue
+            fn = getattr(win, 'apply_theme', None)
+            if callable(fn):
+                try:
+                    fn(theme_key)
+                except Exception as e:
+                    log.error(f"[broadcast_theme] {type(win).__name__}: {e}")
+
     def log(self, message, level="INFO"):
         """Emit message to UI log panel."""
         self.log_signal.emit(message, level)

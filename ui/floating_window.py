@@ -14,6 +14,7 @@ import json
 import os
 import math
 from core.logger import _make_logger, _NoOpLogger
+from ui import theme as _theme
 
 
 _verbose = True
@@ -441,32 +442,33 @@ class FloatingWindow(QWidget):
             self.open_chat()
 
     def _menu_style(self) -> str:
-        """VS Code-style dark context menu stylesheet."""
-        return """
-            QMenu {
-                background-color: #1e1e1e;
-                border: 1px solid #333;
+        """Context menu stylesheet, themed to the active app theme."""
+        p = _theme.current_palette(self.controller)
+        return f"""
+            QMenu {{
+                background-color: {p['surface']};
+                border: 1px solid {p['border']};
                 border-radius: 6px;
                 padding: 4px 0;
                 font-size: 12px;
                 font-family: 'Segoe UI', system-ui, sans-serif;
-            }
-            QMenu::item {
+            }}
+            QMenu::item {{
                 padding: 6px 24px 6px 16px;
-                color: #ccc;
-            }
-            QMenu::item:selected {
-                background-color: #2a2d2e;
-                color: #fff;
-            }
-            QMenu::item:checked {
-                color: #58A6FF;
-            }
-            QMenu::separator {
+                color: {p['text']};
+            }}
+            QMenu::item:selected {{
+                background-color: {p['surface2']};
+                color: {_theme.lighten(p['text'], 0.2)};
+            }}
+            QMenu::item:checked {{
+                color: {p['accent']};
+            }}
+            QMenu::separator {{
                 height: 1px;
-                background: #333;
+                background: {p['border']};
                 margin: 4px 8px;
-            }
+            }}
         """
 
     def show_context_menu(self, pos):

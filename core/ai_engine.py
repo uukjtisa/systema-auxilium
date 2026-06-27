@@ -514,7 +514,28 @@ class AIEngine:
         if self.ai_provider == 'manual':
             return self._provider_manual()
         elif self.ai_provider == 'custom_script':
-            result = self._provider_script(messages, images=images)
+            # Optional resilience: background callers (task agent) set
+            # provider_max_retries > 0 so a transient provider hiccup (None
+            # response or exception) is retried instead of failing the turn.
+            # The main session leaves it at 0 → identical single-attempt behaviour.
+            max_retries = getattr(self, 'provider_max_retries', 0)
+            backoff = getattr(self, 'provider_retry_backoff', 2.0)
+            attempt = 0
+            result = None
+            while True:
+                try:
+                    result = self._provider_script(messages, images=images)
+                except Exception as e:
+                    log.error(f"[AIEngine._call_provider] provider raised: {type(e).__name__}: {e}")
+                    result = None
+                if result or attempt >= max_retries:
+                    break
+                attempt += 1
+                wait = backoff * attempt
+                log.warning(f"[AIEngine._call_provider] empty/failed response — "
+                            f"retry {attempt}/{max_retries} in {wait:.1f}s")
+                import time as _t
+                _t.sleep(wait)
             if result:
                 try:
                     from core.token_est import log_output_tokens, estimate_tokens
