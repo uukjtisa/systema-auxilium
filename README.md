@@ -146,11 +146,13 @@ The repo ships with several working scripts demonstrating the flexibility of the
 **LLM:**
 - `anthropic_provider.py` — Anthropic Claude API
 - `gemini_provider.py` — Google Gemini
-- `llm7_io.py` — LLM7.io
-- `provider_cloudflare_kimi_k2_6.py` — Cloudflare Workers AI / Kimi K2.6
+- `custom_provider_llm7_io.py` — LLM7.io (OpenAI-compatible gateway) · *native tool calling ✓*
+- `provider_cloudflare_kimi_k2_6.py` — Cloudflare Workers AI / Kimi · *native tool calling ✓*
 
 **TTS:**
 - `elevenlabs_tts.py` — Emotional, realistic voice synthesis with expression tags
+
+> Providers marked *native tool calling ✓* support both tool-calling modes (see below). The others work great in Compatibility mode.
 
 ### Build Your Own in Minutes
 
@@ -171,9 +173,14 @@ session naming) two ways. Switch in **Settings → System → Tool Calling Mode*
 - **Compatibility (default).** Tools are described in the system prompt and the
   model invokes them as fenced blocks (e.g. ```` ```work_environment ````). This is the
   universal path — it works with *any* model/provider, no special API support needed.
-- **Native (BETA — unstable).** Tools travel through the provider's own
-  function-calling API instead. This trims the system prompt and makes invocation
-  more reliable — but only on providers that genuinely support function calling.
+- **Native (BETA).** Tools travel through the provider's own function-calling API
+  instead. In this mode the system prompt is rebuilt with a completely fence-free
+  set of instructions, so the model relies purely on the tools channel. This trims
+  the prompt and makes invocation more reliable — on providers that genuinely
+  support function calling. Confirmed working end-to-end (including Cloudflare
+  Workers AI / Kimi and llm7.io with capable models). Background **tasks** run in
+  native too — a task agent reaches your main chat via the `send_message_main()`
+  function in its Python namespace, which works the same in both modes.
 
 A provider opts into native by declaring two markers and one function:
 
@@ -192,8 +199,9 @@ response parsing for all three dialects, so a native provider is only a few line
 If a provider doesn't declare native support (or the endpoint ignores `tools`),
 the app **automatically falls back to Compatibility** — so nothing breaks.
 
-> ⚠️ Native mode is **beta and not fully tested**. If your model misbehaves with
-> it, just switch back to Compatibility. See `_template.py` for a full example.
+> ⚠️ Native mode is **beta**. It's confirmed working, but tool-calling quality
+> still varies by model — weaker models may ignore `tools` and just chat. If yours
+> misbehaves, switch back to Compatibility. See `_template.py` for a full example.
 
 ---
 
