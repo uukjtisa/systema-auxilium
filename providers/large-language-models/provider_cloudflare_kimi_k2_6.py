@@ -62,14 +62,15 @@ MAX_TOKENS     = 16384   # Raise up to 16384 if needed — watch your neuron bud
 SHOW_REASONING = False  # Set True to include reasoning content in the reply
 
 # ── Native tool calling (function calling) ──────────────────────────────────
-# DISABLED: tested 2026-06-27 — Cloudflare Workers AI's OpenAI-compatible endpoint
-# ACCEPTS the `tools` param for these Kimi models but does NOT act on it (the model
-# returns finish_reason='stop' with a fence written as text, never a real tool_call).
-# So native function calling is effectively unsupported here. With this False, the
-# engine auto-falls-back to the universal compat (fenced) path, which Kimi handles
-# well. chat_tools() below is kept as a working reference; flip this back to True if
-# Cloudflare enables real function calling for the model later.
-SUPPORTS_NATIVE_TOOLS = False
+# ENABLED (2026-06-28). Earlier (2026-06-27) this looked unsupported — Kimi kept
+# writing a fence as text with finish_reason='stop'. Root cause was OUR system
+# prompt, not Cloudflare: in native mode it still shipped fence examples/mandates
+# that pushed the model back to fences. Confirmed via opencode, which drives this
+# exact provider with real function calling. The native-mode prompt is now fully
+# fence-free (core/global_instructions native section variants), so Cloudflare
+# Workers AI's OpenAI-compatible endpoint DOES return real tool_calls for Kimi.
+# (If a future model regresses, set this False for clean auto-fallback to compat.)
+SUPPORTS_NATIVE_TOOLS = True
 NATIVE_DIALECT        = "openai"   # Cloudflare Workers AI speaks the OpenAI dialect
 
 # ─────────────────────────────────────────────────────────────────────────────

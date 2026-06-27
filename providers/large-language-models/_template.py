@@ -178,8 +178,13 @@ def chat_image(system_prompt: str, messages: list[dict], image_paths: list[str])
 # enable it for endpoints that REALLY perform function calling. Many endpoints
 # accept the `tools` param but ignore it (the model just chats / writes a fence
 # as text) — in that case leave SUPPORTS_NATIVE_TOOLS = False and the app uses
-# the universal compat path automatically. (Observed: Cloudflare Workers AI's
-# Kimi models accept `tools` but do NOT act on them.)
+# the universal compat path automatically. Verify with a quick test before
+# trusting native on a new endpoint.
+#
+# NOTE: if your model writes a fence/JSON as TEXT instead of emitting a real
+# tool call, the usual culprit is leftover fence wording in the prompt, not the
+# provider — Systema's native mode already strips that, so most OpenAI-compatible
+# endpoints (Cloudflare Workers AI / Kimi included) do return real tool_calls.
 #
 # To opt in, set the two module-level markers and define chat_tools():
 #
