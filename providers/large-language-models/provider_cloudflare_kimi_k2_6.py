@@ -58,8 +58,19 @@ ACCOUNTS = [
 ]
 
 MODEL          = "@cf/moonshotai/kimi-k2.6"
-MAX_TOKENS     = 4096   # Raise up to 16384 if needed — watch your neuron budget
+MAX_TOKENS     = 16384   # Raise up to 16384 if needed — watch your neuron budget
 SHOW_REASONING = False  # Set True to include reasoning content in the reply
+
+# ── Native tool calling (function calling) ──────────────────────────────────
+# DISABLED: tested 2026-06-27 — Cloudflare Workers AI's OpenAI-compatible endpoint
+# ACCEPTS the `tools` param for these Kimi models but does NOT act on it (the model
+# returns finish_reason='stop' with a fence written as text, never a real tool_call).
+# So native function calling is effectively unsupported here. With this False, the
+# engine auto-falls-back to the universal compat (fenced) path, which Kimi handles
+# well. chat_tools() below is kept as a working reference; flip this back to True if
+# Cloudflare enables real function calling for the model later.
+SUPPORTS_NATIVE_TOOLS = False
+NATIVE_DIALECT        = "openai"   # Cloudflare Workers AI speaks the OpenAI dialect
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -446,13 +457,28 @@ def _call_accounts(
     raw_system_prompt: str = "",
     raw_messages: list = None,
     image_paths: list[str] | None = None,
-) -> str:
+    return_raw: bool = False,
+    tools: list | None = None,
+) -> str | object:
     """
     Core dispatcher: iterate accounts, skip exhausted ones, call the first
-    available one. Returns the reply string or an all-exhausted error message.
+    available one.
 
-    On any non-neuron-limit error the full verbose dump is printed before
-    re-raising so you can see exactly what was sent.
+    Args:
+        full_messages   -- The assembled messages list sent to the API.
+        raw_system_prompt -- Original system prompt (for error dumps).
+        raw_messages    -- Original messages (for error dumps).
+        image_paths     -- Image paths (for error dumps).
+        return_raw      -- If True, return the raw OpenAI response object
+                           instead of the extracted reply string.
+                           Used by chat_tools() to inspect tool_calls.
+        tools           -- Optional list of OpenAI-format tool definitions.
+                           Passed through to the API when provided.
+
+    Returns:
+        The reply string (return_raw=False) or the raw response object
+        (return_raw=True). Returns an all-exhausted error string when all
+        accounts are depleted.
     """
     raw_messages = raw_messages or []
     last_error   = None
@@ -470,12 +496,18 @@ def _call_accounts(
 
         try:
             client = _make_client(account)
-            response = client.chat.completions.create(
+            kwargs = dict(
                 model=MODEL,
                 messages=full_messages,
                 max_tokens=MAX_TOKENS,
                 stream=False,
             )
+            if tools:
+                kwargs["tools"] = tools
+                kwargs["tool_choice"] = "auto"   # nudge the model to actually call
+            response = client.chat.completions.create(**kwargs)
+            if return_raw:
+                return response
             reply = _extract_reply(response)
             print(f"[provider] OK Response from {label}")
             return reply or "No response received."
@@ -605,6 +637,62 @@ def chat_image(
         raw_messages=messages,
         image_paths=image_paths,
     )
+
+
+def chat_tools(
+    system_prompt: str,
+    messages: list,
+    tools: list,
+    images: list[str] | str | None = None,
+) -> dict:
+    """
+    Native (function-calling) entrypoint — used when Systema Auxilium's
+    Tool Calling Mode is set to Native. Folds text AND vision into one path.
+
+    Parameters:
+        system_prompt -- Same as chat(). May be empty.
+        messages      -- Same as chat(). In a multi-turn tool conversation these
+                         may already include the OpenAI tool-call / tool-result
+                         messages the engine appended via core.native_adapters.
+        tools         -- CANONICAL tool defs (name/description/parameters) from
+                         the engine's registry; converted to OpenAI format here.
+        images        -- Optional image path(s); folds vision into the same call.
+
+    Returns:
+        A NORMALIZED result the engine understands regardless of provider:
+            {"text": str | None, "tool_calls": [{"id","name","arguments"}, ...]}
+    """
+    from core import native_adapters as na
+
+    oai_tools = na.to_openai_tools(tools) if tools else None
+
+    if images:
+        if isinstance(images, str):
+            images = [images]
+        last_user_text = messages[-1]["content"] if messages else ""
+        prior_messages = messages[:-1] if len(messages) > 1 else []
+        full_messages = (
+            [{"role": "system", "content": system_prompt}] if system_prompt else []
+        ) + prior_messages + [_build_vision_message(images, last_user_text)]
+    else:
+        full_messages = (
+            [{"role": "system", "content": system_prompt}] if system_prompt else []
+        ) + messages
+
+    response = _call_accounts(
+        full_messages,
+        raw_system_prompt=system_prompt,
+        raw_messages=messages,
+        image_paths=images if images else None,
+        return_raw=True,
+        tools=oai_tools,
+    )
+
+    # All accounts exhausted → _call_accounts returns a human-readable string.
+    if isinstance(response, str):
+        return {"text": response, "tool_calls": []}
+
+    return na.parse_openai(response.model_dump())
 
 
 # ── Quick test ────────────────────────────────────────────────────────────────

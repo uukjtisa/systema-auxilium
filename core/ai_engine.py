@@ -193,13 +193,40 @@ class AIEngine:
         lines.append("═══════════════════════════════════════════════════════════")
         return "\n".join(lines)
 
+    def _tool_mode(self) -> str:
+        """Active tool-calling mode: 'compat' (fenced, universal) or 'native'
+        (provider function calling). Read live from settings each call."""
+        try:
+            s = self.settings_callback() if self.settings_callback else None
+            return (s or {}).get('tool_calling_mode', 'compat')
+        except Exception:
+            return 'compat'
+
+    def _compose_system_prompt(self) -> str:
+        """Build the base system prompt with the current tool mode. In native mode
+        the fence-format + fence-syntax sections are dropped (the tools travel
+        through the provider's function-calling channel instead), trimming tokens."""
+        native = self._tool_mode() == 'native'
+        return get_system_prompt(
+            system_info=self.system_info,
+            voice_mode=self.voice_mode,
+            elevenlabs_enabled=self.elevenlabs_enabled,
+            skills=self.skill_manager.get_skills() if self.skill_manager else [],
+            include_image_tools=self.include_image_tools,
+            include_controller_ref=self.include_controller_ref,
+            include_notify_tool=self.include_notify_tool,
+            # Native mode: drop fence sections + add the native-invocation override.
+            native_tools=native,
+        )
+
     def _get_effective_system_prompt(self) -> str:
         """Return the system prompt enriched with any currently active skills and memory block."""
         if self.system_prompt_hijacked and self.custom_system_prompt.strip():
             base = self.custom_system_prompt
         else:
-            base = self.system_prompt + self._render_active_skills()
-        mem_block = self._get_memory_block(self.system_prompt)
+            # Rebuild fresh so a live Tool Calling Mode switch takes effect immediately.
+            base = self._compose_system_prompt() + self._render_active_skills()
+        mem_block = self._get_memory_block(base)
         if mem_block:
             base = self._strip_memory_block(base) + f"\n\n{mem_block}"
         return base
@@ -441,30 +468,74 @@ class AIEngine:
         log.info(f"[AIEngine._http_manual] Got manual response | length={len(result)}")
         return result
 
-    def _provider_script(self, messages, images=None) -> str | None:
-        """Custom script provider — reimports the user's .py file on every call
-        and invokes its chat(system_prompt, messages) function.
-        If images (list) is provided and the script defines chat_image(), that is called instead."""
-        import importlib.util, traceback
-
+    def _load_provider_module(self):
+        """Import the user's custom provider .py fresh (live edits take effect).
+        Returns the module, or None on missing path / load error."""
+        import importlib.util, traceback, os
         if not self.custom_script_path:
-            log.error("[AIEngine._http_custom_script] ✗ No custom script path set")
+            log.error("[AIEngine._load_provider_module] ✗ No custom script path set")
             self.log("Custom script path is not set", "ERROR")
             return None
-
-        import os
         if not os.path.isfile(self.custom_script_path):
-            log.error(f"[AIEngine._http_custom_script] ✗ File not found: '{self.custom_script_path}'")
+            log.error(f"[AIEngine._load_provider_module] ✗ File not found: '{self.custom_script_path}'")
             self.log(f"Custom script not found: {self.custom_script_path}", "ERROR")
             return None
-
         try:
             spec = importlib.util.spec_from_file_location("custom_provider", self.custom_script_path)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
+            return module
         except Exception as e:
-            log.error(f"[AIEngine._http_custom_script] ✗ Failed to load script: {e}\n{traceback.format_exc()}")
+            log.error(f"[AIEngine._load_provider_module] ✗ Failed to load script: {e}\n{traceback.format_exc()}")
             self.log(f"Custom script load error: {e}", "ERROR")
+            return None
+
+    def _native_provider_supported(self, module) -> bool:
+        """True if the active mode is native AND the provider script opts in."""
+        return (
+            self._tool_mode() == 'native'
+            and module is not None
+            and getattr(module, 'SUPPORTS_NATIVE_TOOLS', False)
+            and callable(getattr(module, 'chat_tools', None))
+        )
+
+    def _provider_script_native(self, module, messages, images=None) -> str | None:
+        """Native tool-calling path. Calls the provider's chat_tools() with the
+        canonical tool registry, then reconstructs the equivalent fence text so
+        the rest of the engine processes it exactly like a compat response."""
+        import traceback
+        system_prompt, convo = self._extract_system_and_convo(messages)
+        tools = self.tool_manager.get_canonical_tools(
+            include_session_naming=True,
+            include_skills=bool(self.skill_manager),
+        )
+        try:
+            result = module.chat_tools(system_prompt or "", convo, tools, images=images)
+        except Exception as e:
+            log.error(f"[AIEngine._provider_script_native] ✗ chat_tools() raised: {e}\n{traceback.format_exc()}")
+            self.log(f"Custom script chat_tools() error: {e}", "ERROR")
+            return None
+        if not isinstance(result, dict):
+            log.error("[AIEngine._provider_script_native] ✗ chat_tools() must return a dict "
+                      "{'text', 'tool_calls'}")
+            return None
+
+        text = (result.get('text') or "").strip()
+        fences = self.tool_manager.tool_calls_to_fences(result.get('tool_calls') or [])
+        ai_text = (text + ("\n\n" if text and fences else "") + fences).strip()
+        log.info(f"[AIEngine._provider_script_native] ✓ native result | text_len={len(text)} | "
+                 f"tool_calls={len(result.get('tool_calls') or [])} | reconstructed_len={len(ai_text)}")
+        return ai_text or None
+
+    def _provider_script(self, messages, images=None, module=None) -> str | None:
+        """Custom script provider — reimports the user's .py file on every call
+        and invokes its chat(system_prompt, messages) function.
+        If images (list) is provided and the script defines chat_image(), that is called instead."""
+        import traceback
+
+        if module is None:
+            module = self._load_provider_module()
+        if module is None:
             return None
 
         if not hasattr(module, 'chat') or not callable(module.chat):
@@ -520,11 +591,25 @@ class AIEngine:
             # The main session leaves it at 0 → identical single-attempt behaviour.
             max_retries = getattr(self, 'provider_max_retries', 0)
             backoff = getattr(self, 'provider_retry_backoff', 2.0)
+
+            # Decide compat vs native ONCE per call. Only load the module up-front
+            # when native mode is on (keeps the compat path free of extra loads).
+            _native_module = None
+            if self._tool_mode() == 'native':
+                _native_module = self._load_provider_module()
+                if not self._native_provider_supported(_native_module):
+                    log.info("[AIEngine._call_provider] Native mode requested but provider "
+                             "lacks chat_tools/SUPPORTS_NATIVE_TOOLS — falling back to compat")
+                    _native_module = None
+
             attempt = 0
             result = None
             while True:
                 try:
-                    result = self._provider_script(messages, images=images)
+                    if _native_module is not None:
+                        result = self._provider_script_native(_native_module, messages, images=images)
+                    else:
+                        result = self._provider_script(messages, images=images)
                 except Exception as e:
                     log.error(f"[AIEngine._call_provider] provider raised: {type(e).__name__}: {e}")
                     result = None

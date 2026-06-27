@@ -163,3 +163,47 @@ def chat_image(system_prompt: str, messages: list[dict], image_paths: list[str])
 
     data = response.json()
     return data["choices"][0]["message"]["content"]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# OPTIONAL: Native tool calling  (BETA — UNSTABLE)
+#
+# By default Systema Auxilium drives tools via its universal "compat" format
+# (fenced tool calls described in the system prompt). If your provider/model
+# genuinely supports native function calling, you can opt in so tools travel
+# through the provider's tools API instead — lighter system prompt, more reliable
+# invocation.
+#
+# ⚠ BETA / UNSTABLE: the native path is new and not fully battle-tested. Only
+# enable it for endpoints that REALLY perform function calling. Many endpoints
+# accept the `tools` param but ignore it (the model just chats / writes a fence
+# as text) — in that case leave SUPPORTS_NATIVE_TOOLS = False and the app uses
+# the universal compat path automatically. (Observed: Cloudflare Workers AI's
+# Kimi models accept `tools` but do NOT act on them.)
+#
+# To opt in, set the two module-level markers and define chat_tools():
+#
+#     SUPPORTS_NATIVE_TOOLS = True
+#     NATIVE_DIALECT        = "openai"   # "openai" | "anthropic" | "gemini"
+#
+#     def chat_tools(system_prompt, messages, tools, images=None) -> dict:
+#         """Native entrypoint. `tools` are CANONICAL tool defs
+#         (name/description/parameters). Convert them to your dialect and parse
+#         the response back into the NORMALIZED result the app expects:
+#             {"text": str | None,
+#              "tool_calls": [{"id": str, "name": str, "arguments": dict}, ...]}
+#         The helper module core.native_adapters does both for all 3 dialects."""
+#         from core import native_adapters as na
+#         payload = {
+#             "model": MODEL,
+#             "messages": ([{"role": "system", "content": system_prompt}] if system_prompt else []) + messages,
+#             "tools": na.to_openai_tools(tools),     # or to_anthropic_tools / to_gemini_tools
+#             "tool_choice": "auto",
+#         }
+#         resp = requests.post(API_URL, json=payload,
+#                              headers={"Authorization": f"Bearer {API_KEY}",
+#                                       "Content-Type": "application/json"}, timeout=60).json()
+#         return na.parse_openai(resp)             # or parse_anthropic / parse_gemini
+#
+# That's it — the engine reconstructs everything else from the normalized result.
+# ═════════════════════════════════════════════════════════════════════════════

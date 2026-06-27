@@ -610,38 +610,6 @@ class SettingsWindow(BaseWindow):
             "Useful for knowing when you're approaching model context limits."))
         gen_lay.addWidget(gen_display_group)
 
-        # ── Code Execution Timeout ─────────────────────────────────────────
-        exec_group = QGroupBox("Code Execution")
-        exec_group.setStyleSheet(_GROUP)
-        ex_lay = QVBoxLayout(exec_group)
-
-        _timeout_row = QHBoxLayout()
-        _timeout_row.addWidget(_label("Tool execution timeout (seconds):"))
-        self.exec_timeout_spin = QSpinBox()
-        self.exec_timeout_spin.setRange(10, 3600)
-        self.exec_timeout_spin.setValue(300)
-        self.exec_timeout_spin.setSingleStep(10)
-        self.exec_timeout_spin.setSuffix(" s")
-        self.exec_timeout_spin.setFixedWidth(120)
-        self.exec_timeout_spin.setStyleSheet(f"""
-            QSpinBox {{
-                background-color: {_ELEV};
-                border: 1px solid {_BORDER};
-                border-radius: 6px;
-                padding: 6px 10px;
-                font-size: 11px;
-                color: {_TEXT};
-            }}
-            QSpinBox:focus {{ border-color: {_ACCENT}; }}
-        """)
-        _timeout_row.addWidget(self.exec_timeout_spin)
-        _timeout_row.addStretch()
-        ex_lay.addLayout(_timeout_row)
-        ex_lay.addWidget(_info_box(
-            "When code execution runs longer than this, you'll be asked "
-            "whether to extend the timeout or kill the operation."))
-        gen_lay.addWidget(exec_group)
-
         gen_lay.addStretch()
         tabs.addTab(gen_scroll, "⚙️  General")
 
@@ -1143,6 +1111,57 @@ class SettingsWindow(BaseWindow):
         sp_extras_lay.addWidget(self.include_notify_tool_checkbox)
         sys_lay.addWidget(sp_extras_group)
 
+        # ── Tool Calling Mode ───────────────────────────────────────────────
+        tc_group = QGroupBox("🛠 Tool Calling Mode")
+        tc_group.setStyleSheet(_GROUP)
+        tc_lay = QVBoxLayout(tc_group)
+        self.tool_calling_mode_combo = QComboBox()
+        self.tool_calling_mode_combo.addItem(
+            "Compatibility — fenced tool format in the prompt (works with ANY model)", 'compat')
+        self.tool_calling_mode_combo.addItem(
+            "Native — provider function calling (lighter prompt; needs a supporting provider)", 'native')
+        self.tool_calling_mode_combo.setStyleSheet(_COMBO)
+        tc_lay.addWidget(self.tool_calling_mode_combo)
+        tc_lay.addWidget(_info_box(
+            "Compatibility teaches tools via the system prompt and parses fenced replies — universal, "
+            "but costs prompt tokens and can be mis-formatted by weak models.\n"
+            "Native passes tools through the provider's function-calling API: smaller prompt and "
+            "guaranteed-valid calls — but only works on providers that declare native support. "
+            "Providers without it automatically fall back to Compatibility."))
+        sys_lay.addWidget(tc_group)
+
+        # ── Code Execution (moved here from General) ─────────────────────────
+        exec_group = QGroupBox("Code Execution")
+        exec_group.setStyleSheet(_GROUP)
+        ex_lay = QVBoxLayout(exec_group)
+
+        _timeout_row = QHBoxLayout()
+        _timeout_row.addWidget(_label("Tool execution timeout (seconds):"))
+        self.exec_timeout_spin = QSpinBox()
+        self.exec_timeout_spin.setRange(10, 3600)
+        self.exec_timeout_spin.setValue(300)
+        self.exec_timeout_spin.setSingleStep(10)
+        self.exec_timeout_spin.setSuffix(" s")
+        self.exec_timeout_spin.setFixedWidth(120)
+        self.exec_timeout_spin.setStyleSheet(f"""
+            QSpinBox {{
+                background-color: {_ELEV};
+                border: 1px solid {_BORDER};
+                border-radius: 6px;
+                padding: 6px 10px;
+                font-size: 11px;
+                color: {_TEXT};
+            }}
+            QSpinBox:focus {{ border-color: {_ACCENT}; }}
+        """)
+        _timeout_row.addWidget(self.exec_timeout_spin)
+        _timeout_row.addStretch()
+        ex_lay.addLayout(_timeout_row)
+        ex_lay.addWidget(_info_box(
+            "When code execution runs longer than this, you'll be asked "
+            "whether to extend the timeout or kill the operation."))
+        sys_lay.addWidget(exec_group)
+
         sys_lay.addStretch()
         tabs.addTab(sys_scroll, "💻 System")
 
@@ -1335,6 +1354,9 @@ class SettingsWindow(BaseWindow):
         self.exec_timeout_spin.setValue(
             self.controller.settings.get('tool_execution_timeout_seconds', 300)
         )
+        _tc_mode = self.controller.settings.get('tool_calling_mode', 'compat')
+        _tc_idx = self.tool_calling_mode_combo.findData(_tc_mode)
+        self.tool_calling_mode_combo.setCurrentIndex(_tc_idx if _tc_idx >= 0 else 0)
 
         # Load active LLM provider script
         self._refresh_llm_provider_scripts()
@@ -1532,6 +1554,7 @@ class SettingsWindow(BaseWindow):
         except Exception:
             pass
         self.controller.settings['tool_execution_timeout_seconds'] = self.exec_timeout_spin.value()
+        self.controller.settings['tool_calling_mode'] = self.tool_calling_mode_combo.currentData()
 
         # Save active LLM provider script
         script_path = self.provider_script_combo.currentData() or ''
