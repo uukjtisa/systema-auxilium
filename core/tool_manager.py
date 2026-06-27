@@ -230,6 +230,13 @@ class ToolManager:
                 "before continuing. The namespace persists across calls within a work session."
             ),
             'param': ('code', 'The Python code to execute. You receive its stdout and return value.'),
+            'extra_params': [
+                ('annotation',
+                 "A short 3-6 word label describing what this code does (e.g. 'Reading config "
+                 "file', 'Counting desktop files'). ALWAYS include it — it is shown to the user "
+                 "as this step's title.",
+                 False),
+            ],
         },
         'execute_code': {
             'description': (
@@ -274,13 +281,19 @@ class ToolManager:
         for name in active:
             spec = self._CANONICAL_TOOLS[name]
             pname, pdesc = spec['param']
+            props = {pname: {'type': 'string', 'description': pdesc}}
+            required = [pname]
+            for (ename, edesc, ereq) in spec.get('extra_params', []):
+                props[ename] = {'type': 'string', 'description': edesc}
+                if ereq:
+                    required.append(ename)
             out.append({
                 'name': name,
                 'description': spec['description'],
                 'parameters': {
                     'type': 'object',
-                    'properties': {pname: {'type': 'string', 'description': pdesc}},
-                    'required': [pname],
+                    'properties': props,
+                    'required': required,
                 },
             })
         return out
@@ -298,9 +311,19 @@ class ToolManager:
                 log.warning(f"[ToolManager.tool_calls_to_fences] Unknown tool '{name}' — skipped")
                 continue
             pname = spec['param'][0]
-            body = call.get('arguments', {}).get(pname, '')
+            args = call.get('arguments', {}) or {}
+            body = args.get(pname, '')
             if not isinstance(body, str):
                 body = str(body)
+            # work_environment carries an optional annotation. Native tool calls
+            # have no fence text to hold it, so fold it back into the annotated
+            # fence form (```work_environment: [label]) — otherwise the UI step
+            # title defaults to a generic "code executed".
+            if name == 'work_environment':
+                annotation = args.get('annotation', '')
+                if isinstance(annotation, str) and annotation.strip():
+                    parts.append(f"```{name}: [{annotation.strip()}]\n{body}\n```")
+                    continue
             parts.append(f"```{name}\n{body}\n```")
         return "\n\n".join(parts)
 
