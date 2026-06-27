@@ -120,6 +120,7 @@ Each provider is just a Python file implementing a simple contract:
 
 - **LLM providers** (`providers/large-language-models/`) → define `chat(system_prompt, messages) -> str`
   Optional: `chat_image(system_prompt, messages, image_paths)` for vision support
+  Optional *(BETA)*: `chat_tools(system_prompt, messages, tools, images=None) -> dict` for native function calling — see [Tool Calling Modes](#tool-calling-modes-compat--native-beta)
 - **TTS providers** (`providers/text-to-speech/`) → define `speak(text, save_to) -> bool`
 
 Drop a script in the right folder, hit Refresh in Settings, and it appears instantly. No codebase edits. No restart required.
@@ -161,6 +162,38 @@ Each folder contains a `_template.py` with:
 Translation: *you don't even need to write the Python yourself.* Describe your provider to any AI, paste the output into the folder, reload in Settings, and you're live.
 
 The barrier to adding a new provider is essentially zero.
+
+### Tool Calling Modes (Compat / Native *BETA*)
+
+Systema Auxilium can drive its tools (work mode, code execution, skill load/unload,
+session naming) two ways. Switch in **Settings → System → Tool Calling Mode**:
+
+- **Compatibility (default).** Tools are described in the system prompt and the
+  model invokes them as fenced blocks (e.g. ```` ```work_environment ````). This is the
+  universal path — it works with *any* model/provider, no special API support needed.
+- **Native (BETA — unstable).** Tools travel through the provider's own
+  function-calling API instead. This trims the system prompt and makes invocation
+  more reliable — but only on providers that genuinely support function calling.
+
+A provider opts into native by declaring two markers and one function:
+
+```python
+SUPPORTS_NATIVE_TOOLS = True
+NATIVE_DIALECT        = "openai"   # "openai" | "anthropic" | "gemini"
+
+def chat_tools(system_prompt, messages, tools, images=None) -> dict:
+    # convert `tools` to your dialect, call the API, and return the normalized:
+    #   {"text": str | None, "tool_calls": [{"id", "name", "arguments"}, ...]}
+    ...
+```
+
+The helper module `core/native_adapters.py` does the schema conversion and
+response parsing for all three dialects, so a native provider is only a few lines.
+If a provider doesn't declare native support (or the endpoint ignores `tools`),
+the app **automatically falls back to Compatibility** — so nothing breaks.
+
+> ⚠️ Native mode is **beta and not fully tested**. If your model misbehaves with
+> it, just switch back to Compatibility. See `_template.py` for a full example.
 
 ---
 
@@ -208,20 +241,26 @@ sudo make altinstall
 
 ## How to Install
 
-### Windows
-Run `setup.bat` — this will install all dependencies and generate a `run.bat` for you.
+### Quick Setup (all platforms)
 
-Tested on **Windows 11** and **Windows 10**.
-
-### Linux (Debian-based) & macOS
-Run `setup.sh` (Linux) or `setup_macOs.sh` (macOS) — these will set up your virtual environment and generate the equivalent helper scripts.
+Run the unified setup script with any system Python. It **auto-detects your OS**,
+creates a `.venv`, generates the right helper scripts, and installs the
+dependencies from `requirements.txt`:
 
 ```bash
-bash setup.sh       # Linux
-bash setup_macOs.sh   # macOS
+python setup.py        # Windows
+python3 setup.py       # Linux / macOS
 ```
 
-> Mac OS setup script is untested. So far I have only tested the respective setup script for these: Windows 11, 10, and Kali Linux (Python 3.10)
+When it finishes you'll have helper scripts in the project root:
+- **Windows:** `run.bat`, `open_env.bat`, `add_autostart.bat`, `remove_autostart.bat`
+- **Linux / macOS:** `run.sh`, `open_env.sh`, `add_autostart.sh`, `remove_autostart.sh`
+
+`setup.py` then offers to tuck itself into `setup-scripts/` (defaults to **yes** for a
+clean root — answer **no** to keep it handy for re-runs). The original per-platform
+scripts (`setup.bat`, `setup.sh`, `setup_macOS.sh`) live in `setup-scripts/` for reference.
+
+Tested on **Windows 11**, **Windows 10**, and **Kali Linux** (Python 3.10). The macOS path is untested.
 
 ### Manual Setup (any platform)
 
