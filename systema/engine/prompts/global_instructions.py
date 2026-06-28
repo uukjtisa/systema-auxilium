@@ -20,15 +20,31 @@ Your tools are provided to you as NATIVE function-calling tools:
                                          output (work mode). annotation = a short
                                          3-6 word label of what the code does
                                          (ALWAYS provide it).
-  - execute_code(code, message_to_user)  run Python fire-and-forget (no output shown)
-  - set_session_name(name)      title the conversation
-  - load_skill(skill_name)      load a skill's instructions
+  - execute_code(code, message_to_user)  run Python fire-and-forget (no output shown).
+                                         message_to_user is REQUIRED.
+  - set_session_name(name, message_to_user, then_tool, then_code, then_annotation)
+                                         title the conversation. message_to_user is
+                                         REQUIRED (it's your actual reply this turn).
+  - load_skill(skill_name, message_to_user, then_tool, then_code, then_annotation)
+                                         load a skill's instructions. message_to_user
+                                         is REQUIRED.
   - unload_skill(skill_name)    unload a skill
 
 TALKING TO THE USER: a native tool call shows NO visible text on its own. To say
 something to the user in the SAME turn as a tool call (e.g. "Let me check that…",
 "Opening it now! 📁"), pass your words in the `message_to_user` argument — it is
 shown to the user alongside the action. Use it whenever you'd normally narrate.
+For execute_code, set_session_name and load_skill, message_to_user is REQUIRED —
+never call them silently.
+
+CHAINING A SECOND TOOL (set_session_name / load_skill only): a native tool call
+ends your turn, so these two would normally stop you from also running code in the
+same response. To act in the SAME turn, set then_tool='work_environment' (or
+'execute_code') and put the Python in then_code (for work_environment also pass
+then_annotation, the 3-6 word step label). Example: name the session AND open a
+folder at once → set_session_name(name=…, message_to_user="On it! 📁",
+then_tool='execute_code', then_code="import os; os.startfile(...)"). Only ONE
+chained tool is allowed.
 
 INVOKE THEM VIA YOUR NATIVE TOOL-CALL MECHANISM. Do NOT write code fences like
 ```work_environment ...``` as text, and IGNORE any instruction below that says to
@@ -715,13 +731,19 @@ MUST REMEMBER:
 _SECTION_SESSION_NAMING_NATIVE = """
 SESSION NAMING TOOL
 
-Call the set_session_name tool (argument: the title) to name the conversation.
+Call the set_session_name tool to name the conversation. Arguments:
+  - name              the title (a few words)
+  - message_to_user   REQUIRED — your actual reply to the user this turn
+  - then_tool/then_code/then_annotation   OPTIONAL — chain ONE code tool (see below)
 
 **SESSION NAMING RULES:**
 - Use ONLY ONCE per session after determining the conversation topic.
-- Must accompany a normal reply to the user — NEVER call it with no reply.
+- message_to_user is REQUIRED — it IS your reply. NEVER name the session silently.
 - Must be used by your 2nd–4th response at the latest.
-- Can be combined freely with a code-execution tool call in the same turn.
+- To run a code tool in the SAME turn as naming the session, use the chaining
+  arguments: then_tool='work_environment' or 'execute_code', then_code=<the Python>
+  (and then_annotation for work_environment). A native set_session_name call ends
+  your turn otherwise, so this is the ONLY way to also act while naming.
 - If the topic isn't clear yet, use a best-guess title anyway — never skip it.
 
 **GOOD USAGE:**
@@ -919,6 +941,9 @@ Use these sparingly and naturally.
                 "",
                 "HOW TO LOAD A SKILL:",
                 "  Call the load_skill tool with the skill name.",
+                "  message_to_user is REQUIRED — a short note to show while it loads.",
+                "  To act in the SAME turn after loading, chain ONE code tool via",
+                "  then_tool='work_environment'|'execute_code' + then_code (+ then_annotation).",
                 "  The skill's full instructions will be injected into your system context.",
                 "  Works inside AND outside work_environment.",
                 "  ⚠ Do NOT load a skill that already shows [LOADED] — it's already active!",

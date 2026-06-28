@@ -866,6 +866,26 @@ class AIEngine:
                     'content': SKILL_ALREADY_LOADED_PROMPT.format(skill_name=skill_name, reason=msg)
                 })
             else:
+                # ── Same-turn sub-tool chaining ───────────────────────────────
+                # If load_skill carried a chained code tool (native then_tool, or a
+                # compat two-fence response), run it NOW in this turn instead of a
+                # blind follow-up — the skill is loaded, so the chained action runs
+                # with the skill already in context. The recursion records the code
+                # turn + its result, so we don't append ai_text here (that would
+                # duplicate the chained fence in history).
+                # Detect via the side-effect-free _parse_fence (parse_work_environment
+                # emits the "Working:" banner — the recursion will fire it for real).
+                if (self.tool_manager._parse_fence(remaining_text, 'work_environment')
+                        or self.tool_manager._parse_fence(remaining_text, 'execute_code')):
+                    log.info("[AIEngine._process_ai_response] load_skill chained a code tool — "
+                             "running it in-turn instead of a blind follow-up")
+                    self.conversation_history.append({
+                        'role': 'system',
+                        'content': SKILL_LOADED_CHAT_PROMPT.format(skill_name=skill_name)
+                    })
+                    _r = self._process_ai_response(remaining_text)
+                    _r['skill_loaded'] = skill_name
+                    return _r
                 self.conversation_history.append({'role': 'assistant', 'content': ai_text})
                 self.conversation_history.append({
                     'role': 'system',

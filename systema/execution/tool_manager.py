@@ -251,15 +251,35 @@ class ToolManager:
             'param': ('code', 'The Python code to execute. Output is not returned to you.'),
             'extra_params': [
                 ('message_to_user',
-                 "Optional. A short user-facing message to show alongside this action (e.g. "
+                 "REQUIRED. A short user-facing message to show alongside this action (e.g. "
                  "'Opening your Downloads folder! 📁'). A native tool call shows no text on its "
-                 "own, so put any words meant for the user here.",
-                 False),
+                 "own, so your words to the user MUST go here — never run code silently.",
+                 True),
             ],
         },
         'set_session_name': {
             'description': "Set a short, descriptive title for the current conversation.",
             'param': ('name', 'A short title — just a few words.'),
+            'extra_params': [
+                ('message_to_user',
+                 "REQUIRED. The actual reply to show the user this turn. A native tool call shows "
+                 "no text on its own, so your words to the user MUST go here — never name the "
+                 "session silently.",
+                 True),
+                ('then_tool',
+                 "Optional. Chain ONE code-execution tool to run in this SAME turn: either "
+                 "'work_environment' or 'execute_code'. Use it when you want to name the session "
+                 "AND act in one response — a native set_session_name call would otherwise end "
+                 "your turn before you could act.",
+                 False, ('work_environment', 'execute_code')),
+                ('then_code',
+                 "The Python code for the tool named in then_tool. Required when then_tool is set.",
+                 False),
+                ('then_annotation',
+                 "For then_tool='work_environment' only: a short 3-6 word label of what the "
+                 "chained code does (shown to the user as that step's title).",
+                 False),
+            ],
         },
         'load_skill': {
             'description': (
@@ -267,6 +287,24 @@ class ToolManager:
                 "available skill that is not already loaded."
             ),
             'param': ('skill_name', 'The exact name of the skill to load.'),
+            'extra_params': [
+                ('message_to_user',
+                 "REQUIRED. A short user-facing message to show while the skill loads (e.g. "
+                 "'Loading the data-viz skill… 📊'). A native tool call shows no text on its own, "
+                 "so your words to the user MUST go here.",
+                 True),
+                ('then_tool',
+                 "Optional. Chain ONE code-execution tool to run in this SAME turn, right after "
+                 "the skill loads: either 'work_environment' or 'execute_code'.",
+                 False, ('work_environment', 'execute_code')),
+                ('then_code',
+                 "The Python code for the tool named in then_tool. Required when then_tool is set.",
+                 False),
+                ('then_annotation',
+                 "For then_tool='work_environment' only: a short 3-6 word label of what the "
+                 "chained code does (shown to the user as that step's title).",
+                 False),
+            ],
         },
         'unload_skill': {
             'description': "Remove a previously loaded skill from your context to free space.",
@@ -295,8 +333,14 @@ class ToolManager:
             pname, pdesc = spec['param']
             props = {pname: {'type': 'string', 'description': pdesc}}
             required = [pname]
-            for (ename, edesc, ereq) in spec.get('extra_params', []):
-                props[ename] = {'type': 'string', 'description': edesc}
+            for ep in spec.get('extra_params', []):
+                ename, edesc, ereq = ep[0], ep[1], ep[2]
+                prop = {'type': 'string', 'description': edesc}
+                # Optional 4th element = allowed values (rendered as a JSON-schema
+                # enum so native providers constrain the argument).
+                if len(ep) >= 4 and ep[3]:
+                    prop['enum'] = list(ep[3])
+                props[ename] = prop
                 if ereq:
                     required.append(ename)
             out.append({
@@ -309,6 +353,16 @@ class ToolManager:
                 },
             })
         return out
+
+    def _code_fence(self, tool_name: str, code, annotation: str = "") -> str:
+        """Render one tool fence. work_environment folds its annotation into the
+        ```work_environment: [label] form; everything else is a plain fence."""
+        if not isinstance(code, str):
+            code = str(code)
+        code = code.strip()
+        if tool_name == 'work_environment' and isinstance(annotation, str) and annotation.strip():
+            return f"```work_environment: [{annotation.strip()}]\n{code}\n```"
+        return f"```{tool_name}\n{code}\n```"
 
     def tool_calls_to_fences(self, tool_calls: list) -> str:
         """Reconstruct canonical fence text from normalized native tool calls
@@ -334,16 +388,34 @@ class ToolManager:
             # compat mode).
             msg = args.get('message_to_user', '')
             prefix = (msg.strip() + "\n\n") if isinstance(msg, str) and msg.strip() else ""
-            # work_environment carries an optional annotation. Native tool calls
-            # have no fence text to hold it, so fold it back into the annotated
-            # fence form (```work_environment: [label]) — otherwise the UI step
-            # title defaults to a generic "code executed".
-            if name == 'work_environment':
-                annotation = args.get('annotation', '')
-                if isinstance(annotation, str) and annotation.strip():
-                    parts.append(f"{prefix}```{name}: [{annotation.strip()}]\n{body}\n```")
-                    continue
-            parts.append(f"{prefix}```{name}\n{body}\n```")
+            # work_environment carries an optional annotation, folded into the
+            # annotated fence form so the UI step title isn't a generic default.
+            primary = self._code_fence(name, body, args.get('annotation', '')) \
+                if name == 'work_environment' else f"```{name}\n{body}\n```"
+            parts.append(prefix + primary)
+
+            # ── Sub-tool chaining ────────────────────────────────────────────
+            # A native session-name / load-skill call ends the turn after that
+            # single tool, so it can't ALSO run a code tool the way a compat
+            # two-fence response can. set_session_name / load_skill therefore
+            # accept ONE chained code tool (then_tool + then_code); expand it into
+            # its own fence so the standard pipeline executes it in the same turn.
+            if name in ('set_session_name', 'load_skill'):
+                then_raw = args.get('then_tool', '')
+                then_name = self._tool_keys_norm.get(self._norm_key(str(then_raw))) if then_raw else None
+                if then_name in self._exec_tool_keys:
+                    then_code = args.get('then_code', '')
+                    if isinstance(then_code, str) and then_code.strip():
+                        parts.append(self._code_fence(then_name, then_code,
+                                                      args.get('then_annotation', '')))
+                        log.info(f"[ToolManager.tool_calls_to_fences] '{name}' chained a "
+                                 f"'{then_name}' sub-tool call")
+                    else:
+                        log.warning(f"[ToolManager.tool_calls_to_fences] '{name}' set then_tool="
+                                    f"'{then_raw}' but then_code was empty — chained call skipped")
+                elif then_raw:
+                    log.warning(f"[ToolManager.tool_calls_to_fences] '{name}' then_tool='{then_raw}' "
+                                f"is not a chainable code tool — ignored")
         return "\n\n".join(parts)
 
     # ─────────────────────────────────────────────────────────────────────────
