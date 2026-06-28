@@ -1,6 +1,0 @@
-**/__pycache__/
-*.pyc
-**/*.json
-!data/tasks/functions.json
-!data/tasks/tasks.json
-.pynavigator/

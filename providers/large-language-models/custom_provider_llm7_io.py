@@ -128,10 +128,10 @@ def chat_tools(system_prompt: str, messages: list[dict], tools: list,
     NORMALIZED result the engine expects:
         {"text": str | None, "tool_calls": [{"id","name","arguments"}, ...]}
 
-    core.native_adapters handles both conversions. Vision is not supported by this
+    src.engine.native_adapters handles both conversions. Vision is not supported by this
     provider, so `images` is accepted for contract parity but ignored.
     """
-    from core import native_adapters as na
+    from src.engine import native_adapters as na
 
     full_messages = []
     if system_prompt:

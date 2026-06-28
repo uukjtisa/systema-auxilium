@@ -227,7 +227,7 @@ def _acquire_instance_lock():
 _is_primary, _existing_pid = _acquire_instance_lock()
 if not _is_primary:
     _subprocess.Popen(
-        [sys.executable, str(Path(__file__).parent / "ui" / "startup_notif.py"),
+        [sys.executable, str(Path(__file__).parent / "systema" / "ui" / "startup_notif.py"),
          "--already-running", str(_existing_pid or 0)],
         creationflags=_subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     )
@@ -256,14 +256,14 @@ if sys.platform == "win32":
 
 # ── Startup notification (fire and forget) ───────────────────────────────────
 _subprocess.Popen(
-    [sys.executable, str(Path(__file__).parent / "ui" / "startup_notif.py")],
+    [sys.executable, str(Path(__file__).parent / "systema" / "ui" / "startup_notif.py")],
     creationflags=_subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 )
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Core imports come AFTER the Tee is in place ──────────────────────────────
 from PyQt6.QtWidgets import QApplication
-from core.controller import AssistantController
+from systema.app.controller import AssistantController
 # ─────────────────────────────────────────────────────────────────────────────
 
 

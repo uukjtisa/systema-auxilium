@@ -194,7 +194,7 @@ def chat_tools(system_prompt, messages, tools, images=None) -> dict:
     ...
 ```
 
-The helper module `core/native_adapters.py` does the schema conversion and
+The helper module `systema/engine/native_adapters.py` does the schema conversion and
 response parsing for all three dialects, so a native provider is only a few lines.
 If a provider doesn't declare native support (or the endpoint ignores `tools`),
 the app **automatically falls back to Compatibility** — so nothing breaks.

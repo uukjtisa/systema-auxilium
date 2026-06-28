@@ -654,7 +654,7 @@ def chat_tools(
         system_prompt -- Same as chat(). May be empty.
         messages      -- Same as chat(). In a multi-turn tool conversation these
                          may already include the OpenAI tool-call / tool-result
-                         messages the engine appended via core.native_adapters.
+                         messages the engine appended via src.engine.native_adapters.
         tools         -- CANONICAL tool defs (name/description/parameters) from
                          the engine's registry; converted to OpenAI format here.
         images        -- Optional image path(s); folds vision into the same call.
@@ -663,7 +663,7 @@ def chat_tools(
         A NORMALIZED result the engine understands regardless of provider:
             {"text": str | None, "tool_calls": [{"id","name","arguments"}, ...]}
     """
-    from core import native_adapters as na
+    from src.engine import native_adapters as na
 
     oai_tools = na.to_openai_tools(tools) if tools else None
 
