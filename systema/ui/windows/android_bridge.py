@@ -34,6 +34,7 @@ class AndroidBridge:
         self._send_lock  = threading.Lock()
         self._stop_event = threading.Event()
         self._pending_manual_response_cb = None
+        self._pending_timeout_cb = None
         self._pending_image_paths: list = []   # images queued for next send
         # Ensure received-files directory exists
         from pathlib import Path
@@ -90,7 +91,9 @@ class AndroidBridge:
             self._conn = conn
             self._conn.settimeout(None)
             threading.Thread(target=self._recv_loop, daemon=True).start()
+            self.send_theme()               # match the phone palette to the PC theme
             self.render_loaded_messages()   # replay current session into phone
+            self.send_token_usage()         # show context size on the phone
         except Exception as exc:
             if not self._stop_event.is_set():
                 log.error(f"[AndroidBridge] accept failed: {exc}")
@@ -128,6 +131,9 @@ class AndroidBridge:
                 self.add_user_message(text)
                 self.controller.bridge_user_bubble_signal.emit(text)
                 self.controller.bridge_send_signal.emit(text)
+        elif cmd == "input_sync":
+            text = msg.get("text", "")
+            self._run_on_main(lambda t=text: self._apply_input_sync(t))
         elif cmd == "attach_image_path":
             paths = msg.get("paths", [])
             if isinstance(paths, str):
@@ -158,6 +164,15 @@ class AndroidBridge:
             self._pending_manual_response_cb = None
             if cb:
                 cb(text if text else None)
+        elif cmd == "timeout_result":
+            try:
+                seconds = int(msg.get("seconds", 0))
+            except (TypeError, ValueError):
+                seconds = 0
+            cb = self._pending_timeout_cb
+            self._pending_timeout_cb = None
+            if cb:
+                cb(seconds)
         elif cmd == "get_sessions":
             self._send_sessions_page(msg.get("page", 0), msg.get("search", ""))
         elif cmd == "load_session":
@@ -181,7 +196,135 @@ class AndroidBridge:
                 except Exception as e:
                     log.error(f"[AndroidBridge] toggle_skill error: {e}")
         elif cmd == "open_memory":
-                    self._send_memories()
+            self._send_memories()
+        elif cmd == "memory_add":
+            text = msg.get("text", "").strip()
+            if text:
+                try:
+                    mm = self.controller.memory_manager
+                    if mm and mm.is_ready:
+                        mm.memorize(text)
+                except Exception as e:
+                    log.error(f"[AndroidBridge] memory_add error: {e}")
+            self._send_memories()
+        elif cmd == "memory_delete":
+            mid = msg.get("id", "")
+            if mid:
+                try:
+                    mm = self.controller.memory_manager
+                    if mm and mm.is_ready:
+                        mm.delete(mid)
+                except Exception as e:
+                    log.error(f"[AndroidBridge] memory_delete error: {e}")
+            self._send_memories()
+        elif cmd == "memory_edit":
+            mid = msg.get("id", "")
+            text = msg.get("text", "").strip()
+            if mid and text:
+                try:
+                    mm = self.controller.memory_manager
+                    if mm and mm.is_ready:
+                        mm.update(mid, text)
+                except Exception as e:
+                    log.error(f"[AndroidBridge] memory_edit error: {e}")
+            self._send_memories()
+        elif cmd == "get_tasks":
+            self._send_tasks()
+        elif cmd == "task_toggle":
+            tid = msg.get("id", "")
+            try:
+                tm = self.controller.task_manager
+                for t in tm.get_tasks():
+                    if t.get('id') == tid:
+                        upd = dict(t)
+                        upd['active'] = not upd.get('active', True)
+                        tm.update_task(tid, upd)
+                        break
+            except Exception as e:
+                log.error(f"[AndroidBridge] task_toggle error: {e}")
+            self._send_tasks()
+        elif cmd == "task_delete":
+            tid = msg.get("id", "")
+            if tid:
+                try:
+                    self.controller.task_manager.delete_task(tid)
+                except Exception as e:
+                    log.error(f"[AndroidBridge] task_delete error: {e}")
+            self._send_tasks()
+        elif cmd == "task_save":
+            task = msg.get("task")
+            tid = msg.get("id", "")
+            if isinstance(task, dict) and task.get("name"):
+                try:
+                    tm = self.controller.task_manager
+                    if tid:
+                        tm.update_task(tid, task)
+                    else:
+                        tm.add_task(task)
+                except Exception as e:
+                    log.error(f"[AndroidBridge] task_save error: {e}")
+            self._send_tasks()
+        elif cmd == "open_settings":
+            self._send_settings()
+        elif cmd == "open_debug":
+            self._send_debug()
+        elif cmd == "setting_theme":
+            value = msg.get("value", "")
+            if value:
+                def _apply():
+                    try:
+                        self.controller.settings['chat_theme'] = value
+                        chat = self.controller._chat
+                        if chat and hasattr(chat, 'apply_theme'):
+                            chat.apply_theme(value)   # also mirrors theme back to phone
+                        self.controller.save_settings()
+                    except Exception as e:
+                        log.error(f"[AndroidBridge] setting_theme error: {e}")
+                    self._refresh_pc_settings_window()
+                    self._send_settings()
+                self._run_on_main(_apply)
+        elif cmd == "setting_timeout":
+            try:
+                secs = int(msg.get("value", 300))
+                self.controller.settings['tool_execution_timeout_seconds'] = max(1, secs)
+                self.controller.save_settings()
+            except Exception as e:
+                log.error(f"[AndroidBridge] setting_timeout error: {e}")
+            self._run_on_main(self._refresh_pc_settings_window)
+            self._send_settings()
+        elif cmd == "setting_provider":
+            value = msg.get("value", "")
+            if value:
+                def _apply_p():
+                    try:
+                        self.controller.set_ai_provider(value)
+                    except Exception as e:
+                        log.error(f"[AndroidBridge] setting_provider error: {e}")
+                    self._refresh_pc_settings_window()
+                    self._send_settings()
+                self._run_on_main(_apply_p)
+        elif cmd == "setting_voice":
+            enabled = bool(msg.get("enabled", False))
+            def _apply_v():
+                try:
+                    # Route through the chat's voice methods so the PC button +
+                    # status stay in sync (they call enable/disable_voice_mode).
+                    chat = self.controller._chat
+                    if chat and hasattr(chat, 'enable_voice'):
+                        if enabled:
+                            chat.enable_voice()
+                        else:
+                            chat.disable_voice()
+                    else:
+                        if enabled:
+                            self.controller.enable_voice_mode()
+                        else:
+                            self.controller.disable_voice_mode()
+                except Exception as e:
+                    log.error(f"[AndroidBridge] setting_voice error: {e}")
+                self._refresh_pc_settings_window()
+                self._send_settings()
+            self._run_on_main(_apply_v)
         elif cmd == "open_instructions":
             self._send_instructions()
         elif cmd == "set_instructions":
@@ -209,6 +352,43 @@ class AndroidBridge:
                     self.controller.detach_memory_context(context_id)
                 except Exception as e:
                     log.error(f"[AndroidBridge] detach_memory_context error: {e}")
+
+    def _run_on_main(self, fn):
+        """Marshal a callable onto the GUI thread (recv thread has no Qt event loop)."""
+        try:
+            self.controller.bridge_run_on_main.emit(fn)
+        except Exception as e:
+            log.error(f"[AndroidBridge] _run_on_main error: {e}")
+
+    def _apply_input_sync(self, text: str):
+        """Set the PC chat input to mirror the phone, suppressing the echo back."""
+        try:
+            chat = self.controller._chat
+            if not chat:
+                return
+            field = chat.input_field
+            if field.toPlainText() == text:
+                return
+            chat._suppress_input_sync = True
+            try:
+                field.text_input.setPlainText(text)
+                cur = field.text_input.textCursor()
+                cur.movePosition(cur.MoveOperation.End)
+                field.text_input.setTextCursor(cur)
+            finally:
+                chat._suppress_input_sync = False
+        except Exception as e:
+            log.error(f"[AndroidBridge] _apply_input_sync error: {e}")
+
+    def _refresh_pc_settings_window(self):
+        """If the PC Settings window is open, reload its widgets so a phone-side
+        change is reflected live. Must run on the GUI thread."""
+        try:
+            win = getattr(getattr(self.controller, 'ui', None), 'settings_window', None)
+            if win is not None and win.isVisible() and hasattr(win, 'load_settings'):
+                win.load_settings()
+        except Exception as e:
+            log.error(f"[AndroidBridge] _refresh_pc_settings_window error: {e}")
 
     def _dispatch(self, cmd: dict):
         """Send a JSON command to Android (thread-safe). Identical to ChatWindowTUI._dispatch."""
@@ -281,64 +461,6 @@ class AndroidBridge:
         except Exception:
             user_name, asst_name = "", ""
         self._dispatch({"cmd": "names_data", "user_name": user_name, "asst_name": asst_name})
-
-    def _handle_file_upload(self, msg: dict):
-        """Receive a base64-encoded file from Android, save to data/received/, reply with path."""
-        import base64, os
-        filename = msg.get("filename", "received_file")
-        data_b64 = msg.get("data", "")
-        try:
-            raw = base64.b64decode(data_b64)
-            # Avoid collisions by prefixing with timestamp
-            from datetime import datetime
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S_")
-            safe_name = ts + os.path.basename(filename)
-            dest = self._received_dir / safe_name
-            dest.write_bytes(raw)
-            abs_path = str(dest.resolve())
-            log.info(f"[AndroidBridge] File received → {abs_path}")
-            self._dispatch({
-                "cmd": "file_received",
-                "filename": safe_name,
-                "path": abs_path,
-            })
-        except Exception as e:
-            log.error(f"[AndroidBridge] _handle_file_upload error: {e}")
-            self._dispatch({"cmd": "file_upload_error", "error": str(e)})
-
-    def _send_file_list(self, path_str: str):
-        """Send directory listing of a host path to the Android file browser."""
-        from pathlib import Path
-        import os
-        try:
-            if path_str:
-                target = Path(path_str)
-            else:
-                target = self._browse_root
-            if not target.exists() or not target.is_dir():
-                target = self._browse_root
-            entries = []
-            # Parent entry (go up)
-            parent = str(target.parent) if target != target.parent else ""
-            for item in sorted(target.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
-                try:
-                    entries.append({
-                        "name": item.name,
-                        "path": str(item.resolve()),
-                        "type": "dir" if item.is_dir() else "file",
-                        "size": item.stat().st_size if item.is_file() else 0,
-                    })
-                except PermissionError:
-                    pass
-            self._dispatch({
-                "cmd": "file_list",
-                "current_path": str(target.resolve()),
-                "parent_path": parent,
-                "entries": entries,
-            })
-        except Exception as e:
-            log.error(f"[AndroidBridge] _send_file_list error: {e}")
-            self._dispatch({"cmd": "file_list_error", "error": str(e)})
 
     def _handle_file_upload(self, msg: dict):
         """Receive a base64-encoded file from Android, save to data/received/, reply with path."""
@@ -429,6 +551,126 @@ class AndroidBridge:
             log.error(f"[AndroidBridge] _send_file_list error: {e}")
             self._dispatch({"cmd": "file_list_error", "error": str(e)})
 
+    def send_theme(self, theme: dict | None = None):
+        """Push the active colour theme to the phone so its palette matches the PC.
+        Pass the resolved palette dict directly (from apply_theme) to avoid any
+        settings-timing race; otherwise the current chat_theme setting is read."""
+        try:
+            if theme is None:
+                from systema.ui.theme import THEMES, DEFAULT_THEME_KEY
+                key = DEFAULT_THEME_KEY
+                try:
+                    key = self.controller.settings.get('chat_theme', DEFAULT_THEME_KEY)
+                except Exception:
+                    pass
+                theme = THEMES.get(key, THEMES[DEFAULT_THEME_KEY])
+            keys = ('base', 'surface', 'elevated', 'border',
+                    'accent', 'deep', 'input_card', 'input_card_border')
+            payload = {k: theme.get(k, '') for k in keys}
+            self._dispatch({"cmd": "theme_data", "theme": payload})
+        except Exception as e:
+            log.error(f"[AndroidBridge] send_theme error: {e}")
+
+    def send_token_usage(self):
+        """Push the current context size (history + system prompt) to the phone.
+        The phone shows this as a header chip; per-message input estimate is left
+        to each device since the input text differs."""
+        try:
+            from systema.common.token_est import estimate_next_message_tokens, estimate_tokens
+            ai = getattr(self.controller, 'ai', None)
+            if not ai:
+                return
+            hist = getattr(ai, 'chat_history', None) or getattr(ai, 'conversation_history', []) or []
+            sys_tokens = estimate_tokens(getattr(ai, 'system_prompt', '') or '')
+            total = estimate_next_message_tokens("", hist) + sys_tokens
+            self._dispatch({"cmd": "token_usage", "tokens": int(total)})
+        except Exception as e:
+            log.error(f"[AndroidBridge] send_token_usage error: {e}")
+
+    def _send_debug(self):
+        """Send a concise read-only diagnostics snapshot to the phone."""
+        try:
+            from systema.common.token_est import estimate_tokens
+            c = self.controller
+            ai = getattr(c, 'ai', None)
+            s = c.settings or {}
+            rows = []
+            rows.append(["AI provider", str(s.get('ai_provider', '—'))])
+            rows.append(["TTS provider", str(s.get('tts_provider', '—'))])
+            try:
+                rows.append(["Session", str(getattr(c, 'current_session_id', '') or '—')[:24]])
+            except Exception:
+                pass
+            try:
+                rows.append(["Messages", str(len(getattr(ai, 'conversation_history', []) or []))])
+            except Exception:
+                pass
+            try:
+                mm = c.memory_manager
+                rows.append(["Memories", str(mm.count() if (mm and mm.is_ready) else 0)])
+            except Exception:
+                pass
+            try:
+                loaded = [sk['name'] for sk in c.skill_manager.get_skills() if sk.get('is_loaded')]
+                rows.append(["Loaded skills", ", ".join(loaded) if loaded else "none"])
+            except Exception:
+                pass
+            try:
+                tm = ai.tool_manager
+                state = "work mode" if getattr(tm, 'in_work_mode', False) else \
+                        ("processing" if getattr(tm, 'is_processing', False) else "idle")
+                rows.append(["State", state])
+            except Exception:
+                pass
+            # Use the SAME effective prompt the PC debug window shows
+            # (base + all loaded skills, frontmatter stripped, as sent to the API).
+            try:
+                sysp = ai._get_effective_system_prompt()
+            except Exception:
+                sysp = getattr(ai, 'system_prompt', '') or ''
+            rows.append(["System prompt", f"{len(sysp):,} chars · ~{estimate_tokens(sysp):,} tok"])
+            rows.append(["Connection", self.get_connection_info()])
+            # Send the full effective prompt so it matches the PC verbatim (mark
+            # only if it exceeds a generous safety cap).
+            _cap = 200000
+            _payload_prompt = sysp if len(sysp) <= _cap else sysp[:_cap] + "\n… [truncated]"
+            self._dispatch({"cmd": "debug_data", "rows": rows, "system_prompt": _payload_prompt})
+        except Exception as e:
+            log.error(f"[AndroidBridge] _send_debug error: {e}")
+
+    def _send_settings(self):
+        """Send the SAFE settings subset to the phone (no secrets/API keys)."""
+        try:
+            from systema.ui.theme import THEMES, DEFAULT_THEME_KEY
+            s = self.controller.settings or {}
+            try:
+                providers = [p['name'] for p in self.controller.get_llm_provider_scripts()]
+            except Exception:
+                providers = []
+            try:
+                voice_on = bool(getattr(self.controller._chat, 'voice_enabled', False))
+            except Exception:
+                voice_on = False
+            self._dispatch({
+                "cmd": "settings_data",
+                "theme": s.get('chat_theme', DEFAULT_THEME_KEY),
+                "themes": list(THEMES.keys()),
+                "timeout": int(s.get('tool_execution_timeout_seconds', 300)),
+                "provider": s.get('ai_provider', 'manual'),
+                "providers": providers,
+                "voice": voice_on,
+            })
+        except Exception as e:
+            log.error(f"[AndroidBridge] _send_settings error: {e}")
+
+    def _send_tasks(self):
+        """Send the full task dicts to the phone (edits round-trip losslessly)."""
+        try:
+            tasks = self.controller.task_manager.get_tasks()
+        except Exception:
+            tasks = []
+        self._dispatch({"cmd": "tasks_data", "tasks": tasks})
+
     def _send_memories(self):
         try:
             mm = self.controller.memory_manager
@@ -492,6 +734,7 @@ class AndroidBridge:
     def add_ai_message(self, text: str):
         if text.strip():
             self._dispatch({"cmd": "add_ai", "text": text})
+            self.send_token_usage()   # context grew — refresh the phone chip
 
     def show_ai_message(self, message: str):
         self.add_ai_message(message)
@@ -549,6 +792,7 @@ class AndroidBridge:
                             "cmd": "add_work_execution",
                             "code": msg.get("_code", ""),
                             "output": msg.get("_output", ""),
+                            "annotation": msg.get("_annotation", ""),
                         })
                 elif content:
                     if role == "user":
@@ -576,6 +820,17 @@ class AndroidBridge:
         self._pending_manual_response_cb = None
         self._dispatch({"cmd": "dismiss_manual_response"})
 
+    def request_timeout(self, elapsed: int, callback):
+        """Show the execution-timeout prompt on the phone. callback(seconds) is
+        invoked from the recv thread when the phone answers (0 = kill)."""
+        self._pending_timeout_cb = callback
+        self._dispatch({"cmd": "show_timeout", "elapsed": int(elapsed)})
+
+    def dismiss_timeout(self):
+        """Tell Android to close its timeout dialog (PC or phone already decided)."""
+        self._pending_timeout_cb = None
+        self._dispatch({"cmd": "dismiss_timeout"})
+
     def show_work_banner(self, annotation: str = ""):
         """Tell Android to show the work-mode banner with optional annotation text."""
         self._dispatch({"cmd": "show_work_banner", "text": annotation or "Working…"})
@@ -588,13 +843,24 @@ class AndroidBridge:
         """Send a code-block + its stdout/stderr output to the Android client."""
         self._dispatch({"cmd": "add_work_execution", "code": code, "output": output, "annotation": annotation})
 
-    def show_work_banner(self, annotation: str = ""):
-        """Tell Android to show the work-mode banner with optional annotation text."""
-        self._dispatch({"cmd": "show_work_banner", "text": annotation or "Working…"})
+    # ── Live work-mode output streaming (mirrors chat_window) ─────────────────
 
-    def hide_work_banner(self):
-        """Tell Android to hide the work-mode banner."""
-        self._dispatch({"cmd": "hide_work_banner"})
+    def start_live_output(self, code: str = ""):
+        """Open a transient streaming console on the phone for the running code."""
+        self._live_last = ""
+        self._dispatch({"cmd": "live_output_start"})
+
+    def update_live_output(self, text: str):
+        """Push the current stdout/stderr buffer; skips unchanged ticks."""
+        if text == getattr(self, "_live_last", None):
+            return
+        self._live_last = text
+        self._dispatch({"cmd": "live_output_update", "text": text or ""})
+
+    def end_live_output(self):
+        """Tear down the phone's streaming console (final card arrives separately)."""
+        self._live_last = ""
+        self._dispatch({"cmd": "live_output_end"})
 
     def update_voice_status(self, status: str):
         self._dispatch({"cmd": "voice_status", "status": status})

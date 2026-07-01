@@ -193,6 +193,21 @@ def _extract_after_code_block(raw: str) -> str:
         return ''
     return raw[close_idx + 3:].strip()
 
+def _split_work_message(content: str):
+    """For an assistant message with a tool fence, return (visible_text, code, tool).
+    tool is '' when the message has no work_environment/execute_code fence."""
+    for tool in ('work_environment', 'execute_code'):
+        marker = f'```{tool}'
+        idx = content.find(marker)
+        if idx != -1:
+            visible = content[:idx].strip()
+            rest = content[idx + len(marker):]
+            end = rest.find('```')
+            code = (rest[:end] if end != -1 else rest).strip()
+            return visible, code, tool
+    return content.strip(), '', ''
+
+
 def _viewer_group_history(history: list) -> list:
     """
     Groups session chat history for viewer display.
@@ -389,6 +404,7 @@ class ManageTasksWindow(BaseWindow):
         self._viewer_task_id: str | None = None     # task currently open in session viewer
         self._viewer_date_str: str | None = None    # session date currently open
         self._viewer_msg_count: int = 0             # message count at last render
+        self._viewer_ongoing: bool = False          # whether the open session is mid-ping
         self._viewer_refresh_timer: QTimer | None = None  # live-refresh timer
 
         self.setWindowTitle("Manage Tasks")
@@ -1892,22 +1908,17 @@ class ManageTasksWindow(BaseWindow):
 
         self._viewer_task_id = task_id
         self._viewer_date_str = date_str
-
-        # Clear viewer
-        layout = self._viewer_body_layout
-        while layout.count() > 1:
-            item = layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._viewer_pending = None   # widget cleared above; drop stale ref
+        self._viewer_pending = None   # cleared during render below
 
         history = session.get('chat_history', [])
+        ongoing = bool(session.get('ongoing', False))
         self._viewer_msg_count = len(history)
+        self._viewer_ongoing = ongoing
         task_name = session.get('session_name', '')
         self._viewer_title.setText(f"{task_name}  ·  {date_str}")
 
-        self._render_session_bubbles(history)
-        self._update_viewer_pending(history)
+        self._render_session_bubbles(history)   # clears + full render
+        self._update_viewer_pending(history, ongoing)
 
         # Show live indicator and start timers
         self._viewer_live_dot.setVisible(True)
@@ -1920,109 +1931,174 @@ class ManageTasksWindow(BaseWindow):
             self._viewer_area.verticalScrollBar().maximum()
         ))
 
-    def _render_session_bubbles(self, history: list):
-        """Render chat bubbles into the viewer. Called on initial load and refresh."""
+    def _add_text_bubble(self, role_icon: str, role_text: str, role_color: str,
+                         content: str, kind: str):
+        """Add a simple role-labelled text bubble to the viewer."""
         layout = self._viewer_body_layout
-        # Group work_environment sequences into single display units
-        grouped = _viewer_group_history(history)
-        for msg in grouped:
-            role = msg.get('role', 'user')
-            content = msg.get('content', '')
-            step_count = msg.get('_step_count', 1)
-            if not content:
+        bubble = QFrame()
+        bubble.setObjectName("viewerBubble")
+        if kind == 'agent':
+            border = _ACCENT
+            bg = _SURFACE2
+            bstyle = f"border: 1px solid rgba(79,158,248,0.25); border-left: 3px solid {_ACCENT};"
+        elif kind == 'ping':
+            border = _YELLOW
+            bg = _SURFACE
+            bstyle = f"border: 1px solid {_BORDER}; border-left: 3px solid {_YELLOW};"
+        else:
+            border = _PURPLE
+            bg = _SURFACE
+            bstyle = f"border: 1px solid {_BORDER}; border-left: 3px solid {_PURPLE};"
+        bubble.setStyleSheet(f"QFrame#viewerBubble {{ background: {bg}; {bstyle} border-radius: 0 10px 10px 0; }}")
+        bl = QVBoxLayout(bubble)
+        bl.setContentsMargins(14, 10, 14, 10)
+        bl.setSpacing(6)
+        role_lbl = QLabel(f"{role_icon}  {role_text}")
+        role_lbl.setStyleSheet(
+            f"color: {role_color}; font-size: 10px; font-weight: 700; "
+            f"background: transparent; border: none; letter-spacing: 0.5px;"
+        )
+        bl.addWidget(role_lbl)
+        text_lbl = QLabel(content)
+        text_lbl.setWordWrap(True)
+        text_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        text_lbl.setStyleSheet(
+            f"color: {_TEXT}; font-size: 12px; line-height: 1.5; background: transparent; border: none;"
+        )
+        bl.addWidget(text_lbl)
+        layout.insertWidget(layout.count() - 1, bubble)
+
+    def _add_exec_widget(self, code: str, output: str, annotation: str):
+        """Add a collapsible code+output execution block (like the main chat's UI events)."""
+        layout = self._viewer_body_layout
+        frame = QFrame()
+        frame.setObjectName("viewerExec")
+        frame.setStyleSheet(
+            f"QFrame#viewerExec {{ background: #0D1117; border: 1px solid {_BORDER}; border-radius: 8px; }}"
+        )
+        fl = QVBoxLayout(frame)
+        fl.setContentsMargins(1, 1, 1, 1)
+        fl.setSpacing(0)
+
+        # Header row: label + toggle
+        header = QFrame()
+        header.setStyleSheet(f"background: {_SURFACE}; border: none; border-radius: 8px 8px 0 0;")
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(12, 7, 10, 7)
+        title = QLabel(annotation.strip() if annotation.strip() else "Executed code")
+        title.setStyleSheet(
+            f"color: {_ACCENT}; font-size: 10px; font-weight: 700; letter-spacing: 0.5px; "
+            f"background: transparent; border: none;"
+        )
+        hl.addWidget(title)
+        hl.addStretch()
+        toggle = QPushButton("Show")
+        toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        toggle.setStyleSheet(
+            f"QPushButton {{ color: {_MUTED}; background: {_SURFACE2}; border: 1px solid {_BORDER}; "
+            f"border-radius: 5px; padding: 2px 10px; font-size: 10px; }}"
+            f"QPushButton:hover {{ color: {_ACCENT}; border-color: {_ACCENT}; }}"
+        )
+        hl.addWidget(toggle)
+        fl.addWidget(header)
+
+        # Collapsible body: code + output
+        body = QWidget()
+        body.setStyleSheet("background: transparent; border: none;")
+        body_l = QVBoxLayout(body)
+        body_l.setContentsMargins(0, 0, 0, 0)
+        body_l.setSpacing(0)
+
+        def _mono_block(text, color, bg, header_text, header_color):
+            wrap = QFrame()
+            wrap.setStyleSheet(f"background: {bg}; border: none;")
+            wl = QVBoxLayout(wrap)
+            wl.setContentsMargins(12, 8, 12, 8)
+            wl.setSpacing(4)
+            hdr = QLabel(header_text)
+            hdr.setStyleSheet(f"color: {header_color}; font-size: 9px; font-weight: 700; "
+                              f"letter-spacing: 0.5px; background: transparent; border: none;")
+            wl.addWidget(hdr)
+            lbl = QLabel(text)
+            lbl.setWordWrap(True)
+            lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            lbl.setStyleSheet(f"color: {color}; font-family: 'Cascadia Code','Consolas',monospace; "
+                              f"font-size: 11px; background: transparent; border: none;")
+            wl.addWidget(lbl)
+            return wrap
+
+        if code:
+            body_l.addWidget(_mono_block(code, "#E6EDF3", "#0D1117", "CODE", _MUTED))
+        if output:
+            body_l.addWidget(_mono_block(output, "#8FBC8F", "#0A0F15", "OUTPUT", "#4CD780"))
+        body.setVisible(False)
+        fl.addWidget(body)
+
+        def _toggle():
+            vis = not body.isVisible()
+            body.setVisible(vis)
+            toggle.setText("Hide" if vis else "Show")
+        toggle.clicked.connect(_toggle)
+
+        layout.insertWidget(layout.count() - 1, frame)
+
+    def _render_session_bubbles(self, history: list):
+        """Render the viewer from full session history: ping bubbles, agent text, and
+        collapsible code+output execution blocks (paired from work fences + outputs)."""
+        # Clear existing bubbles (keep the trailing stretch at the end).
+        layout = self._viewer_body_layout
+        while layout.count() > 1:
+            item = layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        i = 0
+        n = len(history)
+        while i < n:
+            msg = history[i]
+            role = msg.get('role', '')
+            content = msg.get('content', '') or ''
+
+            if role == 'ui_event' and msg.get('_type') == 'work_exec':
+                self._add_exec_widget(msg.get('_code', ''), msg.get('_output', ''), msg.get('_annotation', ''))
+                i += 1
                 continue
 
-            is_agent = role == 'assistant'
-            is_ping  = role in ('user', 'system')
+            if role == 'system':
+                if msg.get('_is_work_prompt'):
+                    # Standalone work-output feedback with no preceding code — show
+                    # its output on its own (rare; normally paired below).
+                    out = msg.get('_work_output', '')
+                    if out:
+                        self._add_exec_widget('', out, '')
+                    i += 1
+                    continue
+                if content.strip():
+                    self._add_text_bubble("⏰", "Task Ping", _YELLOW, content.strip(), 'ping')
+                i += 1
+                continue
 
-            bubble = QFrame()
-            bubble.setObjectName("viewerBubble")
-
-            if is_agent:
-                bubble.setStyleSheet(f"""
-                    QFrame#viewerBubble {{
-                        background: {_SURFACE2};
-                        border: 1px solid rgba(79,158,248,0.25);
-                        border-left: 3px solid {_ACCENT};
-                        border-radius: 0 10px 10px 0;
-                    }}
-                """)
-            else:
-                bubble.setStyleSheet(f"""
-                    QFrame#viewerBubble {{
-                        background: {_SURFACE};
-                        border: 1px solid {_BORDER};
-                        border-left: 3px solid {_YELLOW if is_ping else _PURPLE};
-                        border-radius: 0 10px 10px 0;
-                    }}
-                """)
-
-            bl = QVBoxLayout(bubble)
-            bl.setContentsMargins(14, 10, 14, 10)
-            bl.setSpacing(6)
-
-            # Role label row
-            role_row = QHBoxLayout()
-            if is_agent:
-                role_icon = "🤖"
-                if step_count > 1:
-                    role_text = f"Work Session  ·  {step_count} steps"
+            if role == 'assistant':
+                visible, code, tool = _split_work_message(content)
+                if tool:
+                    # Reasoning text (if any), then a collapsible code+output block.
+                    if visible:
+                        self._add_text_bubble("●", "Agent", _ACCENT, visible, 'agent')
+                    output = ''
+                    if i + 1 < n and history[i + 1].get('role') == 'system' and history[i + 1].get('_is_work_prompt'):
+                        output = history[i + 1].get('_work_output', '') or ''
+                        i += 1  # consume the paired output message
+                    self._add_exec_widget(code, output, tool.replace('_', ' '))
                 else:
-                    role_text = "Agent Response"
-                role_color = _ACCENT
-            else:
-                role_icon = "⏰"
-                role_text = "Task Ping"
-                role_color = _YELLOW
+                    if content.strip():
+                        self._add_text_bubble("●", "Agent Response", _ACCENT, content.strip(), 'agent')
+                i += 1
+                continue
 
-            role_lbl = QLabel(f"{role_icon}  {role_text}")
-            role_lbl.setStyleSheet(
-                f"color: {role_color}; font-size: 10px; font-weight: 700; "
-                f"background: transparent; border: none; letter-spacing: 0.5px;"
-            )
-            role_row.addWidget(role_lbl)
-            role_row.addStretch()
-            bl.addLayout(role_row)
-
-            # Content — step annotations
-            text_lbl = QLabel(content)
-            text_lbl.setWordWrap(True)
-            text_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            text_lbl.setStyleSheet(
-                f"color: {_TEXT}; font-size: 12px; line-height: 1.5; "
-                f"background: transparent; border: none;"
-            )
-            bl.addWidget(text_lbl)
-
-            # If a tail (AI's final response after work session exits) was
-            # captured, render it prominently inside the same bubble so it's
-            # never hidden below a scroll boundary.
-            tail = msg.get('_tail', '')
-            if tail:
-                tail_sep = QFrame()
-                tail_sep.setStyleSheet(
-                    f"background: rgba(79,158,248,0.30); border: none; max-height: 1px;"
-                )
-                tail_sep.setFixedHeight(1)
-                bl.addWidget(tail_sep)
-
-                tail_hdr = QLabel("💬  AI Response")
-                tail_hdr.setStyleSheet(
-                    f"color: {_ACCENT}; font-size: 10px; font-weight: 700; "
-                    f"letter-spacing: 0.5px; background: transparent; border: none; padding-top: 2px;"
-                )
-                bl.addWidget(tail_hdr)
-
-                tail_lbl = QLabel(tail)
-                tail_lbl.setWordWrap(True)
-                tail_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-                tail_lbl.setStyleSheet(
-                    f"color: {_TEXT}; font-size: 12px; line-height: 1.5; "
-                    f"background: transparent; border: none;"
-                )
-                bl.addWidget(tail_lbl)
-
-            layout.insertWidget(layout.count() - 1, bubble)
+            # Any other role with text
+            if content.strip():
+                self._add_text_bubble("•", role or "note", _MUTED, content.strip(), 'other')
+            i += 1
 
     def _refresh_viewer_tick(self):
         """Called every 2.5s while session viewer is open. Re-renders if new messages appeared."""
@@ -2033,13 +2109,14 @@ class ManageTasksWindow(BaseWindow):
             if session is None:
                 return
             history = session.get('chat_history', [])
-            if len(history) <= self._viewer_msg_count:
-                return  # nothing new
-            # New messages — re-render only the new ones
-            new_msgs = history[self._viewer_msg_count:]
+            ongoing = bool(session.get('ongoing', False))
+            # Re-render on any change to the history length OR the ongoing flag.
+            if len(history) == self._viewer_msg_count and ongoing == getattr(self, '_viewer_ongoing', False):
+                return  # nothing changed
             self._viewer_msg_count = len(history)
-            self._render_session_bubbles(new_msgs)
-            self._update_viewer_pending(history)
+            self._viewer_ongoing = ongoing
+            self._render_session_bubbles(history)   # full re-render (handles code/output pairing)
+            self._update_viewer_pending(history, ongoing)
             # Scroll to bottom
             QTimer.singleShot(60, lambda: self._viewer_area.verticalScrollBar().setValue(
                 self._viewer_area.verticalScrollBar().maximum()
@@ -2047,11 +2124,11 @@ class ManageTasksWindow(BaseWindow):
         except Exception:
             pass
 
-    def _update_viewer_pending(self, history: list):
+    def _update_viewer_pending(self, history: list, ongoing: bool = False):
         """
-        Show a 'Agent is working…' pill at the bottom of the viewer whenever the
-        most recent entry is a ping/system message with no agent reply yet. Lets
-        manual ⚡ Ping tests read as 'thinking' instead of looking empty/broken.
+        Show an '(Ongoing) Agent is working…' pill at the bottom while the ping is
+        still running (session['ongoing']), or when a ping went out with no agent
+        reply yet. Lets live pings read as 'thinking' instead of looking done.
         """
         # Tear down any existing pending pill.
         existing = getattr(self, '_viewer_pending', None)
@@ -2059,15 +2136,15 @@ class ManageTasksWindow(BaseWindow):
             existing.deleteLater()
             self._viewer_pending = None
 
-        # Determine whether we're awaiting an agent reply.
-        last_role = None
-        for m in reversed(history):
-            if m.get('content'):
-                last_role = m.get('role')
-                break
-        awaiting = last_role in ('system', 'user')   # ping went out, no assistant turn yet
-        if not awaiting:
-            return
+        if not ongoing:
+            # Fall back: awaiting an agent reply after a ping with no response yet.
+            last_role = None
+            for m in reversed(history):
+                if m.get('content'):
+                    last_role = m.get('role')
+                    break
+            if last_role not in ('system', 'user'):
+                return
 
         pill = QFrame()
         pill.setObjectName("viewerPending")
@@ -2080,7 +2157,8 @@ class ManageTasksWindow(BaseWindow):
         """)
         pl = QHBoxLayout(pill)
         pl.setContentsMargins(14, 9, 14, 9)
-        lbl = QLabel("🤖  Agent is working…")
+        label_text = "● (Ongoing)  Agent is working…" if ongoing else "Agent is working…"
+        lbl = QLabel(label_text)
         lbl.setStyleSheet(f"color: {_ACCENT}; font-size: 11px; font-weight: 600; background: transparent; border: none;")
         pl.addWidget(lbl)
         pl.addStretch()
@@ -2098,6 +2176,7 @@ class ManageTasksWindow(BaseWindow):
         self._viewer_task_id = None
         self._viewer_date_str = None
         self._viewer_msg_count = 0
+        self._viewer_ongoing = False
         self._stack.setCurrentIndex(0)
 
     # ═══════════════════════════════════════════════════════════════════════════

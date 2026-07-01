@@ -51,6 +51,7 @@ class AssistantController(QObject):
     bridge_attach_image_signal = pyqtSignal(object)  # list[str] — paths to pin on main thread
     task_message_signal = pyqtSignal(str)  # fires when a task sends a message to main
     bridge_detach_image_signal = pyqtSignal(str)  # path to unpin on main thread
+    bridge_run_on_main = pyqtSignal(object)  # run an arbitrary callable on the GUI thread
 
     def __init__(self):
         super().__init__()
@@ -243,6 +244,7 @@ class AssistantController(QObject):
         self.bridge_new_session_signal.connect(self.create_new_session)
         self.bridge_attach_image_signal.connect(self._handle_bridge_attach_image)
         self.bridge_detach_image_signal.connect(self._handle_bridge_detach_image)
+        self.bridge_run_on_main.connect(lambda fn: fn())
         self.task_message_signal.connect(self._handle_task_message)
         self.ai.manual_response_fn = self._request_manual_response
         self.manual_response_signal.connect(self._show_manual_response_window)
@@ -424,6 +426,11 @@ class AssistantController(QObject):
     def enable_voice_mode(self):
         """Enable voice input/output"""
         log.info("[AssistantController.enable_voice_mode] ── Enabling voice mode ──────────────")
+        # Idempotent: starting an already-active listener fails ("voice failed to
+        # start"). If voice is already on (e.g. enabled from the phone), no-op.
+        if getattr(self, 'voice_mode_active', False):
+            log.info("[AssistantController.enable_voice_mode] Already active — skipping re-start")
+            return True, "Voice mode already active"
         try:
             # List available devices
             input_devices, output_devices = self.voice_handler.list_audio_devices()
@@ -980,6 +987,13 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         self.ai.set_provider(provider)
         self.save_settings()
         self.log(f"AI provider set to: {provider}", "SUCCESS")
+        # Mirror to a connected phone so its Settings panel stays in sync
+        _ab = getattr(getattr(self, 'ui', None), 'android_bridge', None)
+        if _ab and _ab.isVisible():
+            try:
+                _ab._send_settings()
+            except Exception:
+                pass
 
     def get_custom_script_path(self):
         """Get custom script provider path"""
@@ -1089,8 +1103,12 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
                 log.debug(f"[AssistantController.send_message] Found {len(image_paths)} pinned image(s) — "
                           f"upgrading to generate_with_image")
 
-        # Create worker thread
-        self._create_and_start_worker('generate', user_message, image_paths)
+        # Create worker thread — use the image operation when images are pinned
+        # (the bridge/phone path routes here, so it must pick the right method too)
+        if image_paths:
+            self._create_and_start_worker('generate_with_image', user_message, image_paths)
+        else:
+            self._create_and_start_worker('generate', user_message)
 
     def send_message_with_image(self, user_message, image_paths):
         """Send user message with one or more image attachments."""
@@ -1503,12 +1521,16 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         down — the permanent collapsed note is added by the normal flow."""
         if not self._chat:
             return
+        _ab = getattr(getattr(self, 'ui', None), 'android_bridge', None)
         if active:
             code = self.ai.tool_manager.last_work_code or ""
             try:
                 self._chat.start_live_output(code)
             except Exception as e:
                 log.debug(f"[AssistantController._update_live_output_stream] start failed: {e}")
+            if _ab and _ab.isVisible():
+                try: _ab.start_live_output(code)
+                except Exception: pass
             self._live_output_timer.start()
         else:
             self._live_output_timer.stop()
@@ -1520,6 +1542,9 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
                 self._chat.end_live_output()
             except Exception:
                 pass
+            if _ab and _ab.isVisible():
+                try: _ab.end_live_output()
+                except Exception: pass
 
     def _poll_live_output(self):
         """Timer tick — pull current output from the interpreter into the live console."""
@@ -1529,7 +1554,12 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             interp = self.ai.tool_manager.tools.get('python')
             if interp is None:
                 return
-            self._chat.update_live_output(interp.peek_live_output())
+            _text = interp.peek_live_output()
+            self._chat.update_live_output(_text)
+            _ab = getattr(getattr(self, 'ui', None), 'android_bridge', None)
+            if _ab and _ab.isVisible():
+                try: _ab.update_live_output(_text)
+                except Exception: pass
         except Exception:
             pass
 

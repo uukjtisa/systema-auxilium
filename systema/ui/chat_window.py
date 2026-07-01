@@ -1062,6 +1062,8 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         """)
         self.input_field.enterPressed.connect(self.send_message)
         self.input_field.text_input.textChanged.connect(self._update_token_count)
+        self._suppress_input_sync = False
+        self.input_field.text_input.textChanged.connect(self._on_input_changed_sync)
         text_row_layout.addWidget(self.input_field, 1)
         combined_layout.addWidget(text_row)
 
@@ -1947,6 +1949,7 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
             self.voice_enabled = False
             self.voice_btn_inline.setChecked(False)
             self.add_system_message(f"❌ **Voice Mode Failed**\n\n{message}")
+        self._sync_voice_to_phone()
 
     def disable_voice(self):
         """Disable voice mode"""
@@ -1955,6 +1958,28 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         self.voice_btn_inline.setChecked(False)
         self.update_voice_status("")
         self.add_system_message("🔇 **Voice Mode Disabled**")
+        self._sync_voice_to_phone()
+
+    def _sync_voice_to_phone(self):
+        """Push the safe settings subset (incl. voice state) to a connected phone."""
+        _ab = getattr(getattr(self.controller, 'ui', None), 'android_bridge', None)
+        if _ab and _ab.isVisible():
+            try:
+                _ab._send_settings()
+            except Exception:
+                pass
+
+    def _on_input_changed_sync(self):
+        """Mirror the PC input box to the phone as the user types. Suppressed while
+        applying a phone-driven update so the two don't echo each other."""
+        if getattr(self, '_suppress_input_sync', False):
+            return
+        _ab = getattr(getattr(self.controller, 'ui', None), 'android_bridge', None)
+        if _ab and _ab.isVisible():
+            try:
+                _ab._dispatch({"cmd": "input_sync", "text": self.input_field.toPlainText()})
+            except Exception:
+                pass
 
     def load_personalization(self):
         """Load personalization settings"""
@@ -1985,6 +2010,10 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         text, style = status_styles.get(status, ('', ''))
         self.voice_status_label.setText(text)
         self.voice_status_label.setStyleSheet(f"QLabel {{ font-size: 10px; margin: 0 8px; {style} }}")
+        # Mirror to Android phone if connected
+        _ab = getattr(getattr(self.controller, 'ui', None), 'android_bridge', None)
+        if _ab and _ab.isVisible():
+            _ab.update_voice_status(status)
 
         # Show interrupt button during speaking (manual mode only)
         if status == 'speaking' and self.controller.get_voice_interrupt_mode() == 'manual':
@@ -4818,6 +4847,10 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
             self.input_field.text_input.setFocus()
         else:
             self.input_field.setPlaceholderText("Processing Request... please wait")
+        # Mirror to Android phone if connected
+        _ab = getattr(getattr(self.controller, 'ui', None), 'android_bridge', None)
+        if _ab and _ab.isVisible():
+            _ab.set_input_enabled(enabled)
 
     def set_input_placeholder(self, text):
         """Update placeholder text on the input field."""

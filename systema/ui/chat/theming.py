@@ -99,6 +99,13 @@ class ThemingMixin:
         """Apply a named colour theme to all major structural surfaces."""
         t = self._THEMES.get(theme_key, self._THEMES['obsidian_blue'])
         self._current_theme_key = theme_key   # remember for apply_glass_background
+        # Mirror the theme to the Android phone if one is connected
+        try:
+            _ab = getattr(getattr(self.controller, 'ui', None), 'android_bridge', None)
+            if _ab and _ab.isVisible():
+                _ab.send_theme(t)
+        except Exception:
+            pass
         try:
             # Container
             self.container.setStyleSheet(f"""

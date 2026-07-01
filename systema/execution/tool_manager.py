@@ -824,6 +824,17 @@ class ToolManager:
 
         dialog = TimeoutDialog(elapsed, parent)
 
+        # ── Mirror to Android if a phone is connected ─────────────────────────
+        android_bridge = self._get_android_bridge() if callable(self._get_android_bridge) else None
+        if android_bridge and getattr(android_bridge, '_conn', None) is not None:
+            def _on_phone_timeout(seconds):
+                # Runs on the bridge recv thread — apply on the GUI thread.
+                def _apply():
+                    dialog._result = seconds
+                    dialog.accept()
+                android_bridge._run_on_main(_apply)
+            android_bridge.request_timeout(elapsed, _on_phone_timeout)
+
         # Poll exec_done_event every 200ms to auto-close if execution finishes
         _poll = QTimer()
         _poll.setInterval(200)
@@ -841,6 +852,8 @@ class ToolManager:
             dialog.exec()
         finally:
             _poll.stop()
+            if android_bridge and getattr(android_bridge, '_conn', None) is not None:
+                android_bridge.dismiss_timeout()
 
         decision = dialog.result_value
         log.info(f"[ToolManager._show_timeout_dialog_on_main_thread] User decision: {decision}")

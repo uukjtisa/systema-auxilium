@@ -251,7 +251,8 @@ class TaskAIEngine:
         self._engine.custom_script_path = s.get('custom_script_path', '')
         self._engine.ai_provider = s.get('ai_provider', 'custom_script')
 
-    def run_full_ping(self, ping_content: str, history: list, task_system_prompt: str, max_iterations: int = 20) -> tuple:
+    def run_full_ping(self, ping_content: str, history: list, task_system_prompt: str,
+                      max_iterations: int = 20, on_step=None) -> tuple:
         """
         Run a full ping using the same pipeline as the main session:
         generate_response + continue_work_mode loop.
@@ -283,6 +284,14 @@ class TaskAIEngine:
         all_responses = []
         send_main_calls = []
 
+        def _emit_step():
+            """Notify the caller so it can persist the session live for the viewer."""
+            if on_step:
+                try:
+                    on_step(list(self._engine.conversation_history))
+                except Exception as e:
+                    log.error(f"[TaskAIEngine.run_full_ping] on_step error: {e}")
+
         def _record(res: dict):
             """Capture a step's response + any send_message_main call. Skips hard
             provider-error sentinels so a transient outage isn't surfaced as the
@@ -304,6 +313,7 @@ class TaskAIEngine:
             self._reset_work_mode()
             return None, [], list(self._engine.conversation_history)
         _record(result)
+        _emit_step()
 
         # Work mode continuation loop. A single failed step (provider error or
         # exception) no longer kills the ping — it's retried a few times; only
@@ -355,6 +365,7 @@ class TaskAIEngine:
             consecutive_failures = 0
             result = step_result
             _record(result)
+            _emit_step()
 
             if result.get('exited_work_mode'):
                 log.info(f"[TaskAIEngine.run_full_ping] Work mode exited after {iteration} iteration(s)")
@@ -674,30 +685,42 @@ class TaskThread(threading.Thread):
         api_history   = self._build_api_history(session)
         api_hist_len  = len(api_history)
 
-        # 3. Record the ping into the session, then run the AI.
+        # 3. Record the ping, then run the AI — persisting the session after EVERY
+        #    step so the viewer updates LIVE. `ongoing` drives the "Ongoing" label.
         ping_content = self._make_ping_content(resolved)
-        session['chat_history'].append({'role': 'system', 'content': ping_content})
+        pre_history  = list(session['chat_history'])
+        ping_entry   = {'role': 'system', 'content': ping_content}
+
+        def _rebuild(engine_hist, ongoing):
+            tail = [dict(m) for m in engine_hist[api_hist_len:]
+                    if m.get('role') in ('assistant', 'system')]
+            session['chat_history'] = pre_history + [ping_entry] + tail
+            session['ongoing'] = ongoing
+
+        # Show the ping + "Ongoing" immediately (before the first provider call).
+        _rebuild([], True)
+        self._save_session(session, task_id, today)
+
+        def _on_step(engine_hist):
+            _rebuild(engine_hist, True)
+            self._save_session(session, task_id, today)
 
         _unlimited = task.get('unlimited_work_iterations', False)
         _max_iter  = 999999 if _unlimited else task.get('max_work_iterations', 20)
         response_text, send_main_calls, engine_history = self._ai.run_full_ping(
-            ping_content, api_history, system_prompt, max_iterations=_max_iter
+            ping_content, api_history, system_prompt, max_iterations=_max_iter, on_step=_on_step
         )
 
         # 4. Dispatch any user-facing messages the agent emitted.
         for msg in send_main_calls:
             self._safe_send_main(msg)
 
-        # 5. Persist the engine's new assistant/work messages into the session.
-        for _msg in engine_history[api_hist_len:]:
-            if _msg.get('role') in ('assistant', 'system'):
-                session['chat_history'].append(dict(_msg))
-        # Stamp the last assistant entry with the finish time.
+        # 5. Final persist — no longer ongoing + stamp the last assistant's finish time.
+        _rebuild(engine_history, False)
         for _i in range(len(session['chat_history']) - 1, -1, -1):
             if session['chat_history'][_i].get('role') == 'assistant':
                 session['chat_history'][_i]['content'] += f"\n{_now_stamp()}"
                 break
-
         self._save_session(session, task_id, today)
         log.info(f"[TaskThread._execute_ping] Ping complete for task='{task['name']}'")
         return response_text is not None
