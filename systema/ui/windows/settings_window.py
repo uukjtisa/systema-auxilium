@@ -7,11 +7,65 @@ FIXED: Voice settings now actually work - VAD and TTS voice selection are functi
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QLineEdit, QPushButton, QTextEdit, QComboBox, QGroupBox,
                              QCheckBox, QScrollArea, QFrame, QSlider, QSpinBox, QDoubleSpinBox,
-                             QPlainTextEdit, QFileDialog)
+                             QPlainTextEdit, QFileDialog, QStackedWidget)
 from PyQt6.QtCore import Qt, QPoint, QTimer, QRect, QRectF
 from PyQt6.QtGui import QRegion, QPainter, QColor, QFont, QPen
 from systema.ui.base_window import BaseWindow
 from systema.ui import theme as _theme
+
+
+class _SegmentedTabs(QWidget):
+    """Stretch-to-fill segmented tab bar + stacked pages. Drop-in for the parts of
+    QTabWidget this window uses (addTab / setCurrentIndex / currentIndex / count).
+    Buttons expand equally to fill the width — no scroll arrows, no empty band.
+    Colours are passed in from the window's active-theme palette."""
+
+    def __init__(self, surface, elev, text, muted, parent=None):
+        super().__init__(parent)
+        self._surface, self._elev, self._text, self._muted = surface, elev, text, muted
+        self._buttons = []
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        self._bar = QWidget()
+        self._bar.setStyleSheet(f"background: {surface};")
+        self._bar_lay = QHBoxLayout(self._bar)
+        self._bar_lay.setContentsMargins(10, 7, 10, 7)
+        self._bar_lay.setSpacing(6)
+        root.addWidget(self._bar)
+        self._stack = QStackedWidget()
+        root.addWidget(self._stack, 1)
+
+    def addTab(self, widget, label):
+        idx = len(self._buttons)
+        btn = QPushButton(label)
+        btn.setCheckable(True)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {self._muted}; border: none;"
+            f" border-radius: 8px; padding: 9px 6px; font-size: 11px; font-weight: 500; }}"
+            f"QPushButton:hover {{ background: rgba(255,255,255,0.06); color: {self._text}; }}"
+            f"QPushButton:checked {{ background: {self._elev}; color: #FFFFFF; font-weight: 600; }}"
+        )
+        btn.clicked.connect(lambda _=False, i=idx: self.setCurrentIndex(i))
+        self._bar_lay.addWidget(btn, 1)   # equal stretch → tabs fill the width
+        self._buttons.append(btn)
+        self._stack.addWidget(widget)
+        if idx == 0:
+            self.setCurrentIndex(0)
+        return idx
+
+    def setCurrentIndex(self, i):
+        if 0 <= i < len(self._buttons):
+            self._stack.setCurrentIndex(i)
+            for j, b in enumerate(self._buttons):
+                b.setChecked(j == i)
+
+    def currentIndex(self):
+        return self._stack.currentIndex()
+
+    def count(self):
+        return self._stack.count()
 
 
 class _TokenGraphCanvas(QWidget):
@@ -123,6 +177,7 @@ class SettingsWindow(BaseWindow):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setMinimumSize(600, 500)
         self.resize(600, 750)  # Default size (but resizable!)
+        self.setMaximumWidth(900)  # cap horizontal stretch so it never sprawls
 
         # Main container for rounded corners
         self.container = QWidget()
@@ -358,28 +413,11 @@ class SettingsWindow(BaseWindow):
         main_layout.addWidget(header_bar)
 
         # ── Tab widget ───────────────────────────────────────────────────────
-        tabs = QTabWidget()
+        # Custom segmented tab bar: buttons stretch equally to fill the width
+        # (Qt ignores QTabBar.setExpanding when a stylesheet is applied), no scroll
+        # arrows, and the strip shares the content surface — no dark empty band.
+        tabs = _SegmentedTabs(_SURFACE, _ELEV, _TEXT, _MUTED)
         self._tabs = tabs
-        tabs.setStyleSheet(f"""
-            QTabWidget::pane {{
-                border: none;
-                background: {_SURFACE};
-            }}
-            QTabBar::tab {{
-                background: {_BASE};
-                color: {_MUTED};
-                border: none;
-                padding: 10px 18px;
-                font-size: 11px;
-                font-weight: 500;
-            }}
-            QTabBar::tab:selected {{
-                color: {_ACCENT};
-                border-bottom: 2px solid {_ACCENT};
-                background: {_SURFACE};
-            }}
-            QTabBar::tab:hover:!selected {{ color: {_TEXT}; background: {_ELEV}; }}
-        """)
 
         # ════════════════════════════════════════════════════════════════════
         # TAB 1 — AI
@@ -609,6 +647,7 @@ class SettingsWindow(BaseWindow):
         _gen_shortcuts = [
             ("🔧  Tool Calling Mode (Native / Compatibility)", 6),
             ("⚡  Code Execution", 6),
+            ("📱  Android Packet Port", 6),
             ("🤖  AI Provider & Model Script", 1),
             ("💬  Conversation Prefilling", 1),
             ("🎤  Voice & Speech (TTS)", 2),
@@ -1215,6 +1254,75 @@ class SettingsWindow(BaseWindow):
             "whether to extend the timeout or kill the operation."))
         sys_lay.addWidget(exec_group)
 
+        # ── Android Bridge / Packet ─────────────────────────────────────────
+        packet_group = QGroupBox("📱 Android Packet")
+        packet_group.setStyleSheet(_GROUP)
+        pk_lay = QVBoxLayout(packet_group)
+        _port_row = QHBoxLayout()
+        _port_row.addWidget(_label("Packet port (Android Bridge):"))
+        self.packet_port_spin = QSpinBox()
+        self.packet_port_spin.setRange(1024, 65535)
+        self.packet_port_spin.setValue(1111)
+        self.packet_port_spin.setSingleStep(1)
+        self.packet_port_spin.setFixedWidth(120)
+        self.packet_port_spin.setStyleSheet(f"""
+            QSpinBox {{
+                background-color: {_ELEV};
+                border: 1px solid {_BORDER};
+                border-radius: 6px;
+                padding: 6px 10px;
+                font-size: 11px;
+                color: {_TEXT};
+            }}
+            QSpinBox:focus {{ border-color: {_ACCENT}; }}
+        """)
+        _port_row.addWidget(self.packet_port_spin)
+        _port_row.addStretch()
+        pk_lay.addLayout(_port_row)
+        pk_lay.addWidget(_info_box(
+            "TCP port the Android app connects to over Wi-Fi LAN (default 1111).\n"
+            "Enter this as IP:port in the phone app. A change takes effect the next "
+            "time you open the packet (close & reopen it from the floating icon)."))
+        sys_lay.addWidget(packet_group)
+
+        # ── Desktop Shortcut (cross-OS, admin/normal hot-toggle) ─────────────
+        sc_group = QGroupBox("🔗 Desktop Shortcut")
+        sc_group.setStyleSheet(_GROUP)
+        sc_lay = QVBoxLayout(sc_group)
+        sc_lay.addWidget(_info_box(
+            "Create a Systema Auxilium shortcut on your Desktop. Choose whether it "
+            "launches normally or elevated — switching is applied instantly to the "
+            "existing shortcut (Windows: UAC shield • Linux: pkexec • macOS: admin prompt)."))
+        self._sc_priv_group = QButtonGroup(self)
+        self._sc_radio_normal = QRadioButton("Normal privileges")
+        self._sc_radio_admin = QRadioButton("Run as administrator")
+        for _rb in (self._sc_radio_normal, self._sc_radio_admin):
+            _rb.setStyleSheet(_CHECK)
+            self._sc_priv_group.addButton(_rb)
+        self._sc_radio_normal.setChecked(True)
+        _sc_radio_row = QHBoxLayout()
+        _sc_radio_row.addWidget(self._sc_radio_normal)
+        _sc_radio_row.addWidget(self._sc_radio_admin)
+        _sc_radio_row.addStretch()
+        sc_lay.addLayout(_sc_radio_row)
+        _sc_btn_row = QHBoxLayout()
+        _sc_apply_btn = QPushButton("Create / Update Shortcut")
+        _sc_apply_btn.setStyleSheet(_BTN)
+        _sc_apply_btn.clicked.connect(self._apply_shortcut)
+        _sc_remove_btn = QPushButton("Remove")
+        _sc_remove_btn.setStyleSheet(_BTN)
+        _sc_remove_btn.clicked.connect(self._remove_shortcut)
+        _sc_btn_row.addWidget(_sc_apply_btn, stretch=1)
+        _sc_btn_row.addWidget(_sc_remove_btn)
+        sc_lay.addLayout(_sc_btn_row)
+        self._sc_status_lbl = QLabel("")
+        self._sc_status_lbl.setWordWrap(True)
+        self._sc_status_lbl.setStyleSheet(
+            f"color: {_MUTED}; font-size: 10px; background: transparent; padding-top: 4px;")
+        sc_lay.addWidget(self._sc_status_lbl)
+        sys_lay.addWidget(sc_group)
+        self._refresh_shortcut_status()
+
         sys_lay.addStretch()
         tabs.addTab(sys_scroll, "💻 System")
 
@@ -1392,6 +1500,46 @@ class SettingsWindow(BaseWindow):
         except Exception as e:
             self.show_status_message(f"✗ Error refreshing devices: {e}")
 
+    # ── Desktop shortcut (cross-OS) ─────────────────────────────────────────
+    def _sync_shortcut_radios(self):
+        try:
+            from systema.common import shortcuts as _sc
+            st = _sc.status()
+            if st["exists"] and st["admin"] is not None:
+                (self._sc_radio_admin if st["admin"] else self._sc_radio_normal).setChecked(True)
+        except Exception:
+            pass
+
+    def _refresh_shortcut_status(self):
+        try:
+            from systema.common import shortcuts as _sc
+            st = _sc.status()
+            if st["exists"]:
+                lvl = "administrator" if st["admin"] else "normal"
+                self._sc_status_lbl.setText(f"✓ Shortcut on Desktop  ·  {lvl}")
+            else:
+                self._sc_status_lbl.setText("No desktop shortcut yet.")
+        except Exception as e:
+            self._sc_status_lbl.setText(f"Shortcut status unavailable: {e}")
+        self._sync_shortcut_radios()
+
+    def _apply_shortcut(self):
+        try:
+            from systema.common import shortcuts as _sc
+            ok, msg = _sc.set_admin(self._sc_radio_admin.isChecked())
+            self._sc_status_lbl.setText(("✓  " if ok else "✗  ") + msg)
+        except Exception as e:
+            self._sc_status_lbl.setText(f"✗  {e}")
+
+    def _remove_shortcut(self):
+        try:
+            from systema.common import shortcuts as _sc
+            ok, msg = _sc.remove_shortcut()
+            self._sc_status_lbl.setText(("✓  " if ok else "✗  ") + msg)
+            self._sc_radio_normal.setChecked(True)
+        except Exception as e:
+            self._sc_status_lbl.setText(f"✗  {e}")
+
     def load_settings(self):
         """Load settings from controller"""
         # Load General settings
@@ -1406,6 +1554,9 @@ class SettingsWindow(BaseWindow):
         )
         self.exec_timeout_spin.setValue(
             self.controller.settings.get('tool_execution_timeout_seconds', 300)
+        )
+        self.packet_port_spin.setValue(
+            self.controller.settings.get('packet_port', 1111)
         )
         _tc_mode = self.controller.settings.get('tool_calling_mode', 'compat')
         _tc_idx = self.tool_calling_mode_combo.findData(_tc_mode)
@@ -1607,6 +1758,7 @@ class SettingsWindow(BaseWindow):
         except Exception:
             pass
         self.controller.settings['tool_execution_timeout_seconds'] = self.exec_timeout_spin.value()
+        self.controller.settings['packet_port'] = self.packet_port_spin.value()
         self.controller.settings['tool_calling_mode'] = self.tool_calling_mode_combo.currentData()
 
         # Save active LLM provider script

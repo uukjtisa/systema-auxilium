@@ -1,138 +1,85 @@
 # ============================================================================
-# SYSTEMA AUXILIUM - REQUIREMENTS
+# SYSTEMA AUXILIUM — REQUIREMENTS
+# ----------------------------------------------------------------------------
+# Basic install:   pip install -r requirements.txt
+# Recommended:     run  python setup.py  — it builds a .venv and installs these
+#                  for you, with an interactive optional-modules picker.
 # ============================================================================
 
-# ============================================================================
-# REQUIRED DEPENDENCIES (Core Functionality)
-# ============================================================================
+# ── Core / GUI ────────────────────────────────────────────────────────────
+PyQt6                 # Desktop GUI framework
+Pillow                # Image handling (thumbnails, tray icon, shortcut icons)
+pystray               # System-tray icon
+psutil                # System information
+send2trash            # Safe file deletion (Recycle Bin / Trash)
+pyautogui             # Screen capture + desktop automation
+requests              # HTTP for provider scripts & skills
+markdown2             # Markdown rendering in chat
+matplotlib            # LaTeX / plot rendering
+pyparsing             # Markdown / table parsing helper
 
-# GUI Framework
-PyQt6
+# ── AI Provider SDKs (used by the bundled provider scripts) ─────────────────
+anthropic             # Anthropic Claude API
+google-genai          # Google Gemini API (unified SDK; replaces google-generativeai)
+openai                # OpenAI-compatible REST providers
 
-# HTTP Requests & Web (For Puter.js API Bridge)
-requests
-Flask
-Flask-CORS
-flask-socketio
-
-# AI Provider SDKs
-anthropic          # Anthropic Claude API (official SDK)
-google-genai       # Google Gemini API (new unified SDK, replaces google-generativeai)
-openai             # For Scripted Providers that use REST API
-
-# Memory Recall
+# ── Memory recall (RAG embeddings) ──────────────────────────────────────────
 fastembed
 numpy
-# ⚠ onnxruntime 1.20+ has DLL initialization issues on Windows.
+# onnxruntime 1.20+ has DLL initialization issues on Windows.
 # Pin to 1.19.2 for stability. Do NOT upgrade without testing.
 onnxruntime==1.19.2
 
-# Browser Automation (for Puter.js)
-selenium
-webdriver_manager
-
-# System Information
-psutil
-
-# Voice Input/Output
-# numpy>=2.0.0 is required for opencv-python compatibility if the user installs it later.
-# matplotlib>=3.9.0 is required to support numpy 2.x (3.7.x was compiled against numpy 1.x).
-numpy
+# ── Voice input / output ────────────────────────────────────────────────────
 sounddevice
-webrtcvad-wheels  # Changed from webrtcvad to webrtcvad-wheels to skip compiling in installing dependencies.
+webrtcvad-wheels      # prebuilt wheels for VAD (no C compiler needed)
 SpeechRecognition
 edge-tts
-pygame
-
-# Text Processing & Rendering
-markdown2
-matplotlib
-pyparsing
-
-# System Tray Icons
-pystray
-Pillow
-
+pygame                # audio playback
 
 # ============================================================================
-# OPTIONAL
+# OPTIONAL — enable per feature (installed by default unless commented out)
 # ============================================================================
 
-# --- web-browser (skill) --- 
-# Recommended
+# --- web-browser skill (recommended) ---
 beautifulsoup4
 duckduckgo_search
 trafilatura
 
-# --- data-viz (skill) --- 
-# Recommended
+# --- data-viz skill (recommended) ---
 pandas
 
-# --- Local AI Models (LLaMA) ---
-# Uncomment to enable offline AI with LLaMA models (Only for capable hardware)
-# llama-cpp-python
+# --- Offline TTS ---              (uncomment to enable)
+# pyttsx3
 
-# --- Advanced Voice Activity Detection (Silero VAD) ---
-# Uncomment to enable ML-based voice detection
-# ⚠ Install torch separately — DO NOT add to this file.
-# Run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+# --- Offline STT (Vosk) ---       (uncomment to enable)
+# vosk
+
+# --- Local LLaMA models ---       (capable hardware only)
+# llama-cpp-python
+#   Windows CUDA wheels:
+#   pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
+
+# --- Silero VAD (ML voice detection) ---
+#   Install torch SEPARATELY — do NOT add it here (conflicts with onnxruntime on Windows):
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
 # torch
 # torchaudio
 
-# --- Offline Speech Recognition (Vosk) ---
-# Uncomment for offline STT alternative
-# vosk
-
-# --- Offline Text-to-Speech (pyttsx3) ---
-# Uncomment for offline TTS
-# pyttsx3
-
-
 # ============================================================================
-# INSTALLATION NOTES
+# PLATFORM NOTES
 # ============================================================================
-
-# Basic Installation (Required Only):
-#   pip install -r requirements.txt
-#
-# Full Installation (All Features):
-#   Uncomment optional dependencies above, then:
-#   pip install -r requirements.txt
-#
-# OpenCV Installation (AI Visual Capabilities):
-#   Uncomment opencv-python above, then:
-#   pip install -r requirements.txt
-#   NOTE: numpy>=2.0.0 is already enforced above so no conflict will occur.
-#
-# LLaMA Setup (Windows users may need specific build):
-#   pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
-#
-# Silero VAD (requires PyTorch — install separately, NOT via requirements.txt):
-#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
-#   ⚠ Do NOT add torch to requirements.txt — it conflicts with onnxruntime
-#     and causes DLL failures on Windows.
-#
-# Chrome/ChromeDriver for Selenium:
-#   - Download from: https://chromedriver.chromium.org/
-#   - Or install via: pip install webdriver-manager
-
-
-# ============================================================================
-# PLATFORM-SPECIFIC NOTES
-# ============================================================================
-
 # Windows:
-#   - Requires Visual C++ Redistributable 2015-2022 (x64):
+#   - Visual C++ Redistributable 2015–2022 (x64):
 #     https://aka.ms/vs/17/release/vc_redist.x64.exe
-#   - onnxruntime must stay at ==1.19.2 (1.20+ has DLL init failures on Windows)
-#   - For audio, ensure you have working audio drivers
+#   - Keep onnxruntime==1.19.2 (1.20+ causes DLL init failures).
 #
-# Linux:
-#   - May need: sudo apt-get install portaudio19-dev python3-pyaudio
-#   - For PyQt6: sudo apt-get install python3-pyqt6
+# Linux (Debian/Ubuntu):
+#   sudo apt-get install python3-pyqt6 python3-tk portaudio19-dev
+#   - The "Run as administrator" desktop-shortcut option uses `pkexec`
+#     (package: policykit-1).
 #
 # macOS:
-#   - May need: brew install portaudio
-#   - For PyQt6: brew install pyqt6
-
+#   brew install portaudio
+#   - Grant Accessibility permission in System Settings → Privacy & Security.
 # ============================================================================
