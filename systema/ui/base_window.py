@@ -29,7 +29,8 @@ Subclasses that override eventFilter MUST call super().eventFilter(obj, event)
 at the end so the resize-handle logic is always reached.
 """
 
-from PyQt6.QtWidgets import QWidget, QFrame
+from PyQt6.QtWidgets import (QWidget, QFrame, QVBoxLayout, QHBoxLayout,
+                             QLabel, QPushButton)
 from PyQt6.QtCore import Qt, QPoint, QRect, QTimer
 from PyQt6.QtGui import QRegion
 
@@ -226,3 +227,148 @@ class BaseWindow(QWidget):
                 return True
 
         return super().eventFilter(obj, event)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Reusable window shell — the "ultimate parent" chrome.
+    #
+    # New windows should build themselves with these instead of hand-rolling a
+    # header + buttons. Minimal usage:
+    #
+    #     class MyWindow(BaseWindow):
+    #         def __init__(self, controller):
+    #             super().__init__()
+    #             from systema.ui import theme
+    #             p = theme.current_palette(controller)
+    #             body = self.build_shell(p, "My Window", min_size=(560, 460))
+    #             body.addWidget(self.make_button("Do it", p, kind="primary"))
+    #
+    # `build_shell` returns the body QVBoxLayout to populate; it wires the
+    # frameless flags, rounded container, draggable title bar, resize handles
+    # and a professional close/min/max button set.
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def build_shell(self, palette, title, min_size=(560, 460),
+                    buttons=("close",), radius=12):
+        """One-call window setup. Returns the body QVBoxLayout to add content to."""
+        self._pal_cache = palette
+        self._shell_radius = radius
+        self._init_chrome_state()
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
+        self.setMinimumSize(*min_size)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        self._shell = QFrame()
+        self._shell.setObjectName("bwShell")
+        self._shell.setStyleSheet(
+            f"#bwShell {{ background-color: {palette['bg']};"
+            f" border: 1px solid {palette['border']}; border-radius: {radius}px; }}")
+        outer.addWidget(self._shell)
+
+        root = QVBoxLayout(self._shell)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        root.addWidget(self.build_title_bar(title, palette, buttons, radius))
+
+        body = QVBoxLayout()
+        body.setContentsMargins(18, 14, 18, 16)
+        body.setSpacing(10)
+        root.addLayout(body)
+
+        self.create_resize_handles()
+        return body
+
+    def build_title_bar(self, title, palette, buttons=("close",), radius=12):
+        """A draggable custom title bar: title on the left, chrome buttons right."""
+        bar = QFrame()
+        bar.setFixedHeight(self._header_height)
+        bar.setStyleSheet(
+            f"QFrame {{ background-color: {palette['surface']};"
+            f" border-top-left-radius: {radius}px; border-top-right-radius: {radius}px; }}")
+        bar.mousePressEvent = self.header_mouse_press
+        bar.mouseMoveEvent = self.header_mouse_move
+        bar.mouseReleaseEvent = self.header_mouse_release
+        if "maximize" in buttons:
+            bar.mouseDoubleClickEvent = lambda e: self.toggle_maximize()
+
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(16, 0, 8, 0)
+        lay.setSpacing(4)
+        self._title_label = QLabel(title)
+        self._title_label.setStyleSheet(
+            f"color: {palette['text']}; font-size: 13px; font-weight: 600;"
+            f" background: transparent; border: none;")
+        lay.addWidget(self._title_label)
+        lay.addStretch()
+
+        for kind in buttons:
+            if kind == "minimize":
+                lay.addWidget(self._chrome_button("–", palette, self.showMinimized))
+            elif kind == "maximize":
+                self.maximize_btn = self._chrome_button("□", palette, self.toggle_maximize)
+                lay.addWidget(self.maximize_btn)
+            elif kind == "close":
+                lay.addWidget(self._chrome_button("✕", palette, self.close, danger=True))
+        return bar
+
+    def set_title(self, text: str):
+        if getattr(self, "_title_label", None) is not None:
+            self._title_label.setText(text)
+
+    def _chrome_button(self, glyph, palette, on_click, danger=False):
+        btn = QPushButton(glyph)
+        btn.setFixedSize(32, 30)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        hover = "rgba(232,72,72,0.90)" if danger else "rgba(255,255,255,0.10)"
+        hover_fg = "#ffffff" if danger else palette["text"]
+        btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {palette['muted']};"
+            f" border: none; border-radius: 6px; font-size: 13px; }}"
+            f"QPushButton:hover {{ background: {hover}; color: {hover_fg}; }}")
+        btn.clicked.connect(on_click)
+        return btn
+
+    @staticmethod
+    def make_button(text, palette, kind="secondary"):
+        """A consistently-styled body button. kind: primary | secondary | ghost."""
+        from systema.ui import theme  # local import avoids any import cycle
+        btn = QPushButton(text)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setMinimumHeight(34)
+        if kind == "primary":
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {palette['accent']}; color: #05070a;"
+                f" border: none; border-radius: 8px; padding: 8px 18px; font-size: 12px;"
+                f" font-weight: 600; }}"
+                f"QPushButton:hover {{ background-color: {theme.lighten(palette['accent'], 0.18)}; }}"
+                f"QPushButton:pressed {{ background-color: {theme.darken(palette['accent'], 0.12)}; }}"
+                f"QPushButton:disabled {{ background-color: {palette['surface2']};"
+                f" color: {palette['muted']}; }}")
+        elif kind == "ghost":
+            btn.setStyleSheet(
+                f"QPushButton {{ background: transparent; color: {palette['text']};"
+                f" border: none; border-radius: 8px; padding: 8px 14px; font-size: 12px; }}"
+                f"QPushButton:hover {{ background: rgba(255,255,255,0.06); }}"
+                f"QPushButton:disabled {{ color: {palette['muted']}; }}")
+        else:  # secondary
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {palette['surface2']}; color: {palette['text']};"
+                f" border: 1px solid {palette['border']}; border-radius: 8px; padding: 8px 16px;"
+                f" font-size: 12px; }}"
+                f"QPushButton:hover {{ border-color: {palette['accent']};"
+                f" background-color: {theme.lighten(palette['surface2'], 0.06)}; }}"
+                f"QPushButton:disabled {{ color: {palette['muted']}; border-color: {palette['border']}; }}")
+        return btn
+
+    def center_on_screen(self):
+        """Center this window on the screen it will appear on."""
+        try:
+            screen = self.screen() or (self.windowHandle() and self.windowHandle().screen())
+            geo = (screen.availableGeometry() if screen else None)
+            if geo is not None:
+                fg = self.frameGeometry()
+                fg.moveCenter(geo.center())
+                self.move(fg.topLeft())
+        except Exception:
+            pass

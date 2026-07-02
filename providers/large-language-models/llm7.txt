@@ -1,0 +1,40 @@
+Model: qwen3-235b-a22b-instruct-2507-fp8
+  Provider: g
+  Context: {'chars': None, 'tokens': 240000}
+----------------------------------------
+Model: kimi-k2.6
+  Provider: g
+  Context: {'chars': None, 'tokens': 240000}
+----------------------------------------
+Model: minimax-m2.7
+  Provider: g
+  Context: {'chars': None, 'tokens': 180000}
+----------------------------------------
+Model: gpt-oss-20b
+  Provider: p
+  Context: {'chars': None, 'tokens': None}
+----------------------------------------
+Model: codestral-latest
+  Provider: mistral
+  Context: {'chars': None, 'tokens': 32000}
+----------------------------------------
+Model: ministral-8b-2512
+  Provider: mistral
+  Context: {'chars': None, 'tokens': 32000}
+----------------------------------------
+Model: GLM-4.6V-Flash
+  Provider: glm
+  Context: {'chars': None, 'tokens': None}
+----------------------------------------
+Model: devstral-small-2:24b-cloud
+  Provider: ollama
+  Context: {'chars': None, 'tokens': None}
+----------------------------------------
+Model: deepseek-v4-flash
+  Provider: ollama
+  Context: {'chars': None, 'tokens': None}
+----------------------------------------
+Model: deepseek-v3.1:671b-terminus
+  Provider: ollama
+  Context: {'chars': None, 'tokens': None}
+----------------------------------------

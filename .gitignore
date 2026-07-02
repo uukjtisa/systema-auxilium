@@ -1,0 +1,7 @@
+# Maintainer notes stay in the working dir only — never in the repo.
+.dev-copy
+.dev/
+
+# Python
+__pycache__/
+*.py[cod]

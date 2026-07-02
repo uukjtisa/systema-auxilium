@@ -49,6 +49,11 @@ class AndroidBridge:
         """Start listening for an Android connection."""
         if self._visible:
             return
+        # Read the configured packet port (System settings); falls back to default.
+        try:
+            self._port = int((self.controller.settings or {}).get('packet_port', DEFAULT_PORT))
+        except Exception:
+            self._port = DEFAULT_PORT
         self._visible = True
         self._stop_event.clear()
         self._conn = None

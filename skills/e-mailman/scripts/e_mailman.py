@@ -16,8 +16,18 @@ from email.message import EmailMessage
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+# Force UTF-8 for stdout in both terminal and pipe/subprocess contexts
+if sys.stdout.encoding != "utf-8":
+    try:
+        import io
+        sys.stdout = io.TextIOWrapper(
+            sys.stdout.buffer,
+            encoding="utf-8",
+            errors="replace",
+            line_buffering=getattr(sys.stdout, "line_buffering", False),
+        )
+    except (AttributeError, OSError):
+        pass
 
 # ---------------------------------------------------------------------------
 # Paths

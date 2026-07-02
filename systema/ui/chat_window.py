@@ -2023,6 +2023,11 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
 
     def closeEvent(self, event):
         """Handle window close - just hide, don't close app"""
+        # Persist the final position/size before hiding so the next open restores it.
+        try:
+            self.save_window_geometry()
+        except Exception:
+            pass
         self.hide()
         event.ignore()  # Prevent the window from actually closing
 
@@ -5717,8 +5722,23 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
 
         self._update_pinned_overlay()
 
+    def moveEvent(self, event):
+        """Persist position when the window is dragged (debounced)."""
+        super().moveEvent(event)
+        # Ignore moves before the saved geometry has been restored, so an early
+        # default-position move doesn't overwrite the user's saved location.
+        if getattr(self, '_geometry_restored', False) and hasattr(self, 'resize_timer'):
+            self.resize_timer.stop()
+            self.resize_timer.start(600)
+
     def save_window_geometry(self):
         """Save window size and position to config"""
+        # Don't save until the saved geometry has been restored, otherwise the
+        # transient default geometry during startup would clobber the real value.
+        if not getattr(self, '_geometry_restored', False):
+            return
+        if self.isMinimized() or self.isMaximized():
+            return  # don't persist a minimized/maximized transient geometry
         try:
             config = {}
             if os.path.exists(self.config_file):
@@ -5753,6 +5773,10 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
                         )
         except Exception as e:
             log.error(f"[ChatWindow.load_window_geometry] Error loading window geometry: {e}")
+        finally:
+            # Restore is done (even if there was nothing to restore) — from now on
+            # move/resize should persist.
+            self._geometry_restored = True
 
     def eventFilter(self, obj, event):
         """Handle resize handle events and smooth scroll viewport events."""

@@ -16,6 +16,30 @@ description: >
 
 ---
 
+## Execution notes (Python subprocess)
+
+When calling `e_mailman.py` from Python via `subprocess.run` (or `Popen`), **you must always add `encoding="utf-8"`** alongside `text=True`.
+
+Without it, `capture_output=True` can silently return `None` for stdout on Windows (pipe inherit issue after the script reconfigures stdout), or emoji arrows will crash with `UnicodeEncodeError`.
+
+Correct:
+```python
+subprocess.run(
+    [sys.executable, script, "notes"],
+    capture_output=True, text=True, encoding="utf-8", errors="replace"
+)
+```
+
+Incorrect:
+```python
+subprocess.run(
+    [sys.executable, script, "notes"],
+    capture_output=True, text=True      # May return stdout=None or crash on emoji
+)
+```
+
+---
+
 ## STEP 0 — Read notes first. Always.
 
 ```bash
@@ -117,7 +141,7 @@ Each entry in `account_notes.json` now holds both the email address and the note
 ```json
 {
   "Thirdy's email": {
-    "email": "thirdy@gmail.com",
+    "email": "you@example.com",
     "notes": "Personal Gmail. Use for reading emails..."
   }
 }

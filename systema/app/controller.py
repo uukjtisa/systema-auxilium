@@ -34,6 +34,38 @@ log = _make_logger("Controller") if _verbose else _NoOpLogger()
 from systema import APP_ROOT as _APP_ROOT
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Detached relauncher used by restart_app(): waits for the old PID to release the
+# single-instance lock, then starts the app again with the same interpreter+argv.
+_RELAUNCH_SRC = '''import os, sys, time, subprocess
+PID, EXE, ARGV, CWD = {pid}, {exe}, {argv}, {cwd}
+
+def _alive(pid):
+    if sys.platform == "win32":
+        import ctypes
+        h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+        if not h:
+            return False
+        code = ctypes.c_ulong()
+        ctypes.windll.kernel32.GetExitCodeProcess(h, ctypes.byref(code))
+        ctypes.windll.kernel32.CloseHandle(h)
+        return code.value == 259  # STILL_ACTIVE
+    try:
+        os.kill(pid, 0); return True
+    except OSError:
+        return False
+
+for _ in range(300):
+    if not _alive(PID):
+        break
+    time.sleep(0.1)
+time.sleep(0.6)
+flags = 0x00000008 if sys.platform == "win32" else 0  # DETACHED_PROCESS
+try:
+    subprocess.Popen([EXE] + ARGV, cwd=CWD, creationflags=flags)
+except Exception:
+    subprocess.Popen([EXE] + ARGV, cwd=CWD)
+'''
+
 
 class AssistantController(QObject):
     """Main controller for the AI assistant with voice support"""
@@ -263,6 +295,8 @@ class AssistantController(QObject):
         # PATH SYNCER + MEMORY MANAGER — deferred until after the UI is painted
         # so the floating window appears immediately at startup
         self.memory_manager = None  # will be set by _deferred_bg_init
+        self.updater_service = None  # will be set by _deferred_bg_init
+        self._update_window = None   # lazily created by open_update_window()
         QTimer.singleShot(300, self._deferred_bg_init)
         self.log("System AI Assistant initialized", "SUCCESS")
         log.info(f"[AssistantController.__init__] ✓ AssistantController ready | "
@@ -302,7 +336,145 @@ class AssistantController(QObject):
             log.error(f"[AssistantController._deferred_bg_init] ✗ TaskManager failed: {e}")
             self.task_manager = None
 
+        # UPDATER SERVICE — self-update via the gitplucker library (optional dep)
+        try:
+            from systema.app.updater_service import UpdaterService
+            self.updater_service = UpdaterService(self)
+            self.updater_service.update_available.connect(self._on_update_available)
+            # Establish a merge baseline once (background) so 3-way review works
+            # from first install; skips the dev working copy. Then the update probe.
+            QTimer.singleShot(2500, self.updater_service.maybe_seed_baseline_on_startup)
+            QTimer.singleShot(4000, self.updater_service.check_startup_notify)
+            log.info("[AssistantController._deferred_bg_init] ✓ UpdaterService ready")
+        except Exception as e:
+            log.warning(f"[AssistantController._deferred_bg_init] UpdaterService failed (non-fatal): {e}")
+            self.updater_service = None
+
         log.info("[AssistantController._deferred_bg_init] ✓ Deferred init complete")
+
+    # ── Software updates ───────────────────────────────────────────────────────
+
+    def restart_app(self):
+        """Relaunch Systema Auxilium and quit this instance.
+
+        The app is single-instance (a named mutex + lock file), so the new
+        process must not start until this one has fully exited and released the
+        lock. We spawn a tiny detached relauncher that waits for our PID to die,
+        then starts the app with the same interpreter + argv, and then quit.
+        """
+        import sys, os, subprocess
+        from pathlib import Path
+        from PyQt6.QtWidgets import QApplication
+
+        try:
+            app_root = Path(__file__).resolve().parents[2]
+            argv = list(sys.argv)
+            cwd = os.path.dirname(os.path.abspath(argv[0])) if argv and argv[0] else os.getcwd()
+            relaunch = app_root / "data" / "_relaunch.py"
+            relaunch.parent.mkdir(parents=True, exist_ok=True)
+            relaunch.write_text(_RELAUNCH_SRC.format(
+                pid=os.getpid(), exe=repr(sys.executable),
+                argv=repr(argv), cwd=repr(cwd)), encoding="utf-8")
+            flags = 0
+            if sys.platform == "win32":
+                flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | \
+                        getattr(subprocess, "DETACHED_PROCESS", 0)
+            subprocess.Popen([sys.executable, str(relaunch)],
+                             cwd=str(app_root), close_fds=True, creationflags=flags)
+            log.info("[AssistantController.restart_app] relauncher spawned; quitting")
+        except Exception as e:
+            log.error(f"[AssistantController.restart_app] failed to spawn relauncher: {e}")
+            return False
+        QApplication.quit()
+        return True
+
+    def agent_activity(self):
+        """Return (busy, reason) describing whether the AI is mid-task.
+
+        Used to warn before disruptive actions (e.g. applying an update, which
+        rewrites source files the running agent may be using).
+        """
+        reasons = []
+        try:
+            tm = self.ai.tool_manager
+            if getattr(tm, "in_work_mode", False):
+                reasons.append("the agent is in work mode")
+            if getattr(tm, "work_code_running", False):
+                reasons.append("code execution is running")
+        except Exception:
+            pass
+        if getattr(self, "is_processing", False):
+            reasons.append("a response from the API is still pending")
+        return bool(reasons), "; ".join(reasons)
+
+    def _on_update_available(self, has_update: bool, branch: str, commits: list = None):
+        """Startup probe result — offer to open the updater if something is new.
+
+        ``commits`` is the stacked list of pending commit messages (newest first)
+        so the notification shows what actually changed, even when several updates
+        piled up unapplied.
+        """
+        if not has_update:
+            return
+        svc = getattr(self, "updater_service", None)
+        if svc is not None and not svc.notify_enabled:
+            log.info("[AssistantController._on_update_available] suppressed (notifications off)")
+            return
+        try:
+            from PyQt6.QtWidgets import QMessageBox
+            commits = commits or []
+            n = len(commits)
+            headline = (f"A newer version of Systema Auxilium is available on '{branch}'."
+                        if n <= 1 else
+                        f"{n} updates have stacked up on '{branch}' since you last updated.")
+            box = QMessageBox()
+            box.setWindowTitle("Update available")
+            box.setIcon(QMessageBox.Icon.Information)
+            box.setText(headline + "\n\nOpen the updater to review and choose what to apply?")
+            if commits:
+                # Show each commit's -m subject line, newest first (stacked).
+                lines = []
+                for c in commits[:12]:
+                    subj = (c.get("message", "") or "").splitlines()[0] if c.get("message") else "(no message)"
+                    lines.append(f"• {subj}")
+                if n > 12:
+                    lines.append(f"… and {n - 12} more")
+                box.setDetailedText("Changes since your version:\n\n" + "\n".join(lines))
+            open_btn = box.addButton("Open Updater", QMessageBox.ButtonRole.AcceptRole)
+            box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+            box.setModal(False)
+            box.finished.connect(
+                lambda *_: self.open_update_window() if box.clickedButton() is open_btn else None)
+            box.show()
+            self._update_notif_box = box  # keep a reference so it isn't GC'd
+        except Exception as e:
+            log.error(f"[AssistantController._on_update_available] {e}")
+
+    def open_update_window(self, parent=None):
+        """Open the self-update dialog (Settings > System > Check for Updates).
+
+        ``parent`` (the caller window, e.g. Settings) makes the update window a
+        top-level owned by it, so it stacks ABOVE the caller instead of behind.
+        """
+        svc = getattr(self, "updater_service", None)
+        if svc is None or not svc.available:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                parent, "Updater unavailable",
+                "The self-updater isn't available.\n\n"
+                "The 'updater-gitplucker' library must be installed in this "
+                "environment:\n    pip install updater-gitplucker")
+            return
+        try:
+            from systema.ui.windows.update_window import UpdateWindow
+            # Recreate if missing or if the owning parent changed.
+            if self._update_window is None or not self._update_window.isVisible():
+                self._update_window = UpdateWindow(self, parent=parent)
+            self._update_window.show()
+            self._update_window.raise_()
+            self._update_window.activateWindow()
+        except Exception as e:
+            log.error(f"[AssistantController.open_update_window] failed: {e}")
 
     # ── Convenience property ───────────────────────────────────────────────────
 

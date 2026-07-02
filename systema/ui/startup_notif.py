@@ -1,203 +1,175 @@
 """
 ui/startup_notif.py
+
+Lightweight tkinter notice popups, shown as a separate process so they appear
+instantly while the main app is still importing. Two modes:
+
+  (default)                 boot splash while Systema Auxilium initializes
+  --already-running <PID>   shown when a second instance is blocked
+
+Optional (already-running mode):
+  --console <HWND>          window handle of the terminal that launched the
+                            blocked instance; it is closed when the notice is
+                            dismissed / times out, so no stray console lingers.
+
+Styling matches the app's GitHub-dark palette. No emojis.
 """
-import tkinter as tk
+
 import sys
+import tkinter as tk
 
-# ── Already-running variant ───────────────────────────────────────────────────
-_already_running_pid = None
-if "--already-running" in sys.argv:
-    try:
-        _already_running_pid = int(sys.argv[sys.argv.index("--already-running") + 1])
-    except (ValueError, IndexError):
-        _already_running_pid = 0
+# ── Palette (Systema Auxilium dark) ──────────────────────────────────────────
+BG_ELEV  = "#161b22"
+BORDER   = "#232a33"
+FG_MAIN  = "#e6edf3"
+FG_SUB   = "#8b949e"
+FG_FAINT = "#586069"
 
-if _already_running_pid is not None:
-    import os
-    from datetime import datetime
 
-    _root = tk.Tk()
-    _root.title("Systema Auxilium — Already Running")
-    _root.geometry("460x245+{x}+{y}".format(
-        x=_root.winfo_screenwidth() - 480,
-        y=_root.winfo_screenheight() - 290
-    ))
-    _root.overrideredirect(True)
-    _root.attributes('-topmost', True)
-    _root.attributes('-alpha', 0.97)
+def _arg(flag):
+    if flag in sys.argv:
+        try:
+            return sys.argv[sys.argv.index(flag) + 1]
+        except IndexError:
+            return None
+    return None
 
-    bg      = "#0d1117"
-    bg_card = "#161b22"
-    border  = "#f85149"
-    fg_main = "#e6edf3"
-    fg_sub  = "#8b949e"
-    accent  = "#f85149"
-    btn_hvr = "#da3633"
 
-    _root.configure(bg=border)
-
-    outer = tk.Frame(_root, bg=border, padx=1, pady=1)
-    outer.pack(fill="both", expand=True)
-    frame = tk.Frame(outer, bg=bg_card, padx=20, pady=16)
-    frame.pack(fill="both", expand=True)
-
-    top_bar = tk.Frame(frame, bg=bg_card)
-    top_bar.pack(fill="x", pady=(0, 10))
-    dot = tk.Canvas(top_bar, width=10, height=10, bg=bg_card, highlightthickness=0)
-    dot.create_oval(1, 1, 9, 9, fill=accent, outline="")
-    dot.pack(side="left", padx=(0, 7), pady=2)
-    tk.Label(top_bar, text="SYSTEMA AUXILIUM", bg=bg_card, fg=fg_sub,
-             font=("Segoe UI", 8, "bold")).pack(side="left")
-
-    tk.Frame(frame, bg=border, height=1).pack(fill="x", pady=(0, 12))
-
-    tk.Label(frame, text="⚠  Instance Already Active",
-             bg=bg_card, fg=accent, font=("Segoe UI", 13, "bold"),
-             justify="left", anchor="w").pack(fill="x")
-
-    tk.Label(frame,
-             text="Systema Auxilium is already running in the background.",
-             bg=bg_card, fg=fg_main, font=("Segoe UI", 9),
-             justify="left", anchor="w").pack(fill="x", pady=(7, 0))
-
-    tk.Label(frame,
-             text=f"Process ID (PID):  {_already_running_pid}",
-             bg=bg_card, fg=accent, font=("Segoe UI", 9, "bold"),
-             justify="left", anchor="w").pack(fill="x", pady=(4, 0))
-
-    tk.Label(frame,
-             text=(f"Detected at {datetime.now().strftime('%H:%M:%S')}  ·  "
-                   "Use the existing floating window instead of launching again."),
-             bg=bg_card, fg="#484f58", font=("Segoe UI", 8),
-             justify="left", anchor="w", wraplength=400).pack(fill="x", pady=(3, 0))
-
-    bottom = tk.Frame(frame, bg=bg_card)
-    bottom.pack(fill="x", pady=(14, 0))
-
-    _secs = [5]
-    def _tick():
-        if _secs[0] <= 0:
-            _root.destroy(); return
-        _cd.config(text=f"Closing in {_secs[0]}s")
-        _secs[0] -= 1
-        _root.after(1000, _tick)
-
-    _cd = tk.Label(bottom, text=f"Closing in {_secs[0]}s",
-                   bg=bg_card, fg=fg_sub, font=("Segoe UI", 8))
-    _cd.pack(side="left", anchor="s")
-
-    _btn = tk.Button(bottom, text="  Dismiss  ", command=_root.destroy,
-                     bg=accent, fg="#ffffff", font=("Segoe UI", 9, "bold"),
-                     activebackground=btn_hvr, activeforeground="#ffffff",
-                     bd=0, padx=14, pady=5, cursor="hand2", relief="flat")
-    _btn.pack(side="right")
-    _btn.bind("<Enter>", lambda e: _btn.config(bg=btn_hvr))
-    _btn.bind("<Leave>", lambda e: _btn.config(bg=accent))
-
-    _root.after(1000, _tick)
-    _root.mainloop()
-    sys.exit(0)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def close_window(root):
-    root.destroy()
-
-def update_countdown(root, label, seconds_left):
-    if seconds_left <= 0:
-        close_window(root)
+def _close_console(hwnd):
+    """Post WM_CLOSE to a Windows console window (no-op if invalid/closed)."""
+    if not hwnd:
         return
-    label.config(text=f"Notification Closing in {seconds_left}s")
-    root.after(1000, update_countdown, root, label, seconds_left - 1)
+    try:
+        import ctypes
+        ctypes.windll.user32.PostMessageW(int(hwnd), 0x0010, 0, 0)  # WM_CLOSE
+    except Exception:
+        pass
+
+
+MODE_ALREADY = "--already-running" in sys.argv
+ACCENT = "#f85149" if MODE_ALREADY else "#3fb950"
+HOVER = "#da3633" if MODE_ALREADY else "#2ea043"
+CONSOLE_HWND = _arg("--console") if MODE_ALREADY else None
 
 root = tk.Tk()
 root.title("Systema Auxilium")
-root.geometry("420x210+{x}+{y}".format(
-    x=root.winfo_screenwidth() - 440,
-    y=root.winfo_screenheight() - 260
-))
+W, H = (472, 224) if MODE_ALREADY else (432, 202)
+root.geometry(f"{W}x{H}+{root.winfo_screenwidth() - W - 24}"
+              f"+{root.winfo_screenheight() - H - 56}")
 root.overrideredirect(True)
-root.attributes('-topmost', True)
-root.attributes('-alpha', 0.97)
+root.attributes("-topmost", True)
+root.attributes("-alpha", 0.98)
+root.configure(bg=BORDER)
 
-CLOSE_AFTER_SECONDS = 5  # ← change this number to adjust how long the notification stays
+# 1px border + accent left bar + card
+outer = tk.Frame(root, bg=BORDER)
+outer.pack(fill="both", expand=True, padx=1, pady=1)
+tk.Frame(outer, bg=ACCENT, width=4).pack(side="left", fill="y")
+card = tk.Frame(outer, bg=BG_ELEV, padx=20, pady=15)
+card.pack(side="left", fill="both", expand=True)
 
-bg        = "#0d1117"
-bg_card   = "#161b22"
-border    = "#30363d"
-fg_main   = "#e6edf3"
-fg_sub    = "#8b949e"
-accent    = "#58a6ff"
-btn_hover = "#1f6feb"
-
-root.configure(bg=bg)
-
-SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-
-def animate_spinner(label, frame_index=0):
-    spinner = SPINNER_FRAMES[frame_index % len(SPINNER_FRAMES)]
-    label.config(text=f"{spinner}  Initializing Systema Auxilium")
-    label.after(80, animate_spinner, label, frame_index + 1)
-
-outer = tk.Frame(root, bg=border, padx=1, pady=1)
-outer.pack(fill="both", expand=True)
-
-frame = tk.Frame(outer, bg=bg_card, padx=20, pady=16)
-frame.pack(fill="both", expand=True)
-
-# ── Top bar ──────────────────────────────────────────────────────
-top_bar = tk.Frame(frame, bg=bg_card)
-top_bar.pack(fill="x", pady=(0, 10))
-
-dot_canvas = tk.Canvas(top_bar, width=10, height=10, bg=bg_card,
-                        highlightthickness=0)
-dot_canvas.create_oval(1, 1, 9, 9, fill="#3fb950", outline="")
-dot_canvas.pack(side="left", padx=(0, 7), pady=2)
-
-tk.Label(top_bar, text="SYSTEMA AUXILIUM", bg=bg_card, fg=fg_sub,
+# Header
+hdr = tk.Frame(card, bg=BG_ELEV)
+hdr.pack(fill="x")
+_dot = tk.Canvas(hdr, width=9, height=9, bg=BG_ELEV, highlightthickness=0)
+_dot.create_oval(0, 0, 9, 9, fill=ACCENT, outline="")
+_dot.pack(side="left", padx=(0, 8), pady=2)
+tk.Label(hdr, text="SYSTEMA AUXILIUM", bg=BG_ELEV, fg=FG_SUB,
          font=("Segoe UI", 8, "bold")).pack(side="left")
+tk.Frame(card, bg=BORDER, height=1).pack(fill="x", pady=(11, 12))
+
+if MODE_ALREADY:
+    _pid = _arg("--already-running") or "?"
+    tk.Label(card, text="Instance already active", bg=BG_ELEV, fg=FG_MAIN,
+             font=("Segoe UI", 13, "bold"), anchor="w").pack(fill="x")
+    tk.Label(card, text="Systema Auxilium is already running in the background.",
+             bg=BG_ELEV, fg=FG_SUB, font=("Segoe UI", 9), anchor="w",
+             justify="left").pack(fill="x", pady=(6, 0))
+    tk.Label(card, text=f"Process ID   {_pid}", bg=BG_ELEV, fg=ACCENT,
+             font=("Segoe UI", 9, "bold"), anchor="w").pack(fill="x", pady=(4, 0))
+    tk.Label(card, text="Use the existing floating window instead of launching again.",
+             bg=BG_ELEV, fg=FG_FAINT, font=("Segoe UI", 8), anchor="w",
+             justify="left", wraplength=W - 74).pack(fill="x", pady=(3, 0))
+    BTN_TEXT, SECS = "Dismiss", 6
+else:
+    tk.Label(card, text="Starting Systema Auxilium", bg=BG_ELEV, fg=FG_MAIN,
+             font=("Segoe UI", 13, "bold"), anchor="w").pack(fill="x")
+    tk.Label(card, text="Please wait for the floating window to appear.",
+             bg=BG_ELEV, fg=FG_SUB, font=("Segoe UI", 9), anchor="w",
+             justify="left").pack(fill="x", pady=(6, 0))
+    tk.Label(card, text="A freshly booted device may start slower while the OS settles.",
+             bg=BG_ELEV, fg=FG_FAINT, font=("Segoe UI", 8), anchor="w",
+             justify="left", wraplength=W - 74).pack(fill="x", pady=(3, 0))
+    # Indeterminate progress sweep (a clean bar instead of a spinner glyph).
+    _track = tk.Canvas(card, height=3, bg=BORDER, highlightthickness=0)
+    _track.pack(fill="x", pady=(13, 0))
+    _seg = _track.create_rectangle(0, 0, 0, 3, fill=ACCENT, outline="")
+
+    def _sweep(x=0):
+        try:
+            w = _track.winfo_width() or (W - 74)
+            seg_w = max(46, w // 3)
+            pos = (x % (w + seg_w)) - seg_w
+            _track.coords(_seg, pos, 0, pos + seg_w, 3)
+            _track.after(16, _sweep, x + 6)
+        except tk.TclError:
+            pass  # window closed
+
+    _sweep()
+    BTN_TEXT, SECS = "Close", 5
+
+# Footer: countdown (left) + button (right)
+foot = tk.Frame(card, bg=BG_ELEV)
+foot.pack(fill="x", pady=(15, 0))
+_cd = tk.Label(foot, text=f"Closing in {SECS}s", bg=BG_ELEV, fg=FG_SUB,
+               font=("Segoe UI", 8))
+_cd.pack(side="left", anchor="s")
 
 
-# ── Divider ──────────────────────────────────────────────────────
-tk.Frame(frame, bg=border, height=1).pack(fill="x", pady=(0, 12))
+def _dismiss():
+    if MODE_ALREADY:
+        _close_console(CONSOLE_HWND)   # also close the launching terminal
+    try:
+        root.destroy()
+    except tk.TclError:
+        pass
 
-# ── Main message ─────────────────────────────────────────────────
-msg_label = tk.Label(frame, text="Initializing Systema Auxilium", bg=bg_card, fg=fg_main,
-                     font=("Segoe UI", 13, "bold"),
-                     justify="left", anchor="w")
-msg_label.pack(fill="x")
-animate_spinner(msg_label)
 
-tk.Label(frame, text="Please wait for the floating window to pop up.",
-         bg=bg_card, fg=fg_sub, font=("Segoe UI", 9),
-         justify="left", anchor="w").pack(fill="x", pady=(4, 0))
+_btn = tk.Button(foot, text=f"  {BTN_TEXT}  ", command=_dismiss, bg=ACCENT,
+                 fg="#0d1117", font=("Segoe UI", 9, "bold"),
+                 activebackground=HOVER, activeforeground="#ffffff",
+                 bd=0, padx=16, pady=5, cursor="hand2", relief="flat")
+_btn.pack(side="right")
+_btn.bind("<Enter>", lambda e: _btn.config(bg=HOVER, fg="#ffffff"))
+_btn.bind("<Leave>", lambda e: _btn.config(bg=ACCENT, fg="#0d1117"))
 
-tk.Label(frame, text="Startup on a newly booted device may be slower\ndue to cold boot lag while Operating System "
-                     "stabilizes.",
-         bg=bg_card, fg="#484f58", font=("Segoe UI", 8),
-         justify="left", anchor="w").pack(fill="x", pady=(2, 0))
+_left = [SECS]
 
-# ── Bottom row: countdown left, close button right ───────────────
-bottom = tk.Frame(frame, bg=bg_card)
-bottom.pack(fill="x", pady=(14, 0))
 
-countdown_label = tk.Label(bottom, text=f"Notification Closing in {CLOSE_AFTER_SECONDS}s", bg=bg_card, fg=fg_sub,
-                            font=("Segoe UI", 8))
-countdown_label.pack(side="left", anchor="s")
+def _tick():
+    if _left[0] <= 0:
+        _dismiss()
+        return
+    try:
+        _cd.config(text=f"Closing in {_left[0]}s")
+    except tk.TclError:
+        return
+    _left[0] -= 1
+    root.after(1000, _tick)
 
-btn = tk.Button(bottom, text="  Close  ",
-                command=lambda: close_window(root),
-                bg=accent, fg="#0d1117",
-                font=("Segoe UI", 9, "bold"),
-                activebackground=btn_hover, activeforeground="#ffffff",
-                bd=0, padx=14, pady=5,
-                cursor="hand2", relief="flat")
-btn.pack(side="right")
 
-btn.bind("<Enter>", lambda e: btn.config(bg=btn_hover, fg="#ffffff"))
-btn.bind("<Leave>", lambda e: btn.config(bg=accent,    fg="#0d1117"))
+root.after(1000, _tick)
 
-# ── Start countdown ──────────────────────────────────────────────
-update_countdown(root, countdown_label, CLOSE_AFTER_SECONDS)
+# Drag-to-move (frameless).
+def _press(e):
+    root._dx, root._dy = e.x, e.y
+
+def _move(e):
+    root.geometry(f"+{e.x_root - root._dx}+{e.y_root - root._dy}")
+
+for _w in (card, hdr):
+    _w.bind("<Button-1>", _press)
+    _w.bind("<B1-Motion>", _move)
 
 root.mainloop()
-
+sys.exit(0)

@@ -1,58 +1,46 @@
 # Systema Auxilium
 
-**License:** MIT
+**An AI-powered desktop assistant that controls your computer through natural language.**
 
-**Author / Architect:** Niccc2007 ([@uukjtisa](https://github.com/uukjtisa))
+**License:** MIT  ·  **Author / Architect:** Niccc2007 ([@uukjtisa](https://github.com/uukjtisa))
 
-> ⚠️ **Work in Progress** — This project is actively developed. Not all features are fully polished or tested. Contributions and patience are genuinely appreciated.
+> **Status:** Work in progress. Actively developed by one person; not every feature is fully polished, and bugs are expected. Issues, ideas, and pull requests are genuinely appreciated.
 
 ---
 
-# Table of Contents
-- [Things to take into consideration](#things-to-take-into-consideration)
+## Table of Contents
+
 - [What is Systema Auxilium](#what-is-systema-auxilium)
-- [See a Glimpse of It](#see-a-glimpse-of-it)
-- [What Can It Do](#what-can-it-do)
-- [Modular Provider Architecture](#modular-provider-architecture)
+- [A Glimpse of It](#a-glimpse-of-it)
+- [What It Can Do](#what-it-can-do)
+- [AI Providers and Tool Calling](#ai-providers-and-tool-calling)
+  - [Modular Provider Architecture](#modular-provider-architecture)
+  - [Configure a Provider (first-time setup)](#configure-a-provider-first-time-setup)
+  - [Tool Calling: Native and Compatibility](#tool-calling-native-and-compatibility)
+- [Software Updates](#software-updates)
 - [Android Bridge App](#android-bridge-app)
-- [About AI System Control](#about-ai-system-control)
+- [Installation](#installation)
 - [Recommended Python Environment](#recommended-python-environment)
-- [How to Install](#how-to-install)
-- [Safety Warnings](#safety-warnings)
+- [Responsible Use and Safety](#responsible-use-and-safety)
+- [Project Status and Considerations](#project-status-and-considerations)
 - [Contributing](#contributing)
-- [NOTICE](#notice)
-
----
-
-## Things to take into consideration.
-
-This is a **hobby project** built and maintained by a single person.
-
-**I only have access to Windows 11 (Main workspace), Windows 10 (VM), and a Kali Linux (VM) (<u>both VMs use Python 3.10</u>), so these are the only platforms I can personally test on. And even then, I can only test one thing at a time, so there may be some other unintended behaviors.**
-
-**Bugs are expected.** Some features have not been deeply tested, and certain functions may behave unexpectedly depending on your setup. And tool calls may leak if the LLM misses proper usage. If something breaks, please try to replicate it and open an issue. Any details you can provide will help a lot. And if you happen to know your way around Python, taking a look at the bug yourself would be even more appreciated! :)
-
-- **Lighter models may struggle to follow the system prompt tool format reliably.**
-- **Model instruction following capability matters.** This project was developed and tested with strong frontier models. Smaller or weaker models have not been tested and may produce unreliable tool usage. The modular provider system means you can test any model yourself without waiting for me to integrate it — which is kind of the whole point.
-- When the LLM fails to follow the format in tool usage, unintentional results may occur, like tool usage leaking into chat.
-- **System Prompt is not perfect.** I am still actively working on analyzing the system prompt to identify redundant and unnecessary instructions.
-- I'm open to suggestions for revamping the tool system. If you're experienced in agentic stuff, please consider mentoring me! **:)**
-
-Development happens in whatever time I can spare. Updates may be slow, inconsistent, or temporarily halted during academic periods. I have no prior experience maintaining a codebase of this scale, so there may be structural ambiguity in places. I appreciate your patience.
-
-**Co-authors are welcome.** If you find this project interesting and want to help build it, you are more than welcome. No experience bar. No formality. Just reach out or open a PR.
+- [Notice](#notice)
 
 ---
 
 ## What is Systema Auxilium?
 
-**Systema Auxilium** (Latin for *"System Helper"*) is an AI-powered desktop assistant that lets you control your computer through plain natural language. Instead of writing scripts or memorizing commands, you simply describe what you want done — and the assistant figures out the Python code to make it happen.
+**Systema Auxilium** (Latin for *"System Helper"*) is an AI desktop assistant that lets you
+control your computer in plain language. Instead of writing scripts or memorizing commands,
+you describe what you want, and the assistant writes and runs the Python needed to do it,
+observing the result and iterating until the task is done.
 
-It serves as a personalized companion that helps with general automation, making powerful OS operations accessible to anyone.
+It runs locally as a PyQt6 desktop app. The reasoning comes from a configurable LLM provider
+of your choice; everything else, including code execution, runs on your machine.
 
 ---
 
-## See a Glimpse of It
+## A Glimpse of It
 
 <p align="center">
   <img src="demos/1.png" width="45%" />
@@ -73,114 +61,101 @@ It serves as a personalized companion that helps with general automation, making
 
 ---
 
-## What Can It Do?
+## What It Can Do
 
-Systema Auxilium uses Python to do actual work on your computer. Its capabilities are scoped to what the Python interpreter can do, which is broad, so responsible use and reviewing generated code before execution is strongly encouraged.
+Systema Auxilium works by writing and running Python on your computer, so its reach is broad.
+Reviewing generated code before it runs (see [Responsible Use](#responsible-use-and-safety)) is
+strongly encouraged.
 
-**File & Folder Management**
-Read, write, create, move, rename, or delete files and directories. Analyse folders, count file types, calculate sizes, list contents — all from a single sentence.
+- **File and folder management** — read, write, create, move, rename, delete; analyze folders,
+  count file types, compute sizes, list contents from a single sentence.
+- **App and window control** — open, launch, or close applications; show popups, dialogs, or
+  custom GUI windows; interact with your desktop programmatically.
+- **System information and monitoring** — CPU, memory, disk, running processes, specs, and more.
+- **Calculations and data processing** — complex math, dataset processing, reading and parsing
+  files (text, CSV, and so on) into structured results.
+- **Voice mode** — speak to the assistant and hear replies via text-to-speech. ElevenLabs is
+  supported out of the box (expressive output including laughter, sighs, emphasis), plus any
+  custom TTS provider through the modular script system.
+- **Modular AI providers** — every AI backend is a self-contained script you drop into a folder.
+  No hardcoded providers, no codebase changes.
+- **Scheduled tasks** — persistent background agents that ping the AI on a schedule, each with
+  its own instruction, active window, ping interval, permissions, and pre-loaded skills. Task
+  agents can send messages straight into your main chat.
+- **Skills** — focused instruction packs (under `skills/`) that give the assistant specialized
+  knowledge and helper scripts for specific jobs.
+- **Self-knowledge** — the assistant can explain what it is and how it works, and check its own
+  status and updates on request (see [Software Updates](#software-updates)).
+- **Self-updating** — update the app from GitHub inside the app: review the exact changes, pick
+  which files to apply, auto-install new dependencies, with a backup and one-click revert.
+- **Session naming** — conversations are named automatically so you can navigate back easily.
+- **Guarded execution** — an optional mode that shows the generated Python before it runs, so
+  you can review, approve, or reject every action.
 
-**App & Window Control**
-Open, launch, or close applications. Show popups, dialogs, or custom GUI windows. Interact with your desktop environment programmatically.
-
-**System Information & Monitoring**
-Check CPU usage, memory, disk space, running processes, system specs, and more.
-
-**Calculations & Data Processing**
-Perform complex calculations, process datasets, read and parse files (text, CSV, etc.), and return structured results.
-
-**Voice Mode**
-Speak to Systema Auxilium and have it respond via text-to-speech. Supports ElevenLabs out of the box for realistic, emotional voice output — including natural expressions like laughter, sighs, and emphasis — plus any custom TTS provider via the modular script system.
-
-**Modular AI Provider Support**
-Every AI backend is a self-contained script you drop into a folder. No hardcoded providers, no codebase changes. See [Modular Provider Architecture](#modular-provider-architecture) below.
-
-**Scheduled Tasks**
-Set up persistent background agents that ping the AI on a schedule — even while you're doing something else. Each task has its own instruction, active time window, and ping interval (or specific ping times within that window). Tasks can be paused or activated without deletion, and each runs in its own session context. You can pre-load skills into a task agent so it has specialized knowledge from the moment it starts, and set per-task permissions to control exactly what the agent is allowed to do — like whether it can run code, use work mode, or manage skills. Task agents can send messages directly into your main chat when they have something to report.
-Extra features:
-    - Scripted Instructions: Possible applications Make conditional Instructions and well defined case appropriate instructions.
-    - Scripted Ping poller: Possible applications make a listener for messages in an app and ping the agent about it.
-IMPORTANT NOTE: Within the scheduled task, code execution calls are approved immediately, so be very careful with your instructions and permissions you allow!
-
-**Session Naming**
-The assistant automatically names each conversation session so you can easily navigate back to previous conversations.
-
-**Safe Execution Settings** *(Functional but still being refined — edge cases exist. Suggestions welcome.)*
-A safety-first mode that shows you the generated Python code *before* it runs, so you can review, approve, or reject every action.
+> Scheduled tasks approve code execution immediately within the task, so be deliberate about
+> each task's instructions and permissions.
 
 ---
 
-## Modular Provider Architecture
+## AI Providers and Tool Calling
 
-Systema Auxilium uses a **fully modular provider system** for both AI inference and text-to-speech. There is no hardcoded provider list — everything lives as a self-contained Python script in the `providers/` directory.
+### Modular Provider Architecture
 
-### How It Works
+Systema Auxilium uses a fully modular provider system for both AI inference and text-to-speech.
+There is no hardcoded provider list; each provider is a self-contained Python file in
+`providers/`.
 
-Each provider is just a Python file implementing a simple contract:
+Each provider implements a small contract:
 
-- **LLM providers** (`providers/large-language-models/`) → define `chat(system_prompt, messages) -> str`
-  Optional: `chat_image(system_prompt, messages, image_paths)` for vision support
-  Optional *(BETA)*: `chat_tools(system_prompt, messages, tools, images=None) -> dict` for native function calling — see [Tool Calling Modes](#tool-calling-modes-compat--native-beta)
-- **TTS providers** (`providers/text-to-speech/`) → define `speak(text, save_to) -> bool`
+- **LLM providers** (`providers/large-language-models/`) define `chat(system_prompt, messages) -> str`
+  - Optional: `chat_image(system_prompt, messages, image_paths)` for vision
+  - Optional: `chat_tools(system_prompt, messages, tools, images=None) -> dict` for native
+    function calling (see [Tool Calling](#tool-calling-native-and-compatibility))
+- **TTS providers** (`providers/text-to-speech/`) define `speak(text, save_to) -> bool`
 
-Drop a script in the right folder, hit Refresh in Settings, and it appears instantly. No codebase edits. No restart required.
+Drop a script in the right folder, hit Refresh in Settings, and it appears instantly. No codebase
+edits, no restart.
 
-### First-Time Setup — Configure a Provider
+**Included scripts:**
 
-> **Before you can chat, you need to configure at least one LLM provider.** This is the only real setup step, and it's the same as any other AI platform — you need an API key or access credential for the service you want to use.
+- LLM: `anthropic_provider.py` (Claude), `gemini_provider.py` (Gemini),
+  `custom_provider_llm7_io.py` (LLM7.io, OpenAI-compatible, native tool calling),
+  `provider_cloudflare_kimi_k2_6.py` (Cloudflare Workers AI / Kimi, native tool calling)
+- TTS: `elevenlabs_tts.py` (expressive voice synthesis)
 
-Here's how to do it in three steps:
+Each folder ships a `_template.py` with a ready-to-use skeleton, full docstrings, and a
+paste-ready prompt you can give any AI to generate a working provider for your API. The barrier
+to adding a provider is essentially zero.
 
-1. Open `providers/large-language-models/` and pick one of the included provider scripts (or copy `_template.py`)
-2. Open the file and fill in your API key, model name, or endpoint URL — it's clearly marked at the top of every script
-3. In the app: go to **Settings → AI → Active Provider Script**, select your script, and hit **Save Settings**
+### Configure a Provider (first-time setup)
 
-That's it. If you're unsure how to get an API key for a specific service, just ask any AI assistant — *"How do I get an API key for [provider name]?"* — and you'll have an answer in seconds. The configuration itself is just editing a text file; no Python knowledge required.
+> Before you can chat, configure at least one LLM provider. This is the only real setup step and
+> works like any other AI platform: you supply an API key or credential for the service you want.
 
-This is intentional. Provider configuration lives in the script, not the GUI, because every provider has different fields. It's the same tradeoff every other AI platform makes — and it keeps the codebase clean.
+1. Open `providers/large-language-models/` and pick an included script (or copy `_template.py`).
+2. Edit the file and fill in your API key, model name, or endpoint URL (clearly marked at the top).
+3. In the app: **Settings -> AI -> Active Provider Script**, select your script, and **Save Settings**.
 
-### Included Provider Scripts
+Provider configuration lives in the script rather than the GUI because every provider has
+different fields; this keeps the codebase clean.
 
-The repo ships with several working scripts demonstrating the flexibility of the system:
+### Tool Calling: Native and Compatibility
 
-**LLM:**
-- `anthropic_provider.py` — Anthropic Claude API
-- `gemini_provider.py` — Google Gemini
-- `custom_provider_llm7_io.py` — LLM7.io (OpenAI-compatible gateway) · *native tool calling ✓*
-- `provider_cloudflare_kimi_k2_6.py` — Cloudflare Workers AI / Kimi · *native tool calling ✓*
+The assistant drives its tools (work mode, code execution, skill load/unload, session naming)
+in one of two modes. Switch in **Settings -> System -> Tool Calling Mode**:
 
-**TTS:**
-- `elevenlabs_tts.py` — Emotional, realistic voice synthesis with expression tags
-
-> Providers marked *native tool calling ✓* support both tool-calling modes (see below). The others work great in Compatibility mode.
-
-### Build Your Own in Minutes
-
-Each folder contains a `_template.py` with:
-- A ready-to-use `requests`-based implementation skeleton
-- Full docstrings explaining the contract
-- A **ready-made prompt you can paste into ChatGPT, Claude, or Gemini** to generate a working provider script for your specific API automatically
-
-Translation: *you don't even need to write the Python yourself.* Describe your provider to any AI, paste the output into the folder, reload in Settings, and you're live.
-
-The barrier to adding a new provider is essentially zero.
-
-### Tool Calling Modes (Compat / Native *BETA*)
-
-Systema Auxilium can drive its tools (work mode, code execution, skill load/unload,
-session naming) two ways. Switch in **Settings → System → Tool Calling Mode**:
-
-- **Compatibility (default).** Tools are described in the system prompt and the
-  model invokes them as fenced blocks (e.g. ```` ```work_environment ````). This is the
-  universal path — it works with *any* model/provider, no special API support needed.
-- **Native (BETA).** Tools travel through the provider's own function-calling API
-  instead. In this mode the system prompt is rebuilt with a completely fence-free
-  set of instructions, so the model relies purely on the tools channel. This trims
-  the prompt and makes invocation more reliable — on providers that genuinely
-  support function calling. Confirmed working end-to-end (including Cloudflare
-  Workers AI / Kimi and llm7.io with capable models). Background **tasks** run in
-  native too — a task agent reaches your main chat via the `send_message_main()`
-  function in its Python namespace, which works the same in both modes.
+- **Native.** Tool calls travel through the provider's own function-calling API. The system prompt
+  is rebuilt fence-free, so the model relies purely on the structured tools channel. This is the
+  more reliable path: invocations are well-formed by construction, so there is no fenced format
+  for a model to mis-write and nothing leaks into chat. It requires a provider that genuinely
+  supports function calling. Background tasks work in native too (a task agent reaches your main
+  chat via `send_message_main()` in its Python namespace).
+- **Compatibility (legacy, universal fallback).** Tools are described in the system prompt and the
+  model invokes them as fenced blocks (for example ```` ```work_environment ````). This works with
+  *any* model or provider, with no special API support. It costs prompt tokens, and a weaker model
+  can occasionally mis-format a call. The app includes recovery safeguards for malformed calls, and
+  if a provider does not declare native support (or ignores `tools`), it automatically falls back
+  here, so nothing breaks.
 
 A provider opts into native by declaring two markers and one function:
 
@@ -194,41 +169,87 @@ def chat_tools(system_prompt, messages, tools, images=None) -> dict:
     ...
 ```
 
-The helper module `systema/engine/native_adapters.py` does the schema conversion and
-response parsing for all three dialects, so a native provider is only a few lines.
-If a provider doesn't declare native support (or the endpoint ignores `tools`),
-the app **automatically falls back to Compatibility** — so nothing breaks.
+`systema/engine/native_adapters.py` handles schema conversion and response parsing for all three
+dialects, so a native provider is only a few lines. See `_template.py` for a full example.
 
-> ⚠️ Native mode is **beta**. It's confirmed working, but tool-calling quality
-> still varies by model — weaker models may ignore `tools` and just chat. If yours
-> misbehaves, switch back to Compatibility. See `_template.py` for a full example.
+> Native tool-calling quality still varies by model. If a particular model misbehaves in native
+> mode, switch to Compatibility, which always works.
+
+---
+
+## Software Updates
+
+Systema Auxilium can update itself from GitHub, in-app, under **Settings -> System** (full controls)
+or **Settings -> General** (shortcut) -> **Check for Updates**:
+
+- **Review before applying** — see every changed file and its exact diff; the files with real
+  textual changes are highlighted and selected for you, and you choose what to apply.
+- **Preserves your local edits** — a 3-way merge folds upstream changes into files you have
+  modified; genuine conflicts are marked for you to resolve rather than silently overwritten.
+- **Dependencies** — newly required Python packages are detected and installed automatically.
+- **Backup and revert** — a snapshot is taken before anything changes, so the whole update can be
+  reverted with one click. Snapshot history is kept.
+- **Your data is never touched** — settings and the `data/` folder are excluded from updates.
+- **Startup check** — if a new version is available, the app offers to open the updater on launch.
+
+The updater is powered by the open-source library
+[**updater-gitplucker**](https://github.com/uukjtisa/updater-gitplucker)
+(`pip install updater-gitplucker`), which is reusable in any Python project.
 
 ---
 
 ## Android Bridge App
 
-Added: May 5, 2026
-Mobile PC Assistant Access - Talk to your assistant from anywhere in your house.
-Github repo: [systema-auxilium-android-module](https://github.com/uukjtisa/systema-auxilium-android-module)
-Release: [Open](https://github.com/uukjtisa/systema-auxilium-android-module/releases)
+Talk to your assistant from anywhere on your local network.
+
+- Repo: [systema-auxilium-android-module](https://github.com/uukjtisa/systema-auxilium-android-module)
+- Releases: [download](https://github.com/uukjtisa/systema-auxilium-android-module/releases)
+
+Enable the bridge in **Settings -> System -> Android Packet** and connect the phone app over
+Wi-Fi LAN using `IP:port`.
 
 ---
 
-## About AI System Control
+## Installation
 
-### User Responsibility
+### Quick setup (all platforms)
 
-Like any powerful tool, Systema Auxilium requires responsible use. Users should understand the commands they're authorizing. The system warns about elevated permissions on startup. Running with minimal necessary privileges and maintaining regular backups is recommended. Whether you write a Python script manually or use an AI assistant — you are ultimately responsible for code execution on your system.
+Run the unified setup script with any system Python. It auto-detects your OS, creates a `.venv`,
+generates the right helper scripts, and installs dependencies from `requirements.txt`:
+
+```bash
+python setup.py        # Windows
+python3 setup.py       # Linux / macOS
+```
+
+Afterwards you will have helper scripts in the project root:
+
+- **Windows:** `run.bat`, `open_env.bat`, `add_autostart.bat`, `remove_autostart.bat`
+- **Linux / macOS:** `run.sh`, `open_env.sh`, `add_autostart.sh`, `remove_autostart.sh`
+
+`setup.py` then offers to move itself into a `setup-scripts/` folder (defaults to yes for a clean
+root; answer no to keep it handy for re-runs). It is self-contained and replaces the old
+per-platform setup scripts.
+
+Tested on Windows 11, Windows 10, and Kali Linux (Python 3.10). The macOS path is untested.
+
+### Manual setup (any platform)
+
+1. Install Python 3.10.11.
+2. Install dependencies: `pip install -r requirements.txt`
+3. Configure an AI provider (see [Configure a Provider](#configure-a-provider-first-time-setup)).
+4. Run the app: `python main.py`
 
 ---
 
 ## Recommended Python Environment
 
-It is **strongly recommended** to run this project using **Python 3.10.11**, the exact version used during development. Using a different Python version may lead to module incompatibilities or unexpected behavior.
+It is strongly recommended to run this project on **Python 3.10.11**, the exact version used during
+development. Other versions may cause module incompatibilities or unexpected behavior.
 
-**Official Python 3.10.11 release:** https://www.python.org/downloads/release/python-31011/
+- Official Python 3.10.11 release: https://www.python.org/downloads/release/python-31011/
 
-**Kali Linux install script I used to install Python 3.10 (use at your own discretion)**
+Kali Linux install steps used during development (use at your own discretion):
 
 ```bash
 sudo apt install -y build-essential wget libssl-dev zlib1g-dev \
@@ -247,59 +268,49 @@ sudo make altinstall
 
 ---
 
-## How to Install
+## Responsible Use and Safety
 
-### Quick Setup (all platforms)
+Like any powerful tool, Systema Auxilium requires responsible use. Whether code is written by hand
+or generated by an AI, you are responsible for what runs on your system.
 
-Run the unified setup script with any system Python. It **auto-detects your OS**,
-creates a `.venv`, generates the right helper scripts, and installs the
-dependencies from `requirements.txt`:
-
-```bash
-python setup.py        # Windows
-python3 setup.py       # Linux / macOS
-```
-
-When it finishes you'll have helper scripts in the project root:
-- **Windows:** `run.bat`, `open_env.bat`, `add_autostart.bat`, `remove_autostart.bat`
-- **Linux / macOS:** `run.sh`, `open_env.sh`, `add_autostart.sh`, `remove_autostart.sh`
-
-`setup.py` then offers to tuck itself into a `setup-scripts/` folder (defaults to **yes**
-for a clean root — answer **no** to keep it handy for re-runs). `setup.py` is fully
-self-contained; it replaces the old per-platform `setup.bat` / `setup.sh` / `setup_macOS.sh`.
-
-Tested on **Windows 11**, **Windows 10**, and **Kali Linux** (Python 3.10). The macOS path is untested.
-
-### Manual Setup (any platform)
-
-1. Ensure Python 3.10.11 is installed
-2. Install dependencies: `pip install -r requirements.txt`
-3. Configure an AI provider — open a script in `providers/large-language-models/`, fill in your credentials, then select it in **Settings → AI**. See [First-Time Setup](#first-time-setup--configure-a-provider) above.
-4. Run the application: `python main.py`
+- The assistant can perform system-level actions if run with sufficient permissions.
+- Be deliberate with your prompts and with what you approve.
+- Review generated code before execution, especially with guarded execution.
+- The app warns about elevated permissions on startup; prefer minimal necessary privileges.
+- Consider running in a VM or test environment initially, and keep regular backups.
 
 ---
 
-## Safety Warnings
+## Project Status and Considerations
 
-⚠️ **IMPORTANT SAFETY INFORMATION** ⚠️
+This is a hobby project built and maintained by one person, developed and tested primarily on
+Windows 11, with Windows 10 and Kali Linux VMs (both on Python 3.10). Only one thing can be tested
+at a time, so unintended behaviors are possible.
 
-- This AI can execute system-level actions if run with sufficient permissions
-- Use caution when issuing prompts and commands
-- Review generated code before execution (especially once Guided Mode is complete)
-- You are responsible for all actions taken by the system
-- Consider running in a virtual machine or test environment initially
-- Keep regular backups of important data
+- **Bugs are expected.** Some features are not deeply tested. If something breaks, try to reproduce
+  it and open an issue with details. Fixes and PRs are very welcome.
+- **Model capability matters.** The project was built and tested with strong frontier models.
+  Weaker models are less predictable. In **Compatibility** tool-calling mode a weak model can
+  mis-format a fenced call; **Native** tool-calling mode avoids the fenced format entirely and is
+  the more reliable option with a capable, function-calling provider. The modular provider system
+  lets you test any model yourself.
+- **System prompt is still being refined** to trim redundant instructions.
+- Suggestions on the tooling and agent design are welcome; if you have agentic experience, mentoring
+  is appreciated.
+
+Development happens in whatever time is available, so updates may be slow or bursty. Co-authors are
+welcome, with no experience bar; just reach out or open a PR.
 
 ---
 
 ## Contributing
 
-Contributions of any kind are genuinely welcome — bug reports, feature ideas, pull requests, and general feedback all help.
-If you'd like to get involved, please see [CONTRIBUTING.md](CONTRIBUTING.md) or reach out directly.
+Contributions of any kind are genuinely welcome: bug reports, feature ideas, pull requests, and
+feedback. See [CONTRIBUTING.md](CONTRIBUTING.md) or reach out directly.
 
 ---
 
-## NOTICE
+## Notice
 
 For authorship, AI tooling disclosure, and legal information, see the [NOTICE](NOTICE) file.
 

@@ -112,7 +112,7 @@ ACCOUNTS = [
     },
 ]
 
-MODEL          = "@cf/moonshotai/kimi-k2.6"
+MODEL          = "@cf/moonshotai/kimi-k2.7-code"
 MAX_TOKENS     = 16384   # Raise up to 16384 if needed — watch your neuron budget
 SHOW_REASONING = False  # Set True to include reasoning content in the reply
 

@@ -226,9 +226,17 @@ def _acquire_instance_lock():
 
 _is_primary, _existing_pid = _acquire_instance_lock()
 if not _is_primary:
+    # Pass the launching terminal's window handle so the notice's Dismiss button
+    # can close it too (no stray console left behind by the blocked launch).
+    _console_hwnd = 0
+    if sys.platform == "win32":
+        try:
+            _console_hwnd = ctypes.windll.kernel32.GetConsoleWindow() or 0
+        except Exception:
+            _console_hwnd = 0
     _subprocess.Popen(
         [sys.executable, str(Path(__file__).parent / "systema" / "ui" / "startup_notif.py"),
-         "--already-running", str(_existing_pid or 0)],
+         "--already-running", str(_existing_pid or 0), "--console", str(_console_hwnd)],
         creationflags=_subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     )
     sys.exit(0)

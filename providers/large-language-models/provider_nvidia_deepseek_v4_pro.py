@@ -1,0 +1,109 @@
+"""
+provider_nvidia_deepseek_v4_pro.py
+====================================
+Custom Script Provider for Systema Auxilium.
+Uses DeepSeek V4 Pro via the NVIDIA Inference API.
+
+Model: deepseek-ai/deepseek-v4-pro
+Endpoint: https://integrate.api.nvidia.com/v1
+
+DeepSeek V4 Pro supports extended reasoning. Reasoning content is stripped
+by default — only the final reply is returned. Set SHOW_REASONING = True
+to include <think>...</think> blocks in the chat window.
+
+Point this file at:
+    Settings → AI → Custom Script Provider
+"""
+
+from openai import OpenAI
+
+
+# ── Configure here ────────────────────────────────────────────────────────────
+
+API_KEY        = "nvapi-YOUR-NVIDIA-API-KEY"   # Replace with your NVIDIA API key
+MODEL          = "deepseek-ai/deepseek-v4-pro"
+TEMPERATURE    = 1
+TOP_P          = 0.95
+MAX_TOKENS     = 16384
+SHOW_REASONING = False  # Set True to include <think>...</think> in the reply
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+client = OpenAI(
+    base_url="https://integrate.api.nvidia.com/v1",
+    api_key=API_KEY,
+)
+
+
+def chat(system_prompt: str, messages: list[dict]) -> str:
+    """Send a streaming request to DeepSeek V4 Pro and return the reply."""
+
+    full_messages = (
+        [{"role": "system", "content": system_prompt}] if system_prompt else []
+    ) + messages
+
+    completion = client.chat.completions.create(
+        model=MODEL,
+        messages=full_messages,
+        temperature=TEMPERATURE,
+        top_p=TOP_P,
+        max_tokens=MAX_TOKENS,
+        extra_body={
+            "chat_template_kwargs": {
+                "thinking": True,
+                "reasoning_effort": "high",
+            }
+        },
+        stream=True,
+    )
+
+    reasoning_parts = []
+    content_parts   = []
+
+    for chunk in completion:
+        if not getattr(chunk, "choices", None):
+            continue
+        if not chunk.choices or getattr(chunk.choices[0], "delta", None) is None:
+            continue
+
+        delta = chunk.choices[0].delta
+
+        reasoning = (
+            getattr(delta, "reasoning", None) or
+            getattr(delta, "reasoning_content", None)
+        )
+        if reasoning:
+            reasoning_parts.append(reasoning)
+
+        if getattr(delta, "content", None) is not None:
+            content_parts.append(delta.content)
+
+    reply = "".join(content_parts).strip()
+
+    if SHOW_REASONING and reasoning_parts:
+        reasoning_text = "".join(reasoning_parts).strip()
+        reply = f"<think>\n{reasoning_text}\n</think>\n\n{reply}"
+
+    return reply or "No response received."
+
+
+# ── Quick test ────────────────────────────────────────────────────────────────
+# Run directly to verify your API key and connection before using in Systema.
+#   python provider_nvidia_deepseek_v4_pro.py
+
+if __name__ == "__main__":
+    print("Testing NVIDIA DeepSeek V4 Pro provider...")
+    print(f"Model:    {MODEL}")
+    print(f"Endpoint: https://integrate.api.nvidia.com/v1")
+    print("-" * 48)
+
+    try:
+        result = chat(
+            system_prompt="You are a helpful assistant.",
+            messages=[{"role": "user", "content": "Say 'Provider test successful.' and nothing else."}],
+        )
+        print("Response:", result)
+        print("-" * 48)
+        print("✅ Test passed. Provider is working correctly.")
+    except Exception as e:
+        print(f"❌ Test failed: {e}")

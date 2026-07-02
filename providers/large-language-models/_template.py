@@ -197,8 +197,8 @@ def chat_image(system_prompt: str, messages: list[dict], image_paths: list[str])
 #         the response back into the NORMALIZED result the app expects:
 #             {"text": str | None,
 #              "tool_calls": [{"id": str, "name": str, "arguments": dict}, ...]}
-#         The helper module src.engine.native_adapters does both for all 3 dialects."""
-#         from src.engine import native_adapters as na
+#         The helper module systema.engine.native_adapters does both for all 3 dialects."""
+#         from systema.engine import native_adapters as na
 #         payload = {
 #             "model": MODEL,
 #             "messages": ([{"role": "system", "content": system_prompt}] if system_prompt else []) + messages,

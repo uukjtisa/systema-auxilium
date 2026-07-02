@@ -67,6 +67,9 @@ class _SegmentedTabs(QWidget):
     def count(self):
         return self._stack.count()
 
+    def widget(self, i):
+        return self._stack.widget(i)
+
 
 class _TokenGraphCanvas(QWidget):
     """Simple bar graph for token usage data."""
@@ -224,6 +227,84 @@ class SettingsWindow(BaseWindow):
         (base, surface, elevated, border, accent, text, muted)."""
         p = _theme.current_palette(self.controller)
         return p['bg'], p['surface'], p['surface2'], p['border'], p['accent'], p['text'], p['muted']
+
+    # ── quick-jump shortcuts (General tab) ──────────────────────────────────
+    @staticmethod
+    def _norm_title(s: str) -> str:
+        """Lower-case, keep only ascii letters/digits/spaces so emoji or extra
+        glyphs in a group title never break anchor matching."""
+        return "".join(c for c in s.lower() if c.isalnum() or c == " ").strip()
+
+    def _find_group(self, page, title: str):
+        """First QGroupBox under ``page`` whose title contains ``title``."""
+        want = self._norm_title(title)
+        for gb in page.findChildren(QGroupBox):
+            if want in self._norm_title(gb.title()):
+                return gb
+        return None
+
+    def _jump_to(self, target, anchor: str | None = None):
+        """Switch to the destination tab (or open the updater) and, when an
+        anchor group is given, scroll it into view and blink-highlight it."""
+        if target == "updates":
+            self.controller.open_update_window(parent=self)
+            return
+        self._tabs.setCurrentIndex(target)
+        if not anchor:
+            return
+
+        def _go():
+            page = self._tabs.widget(target)
+            if page is None:
+                return
+            grp = self._find_group(page, anchor)
+            if grp is None:
+                return
+            sa = page if isinstance(page, QScrollArea) else page.findChild(QScrollArea)
+            if sa is not None:
+                sa.ensureWidgetVisible(grp, 0, 60)
+            self._flash_widget(grp)
+
+        # Let the stacked page lay out before measuring / scrolling.
+        QTimer.singleShot(70, _go)
+
+    def _flash_widget(self, w):
+        """Theme-seamless 3-second accent blink over a widget (3 pulses).
+
+        Non-destructive: overlays an accent border+tint keyed to the widget's
+        objectName and restores the original stylesheet when finished."""
+        from PyQt6.QtCore import QVariantAnimation
+
+        accent = QColor(self._palette()[4])
+        base_style = w.styleSheet()
+        if not w.objectName():
+            w.setObjectName(f"_flash_{id(w)}")
+        name = w.objectName()
+
+        anim = QVariantAnimation(self)
+        anim.setDuration(3000)
+        anim.setStartValue(0.0)
+        anim.setEndValue(0.0)
+        # Three on/off pulses across the 3 seconds.
+        for k in range(7):
+            anim.setKeyValueAt(k / 6.0, 1.0 if k % 2 else 0.0)
+
+        def _apply(v):
+            v = float(v)
+            br = f"rgba({accent.red()},{accent.green()},{accent.blue()},{0.18 + 0.72 * v:.3f})"
+            bg = f"rgba({accent.red()},{accent.green()},{accent.blue()},{0.04 + 0.16 * v:.3f})"
+            w.setStyleSheet(base_style +
+                            f"\nQGroupBox#{name} {{ border: 1px solid {br};"
+                            f" background-color: {bg}; }}")
+
+        def _done():
+            w.setStyleSheet(base_style)
+            self._flash_anim = None
+
+        anim.valueChanged.connect(_apply)
+        anim.finished.connect(_done)
+        self._flash_anim = anim   # keep a ref so it isn't garbage-collected
+        anim.start()
 
     def init_ui(self):
         """Initialize tabbed settings UI"""
@@ -393,7 +474,7 @@ class SettingsWindow(BaseWindow):
         header_layout = QHBoxLayout(header_bar)
         header_layout.setContentsMargins(16, 0, 16, 0)
 
-        title_lbl = QLabel("⚙️  Settings")
+        title_lbl = QLabel("Settings")
         title_lbl.setStyleSheet(f"font-size:15px; font-weight:600; color:{_TEXT}; background:transparent;")
         header_layout.addWidget(title_lbl)
         header_layout.addStretch()
@@ -440,7 +521,7 @@ class SettingsWindow(BaseWindow):
         _prov_refresh_btn.clicked.connect(self._refresh_llm_provider_scripts)
         _prov_row.addWidget(_prov_refresh_btn)
         pg_lay.addLayout(_prov_row)
-        _open_prov_btn = QPushButton("📂  Open Providers Folder")
+        _open_prov_btn = QPushButton("Open Providers Folder")
         _open_prov_btn.setStyleSheet(_BTN)
 
         def _open_llm_providers_folder():
@@ -467,7 +548,7 @@ class SettingsWindow(BaseWindow):
             "Set  self.ai_provider = 'manual'  in controller.py if you want to type responses by hand.\n"
             "Use this button to copy the current system prompt to clipboard."
         ))
-        copy_sys_btn = QPushButton("📋 Copy Current System Prompt")
+        copy_sys_btn = QPushButton("Copy Current System Prompt")
         copy_sys_btn.setStyleSheet(_BTN)
         copy_sys_btn.setToolTip("Copy the full effective system prompt (base + loaded skills) to clipboard")
 
@@ -478,9 +559,9 @@ class SettingsWindow(BaseWindow):
             except Exception as e:
                 prompt = f"[Error retrieving system prompt: {e}]"
             QApplication.clipboard().setText(prompt)
-            copy_sys_btn.setText("✅ Copied!")
+            copy_sys_btn.setText("Copied ✓")
             from PyQt6.QtCore import QTimer
-            QTimer.singleShot(2000, lambda: copy_sys_btn.setText("📋 Copy Current System Prompt"))
+            QTimer.singleShot(2000, lambda: copy_sys_btn.setText("Copy Current System Prompt"))
 
         copy_sys_btn.clicked.connect(_copy_system_prompt)
         mn_lay.addWidget(copy_sys_btn)
@@ -539,7 +620,7 @@ class SettingsWindow(BaseWindow):
                 checked and self.pf_radio_session.isChecked()))
 
         pf_lay.addWidget(_label(
-            "💡 Premade: edit PREFILLING in global_instructions.py.  "
+            "Premade: edit PREFILLING in global_instructions.py.  "
             "Session: the full chat history of the chosen session is injected "
             "before every request — the AI \"remembers\" doing things that way.",
             muted=True))
@@ -627,46 +708,70 @@ class SettingsWindow(BaseWindow):
 
         _jump_style = f"""
             QPushButton {{
-                background: {_BASE};
-                color: {_TEXT};
-                border: 1px solid {_ELEV};
-                border-radius: 8px;
-                padding: 9px 12px;
-                font-size: 10pt;
+                background: {_ELEV};
+                color: {_MUTED};
+                border: 1px solid {_BORDER};
+                border-radius: 7px;
+                padding: 7px 11px;
+                font-size: 9.5pt;
                 text-align: left;
             }}
             QPushButton:hover {{
                 border: 1px solid {_ACCENT};
-                color: {_ACCENT};
-                background: {_ELEV};
+                color: {_TEXT};
+                background: {_theme.lighten(_ELEV, 0.06)};
+            }}
+        """
+        # Accent variant for the primary action (updates).
+        _jump_style_accent = f"""
+            QPushButton {{
+                background: {_theme.darken(_ACCENT, 0.55)};
+                color: {_TEXT};
+                border: 1px solid {_theme.darken(_ACCENT, 0.30)};
+                border-radius: 7px;
+                padding: 7px 11px;
+                font-size: 9.5pt;
+                font-weight: 600;
+                text-align: left;
+            }}
+            QPushButton:hover {{
+                border: 1px solid {_ACCENT};
+                color: #ffffff;
+                background: {_theme.darken(_ACCENT, 0.35)};
             }}
         """
 
-        # (button label, target tab index)  — General=0, AI=1, Voice=2, UI=3,
-        # Memory=4, Security=5, System=6.
+        # (label, target, anchor)  target = tab index (General=0, AI=1, Voice=2,
+        # UI=3, Memory=4, Security=5, System=6) OR the string "updates" to open the
+        # updater. anchor = a substring of the destination QGroupBox title (emoji /
+        # spacing ignored); the jump scrolls to it and blink-highlights it.
         _gen_shortcuts = [
-            ("🔧  Tool Calling Mode (Native / Compatibility)", 6),
-            ("⚡  Code Execution", 6),
-            ("📱  Android Packet Port", 6),
-            ("🤖  AI Provider & Model Script", 1),
-            ("💬  Conversation Prefilling", 1),
-            ("🎤  Voice & Speech (TTS)", 2),
-            ("🎨  Theme & Appearance", 3),
-            ("🧠  Memory", 4),
-            ("🔒  Security & Approvals", 5),
+            ("Check for Updates",       "updates", None),
+            ("Tool Calling Mode",       6, "Tool Calling Mode"),
+            ("Code Execution",          6, "Code Execution"),
+            ("Android Packet Port",     6, "Android Packet"),
+            ("AI Provider & Model",     1, "AI Provider"),
+            ("Conversation Prefilling", 1, "Conversation Prefilling"),
+            ("Voice & Speech (TTS)",    2, "Text-to-Speech"),
+            ("Theme & Appearance",      3, "Main Theme"),
+            ("Memory",                  4, "Memory"),
+            ("Security & Approvals",    5, "Code Execution Safety"),
         ]
 
-        def _make_tab_jump(idx):
-            return lambda: self._tabs.setCurrentIndex(idx)
+        def _make_jump(target, anchor):
+            return lambda: self._jump_to(target, anchor)
 
         gf_grid = QGridLayout()
-        gf_grid.setHorizontalSpacing(8)
-        gf_grid.setVerticalSpacing(8)
-        for _gi, (_glabel, _gtab) in enumerate(_gen_shortcuts):
+        gf_grid.setHorizontalSpacing(7)
+        gf_grid.setVerticalSpacing(7)
+        for _gi, (_glabel, _gtarget, _ganchor) in enumerate(_gen_shortcuts):
             _gbtn = QPushButton(_glabel)
-            _gbtn.setStyleSheet(_jump_style)
-            _gbtn.clicked.connect(_make_tab_jump(_gtab))
+            _gbtn.setCursor(_Qt.CursorShape.PointingHandCursor)
+            _gbtn.setStyleSheet(_jump_style_accent if _gtarget == "updates" else _jump_style)
+            _gbtn.clicked.connect(_make_jump(_gtarget, _ganchor))
             gf_grid.addWidget(_gbtn, _gi // 2, _gi % 2)
+        gf_grid.setColumnStretch(0, 1)
+        gf_grid.setColumnStretch(1, 1)
         gf_lay.addLayout(gf_grid)
         gen_lay.addWidget(gen_find_group)
 
@@ -703,9 +808,9 @@ class SettingsWindow(BaseWindow):
         gen_lay.addWidget(gen_display_group)
 
         gen_lay.addStretch()
-        tabs.addTab(gen_scroll, "⚙️  General")
+        tabs.addTab(gen_scroll, "General")
 
-        tabs.addTab(ai_scroll, "🤖  AI")
+        tabs.addTab(ai_scroll, "AI")
 
         # ════════════════════════════════════════════════════════════════════
         # TAB 2 — Voice
@@ -716,11 +821,11 @@ class SettingsWindow(BaseWindow):
         dev_group = QGroupBox("Audio Devices")
         dev_group.setStyleSheet(_GROUP)
         dv_lay = QVBoxLayout(dev_group)
-        dv_lay.addWidget(_label("🎙️ Microphone:", bold=True))
+        dv_lay.addWidget(_label("Microphone:", bold=True))
         self.input_device_combo = QComboBox()
         self.input_device_combo.setStyleSheet(_COMBO)
         dv_lay.addWidget(self.input_device_combo)
-        dv_lay.addWidget(_label("🔊 Speaker:", bold=True, top_margin=8))
+        dv_lay.addWidget(_label("Speaker:", bold=True, top_margin=8))
         self.output_device_combo = QComboBox()
         self.output_device_combo.setStyleSheet(_COMBO)
         dv_lay.addWidget(self.output_device_combo)
@@ -740,7 +845,7 @@ class SettingsWindow(BaseWindow):
         self.interrupt_mode_combo.setStyleSheet(_COMBO)
         int_lay.addWidget(self.interrupt_mode_combo)
         int_lay.addWidget(_label(
-            "💡 Manual: click 🔇 in chat  ·  Automatic: TTS stops when you speak", muted=True))
+            "Manual: click mute in chat  ·  Automatic: TTS stops when you speak", muted=True))
         voice_lay.addWidget(int_group)
 
         # TTS
@@ -764,7 +869,7 @@ class SettingsWindow(BaseWindow):
         _tts_combo_row.addWidget(_tts_refresh_btn)
         tts_lay.addLayout(_tts_combo_row)
         tts_lay.addWidget(_info_box(
-            "📁  Custom TTS scripts live in  providers/text-to-speech/\n"
+            "Custom TTS scripts live in  providers/text-to-speech/\n"
             "Each .py must define:  speak(text: str, save_to: str) -> bool\n"
             "When a custom script is selected the voice dropdown below is hidden "
             "(voice config lives inside the script)."
@@ -789,7 +894,7 @@ class SettingsWindow(BaseWindow):
         etg_lay.addWidget(self.tts_voice_combo)
         tts_lay.addWidget(self.edge_tts_group)
 
-        _open_tts_btn = QPushButton("📂  Open TTS Providers Folder")
+        _open_tts_btn = QPushButton("Open TTS Providers Folder")
         _open_tts_btn.setStyleSheet(_BTN)
 
         def _open_tts_providers_folder():
@@ -851,7 +956,7 @@ class SettingsWindow(BaseWindow):
         self.vad_combo.setStyleSheet(_COMBO)
         _wr.addWidget(self.vad_combo)
         ww_lay.addLayout(_wr)
-        ww_lay.addWidget(_label("💡 Higher = less sensitive to background noise", muted=True))
+        ww_lay.addWidget(_label("Higher = less sensitive to background noise", muted=True))
         vad_lay.addWidget(self.webrtc_settings_widget)
 
         self.silero_settings_widget = QWidget()
@@ -868,13 +973,13 @@ class SettingsWindow(BaseWindow):
         self.silero_threshold_combo.setStyleSheet(_COMBO)
         _sr.addWidget(self.silero_threshold_combo)
         sw_lay.addLayout(_sr)
-        sw_lay.addWidget(_label("💡 Higher = fewer false positives", muted=True))
+        sw_lay.addWidget(_label("Higher = fewer false positives", muted=True))
         self.silero_settings_widget.hide()
         vad_lay.addWidget(self.silero_settings_widget)
         voice_lay.addWidget(vad_group)
 
         voice_lay.addStretch()
-        tabs.addTab(voice_scroll, "🎤  Voice")
+        tabs.addTab(voice_scroll, "Voice")
 
         # ════════════════════════════════════════════════════════════════════
         # TAB 3 — UI / Appearance
@@ -976,7 +1081,7 @@ class SettingsWindow(BaseWindow):
         ui_lay.addWidget(theme_group)
 
         # ── Glass overlay section ────────────────────────────────────────────
-        glass_group = QGroupBox("🪟 Glass Overlay")
+        glass_group = QGroupBox("Glass Overlay")
         glass_group.setStyleSheet(_GROUP)
         gl_lay = QVBoxLayout(glass_group)
         gl_lay.addWidget(_info_box(
@@ -1055,14 +1160,14 @@ class SettingsWindow(BaseWindow):
 
         ui_lay.addWidget(glass_group)
         ui_lay.addStretch()
-        tabs.addTab(ui_scroll, "🎨  UI")
+        tabs.addTab(ui_scroll, "UI")
 
         # ════════════════════════════════════════════════════════════════════
         # TAB 4 — Memory
         # ════════════════════════════════════════════════════════════════════
         mem_scroll, mem_lay = _make_scroll_tab()
 
-        mem_group = QGroupBox("🧠 Memory (RAG)")
+        mem_group = QGroupBox("Memory (RAG)")
         mem_group.setStyleSheet(_GROUP)
         mg_lay = QVBoxLayout(mem_group)
         mg_lay.addWidget(_info_box(
@@ -1105,7 +1210,7 @@ class SettingsWindow(BaseWindow):
         _recall_row.addWidget(self.memory_recall_mode_combo)
         mg_lay.addLayout(_recall_row)
 
-        open_mem_btn = QPushButton("🧠  Open Memory Manager")
+        open_mem_btn = QPushButton("Open Memory Manager")
         open_mem_btn.setStyleSheet(f"""
             QPushButton {{ background:#0E1F0E; border:1px solid #1E4A1E; border-radius:6px;
                           color:#3FB950; padding:7px 14px; font-size:11px; }}
@@ -1116,14 +1221,14 @@ class SettingsWindow(BaseWindow):
 
         mem_lay.addWidget(mem_group)
         mem_lay.addStretch()
-        tabs.addTab(mem_scroll, "🧠  Memory")
+        tabs.addTab(mem_scroll, "Memory")
 
         # ════════════════════════════════════════════════════════════════════
         # TAB 5 — Security
         # ════════════════════════════════════════════════════════════════════
         sec_scroll, sec_lay = _make_scroll_tab()
 
-        sec_group = QGroupBox("🔒 Code Execution Safety")
+        sec_group = QGroupBox("Code Execution Safety")
         sec_group.setStyleSheet(_GROUP)
         sg_lay = QVBoxLayout(sec_group)
         self.supervised_checkbox = QCheckBox("Enable Supervised Execution (Recommended)")
@@ -1132,11 +1237,11 @@ class SettingsWindow(BaseWindow):
         sg_lay.addWidget(self.supervised_checkbox)
         sg_lay.addWidget(_info_box(
             "When enabled, you review all code before it runs — edit, explain, or reject it.\n\n"
-            "⚠️ Disabling allows automatic code execution without review. "
+            "Warning: Disabling allows automatic code execution without review. "
             "Only disable if you fully trust the AI."))
         sec_lay.addWidget(sec_group)
 
-        dbg_group = QGroupBox("🐛 Debug")
+        dbg_group = QGroupBox("Debug")
         dbg_group.setStyleSheet(_GROUP)
         dg_lay = QVBoxLayout(dbg_group)
         self.debug_checkbox = QCheckBox("Enable Debug Mode")
@@ -1147,14 +1252,14 @@ class SettingsWindow(BaseWindow):
             "what the AI is doing, its inputs, outputs, and decision-making process."))
         sec_lay.addWidget(dbg_group)
         sec_lay.addStretch()
-        tabs.addTab(sec_scroll, "🔒  Security")
+        tabs.addTab(sec_scroll, "Security")
 
         # ════════════════════════════════════════════════════════════════════
         # TAB 6 — System
         # ════════════════════════════════════════════════════════════════════
         sys_scroll, sys_lay = _make_scroll_tab()
 
-        tl_group = QGroupBox("🔒 Tool Execution Locking")
+        tl_group = QGroupBox("Tool Execution Locking")
         tl_group.setStyleSheet(_GROUP)
         tl_lay = QVBoxLayout(tl_group)
         self.tool_exec_lockout_checkbox = QCheckBox("Enable Tool Execution Lockout")
@@ -1164,7 +1269,7 @@ class SettingsWindow(BaseWindow):
             "When enabled, the agent will no longer be able to do anything but generate chat responses."))
         sys_lay.addWidget(tl_group)
 
-        sp_group = QGroupBox("🤖 System Prompt Hijacking")
+        sp_group = QGroupBox("System Prompt Hijacking")
         sp_group.setStyleSheet(_GROUP)
         sp_lay = QVBoxLayout(sp_group)
         self.system_prompt_hijack_checkbox = QCheckBox("Enable System Prompt Hijack")
@@ -1179,7 +1284,7 @@ class SettingsWindow(BaseWindow):
         sp_lay.addWidget(self.system_prompt_hijack_input)
         sys_lay.addWidget(sp_group)
 
-        sp_extras_group = QGroupBox("🧩 Optional System Prompt Sections (Main AI Engine)")
+        sp_extras_group = QGroupBox("Optional System Prompt Sections (Main AI Engine)")
         sp_extras_group.setStyleSheet(_GROUP)
         sp_extras_lay = QVBoxLayout(sp_extras_group)
         self.include_image_tools_checkbox = QCheckBox("Inject Image Tools into system prompt")
@@ -1204,7 +1309,7 @@ class SettingsWindow(BaseWindow):
         sys_lay.addWidget(sp_extras_group)
 
         # ── Tool Calling Mode ───────────────────────────────────────────────
-        tc_group = QGroupBox("🛠 Tool Calling Mode")
+        tc_group = QGroupBox("Tool Calling Mode")
         tc_group.setStyleSheet(_GROUP)
         tc_lay = QVBoxLayout(tc_group)
         self.tool_calling_mode_combo = QComboBox()
@@ -1255,7 +1360,7 @@ class SettingsWindow(BaseWindow):
         sys_lay.addWidget(exec_group)
 
         # ── Android Bridge / Packet ─────────────────────────────────────────
-        packet_group = QGroupBox("📱 Android Packet")
+        packet_group = QGroupBox("Android Packet")
         packet_group.setStyleSheet(_GROUP)
         pk_lay = QVBoxLayout(packet_group)
         _port_row = QHBoxLayout()
@@ -1286,25 +1391,39 @@ class SettingsWindow(BaseWindow):
         sys_lay.addWidget(packet_group)
 
         # ── Desktop Shortcut (cross-OS, admin/normal hot-toggle) ─────────────
-        sc_group = QGroupBox("🔗 Desktop Shortcut")
+        sc_group = QGroupBox("Desktop Shortcut")
         sc_group.setStyleSheet(_GROUP)
         sc_lay = QVBoxLayout(sc_group)
         sc_lay.addWidget(_info_box(
             "Create a Systema Auxilium shortcut on your Desktop. Choose whether it "
             "launches normally or elevated — switching is applied instantly to the "
-            "existing shortcut (Windows: UAC shield • Linux: pkexec • macOS: admin prompt)."))
+            "existing shortcut (Windows: UAC shield, Linux: pkexec, macOS: admin prompt)."))
+        # Segmented toggle — the selected privilege is clearly highlighted and
+        # prefixed with a check, and reflects the existing shortcut's real state.
         self._sc_priv_group = QButtonGroup(self)
-        self._sc_radio_normal = QRadioButton("Normal privileges")
-        self._sc_radio_admin = QRadioButton("Run as administrator")
-        for _rb in (self._sc_radio_normal, self._sc_radio_admin):
-            _rb.setStyleSheet(_CHECK)
-            self._sc_priv_group.addButton(_rb)
+        self._sc_priv_group.setExclusive(True)
+        _priv_css = f"""
+            QPushButton {{ background-color: {_ELEV}; color: {_MUTED};
+                border: 1px solid {_BORDER}; border-radius: 8px;
+                padding: 10px 16px; font-size: 12px; text-align: left; }}
+            QPushButton:hover {{ border-color: {_ACCENT}; color: {_TEXT}; }}
+            QPushButton:checked {{ background-color: {_ACCENT}; color: #05070a;
+                border-color: {_ACCENT}; font-weight: 600; }}
+        """
+        self._sc_radio_normal = QPushButton("Normal privileges")
+        self._sc_radio_admin = QPushButton("Run as administrator")
+        for _pb in (self._sc_radio_normal, self._sc_radio_admin):
+            _pb.setCheckable(True)
+            _pb.setCursor(_Qt.CursorShape.PointingHandCursor)
+            _pb.setStyleSheet(_priv_css)
+            self._sc_priv_group.addButton(_pb)
         self._sc_radio_normal.setChecked(True)
+        self._sc_priv_group.buttonToggled.connect(lambda *_: self._update_priv_labels())
         _sc_radio_row = QHBoxLayout()
-        _sc_radio_row.addWidget(self._sc_radio_normal)
-        _sc_radio_row.addWidget(self._sc_radio_admin)
-        _sc_radio_row.addStretch()
+        _sc_radio_row.addWidget(self._sc_radio_normal, stretch=1)
+        _sc_radio_row.addWidget(self._sc_radio_admin, stretch=1)
         sc_lay.addLayout(_sc_radio_row)
+        self._update_priv_labels()
         _sc_btn_row = QHBoxLayout()
         _sc_apply_btn = QPushButton("Create / Update Shortcut")
         _sc_apply_btn.setStyleSheet(_BTN)
@@ -1323,8 +1442,55 @@ class SettingsWindow(BaseWindow):
         sys_lay.addWidget(sc_group)
         self._refresh_shortcut_status()
 
+        # ── Software Updates (self-update via gitplucker) ────────────────────
+        upd_group = QGroupBox("Software Updates")
+        upd_group.setStyleSheet(_GROUP)
+        upd_lay = QVBoxLayout(upd_group)
+        upd_lay.addWidget(_info_box(
+            "Check GitHub for a newer version of Systema Auxilium, review the exact changes, "
+            "and choose which files to update. Your local edits to tracked files are merged "
+            "where possible (conflicts are marked), new Python dependencies are auto-installed, "
+            "and a backup is saved to data/updates/ before anything is written. Your settings "
+            "and data/ are never touched.\n"
+            "Source: github.com/uukjtisa/systema-auxilium"))
+        _upd_btn = QPushButton("Check for Updates")
+        _upd_btn.setStyleSheet(_BTN)
+        _upd_btn.clicked.connect(lambda: self.controller.open_update_window(parent=self))
+        upd_lay.addWidget(_upd_btn)
+
+        # Auto-updater preferences (persisted; gate the startup probe + notice).
+        _svc = getattr(self.controller, "updater_service", None)
+        self.update_autocheck_checkbox = QCheckBox("Automatically check for updates on startup")
+        self.update_autocheck_checkbox.setStyleSheet(_CHECK)
+        self.update_notify_checkbox = QCheckBox("Notify me when an update is available")
+        self.update_notify_checkbox.setStyleSheet(_CHECK)
+        self.update_autodeps_checkbox = QCheckBox("Auto-install new Python dependencies when applying")
+        self.update_autodeps_checkbox.setStyleSheet(_CHECK)
+        if _svc is not None:
+            self.update_autocheck_checkbox.setChecked(_svc.auto_check_enabled)
+            self.update_notify_checkbox.setChecked(_svc.notify_enabled)
+            self.update_autodeps_checkbox.setChecked(_svc.auto_install_deps)
+            self.update_autocheck_checkbox.toggled.connect(_svc.set_auto_check_enabled)
+            self.update_notify_checkbox.toggled.connect(_svc.set_notify_enabled)
+            self.update_autodeps_checkbox.toggled.connect(_svc.set_auto_install_deps)
+            # Notifications are meaningless without the startup check — keep them linked.
+            self.update_notify_checkbox.setEnabled(_svc.auto_check_enabled)
+            self.update_autocheck_checkbox.toggled.connect(
+                self.update_notify_checkbox.setEnabled)
+        else:
+            for _cb in (self.update_autocheck_checkbox, self.update_notify_checkbox,
+                        self.update_autodeps_checkbox):
+                _cb.setEnabled(False)
+        upd_lay.addWidget(self.update_autocheck_checkbox)
+        upd_lay.addWidget(self.update_notify_checkbox)
+        upd_lay.addWidget(self.update_autodeps_checkbox)
+        upd_lay.addWidget(_info_box(
+            "Startup checks are silent and skipped automatically in a developer working copy. "
+            "Turn off auto-check to only look for updates when you click the button above."))
+        sys_lay.addWidget(upd_group)
+
         sys_lay.addStretch()
-        tabs.addTab(sys_scroll, "💻 System")
+        tabs.addTab(sys_scroll, "System")
 
         main_layout.addWidget(tabs, stretch=1)
 
@@ -1347,7 +1513,7 @@ class SettingsWindow(BaseWindow):
         self.footer_status_label.setStyleSheet(f"color:{_MUTED}; font-size:11px; background:transparent;")
         footer_lay.addWidget(self.footer_status_label, stretch=1)
 
-        save_btn = QPushButton("💾  Save Settings")
+        save_btn = QPushButton("Save Settings")
         save_btn.setStyleSheet(_BTN_PRIMARY)
         save_btn.setMinimumWidth(140)
         save_btn.clicked.connect(self.save_settings)
@@ -1456,7 +1622,7 @@ class SettingsWindow(BaseWindow):
         self.tts_provider_combo.clear()
         self.tts_provider_combo.addItem("Edge TTS (Microsoft, Free)", "edge-tts")
         for s in scripts:
-            self.tts_provider_combo.addItem(f"📝  {s['name']}", s['path'])
+            self.tts_provider_combo.addItem(f"{s['name']}", s['path'])
         restored = False
         for i in range(self.tts_provider_combo.count()):
             if self.tts_provider_combo.itemData(i) == current:
@@ -1501,6 +1667,16 @@ class SettingsWindow(BaseWindow):
             self.show_status_message(f"✗ Error refreshing devices: {e}")
 
     # ── Desktop shortcut (cross-OS) ─────────────────────────────────────────
+    def _update_priv_labels(self):
+        """Prefix a check mark on the selected privilege so it's unmistakable."""
+        try:
+            self._sc_radio_normal.setText(
+                ("✓  " if self._sc_radio_normal.isChecked() else "") + "Normal privileges")
+            self._sc_radio_admin.setText(
+                ("✓  " if self._sc_radio_admin.isChecked() else "") + "Run as administrator")
+        except Exception:
+            pass
+
     def _sync_shortcut_radios(self):
         try:
             from systema.common import shortcuts as _sc
@@ -1509,6 +1685,7 @@ class SettingsWindow(BaseWindow):
                 (self._sc_radio_admin if st["admin"] else self._sc_radio_normal).setChecked(True)
         except Exception:
             pass
+        self._update_priv_labels()
 
     def _refresh_shortcut_status(self):
         try:

@@ -35,7 +35,7 @@ If `emails.json` doesn't exist yet, the script will auto-create an empty one on 
 Option A — Use the CLI (recommended):
     python scripts/e_mailman.py account --add \
         --name "gmail" \
-        --email "you@gmail.com" \
+        --email "you@example.com" \
         --password "xxxx xxxx xxxx xxxx" \
         --smtp-host smtp.gmail.com \
         --smtp-port 465 \
@@ -49,7 +49,7 @@ Option B — Edit the JSON manually:
       "accounts": [
         {
           "name": "gmail",
-          "account": "you@gmail.com",
+          "account": "you@example.com",
           "password": "xxxx xxxx xxxx xxxx",
           "smtp_host": "smtp.gmail.com",
           "smtp_port": 465,
@@ -74,7 +74,7 @@ Check latest 10 emails:
     python scripts/e_mailman.py read --latest --count 10
 
 Search emails from a sender:
-    python scripts/e_mailman.py read --from "johndoe@gmail.com"
+    python scripts/e_mailman.py read --from "you@example.com"
 
 Search by subject keyword:
     python scripts/e_mailman.py read --search "invoice"
