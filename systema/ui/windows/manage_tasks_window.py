@@ -1073,6 +1073,7 @@ class ManageTasksWindow(BaseWindow):
                 'inject_image_tools':      self._f_perm_image_tools.isChecked(),
                 'inject_controller_ref':   self._f_perm_controller_ref.isChecked(),
                 'inject_notify_tool':      self._f_perm_notify_tool.isChecked(),
+                'bypass_supervised':       self._f_perm_bypass.isChecked(),
             },
             'loaded_skills': self._get_checked_skill_names(),
         }))
@@ -1684,6 +1685,13 @@ class ManageTasksWindow(BaseWindow):
         self._f_perm_controller_ref = QCheckBox("Inject Controller Reference on the system prompt")
         self._f_perm_notify_tool = QCheckBox("Inject Notify Tool on the system prompt")
 
+        # Opt-in: let this background task skip the approval dialog + security gate.
+        self._f_perm_bypass = QCheckBox("Bypass Supervised Execution & Security")
+        self._f_perm_bypass.setChecked(False)   # default OFF
+        _bypass_sub = QLabel("Only works if supervised execution is enabled")
+        _bypass_sub.setStyleSheet(f"color: {_MUTED}; font-size: 10px; margin-left: 26px;")
+        _bypass_sub.setWordWrap(True)
+
         # ── Work iterations row (sits under the workmode checkbox) ────────────
         _iter_row = QWidget()
         _iter_row.setStyleSheet("background: transparent;")
@@ -1740,10 +1748,20 @@ class ManageTasksWindow(BaseWindow):
             "Injects the notify tool instructions into this task session's system prompt.\n"
             "Only affects this task — does not change the main AI engine or other tasks."
         )
+        self._f_perm_bypass.setToolTip(
+            "Let this background task run code WITHOUT the approval dialog and WITHOUT\n"
+            "the security gate (static risk scan / policy / approval memory).\n\n"
+            "Default OFF: the task obeys your global Supervised Execution setting, just\n"
+            "like the main chat. Turn this ON only for a task you fully trust to run\n"
+            "unattended.\n\n"
+            "Only has an effect when Supervised Execution is enabled — if supervision is\n"
+            "already off globally, code auto-runs regardless."
+        )
 
         for cb in (self._f_perm_workmode, self._f_perm_exec_code,
                    self._f_perm_image_tools,
-                   self._f_perm_controller_ref, self._f_perm_notify_tool):
+                   self._f_perm_controller_ref, self._f_perm_notify_tool,
+                   self._f_perm_bypass):
             cb.setStyleSheet(_CHECK)
 
         fl.addWidget(_card(perm_hint,
@@ -1751,6 +1769,7 @@ class ManageTasksWindow(BaseWindow):
                            self._f_perm_exec_code,
                            self._f_perm_image_tools,
                            self._f_perm_controller_ref, self._f_perm_notify_tool,
+                           self._f_perm_bypass, _bypass_sub,
                            title="Agent Permissions", icon="🔐"))
 
         # ══ CARD 5: Pre-loaded Skills ══════════════════════════════════════════
@@ -2571,6 +2590,7 @@ class ManageTasksWindow(BaseWindow):
         self._f_perm_image_tools.setChecked(False)
         self._f_perm_controller_ref.setChecked(False)
         self._f_perm_notify_tool.setChecked(False)
+        self._f_perm_bypass.setChecked(False)
         self._f_max_iterations.setValue(20)
         self._f_max_iterations.setEnabled(True)
         self._f_unlimited_iterations.setChecked(False)
@@ -2632,6 +2652,7 @@ class ManageTasksWindow(BaseWindow):
         self._f_perm_image_tools.setChecked(perms.get('inject_image_tools', False))
         self._f_perm_controller_ref.setChecked(perms.get('inject_controller_ref', False))
         self._f_perm_notify_tool.setChecked(perms.get('inject_notify_tool', False))
+        self._f_perm_bypass.setChecked(perms.get('bypass_supervised', False))
 
         self._f_max_iterations.setValue(task.get('max_work_iterations', 20))
         unlimited = task.get('unlimited_work_iterations', False)
@@ -3231,6 +3252,7 @@ class ManageTasksWindow(BaseWindow):
                 "inject_image_tools": self._f_perm_image_tools.isChecked(),
                 "inject_controller_ref": self._f_perm_controller_ref.isChecked(),
                 "inject_notify_tool": self._f_perm_notify_tool.isChecked(),
+                "bypass_supervised": self._f_perm_bypass.isChecked(),
             },
             "max_work_iterations": self._f_max_iterations.value(),
             "unlimited_work_iterations": self._f_unlimited_iterations.isChecked(),

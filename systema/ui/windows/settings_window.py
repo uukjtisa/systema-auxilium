@@ -7,7 +7,8 @@ FIXED: Voice settings now actually work - VAD and TTS voice selection are functi
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QLineEdit, QPushButton, QTextEdit, QComboBox, QGroupBox,
                              QCheckBox, QScrollArea, QFrame, QSlider, QSpinBox, QDoubleSpinBox,
-                             QPlainTextEdit, QFileDialog, QStackedWidget)
+                             QPlainTextEdit, QFileDialog, QStackedWidget, QMessageBox,
+                             QInputDialog)
 from PyQt6.QtCore import Qt, QPoint, QTimer, QRect, QRectF
 from PyQt6.QtGui import QRegion, QPainter, QColor, QFont, QPen
 from systema.ui.base_window import BaseWindow
@@ -1236,10 +1237,119 @@ class SettingsWindow(BaseWindow):
         self.supervised_checkbox.setStyleSheet(_CHECK)
         sg_lay.addWidget(self.supervised_checkbox)
         sg_lay.addWidget(_info_box(
-            "When enabled, you review all code before it runs — edit, explain, or reject it.\n\n"
+            "When enabled, you review RISKY code before it runs — edit, explain, or "
+            "reject it. Obviously-safe snippets (plain print, math, a bare import) run "
+            "without a prompt; use 'Review even safe code' below to be asked for "
+            "everything.\n\n"
             "Warning: Disabling allows automatic code execution without review. "
             "Only disable if you fully trust the AI."))
         sec_lay.addWidget(sec_group)
+
+        # ── Execution policy + approval memory + audit ──────────────────────
+        from systema.security import code_guard as _guard
+        pol_group = QGroupBox("Execution Policy & Audit")
+        pol_group.setStyleSheet(_GROUP)
+        pol_lay = QVBoxLayout(pol_group)
+        pol_lay.addWidget(_info_box(
+            "A safety net modeled on AI-agent harnesses. Every file, process, "
+            "network, dynamic-code, system and credential operation is sorted into "
+            "a category you control here. Each category can be set to: ask (prompt "
+            "for approval), allow (run without a prompt), or deny (always block). "
+            "'ask' and 'deny' apply even when Supervised Execution is off, so risky "
+            "code is always caught. Pick a preset for a quick start, or fine-tune "
+            "each row. Works on Windows, Linux, and macOS."))
+
+        # ── Preset row ──────────────────────────────────────────────────────
+        _preset_row = QHBoxLayout()
+        _preset_lbl = QLabel("Preset:")
+        _preset_lbl.setStyleSheet(f"color:{_TEXT}; font-size:11px; font-weight:600;")
+        _preset_row.addWidget(_preset_lbl)
+        self._preset_combo = QComboBox()
+        self._preset_combo.setStyleSheet(_COMBO)
+        _preset_row.addWidget(self._preset_combo, 1)
+        _preset_apply = QPushButton("Apply")
+        _preset_apply.setStyleSheet(_BTN)
+        _preset_apply.setToolTip("Load the selected preset into the rows below.")
+        _preset_apply.clicked.connect(self._apply_policy_preset)
+        _preset_row.addWidget(_preset_apply)
+        _preset_save = QPushButton("Save as…")
+        _preset_save.setStyleSheet(_BTN)
+        _preset_save.setToolTip("Save the current rows as a new named preset.")
+        _preset_save.clicked.connect(self._save_policy_preset)
+        _preset_row.addWidget(_preset_save)
+        _preset_del = QPushButton("Delete")
+        _preset_del.setStyleSheet(_BTN)
+        _preset_del.setToolTip("Delete the selected custom preset (built-ins can't be removed).")
+        _preset_del.clicked.connect(self._delete_policy_preset)
+        _preset_row.addWidget(_preset_del)
+        pol_lay.addLayout(_preset_row)
+
+        # ── Per-category rules, grouped so the finer list stays readable ─────
+        self._policy_combos = {}
+        for _grp_title, _grp_cats in _guard.CATEGORY_GROUPS:
+            _sub = QLabel(_grp_title)
+            _sub.setStyleSheet(f"color:{_MUTED}; font-size:10px; font-weight:700;"
+                               "letter-spacing:1px; margin-top:6px;")
+            pol_lay.addWidget(_sub)
+            for _cat in _grp_cats:
+                _row = QHBoxLayout()
+                _lbl = QLabel(_guard.CATEGORY_LABELS.get(_cat, _cat))
+                _lbl.setStyleSheet(f"color:{_TEXT}; font-size:11px;")
+                _lbl.setWordWrap(True)
+                _row.addWidget(_lbl, 1)
+                _combo = QComboBox()
+                _combo.addItems(["ask", "allow", "deny"])
+                _combo.setStyleSheet(_COMBO)
+                _combo.setMaximumWidth(120)
+                _row.addWidget(_combo)
+                self._policy_combos[_cat] = _combo
+                pol_lay.addLayout(_row)
+        self._refresh_preset_combo()
+
+        self.approval_memory_checkbox = QCheckBox(
+            "Remember approvals — don't ask again for identical code")
+        self.approval_memory_checkbox.setChecked(True)
+        self.approval_memory_checkbox.setStyleSheet(_CHECK)
+        pol_lay.addWidget(self.approval_memory_checkbox)
+
+        self.review_safe_code_checkbox = QCheckBox(
+            "Review even safe code (prompt for everything, incl. plain print)")
+        self.review_safe_code_checkbox.setChecked(False)
+        self.review_safe_code_checkbox.setStyleSheet(_CHECK)
+        self.review_safe_code_checkbox.setToolTip(
+            "By default, code with no risky operations (plain print, math, a bare "
+            "import) runs without a prompt even under Supervised Execution — only "
+            "caution/danger operations are reviewed.\nTick this to be prompted for "
+            "EVERY code execution, no matter how trivial.")
+        pol_lay.addWidget(self.review_safe_code_checkbox)
+
+        _forget_btn = QPushButton("Forget remembered approvals")
+        _forget_btn.setStyleSheet(_BTN)
+        _forget_btn.clicked.connect(self._forget_approvals)
+        pol_lay.addWidget(_forget_btn)
+
+        _audit_hdr = QLabel("Recent execution audit")
+        _audit_hdr.setStyleSheet(f"color:{_TEXT}; font-size:11px; font-weight:600;")
+        pol_lay.addWidget(_audit_hdr)
+        self.audit_view = QTextEdit()
+        self.audit_view.setReadOnly(True)
+        self.audit_view.setMaximumHeight(150)
+        self.audit_view.setStyleSheet(
+            f"QTextEdit {{ background:{_ELEV}; border:1px solid {_BORDER}; border-radius:6px;"
+            f" padding:8px; font-family:Consolas,monospace; font-size:10px; color:{_TEXT}; }}")
+        pol_lay.addWidget(self.audit_view)
+        _audit_row = QHBoxLayout()
+        _audit_refresh = QPushButton("Refresh")
+        _audit_refresh.setStyleSheet(_BTN)
+        _audit_refresh.clicked.connect(self._refresh_audit_view)
+        _audit_clear = QPushButton("Clear log")
+        _audit_clear.setStyleSheet(_BTN)
+        _audit_clear.clicked.connect(self._clear_audit_log)
+        _audit_row.addWidget(_audit_refresh)
+        _audit_row.addWidget(_audit_clear)
+        _audit_row.addStretch()
+        pol_lay.addLayout(_audit_row)
+        sec_lay.addWidget(pol_group)
 
         dbg_group = QGroupBox("Debug")
         dbg_group.setStyleSheet(_GROUP)
@@ -1757,6 +1867,22 @@ class SettingsWindow(BaseWindow):
         supervised_mode = self.controller.settings.get('supervised_execution', True)  # Default ON
         self.supervised_checkbox.setChecked(supervised_mode)
 
+        # Load execution policy + approval memory + audit view
+        try:
+            _pol = self.controller.settings.get('security_exec_policy', {}) or {}
+            for _cat, _combo in getattr(self, '_policy_combos', {}).items():
+                _val = _pol.get(_cat, 'ask')
+                _idx = _combo.findText(_val if _val in ('ask', 'allow', 'deny') else 'ask')
+                _combo.setCurrentIndex(max(0, _idx))
+            self.approval_memory_checkbox.setChecked(
+                self.controller.settings.get('security_approval_memory', True))
+            self.review_safe_code_checkbox.setChecked(
+                self.controller.settings.get('security_review_safe_code', False))
+            self._refresh_preset_combo()
+            self._refresh_audit_view()
+        except Exception:
+            pass
+
         # Load Tool lockout switch
         tool_exec_locked = self.controller.settings.get('tool_execution_lockout', False)
         self.tool_exec_lockout_checkbox.setChecked(tool_exec_locked)
@@ -1922,6 +2048,134 @@ class SettingsWindow(BaseWindow):
         # Update visibility
         self.on_vad_settings_changed()
 
+    # ── execution-policy presets ────────────────────────────────────────────
+    def _current_policy_rules(self) -> dict:
+        """Read the per-category combos into a {category: policy} map."""
+        return {_cat: _combo.currentText()
+                for _cat, _combo in getattr(self, '_policy_combos', {}).items()}
+
+    def _set_policy_rules(self, rules: dict):
+        """Push a {category: policy} map onto the per-category combos."""
+        for _cat, _combo in getattr(self, '_policy_combos', {}).items():
+            _val = rules.get(_cat, 'ask')
+            _idx = _combo.findText(_val if _val in ('ask', 'allow', 'deny') else 'ask')
+            _combo.setCurrentIndex(max(0, _idx))
+
+    def _refresh_preset_combo(self, select: str | None = None):
+        """Repopulate the preset dropdown (built-ins first, then custom)."""
+        try:
+            from systema.security import code_guard as _guard
+            combo = getattr(self, '_preset_combo', None)
+            if combo is None:
+                return
+            settings = getattr(self.controller, 'settings', {}) or {}
+            builtin = list(_guard.BUILTIN_PRESETS.keys())
+            custom = [n for n in (settings.get(_guard._PRESETS_KEY) or {})
+                      if n not in _guard.BUILTIN_PRESETS]
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(builtin)
+            if custom:
+                combo.insertSeparator(len(builtin))
+                combo.addItems(sorted(custom))
+            if select:
+                _i = combo.findText(select)
+                if _i >= 0:
+                    combo.setCurrentIndex(_i)
+            combo.blockSignals(False)
+        except Exception:
+            pass
+
+    def _apply_policy_preset(self):
+        """Load the selected preset's rules into the category combos."""
+        try:
+            from systema.security import code_guard as _guard
+            name = self._preset_combo.currentText()
+            presets = _guard.load_presets(getattr(self.controller, 'settings', {}) or {})
+            if name in presets:
+                self._set_policy_rules(presets[name])
+        except Exception as e:
+            QMessageBox.warning(self, "Could not apply preset", str(e))
+
+    def _save_policy_preset(self):
+        """Save the current category rows as a new named custom preset."""
+        try:
+            from systema.security import code_guard as _guard
+            name, ok = QInputDialog.getText(self, "Save preset",
+                                            "Name for this policy preset:")
+            if not ok or not name.strip():
+                return
+            _guard.save_custom_preset(self.controller.settings, name.strip(),
+                                      self._current_policy_rules())
+            self.controller.save_settings()
+            self._refresh_preset_combo(select=name.strip())
+            QMessageBox.information(self, "Preset saved",
+                                    f"Saved preset '{name.strip()}'.")
+        except ValueError as e:
+            QMessageBox.warning(self, "Invalid name", str(e))
+        except Exception as e:
+            QMessageBox.warning(self, "Could not save preset", str(e))
+
+    def _delete_policy_preset(self):
+        """Delete the selected custom preset (built-ins are protected)."""
+        try:
+            from systema.security import code_guard as _guard
+            name = self._preset_combo.currentText()
+            if name in _guard.BUILTIN_PRESETS:
+                QMessageBox.information(self, "Built-in preset",
+                                        f"'{name}' is a built-in preset and can't be deleted.")
+                return
+            if QMessageBox.question(self, "Delete preset?",
+                                    f"Delete the custom preset '{name}'?") \
+                    != QMessageBox.StandardButton.Yes:
+                return
+            _guard.delete_custom_preset(self.controller.settings, name)
+            self.controller.save_settings()
+            self._refresh_preset_combo()
+        except Exception as e:
+            QMessageBox.warning(self, "Could not delete preset", str(e))
+
+    def _forget_approvals(self):
+        """Clear the 'don't ask again' approval memory (session + persistent)."""
+        try:
+            from systema.security.code_guard import ApprovalMemory
+            mem = ApprovalMemory()
+            n = mem.persistent_count
+            mem.forget_all()
+            QMessageBox.information(self, "Approvals cleared",
+                                    f"Forgot {n} remembered approval(s). "
+                                    "Code will be prompted for again.")
+        except Exception as e:
+            QMessageBox.warning(self, "Could not clear", str(e))
+
+    def _refresh_audit_view(self):
+        """Load the tail of the execution audit log into the viewer."""
+        try:
+            from systema.security.code_guard import AuditLog
+            rows = AuditLog.tail(50)
+            if not rows:
+                self.audit_view.setPlainText("No executions recorded yet.")
+                return
+            lines = [f"{r.get('ts','')}  {r.get('decision','?'):>8} "
+                     f"[{r.get('source','?')}]  {r.get('type','?')}  "
+                     f"risk: {r.get('risk','')}" for r in rows]
+            self.audit_view.setPlainText("\n".join(lines))
+        except Exception as e:
+            self.audit_view.setPlainText(f"(could not read audit log: {e})")
+
+    def _clear_audit_log(self):
+        """Truncate the execution audit log after confirmation."""
+        if QMessageBox.question(self, "Clear audit log?",
+                                "Erase the recorded execution history?") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            from systema.security.code_guard import AuditLog
+            AuditLog._FILE.write_text("", encoding="utf-8")
+        except Exception:
+            pass
+        self._refresh_audit_view()
+
     def save_settings(self):
         """Save settings to controller"""
         # Save General settings
@@ -1953,6 +2207,18 @@ class SettingsWindow(BaseWindow):
         # Save supervised execution mode
         supervised_mode = self.supervised_checkbox.isChecked()
         self.controller.settings['supervised_execution'] = supervised_mode
+
+        # Save execution policy + approval memory
+        try:
+            self.controller.settings['security_exec_policy'] = {
+                _cat: _combo.currentText()
+                for _cat, _combo in getattr(self, '_policy_combos', {}).items()}
+            self.controller.settings['security_approval_memory'] = \
+                self.approval_memory_checkbox.isChecked()
+            self.controller.settings['security_review_safe_code'] = \
+                self.review_safe_code_checkbox.isChecked()
+        except Exception:
+            pass
 
         # Save system prompt hijacking and Tool lockout switch
         self.controller.set_tool_execution_lockout(self.tool_exec_lockout_checkbox.isChecked())

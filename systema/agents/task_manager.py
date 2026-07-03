@@ -138,7 +138,6 @@ class TaskAIEngine:
             # Background mode — no UI, no approval dialogs
             self._engine.tool_manager._get_chat = lambda: None
             self._engine.tool_manager._get_android_bridge = lambda: None
-            self._engine.tool_manager.supervised_execution = False
             # Resilience: retry transient provider failures so a single hiccup
             # doesn't kill an unattended background ping (main session uses 0).
             self._engine.provider_max_retries = 3
@@ -146,11 +145,30 @@ class TaskAIEngine:
             perms = self._task.get('permissions', {})
             self._engine.tool_manager.allow_workmode = perms.get('allow_workmode', False)
             self._engine.tool_manager.allow_execute_code = perms.get('allow_execute_code', False)
+            self._apply_supervision(perms)
             self._inject_task_namespace()
             log.info("[TaskAIEngine._init_engine] ✓ Dedicated AIEngine instance created")
         except Exception as e:
             log.error(f"[TaskAIEngine._init_engine] ✗ {type(e).__name__}: {e}")
             self._engine = None
+
+    def _apply_supervision(self, perms: dict | None = None):
+        """Set the task engine's supervision policy from the task's permissions.
+
+        bypass_supervised ON  -> skip the whole gate (supervised + security),
+                                 code auto-runs unattended (the historical task
+                                 behaviour). Only meaningful when the user has
+                                 supervised execution enabled globally.
+        bypass_supervised OFF -> defer to the global supervised-execution setting
+                                 and the security gate, like the main session."""
+        if perms is None:
+            perms = self._task.get('permissions', {})
+        bypass = bool(perms.get('bypass_supervised', False))
+        tm = self._engine.tool_manager
+        tm.bypass_security = bypass
+        # None = defer to global settings; keep it that way when NOT bypassing so a
+        # background task honours the user's supervised-execution + security choice.
+        tm.supervised_execution = False if bypass else None
 
     def _inject_task_namespace(self):
         """(Re-)inject everything the task's Python tool needs. Idempotent and
@@ -274,8 +292,8 @@ class TaskAIEngine:
         # Inject task system prompt (includes full user system prompt + task context)
         self._engine.system_prompt_hijacked = True
         self._engine.custom_system_prompt = task_system_prompt
-        # Ensure background mode persists after sync
-        self._engine.tool_manager.supervised_execution = False
+        # Ensure the task's supervision policy persists after sync
+        self._apply_supervision()
 
         # Restore session history into the engine
         self._engine.conversation_history = list(history)

@@ -325,7 +325,9 @@ class UpdaterService(QObject):
             dest = backup_dir / target.name
             shutil.copy2(target, dest)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
+        # newline="" preserves the exact line endings the merge produced instead
+        # of letting Windows translate every "\n" into "\r\n".
+        target.write_text(text, encoding="utf-8", newline="")
         log.info(f"[UpdaterService.write_managed_file] wrote {rp} (backup in {backup_dir})")
         return str(backup_dir)
 

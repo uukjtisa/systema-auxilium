@@ -98,6 +98,9 @@ class ToolManager:
         self.ai_engine = ai_engine
         # Override: None = defer to settings_callback; True/False = force on/off
         self.supervised_execution = None
+        # When True, skip the ENTIRE gate (scan/policy/memory/dialog) and auto-run.
+        # Used by background scheduled tasks that opt into bypassing supervision.
+        self.bypass_security = False
         # Capability gates — enforced by run_work_environment/run_execute_code,
         # not just narrated in the system prompt. Set by TaskAIEngine from task dict.
         self.allow_workmode = True
@@ -671,25 +674,105 @@ class ToolManager:
         log.info(f"[ToolManager._check_supervised_execution] execution_type='{execution_type}' | "
                  f"code_len={len(code)} | has_settings_callback={self.settings_callback is not None}")
 
-        # Check if supervised execution is enabled
-        # self.supervised_execution overrides the settings_callback when set
+        # Full bypass — a background task explicitly opted out of supervision AND
+        # the security gate. Auto-approve, but still leave an audit trail.
+        if self.bypass_security:
+            log.info("[ToolManager._check_supervised_execution] bypass_security — auto-approving")
+            self._audit_decision(code, execution_type, 'auto', 'task-bypass')
+            return True, code
+
+        # Resolve settings + whether supervised prompting is on.
+        # self.supervised_execution overrides the settings_callback when set.
+        try:
+            settings = self.settings_callback() if self.settings_callback else {}
+        except Exception:
+            settings = {}
         if self.supervised_execution is not None:
             supervised_enabled = self.supervised_execution
-            log.debug(f"[ToolManager._check_supervised_execution] supervised_execution (override)={supervised_enabled}")
-        elif self.settings_callback:
-            settings = self.settings_callback()
-            supervised_enabled = settings.get('supervised_execution', True)  # Default ON
-            log.debug(f"[ToolManager._check_supervised_execution] supervised_execution (from settings)={supervised_enabled}")
         else:
-            # No settings callback, assume supervised mode
-            supervised_enabled = True
-            log.warning("[ToolManager._check_supervised_execution] No settings_callback — "
-                        "assuming supervised=True")
+            supervised_enabled = settings.get('supervised_execution', True)  # Default ON
+        log.debug(f"[ToolManager._check_supervised_execution] supervised_enabled={supervised_enabled}")
 
-        if not supervised_enabled:
-            # Auto-approve if supervision is disabled
-            log.debug("[ToolManager._check_supervised_execution] Supervision disabled — auto-approving")
-            return True, code
+        # ── Security layer: static scan -> policy -> approval memory ─────────
+        # Layered like a mature agent harness. Defensive: a fault in the safety
+        # layer must never itself block a run — fall back to plain supervision.
+        self._pending_scan_findings = None
+        try:
+            from systema.security import code_guard as guard
+            findings = guard.scan_code(code)
+            engine = guard.PolicyEngine(settings)
+            memory_on = settings.get('security_approval_memory', True)
+
+            # The gate is POLICY-authoritative, not severity-authoritative. A
+            # category's rule (ask / allow / deny) decides what happens to the
+            # real operations it covers — a write set to 'ask' prompts even
+            # though a lone write is only a 'caution', which is exactly the hole
+            # that let create/edit slip through before.
+
+            # 1. Hard policy deny — blocks in either mode. Deny is absolute: it
+            #    fires on ANY finding in a denied category, even an INFO-level
+            #    signal like a bare `import`.
+            decision, cats = engine.decide(findings)
+            if decision == guard.POLICY_DENY:
+                guard.AuditLog.record(code=code, execution_type=execution_type,
+                                      decision='denied', source='policy',
+                                      findings=findings, extra={'categories': cats})
+                log.warning(f"[ToolManager._check_supervised_execution] policy DENY on {cats} — blocking")
+                self.approval_signal.system_message.emit(
+                    "Blocked by your security policy (" + ", ".join(cats) + "). "
+                    "Adjust it in Settings > Security to allow this.")
+                return False, code
+
+            # 2. Identical code approved before — skip the prompt.
+            if memory_on and guard.ApprovalMemory().is_approved(code):
+                guard.AuditLog.record(code=code, execution_type=execution_type,
+                                      decision='approved', source='memory', findings=findings)
+                log.info("[ToolManager._check_supervised_execution] approved from memory (known hash)")
+                return True, code
+
+            # 3. Gate on the REAL operations (caution/danger). INFO-level signals
+            #    (a bare `import`, os.chdir, plain print) never force a prompt on
+            #    their own — that keeps trivial code from nagging. Users who want
+            #    to review absolutely everything set 'security_review_safe_code'.
+            risky = [f for f in findings
+                     if f.severity in (guard.SEV_CAUTION, guard.SEV_DANGER)]
+            if not risky and not settings.get('security_review_safe_code', False):
+                guard.AuditLog.record(code=code, execution_type=execution_type,
+                                      decision='auto', source='safe', findings=findings)
+                log.debug("[ToolManager._check_supervised_execution] no caution/danger ops — auto-approving safe code")
+                return True, code
+
+            # 4. Among the real operations, the per-category policy decides.
+            #    'allow' for every risky category => auto-approve (an explicit
+            #    allow-list that overrides supervision). Otherwise a category set
+            #    to 'ask' forces the prompt regardless of the Supervised toggle.
+            risky_decision, risky_cats = engine.decide(risky)
+            if risky and risky_decision == guard.POLICY_ALLOW:
+                guard.AuditLog.record(code=code, execution_type=execution_type,
+                                      decision='auto', source='policy',
+                                      findings=findings, extra={'categories': risky_cats})
+                log.info(f"[ToolManager._check_supervised_execution] allow-listed {risky_cats} — auto-approving")
+                return True, code
+
+            # 5. Prompt when Supervised is ON, or (Supervised OFF) whenever a
+            #    risky category the code uses is set to 'ask'. review_safe_code
+            #    also forces the prompt for otherwise-safe code that reached here.
+            need_prompt = (supervised_enabled
+                           or (risky and risky_decision == guard.POLICY_ASK)
+                           or settings.get('security_review_safe_code', False))
+            if not need_prompt:
+                guard.AuditLog.record(code=code, execution_type=execution_type,
+                                      decision='auto',
+                                      source=('policy' if findings else 'unsupervised'),
+                                      findings=findings)
+                log.debug("[ToolManager._check_supervised_execution] auto-approved (no prompt required)")
+                return True, code
+            self._pending_scan_findings = findings   # reused for the post-dialog audit
+        except Exception as e:
+            log.error(f"[ToolManager._check_supervised_execution] security layer error "
+                      f"(continuing with plain supervision): {type(e).__name__}: {e}")
+            if not supervised_enabled:
+                return True, code
 
         # Show approval dialog on main thread
         log.debug("[ToolManager._check_supervised_execution] Emitting request_approval signal to main thread")
@@ -714,10 +797,14 @@ class ToolManager:
             approved = approval_event.wait(timeout=300)
             if not approved:
                 log.error("[ToolManager._check_supervised_execution] Approval wait timed out after 300s — denying by default")
+                self._audit_decision(code, execution_type, 'rejected', 'timeout')
                 return False, code
 
             log.info(f"[ToolManager._check_supervised_execution] User decision received | "
                      f"approved={approval_result['approved']}")
+            self._audit_decision(approval_result['modified_code'], execution_type,
+                                 'approved' if approval_result['approved'] else 'rejected',
+                                 'user')
             return approval_result['approved'], approval_result['modified_code']
 
         except Exception as e:
@@ -725,6 +812,17 @@ class ToolManager:
                       f"{type(e).__name__}: {e}")
             # If dialog fails, approve by default (but log error)
             return True, code
+
+    def _audit_decision(self, code, execution_type, decision, source):
+        """Append one entry to the security audit log, reusing the scan from the
+        pre-dialog phase when available. Never raises."""
+        try:
+            from systema.security import code_guard as guard
+            guard.AuditLog.record(code=code, execution_type=execution_type,
+                                  decision=decision, source=source,
+                                  findings=getattr(self, '_pending_scan_findings', None))
+        except Exception:
+            pass
 
     def _close_active_approval_dialog(self, approved: bool, modified_code: str):
         """Slot — always runs on main thread. Closes PC dialog when Android decides first."""

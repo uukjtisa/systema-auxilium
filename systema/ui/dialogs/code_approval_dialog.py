@@ -1,651 +1,552 @@
 """
-ui/code_approval_dialog.py
-Code Approval Dialog - Shows code before execution for supervised mode
-FIXED: Simple chat window for explanations, stays on top, no crashes
+systema/ui/dialogs/code_approval_dialog.py
+
+Code Approval dialog — the gate before the app runs AI-authored code in
+supervised mode. Rebuilt as a small *personal coding agent*:
+
+  • Live theme palette (no hard-coded colours, no emojis).
+  • Editable code panel — you can tweak the code before approving.
+  • Risk panel — an automatic static scan (systema.security.code_guard) that
+    re-runs whenever the code changes ("delta re-approval").
+  • Code Reviewer sub-agent ([[code_agent]]) chat: Explain, Suggest a safer
+    version, or free-form questions. Same provider, own prompt/tools/interpreter.
+    Shows a "responding" indicator and locks input while it works. Per-request
+    token usage is displayed.
+  • Proposed edits arrive as a DIFF with one-click Apply / Dismiss.
+  • "Don't ask again for identical code" remembers the approved hash
+    (systema.security.code_guard.ApprovalMemory) so the same snippet skips the
+    prompt next time.
+
+Compatibility: the static ``get_approval(code, execution_type, ai_engine,
+parent=None) -> (approved, modified_code)`` API and the ``code_edit`` / ``result``
+/ ``modified_code`` / ``accept`` / ``close`` attributes are preserved — the
+tool_manager and the Android bridge drive the dialog through them.
 """
 
-from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
-                             QTextEdit, QLabel, QCheckBox, QMessageBox, QSplitter,
-                             QWidget, QScrollArea)
-from PyQt6.QtCore import Qt, pyqtSignal, QThread
-from PyQt6.QtGui import QFont
+from __future__ import annotations
+
+import difflib
+
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QFont
+from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+                             QTextEdit, QListWidget, QListWidgetItem, QSplitter,
+                             QWidget, QCheckBox, QFrame)
+
+from systema.agents.code_agent import CodeAgent
+from systema.security.code_guard import (scan_code, summarize_findings, redact_secrets,
+                                         ApprovalMemory, SEV_DANGER, SEV_CAUTION,
+                                         SEV_INFO)
+from systema.ui import theme
 
 
-class AIResponseWorker(QThread):
-    """Worker thread for AI responses to prevent UI freezing"""
+def _esc(s: str) -> str:
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-    response_ready = pyqtSignal(str)  # Signal when response is ready
-    error_occurred = pyqtSignal(str)  # Signal when error occurs
 
-    def __init__(self, ai_engine, prompt):
+def _md(text: str) -> str:
+    """Render a chat message as markdown -> HTML (Qt rich text)."""
+    try:
+        import markdown2
+        return markdown2.markdown(
+            text or "", extras=["fenced-code-blocks", "tables", "break-on-newline"])
+    except Exception:
+        return _esc(text or "").replace("\n", "<br>")
+
+
+class _CodeAgentWorker(QThread):
+    """Runs one Code Reviewer instruction off the GUI thread."""
+    message = pyqtSignal(str, str)      # (role, text)
+    proposal = pyqtSignal(str, str)     # (replacement_code, why)
+    tokens = pyqtSignal(str)            # token-meter summary
+    finished_ok = pyqtSignal(str)
+    failed = pyqtSignal(str)
+
+    def __init__(self, code, execution_type, ai_engine, task, meter):
         super().__init__()
-        self.ai_engine = ai_engine
-        self.prompt = prompt
+        self._code = code
+        self._etype = execution_type
+        self._ai = ai_engine
+        self._task = task
+        self._meter = meter
 
     def run(self):
-        """Run the AI request in background"""
         try:
-            # Get AI response using internal method
-            if hasattr(self.ai_engine, '_get_ai_response_internal'):
-                response = self.ai_engine._get_ai_response_internal(self.prompt)
-                if isinstance(response, dict) and 'response' in response:
-                    self.response_ready.emit(response['response'])
-                else:
-                    self.response_ready.emit(str(response))
-            else:
-                # Fallback: use provider-specific method
-                if self.ai_engine.ai_provider == 'anthropic':
-                    response = self._get_anthropic_response()
-                elif self.ai_engine.ai_provider == 'gemini':
-                    response = self._get_gemini_response()
-                elif self.ai_engine.ai_provider == 'puter':
-                    response = self._get_puter_response()
-                else:
-                    self.error_occurred.emit("Unknown AI provider")
-                    return
-
-                self.response_ready.emit(response)
-
+            agent = CodeAgent(
+                self._code, self._etype, ai_engine=self._ai, meter=self._meter,
+                on_message=lambda role, text: self.message.emit(role, text),
+                on_proposal=lambda code, why: self.proposal.emit(code, why or ""))
+            summary = agent.run(self._task)
+            self.tokens.emit(self._meter.summary() if self._meter else "")
+            self.finished_ok.emit(summary or "")
         except Exception as e:
-            self.error_occurred.emit(f"Error: {str(e)}")
-
-    def _get_anthropic_response(self):
-        """Get Anthropic response"""
-        import requests
-        url = "https://api.anthropic.com/v1/messages"
-        headers = {
-            "x-api-key": self.ai_engine.api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json"
-        }
-
-        data = {
-            "model": "claude-sonnet-4-20250514",
-            "max_tokens": 2000,
-            "messages": [{"role": "user", "content": self.prompt}]
-        }
-
-        response = requests.post(url, headers=headers, json=data, timeout=30)
-        response.raise_for_status()
-        result = response.json()
-
-        return result['content'][0]['text']
-
-    def _get_gemini_response(self):
-        """Get Gemini response"""
-        import requests
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.ai_engine.gemini_model}:generateContent?key={self.ai_engine.gemini_api_key}"
-
-        data = {
-            "contents": [{
-                "parts": [{"text": self.prompt}]
-            }]
-        }
-
-        response = requests.post(url, json=data, timeout=30)
-        response.raise_for_status()
-        result = response.json()
-
-        return result['candidates'][0]['content']['parts'][0]['text']
-
-    def _get_puter_response(self):
-        """Get Puter response"""
-        if not self.ai_engine.puter_server or not self.ai_engine.puter_server.is_running():
-            raise Exception("Puter server not running")
-
-        response = self.ai_engine.generate_response(self.prompt)
-        return response
-
-
-class SimpleChatWidget(QWidget):
-    """Simple chat widget for code explanations"""
-
-    send_message = pyqtSignal(str)  # Signal to send message to AI
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.message_history = []
-        self.init_ui()
-
-    def init_ui(self):
-        """Initialize the chat UI"""
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 0, 0, 0)
-        layout.setSpacing(8)
-
-        # Chat title/header
-        header = QLabel("💬 Code Analysis Chat")
-        header.setStyleSheet("""
-            QLabel {
-                color: #8B949E;
-                font-size: 12px;
-                font-weight: 600;
-                margin-bottom: 8px;
-                padding: 8px 0px;
-                letter-spacing: 0.5px;
-            }
-        """)
-        layout.addWidget(header)
-
-        # Chat history display
-        self.chat_display = QTextEdit()
-        self.chat_display.setReadOnly(True)
-        self.chat_display.setStyleSheet("""
-            QTextEdit {
-                background-color: #0D1117;
-                border: 1px solid rgba(88, 166, 255, 0.18);
-                border-radius: 8px;
-                padding: 12px;
-                font-size: 12px;
-                color: #E6EDF3;
-                line-height: 1.5;
-            }
-            QScrollBar:vertical {
-                background: transparent; width: 6px; border: none;
-            }
-            QScrollBar::handle:vertical {
-                background: #21262D; border-radius: 3px; min-height: 20px;
-            }
-            QScrollBar::handle:vertical:hover { background: #30363D; }
-            QScrollBar::add-line, QScrollBar::sub-line { height: 0; }
-        """)
-        layout.addWidget(self.chat_display, 1)
-
-        # Input area
-        input_layout = QHBoxLayout()
-        input_layout.setSpacing(8)
-
-        self.input_field = QTextEdit()
-        self.input_field.setPlaceholderText("Ask about the code...")
-        self.input_field.setMaximumHeight(50)
-        self.input_field.setStyleSheet("""
-            QTextEdit {
-                background-color: #161B22;
-                border: 1px solid rgba(88, 166, 255, 0.18);
-                border-radius: 6px;
-                padding: 8px;
-                font-size: 12px;
-                color: #E6EDF3;
-            }
-            QTextEdit:focus {
-                border: 1px solid rgba(88, 166, 255, 0.55);
-            }
-        """)
-
-        # Send button
-        send_btn = QPushButton("Send")
-        send_btn.setStyleSheet("""
-            QPushButton {
-                background-color: rgba(88, 166, 255, 0.12);
-                border: 1px solid rgba(88, 166, 255, 0.28);
-                border-radius: 6px;
-                padding: 10px 18px;
-                font-size: 12px;
-                color: #58A6FF;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background-color: rgba(88, 166, 255, 0.22);
-                border-color: #58A6FF;
-            }
-            QPushButton:disabled {
-                background-color: transparent;
-                border-color: #21262D;
-                color: #30363D;
-            }
-        """)
-        send_btn.clicked.connect(self.send_user_message)
-
-        input_layout.addWidget(self.input_field, 1)
-        input_layout.addWidget(send_btn)
-
-        layout.addLayout(input_layout)
-
-    def send_user_message(self):
-        """Send user message"""
-        message = self.input_field.toPlainText().strip()
-        if not message:
-            return
-        self.add_message("You", message, "#58A6FF")
-        self.send_message.emit(message)
-        self.input_field.clear()
-
-    def add_message(self, sender, message, color="#8B949E"):
-        """Add message to chat display"""
-        self.message_history.append((sender, message))
-        formatted = f'<div style="margin-bottom: 10px; padding: 8px 10px; background: rgba(88,166,255,0.04); border-left: 2px solid {color}; border-radius: 3px;">'
-        formatted += f'<b style="color: {color}; font-size: 11px;">{sender}</b><br>'
-        formatted += f'<span style="color: #E6EDF3; font-size: 12px;">{message}</span>'
-        formatted += '</div>'
-        self.chat_display.append(formatted)
-        cursor = self.chat_display.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        self.chat_display.setTextCursor(cursor)
-
-    def clear_history(self):
-        """Clear chat history"""
-        self.message_history = []
-        self.chat_display.clear()
-
-    def show_loading(self):
-        """Show loading indicator"""
-        formatted = '<div style="margin-bottom: 10px; padding: 8px 10px; background: rgba(88,166,255,0.04); border-left: 2px solid #30363D; border-radius: 3px;">'
-        formatted += '<b style="color: #30363D; font-size: 11px;">AI</b><br>'
-        formatted += '<span style="color: #8B949E; font-size: 12px;"><i>Thinking…</i></span>'
-        formatted += '</div>'
-        self.chat_display.append(formatted)
-        cursor = self.chat_display.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        self.chat_display.setTextCursor(cursor)
-
-    def remove_last_message(self):
-        """Remove the last message (used to remove loading indicator)"""
-        if self.message_history:
-            self.message_history.pop()
-
-        # Rebuild display without last message
-        self.chat_display.clear()
-        for sender, message in self.message_history:
-            color = "#58A6FF" if sender == "You" else "#8B949E"
-            formatted = f'<div style="margin-bottom: 12px;">'
-            formatted += f'<b style="color: {color};">{sender}:</b><br>'
-            formatted += f'<span style="color: #E8EAED;">{message}</span>'
-            formatted += '</div>'
-            self.chat_display.append(formatted)
+            self.failed.emit(f"{type(e).__name__}: {e}")
 
 
 class CodeApprovalDialog(QDialog):
-    """Dialog for reviewing and approving code before execution"""
+    """Review, edit, and approve one code snippet before it runs."""
+
+    _SEV_COLOR_KEY = {SEV_DANGER: "red", SEV_CAUTION: "yellow", SEV_INFO: "muted"}
 
     def __init__(self, code, execution_type, ai_engine, parent=None):
-        """
-        Initialize code approval dialog
-
-        Args:
-            code: The code to be executed
-            execution_type: 'execute_code' or 'work_environment'
-            ai_engine: Reference to AI engine for explanations
-            parent: Parent widget
-        """
         super().__init__(parent)
-        self._is_explained = False
         self.code = code
         self.execution_type = execution_type
         self.ai_engine = ai_engine
-        self.result = None  # 'accept', 'reject', or None
+        self.result = None                 # 'accept' | 'reject' | None
         self.modified_code = code
-        self.chat_visible = False
-        self.worker = None  # AI response worker thread
 
-        self.init_ui()
+        self._worker = None
+        self._typing_timer = None
+        self._typing_dots = 0
+        self._pending_proposal = None      # (code, why) awaiting Apply/Dismiss
 
-    def init_ui(self):
-        """Initialize the UI"""
+        # Live theme palette (falls back to the default theme if no controller).
+        controller = getattr(ai_engine, "controller", None)
+        self._controller = controller
+        try:
+            self.p = theme.current_palette(controller)
+        except Exception:
+            self.p = theme.resolve_palette(theme.THEMES[theme.DEFAULT_THEME_KEY])
+
+        from systema.common.token_meter import TokenMeter
+        self._meter = TokenMeter("Code Reviewer")
+        self._memory = ApprovalMemory()
+
+        self._build()
+        self._refresh_security()
+
+    # ── layout ──────────────────────────────────────────────────────────────
+    def _build(self):
+        p = self.p
         self.setWindowTitle("Code Approval Required")
         self.setModal(True)
-        self.setMinimumSize(900, 500)
-        self.resize(1200, 600)
+        self.setMinimumSize(940, 560)
+        self.resize(1200, 660)
+        self.setWindowFlags(Qt.WindowType.Dialog
+                            | Qt.WindowType.WindowStaysOnTopHint
+                            | Qt.WindowType.WindowCloseButtonHint)
+        self.setStyleSheet(
+            f"QDialog {{ background-color: {p['bg']}; }}"
+            f"QWidget {{ color: {p['text']}; font-family: 'Segoe UI', system-ui, sans-serif; }}")
 
-        # CRITICAL: Make window stay on top of everything
-        self.setWindowFlags(
-            Qt.WindowType.Dialog |
-            Qt.WindowType.WindowStaysOnTopHint |  # Stay on top!
-            Qt.WindowType.WindowCloseButtonHint
-        )
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 16, 18, 16)
+        root.setSpacing(10)
 
-        # Raise and activate window
-        self.raise_()
-        self.activateWindow()
+        title = QLabel("Code execution approval")
+        title.setStyleSheet(f"color: {p['text']}; font-size: 15px; font-weight: 600;"
+                            " background: transparent;")
+        root.addWidget(title)
 
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #0D1117;
-            }
-            QWidget {
-                color: #E6EDF3;
-                font-family: 'Segoe UI', -apple-system, system-ui, sans-serif;
-            }
-        """)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(12)
-
-        # Title
-        title = QLabel("⚠️ Code Execution Approval (You can disable this pop up in the settings)")
-        title.setStyleSheet("""
-            QLabel {
-                color: #E6EDF3;
-                font-size: 15px;
-                font-weight: 600;
-                margin-bottom: 8px;
-            }
-        """)
-        layout.addWidget(title)
-
-        # Description
-        desc_text = "work environment" if self.execution_type == "work_environment" else "direct execution"
-        desc = QLabel(f"The AI wants to execute the following code ({desc_text}). Review and approve:")
-        desc.setStyleSheet("color: #8B949E; font-size: 11px; margin-bottom: 8px;")
+        where = ("work environment" if self.execution_type == "work_environment"
+                 else "direct execution")
+        desc = QLabel(f"The AI wants to run the code below ({where}). Review, edit if "
+                      "needed, and approve. You can turn this prompt off in Settings.")
         desc.setWordWrap(True)
-        layout.addWidget(desc)
+        desc.setStyleSheet(f"color: {p['muted']}; font-size: 11px; background: transparent;")
+        root.addWidget(desc)
 
-        # Splitter for code editor and chat (chat hidden by default)
-        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        split = QSplitter(Qt.Orientation.Horizontal)
+        split.setChildrenCollapsible(False)
+        split.setStyleSheet(f"QSplitter::handle {{ background: {p['border']}; width: 2px; }}")
+        split.addWidget(self._build_code_side())
+        split.addWidget(self._build_side_panel())
+        split.setSizes([680, 420])
+        root.addWidget(split, stretch=1)
 
-        # Code editor container
-        code_container = QWidget()
-        code_layout = QVBoxLayout(code_container)
-        code_layout.setContentsMargins(0, 0, 0, 0)
+        # footer: memory checkbox + Reject / Accept
+        foot = QHBoxLayout()
+        self.remember_cb = QCheckBox("Don't ask again for identical code")
+        self.remember_cb.setStyleSheet(
+            f"QCheckBox {{ color: {p['muted']}; font-size: 11px; background: transparent; }}"
+            f"QCheckBox::indicator {{ width: 14px; height: 14px; }}")
+        foot.addWidget(self.remember_cb)
+        foot.addStretch()
+
+        reject_btn = QPushButton("Reject")
+        reject_btn.setStyleSheet(self._btn(kind="danger"))
+        reject_btn.clicked.connect(self.on_reject)
+        foot.addWidget(reject_btn)
+
+        self.accept_btn = QPushButton("Accept and execute")
+        self.accept_btn.setStyleSheet(self._btn(primary=True))
+        self.accept_btn.clicked.connect(self.on_accept)
+        self.accept_btn.setDefault(True)
+        foot.addWidget(self.accept_btn)
+        root.addLayout(foot)
+
+    def _build_code_side(self) -> QWidget:
+        p = self.p
+        w = QWidget(); w.setStyleSheet("background: transparent;")
+        lay = QVBoxLayout(w); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(6)
+        lay.addWidget(self._h("Code to run"))
 
         self.code_edit = QTextEdit()
         self.code_edit.setPlainText(self.code)
-        self.code_edit.setStyleSheet("""
-            QTextEdit {
-                background-color: #0D1117;
-                border: 1px solid rgba(88, 166, 255, 0.18);
-                border-radius: 8px;
-                padding: 12px;
-                font-size: 13px;
-                font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-                color: #E6EDF3;
-                line-height: 1.6;
-            }
-            QTextEdit:focus {
-                border: 1px solid rgba(88, 166, 255, 0.55);
-                background-color: #0a0f16;
-            }
-        """)
-
-        # Set monospace font
-        font = QFont("Consolas", 10)
-        font.setStyleHint(QFont.StyleHint.Monospace)
+        self.code_edit.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.code_edit.setStyleSheet(self._edit_style(mono=True))
+        font = QFont("Consolas", 10); font.setStyleHint(QFont.StyleHint.Monospace)
         self.code_edit.setFont(font)
+        self.code_edit.textChanged.connect(self._on_code_changed)
+        lay.addWidget(self.code_edit, stretch=1)
 
-        code_layout.addWidget(self.code_edit)
+        # Proposed-edit panel (hidden until the agent proposes something).
+        self.proposal_box = QFrame()
+        self.proposal_box.setStyleSheet(
+            f"QFrame {{ background: {p['surface']}; border: 1px solid {p['accent']};"
+            " border-radius: 8px; }}")
+        pbl = QVBoxLayout(self.proposal_box)
+        pbl.setContentsMargins(10, 8, 10, 10); pbl.setSpacing(6)
+        self.proposal_why = QLabel("")
+        self.proposal_why.setWordWrap(True)
+        self.proposal_why.setStyleSheet(
+            f"color: {p['accent']}; font-size: 11px; font-weight: 600; background: transparent;")
+        pbl.addWidget(self.proposal_why)
+        self.proposal_diff = QTextEdit()
+        self.proposal_diff.setReadOnly(True)
+        self.proposal_diff.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.proposal_diff.setStyleSheet(self._edit_style(mono=True))
+        self.proposal_diff.setMaximumHeight(190)
+        pbl.addWidget(self.proposal_diff)
+        prow = QHBoxLayout(); prow.setSpacing(6); prow.addStretch()
+        dismiss_btn = QPushButton("Dismiss")
+        dismiss_btn.setStyleSheet(self._btn())
+        dismiss_btn.clicked.connect(self._dismiss_proposal)
+        prow.addWidget(dismiss_btn)
+        apply_btn = QPushButton("Apply edit")
+        apply_btn.setStyleSheet(self._btn(primary=True))
+        apply_btn.clicked.connect(self._apply_proposal)
+        prow.addWidget(apply_btn)
+        pbl.addLayout(prow)
+        self.proposal_box.hide()
+        lay.addWidget(self.proposal_box)
+        return w
 
-        # Chat widget (hidden by default)
-        self.chat_widget = SimpleChatWidget()
-        self.chat_widget.send_message.connect(self.handle_chat_message)
-        self.chat_widget.setStyleSheet("""
-            SimpleChatWidget {
-                background-color: #0D1117;
-                border-left: 1px solid rgba(88, 166, 255, 0.18);
-                border-radius: 0px;
-                padding-left: 12px;
-            }
-        """)
-        self.chat_widget.hide()
+    def _build_side_panel(self) -> QWidget:
+        p = self.p
+        w = QWidget(); w.setStyleSheet("background: transparent;")
+        lay = QVBoxLayout(w); lay.setContentsMargins(12, 0, 0, 0); lay.setSpacing(6)
 
-        self.splitter.addWidget(code_container)
-        self.splitter.addWidget(self.chat_widget)
-        self.splitter.setStretchFactor(0, 2)  # Code gets 2/3 of space
-        self.splitter.setStretchFactor(1, 1)  # Chat gets 1/3 of space
+        # ── risk panel ────────────────────────────────────────────────────
+        lay.addWidget(self._h("Static risk scan"))
+        self.scan_lbl = QLabel("")
+        self.scan_lbl.setWordWrap(True)
+        self.scan_lbl.setStyleSheet(f"color: {p['muted']}; font-size: 11px; background: transparent;")
+        lay.addWidget(self.scan_lbl)
+        self.risk_list = QListWidget()
+        self.risk_list.setStyleSheet(self._list())
+        self.risk_list.setMaximumHeight(150)
+        lay.addWidget(self.risk_list)
 
-        layout.addWidget(self.splitter, 1)
+        # ── code reviewer sub-agent ───────────────────────────────────────
+        lay.addWidget(self._h("Code Reviewer (AI)"))
+        row = QHBoxLayout(); row.setSpacing(6)
+        self.explain_btn = QPushButton("Explain and assess")
+        self.explain_btn.setStyleSheet(self._btn())
+        self.explain_btn.clicked.connect(self._ai_explain)
+        self.improve_btn = QPushButton("Suggest a safer version")
+        self.improve_btn.setStyleSheet(self._btn())
+        self.improve_btn.clicked.connect(self._ai_improve)
+        row.addWidget(self.explain_btn); row.addWidget(self.improve_btn)
+        lay.addLayout(row)
 
-        # Warning label
-        warning = QLabel("⚠️ Only approve code you understand and trust")
-        warning.setStyleSheet("""
-            QLabel {
-                color: rgba(242, 139, 130, 0.85);
-                font-size: 11px;
-                font-style: italic;
-                margin-top: 4px;
-            }
-        """)
-        layout.addWidget(warning)
+        self.chat = QTextEdit()
+        self.chat.setReadOnly(True)
+        self.chat.setStyleSheet(self._edit_style())
+        lay.addWidget(self.chat, stretch=1)
 
-        # Buttons
-        button_layout = QHBoxLayout()
-        button_layout.setSpacing(8)
+        self.token_lbl = QLabel("tokens — no requests yet")
+        self.token_lbl.setStyleSheet(f"color: {p['muted']}; font-size: 10px; background: transparent;")
+        lay.addWidget(self.token_lbl)
 
-        _btn_base = """
-            QPushButton {
-                border-radius: 6px;
-                padding: 9px 20px;
-                font-size: 12px;
-                font-weight: 500;
-            }
-        """
+        self.typing_lbl = QLabel("")
+        self.typing_lbl.setStyleSheet(
+            f"color: #05070a; background: {p['accent']}; font-size: 12px; font-weight: 700;"
+            " border-radius: 6px; padding: 7px 10px;")
+        self.typing_lbl.setVisible(False)
+        lay.addWidget(self.typing_lbl)
 
-        # Explain button
-        self.explain_btn = QPushButton("🤔 Explain")
-        self.explain_btn.setStyleSheet("""
-            QPushButton {
-                background-color: transparent;
-                border: 1px solid #30363D;
-                border-radius: 6px;
-                padding: 9px 20px;
-                font-size: 12px;
-                color: #8B949E;
-            }
-            QPushButton:hover {
-                background-color: rgba(88, 166, 255, 0.08);
-                color: #E6EDF3;
-                border-color: rgba(88, 166, 255, 0.4);
-            }
-        """)
-        self.explain_btn.clicked.connect(self.on_explain)
+        ask = QHBoxLayout(); ask.setSpacing(6)
+        self.ask_field = QTextEdit()
+        self.ask_field.setPlaceholderText("Ask the Code Reviewer…")
+        self.ask_field.setMaximumHeight(52)
+        self.ask_field.setStyleSheet(self._edit_style())
+        ask.addWidget(self.ask_field, stretch=1)
+        self.send_btn = QPushButton("Send")
+        self.send_btn.setStyleSheet(self._btn())
+        self.send_btn.clicked.connect(self._ai_ask)
+        ask.addWidget(self.send_btn)
+        lay.addLayout(ask)
+        return w
 
-        # Reject button
-        reject_btn = QPushButton("❌ Reject")
-        reject_btn.setStyleSheet("""
-            QPushButton {
-                background-color: transparent;
-                border: 1px solid rgba(242, 139, 130, 0.45);
-                border-radius: 6px;
-                padding: 9px 20px;
-                font-size: 12px;
-                color: #F28B82;
-            }
-            QPushButton:hover {
-                background-color: rgba(242, 139, 130, 0.1);
-                border-color: #F28B82;
-            }
-        """)
-        reject_btn.clicked.connect(self.on_reject)
+    # ── security scan (auto on open + on every edit = delta re-approval) ─────
+    def _on_code_changed(self):
+        self.code = self.code_edit.toPlainText()
+        # A debounce keeps typing smooth; snippets are small so 250 ms is plenty.
+        if getattr(self, "_scan_timer", None) is None:
+            self._scan_timer = QTimer(self)
+            self._scan_timer.setSingleShot(True)
+            self._scan_timer.timeout.connect(self._refresh_security)
+        self._scan_timer.start(250)
 
-        # Accept button
-        accept_btn = QPushButton("✅ Accept & Execute")
-        accept_btn.setStyleSheet("""
-            QPushButton {
-                background-color: rgba(88, 166, 255, 0.15);
-                border: 1px solid rgba(88, 166, 255, 0.45);
-                border-radius: 6px;
-                padding: 9px 24px;
-                font-size: 12px;
-                color: #58A6FF;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background-color: rgba(88, 166, 255, 0.25);
-                border-color: #58A6FF;
-                color: #79BBFF;
-            }
-        """)
-        accept_btn.clicked.connect(self.on_accept)
-        accept_btn.setDefault(True)
+    def _refresh_security(self):
+        p = self.p
+        code = self.code_edit.toPlainText()
+        findings = scan_code(code)
+        self.risk_list.clear()
+        for f in findings:
+            snippet, _ = redact_secrets(f.snippet)
+            it = QListWidgetItem(f"[{f.severity}] {f.category}  L{f.line}: {f.note}"
+                                 + (f"   {snippet.strip()}" if snippet.strip() else ""))
+            it.setForeground(QColor(p[self._SEV_COLOR_KEY.get(f.severity, "text")]))
+            self.risk_list.addItem(it)
 
-        button_layout.addWidget(self.explain_btn)
-        button_layout.addStretch()
-        button_layout.addWidget(reject_btn)
-        button_layout.addWidget(accept_btn)
-
-        layout.addLayout(button_layout)
-
-    def showEvent(self, event):
-        """Override show event to ensure window stays on top"""
-        super().showEvent(event)
-        self.raise_()
-        self.activateWindow()
-
-    def closeEvent(self, event):
-        """Override close event to cleanup worker thread"""
-        # Stop worker thread if running
-        if self.worker and self.worker.isRunning():
-            self.worker.quit()
-            self.worker.wait()
-        super().closeEvent(event)
-
-    def on_explain(self):
-        """Show chat and request explanation of the code"""
-        # Toggle chat visibility
-        if not self.chat_visible:
-            # Show chat
-            self.chat_widget.show()
-            self.chat_visible = True
-            self.explain_btn.setText("🤔 Hide Panel")
-
-            # Get current code
-            current_code = self.code_edit.toPlainText().strip()
-
-            # Send initial explanation request
-            explain_prompt = (
-                f"<SYSTEM_AUTOMATED_MESSAGE> PLEASE EXPLAIN THIS CODE THAT IS TO BE EXECUTED, "
-                f"WARN OF ANY RISK AND MALICIOUS INTENT IF ANY. "
-                f"SAY WHETHER IT IS [SAFE, RISKY, BAD] ALSO KEEP YOUR RESPONSE FOR THIS SPECIFIC MESSAGE CONCISE AND CLEAN OF ANY MARKDOWN OR SEPCIAL CHARACTERS </SYSTEM_AUTOMATED_MESSAGE>\n\n"
-                f"```python\n{current_code}\n```"
-            )
-
-            if not self._is_explained:
-                self.chat_widget.add_message("You", "Explain this code and assess its safety", "#58A6FF")
-                self.request_ai_response(explain_prompt)
-                self._is_explained = True
+        known = self._memory.is_approved(code)
+        summary = summarize_findings(findings)
+        if known:
+            self.scan_lbl.setText(f"{summary}. This exact code was approved before.")
         else:
-            # Hide chat
-            self.chat_widget.hide()
-            self.chat_visible = False
-            self.explain_btn.setText("🤔 Explain")
+            self.scan_lbl.setText(summary + (". Review before approving."
+                                             if findings else "."))
 
-    def handle_chat_message(self, message):
-        """Handle user message in chat"""
-        # Send to AI
-        self.request_ai_response(message)
+    # ── AI panel ─────────────────────────────────────────────────────────────
+    def _ai_busy(self, busy):
+        for b in (self.explain_btn, self.improve_btn, self.send_btn):
+            b.setEnabled(not busy)
+        self.ask_field.setReadOnly(busy)
+        self.typing_lbl.setVisible(busy)
+        if busy:
+            self._typing_dots = 0
+            if self._typing_timer is None:
+                self._typing_timer = QTimer(self)
+                self._typing_timer.timeout.connect(self._tick_typing)
+            self._tick_typing()
+            self._typing_timer.start(450)
+        elif self._typing_timer is not None:
+            self._typing_timer.stop()
 
-    def request_ai_response(self, prompt):
-        """Request AI response without affecting main conversation"""
-        # Show loading indicator
-        self.chat_widget.show_loading()
+    _SPIN = ("◐", "◓", "◑", "◒")
 
-        # Disable send button during request
-        for widget in self.chat_widget.findChildren(QPushButton):
-            if widget.text() == "Send":
-                widget.setEnabled(False)
+    def _tick_typing(self):
+        self._typing_dots = (self._typing_dots + 1) % 4
+        frame = self._SPIN[self._typing_dots]
+        self.typing_lbl.setText(f"  {frame}   Code Reviewer is responding, please wait"
+                                + "." * self._typing_dots + "   ")
 
-        # Stop any existing worker
-        if self.worker and self.worker.isRunning():
-            self.worker.quit()
-            self.worker.wait()
+    def _run_agent(self, task):
+        if self._worker is not None and self._worker.isRunning():
+            self._append_chat("system", "Please wait — the Code Reviewer is still "
+                                        "responding to your last message.")
+            return
+        if self.ai_engine is None:
+            self._append_chat("system", "No AI engine available.")
+            return
+        self._ai_busy(True)
+        w = _CodeAgentWorker(self.code_edit.toPlainText(), self.execution_type,
+                             self.ai_engine, task, self._meter)
+        w.message.connect(self._append_chat)
+        w.proposal.connect(self._on_proposal)
+        w.tokens.connect(lambda s: self.token_lbl.setText(s or self.token_lbl.text()))
+        w.finished_ok.connect(self._on_agent_done)
+        w.failed.connect(self._on_agent_failed)
+        self._worker = w
+        w.start()
 
-        # Create and start worker thread
-        self.worker = AIResponseWorker(self.ai_engine, prompt)
-        self.worker.response_ready.connect(self.on_ai_response)
-        self.worker.error_occurred.connect(self.on_ai_error)
-        self.worker.finished.connect(self.on_worker_finished)
-        self.worker.start()
+    def _on_agent_done(self, _summary):
+        self._ai_busy(False)
 
-    def on_ai_response(self, response):
-        """Handle AI response from worker thread"""
-        # Get current HTML and remove the loading message
-        html = self.chat_widget.chat_display.toHtml()
+    def _on_agent_failed(self, msg):
+        self._ai_busy(False)
+        self._append_chat("system", f"Error: {msg}")
 
-        # Simple approach: clear and rebuild without loading
-        if "Thinking..." in html:
-            # Get all messages except the loading one
-            temp_history = self.chat_widget.message_history.copy()
-            self.chat_widget.chat_display.clear()
+    def _ai_explain(self):
+        self._append_chat("you", "Explain this code and assess its safety.")
+        self._run_agent("Explain in plain language what this code does and whether it "
+                        "is safe, risky, or dangerous. Do not propose an edit unless "
+                        "there is a real risk to fix.")
 
-            # Rebuild chat without loading message
-            for sender, message in temp_history:
-                color = "#58A6FF" if sender == "You" else "#8B949E"
-                formatted = f'<div style="margin-bottom: 12px;">'
-                formatted += f'<b style="color: {color};">{sender}:</b><br>'
-                formatted += f'<span style="color: #E8EAED;">{message}</span>'
-                formatted += '</div>'
-                self.chat_widget.chat_display.append(formatted)
+    def _ai_improve(self):
+        self._append_chat("you", "Suggest a safer version of this code.")
+        self._run_agent("Make this code safer without changing its intended behaviour "
+                        "(scope deletes to the app dir, add guards, remove hardcoded "
+                        "secrets, avoid shell=True). Propose the edit as the COMPLETE "
+                        "revised snippet with a short reason. If it is already fine, "
+                        "just say so.")
 
-        # Add actual response
-        self.chat_widget.add_message("AI", response, "#3FB950")
+    def _ai_ask(self):
+        q = self.ask_field.toPlainText().strip()
+        if not q:
+            return
+        self.ask_field.clear()
+        self._append_chat("you", q)
+        self._run_agent(q)
 
-    def on_ai_error(self, error_msg):
-        """Handle AI error from worker thread"""
-        # Get current HTML and remove the loading message
-        html = self.chat_widget.chat_display.toHtml()
+    def _append_chat(self, role, text):
+        p = self.p
+        who = {"you": p["accent"], "agent": p["text"], "system": p["muted"]}.get(role, p["text"])
+        label = {"you": "You", "agent": "Code Reviewer", "system": "System"}.get(role, role)
+        self.chat.append(
+            f'<div style="margin:6px 0"><span style="color:{who};font-weight:600">'
+            f'{label}:</span><div style="color:{p["text"]}">{_md(text)}</div></div>')
+        cur = self.chat.textCursor()
+        cur.movePosition(cur.MoveOperation.End)
+        self.chat.setTextCursor(cur)
 
-        # Simple approach: clear and rebuild without loading
-        if "Thinking..." in html:
-            # Get all messages except the loading one
-            temp_history = self.chat_widget.message_history.copy()
-            self.chat_widget.chat_display.clear()
+    # ── proposed edit -> diff + one-click apply ──────────────────────────────
+    def _on_proposal(self, new_code, why):
+        self._pending_proposal = (new_code, why)
+        self.proposal_why.setText("Proposed edit" + (f": {why}" if why else ""))
+        self.proposal_diff.setHtml(self._render_diff(self.code_edit.toPlainText(), new_code))
+        self.proposal_box.show()
 
-            # Rebuild chat without loading message
-            for sender, message in temp_history:
-                color = "#58A6FF" if sender == "You" else "#8B949E"
-                formatted = f'<div style="margin-bottom: 12px;">'
-                formatted += f'<b style="color: {color};">{sender}:</b><br>'
-                formatted += f'<span style="color: #E8EAED;">{message}</span>'
-                formatted += '</div>'
-                self.chat_widget.chat_display.append(formatted)
+    def _render_diff(self, old, new):
+        p = self.p
+        rows = []
+        diff = difflib.unified_diff(old.splitlines(), new.splitlines(),
+                                    lineterm="", n=2)
+        for ln in diff:
+            if ln.startswith("+++") or ln.startswith("---"):
+                continue
+            if ln.startswith("@@"):
+                fg, bg = p["muted"], "transparent"
+            elif ln.startswith("+"):
+                fg, bg = "#c6ecc6", "rgba(80,200,120,0.14)"
+            elif ln.startswith("-"):
+                fg, bg = "#f2b8b5", "rgba(230,90,90,0.14)"
+            else:
+                fg, bg = p["text"], "transparent"
+            rows.append(f'<div style="background:{bg};color:{fg};white-space:pre;'
+                        f'font-family:Consolas,monospace;padding:0 6px">'
+                        f'{_esc(ln) or "&nbsp;"}</div>')
+        if not rows:
+            rows.append(f'<div style="color:{p["muted"]}">No textual difference.</div>')
+        return "".join(rows)
 
-        # Add error message
-        self.chat_widget.add_message("System", error_msg, "#F28B82")
+    def _apply_proposal(self):
+        if not self._pending_proposal:
+            return
+        new_code = self._pending_proposal[0]
+        self.code_edit.setPlainText(new_code)      # triggers _refresh_security
+        self._dismiss_proposal()
+        self._append_chat("system", "Applied the proposed edit. Re-scanned; review "
+                                    "before approving.")
 
-    def on_worker_finished(self):
-        """Re-enable UI after worker finishes"""
-        # Re-enable send button
-        for widget in self.chat_widget.findChildren(QPushButton):
-            if widget.text() == "Send":
-                widget.setEnabled(True)
+    def _dismiss_proposal(self):
+        self._pending_proposal = None
+        self.proposal_box.hide()
 
+    # ── accept / reject ──────────────────────────────────────────────────────
     def on_reject(self):
-        """Reject code execution"""
-        # Stop worker thread if running
-        if self.worker and self.worker.isRunning():
-            self.worker.quit()
-            self.worker.wait()
-
-        # Clear chat history
-        if self.chat_visible:
-            self.chat_widget.clear_history()
-
+        self._stop_worker()
         self.result = 'reject'
         self.close()
 
     def on_accept(self):
-        """Accept and execute code"""
-        # Stop worker thread if running
-        if self.worker and self.worker.isRunning():
-            self.worker.quit()
-            self.worker.wait()
-
-        # Clear chat history
-        if self.chat_visible:
-            self.chat_widget.clear_history()
-
+        self._stop_worker()
         self.result = 'accept'
         self.modified_code = self.code_edit.toPlainText().strip()
+        if self.remember_cb.isChecked():
+            try:
+                self._memory.remember(self.modified_code, persist=True,
+                                      note=f"approved via dialog ({self.execution_type})")
+            except Exception:
+                pass
+            # Also relax the execution policy: set the risk categories this code
+            # uses to 'allow' so they show up (and are editable) in Settings >
+            # Security. "Don't ask again" then applies both to this exact code
+            # (hash memory) and to these operation types (policy).
+            self._allow_categories_in_policy()
         self.accept()
 
+    def _allow_categories_in_policy(self):
+        """Flip every risk category present in the current code to 'allow' in the
+        saved execution policy (persisted via the controller). No-op if there's no
+        controller or no risky categories."""
+        controller = self._controller
+        if controller is None or not hasattr(controller, "settings"):
+            return
+        try:
+            from systema.security.code_guard import (scan_code, PolicyEngine,
+                                                     POLICY_ALLOW)
+            cats = sorted({f.category for f in scan_code(self.code_edit.toPlainText())})
+            if not cats:
+                return
+            rules = dict(PolicyEngine(controller.settings).rules)   # full current set
+            for c in cats:
+                if c in rules:
+                    rules[c] = POLICY_ALLOW
+            PolicyEngine.save(controller.settings, rules)           # writes security_exec_policy
+            if hasattr(controller, "save_settings"):
+                controller.save_settings()
+        except Exception:
+            pass
+
+    # ── lifecycle ────────────────────────────────────────────────────────────
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.raise_()
+        self.activateWindow()
+
+    def _stop_worker(self):
+        w = self._worker
+        if w is not None and w.isRunning():
+            try:
+                w.message.disconnect(); w.proposal.disconnect()
+                w.finished_ok.disconnect(); w.failed.disconnect()
+            except Exception:
+                pass
+        if self._typing_timer is not None:
+            self._typing_timer.stop()
+
+    def closeEvent(self, event):
+        self._stop_worker()
+        super().closeEvent(event)
+
+    # ── styling helpers ──────────────────────────────────────────────────────
+    def _h(self, text):
+        lbl = QLabel(text)
+        lbl.setStyleSheet(f"color: {self.p['text']}; font-size: 12px; font-weight: 600;"
+                          " background: transparent;")
+        return lbl
+
+    def _btn(self, primary=False, kind="secondary"):
+        p = self.p
+        if primary:
+            bg, fg, border = p["accent"], "#05070a", p["accent"]
+        elif kind == "danger":
+            bg, fg, border = "transparent", p["red"], p["red"]
+        else:
+            bg, fg, border = p["surface2"], p["text"], p["border"]
+        return (f"QPushButton {{ background: {bg}; color: {fg}; border: 1px solid {border};"
+                f" border-radius: 6px; padding: 7px 14px; font-size: 11px; }}"
+                f"QPushButton:hover {{ border: 1px solid {p['accent']}; }}"
+                f"QPushButton:disabled {{ color: {p['muted']}; border-color: {p['border']}; }}")
+
+    def _list(self):
+        p = self.p
+        return (f"QListWidget {{ background: {p['surface']}; border: 1px solid {p['border']};"
+                f" border-radius: 8px; padding: 4px; font-family: Consolas, monospace;"
+                f" font-size: 10px; color: {p['text']}; outline: none; }}"
+                f"QListWidget::item {{ padding: 2px 4px; }}")
+
+    def _edit_style(self, mono=False):
+        p = self.p
+        fam = "font-family: Consolas, monospace;" if mono else ""
+        return (f"QTextEdit {{ background: {p['surface']}; border: 1px solid {p['border']};"
+                f" border-radius: 8px; padding: 8px; {fam} font-size: 11px; color: {p['text']}; }}"
+                f"QTextEdit:focus {{ border: 1px solid {p['accent']}; }}")
+
+    # ── static entry point (unchanged contract) ──────────────────────────────
     @staticmethod
     def get_approval(code, execution_type, ai_engine, parent=None):
-        """
-        Show dialog and get approval
-
-        Returns:
-            tuple: (approved: bool, modified_code: str)
-        """
+        """Show the dialog modally and return ``(approved, modified_code)``."""
         dialog = CodeApprovalDialog(code, execution_type, ai_engine, parent)
         dialog.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
-
-        # Ensure it shows on top
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
-
-        result = dialog.exec()
-
+        dialog.exec()
         approved = dialog.result == 'accept'
         modified_code = dialog.modified_code if approved else code
-
         return approved, modified_code

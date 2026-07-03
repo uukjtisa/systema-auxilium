@@ -14,7 +14,8 @@ No emojis anywhere - clean monochrome glyphs / text only.
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QHBoxLayout, QLabel, QListWidget,
                              QListWidgetItem, QMessageBox, QSplitter, QTextEdit,
                              QVBoxLayout, QWidget)
@@ -85,6 +86,9 @@ class UpdateWindow(BaseWindow):
         self.service = controller.updater_service
         self._plan = None
         self._busy = False
+        self._loading_item = None      # spinner placeholder row in the file list
+        self._spin_timer = None
+        self._spin_i = 0
         self._diff_html = ""
         self._tagged = None
         self._expanded_dlg = None
@@ -238,11 +242,11 @@ class UpdateWindow(BaseWindow):
             f"QCheckBox {{ color: {p['muted']}; font-size: 11px; background: transparent; }}")
         self.wrap_check.toggled.connect(self._on_wrap_toggled)
         tools.addWidget(self.wrap_check)
-        self.manage_btn = self.make_button("Manage / AI", p, kind="ghost")
+        self.manage_btn = self.make_button("Manage", p, kind="ghost")
         self.manage_btn.setToolTip(
-            "Resolve changes hunk-by-hunk (or line-by-line) with an AI helper — "
-            "the safe way to handle PROTECTED provider files without losing your "
-            "accounts. Includes the current file and every protected file.")
+            "Resolve changes hunk-by-hunk (or line-by-line) yourself — the safe way "
+            "to handle PROTECTED provider files without losing your accounts. "
+            "Includes the current file and every protected file.")
         self.manage_btn.clicked.connect(self._open_manage)
         tools.addWidget(self.manage_btn)
         self.expand_btn = self.make_button("Expand", p, kind="ghost")
@@ -634,7 +638,7 @@ class UpdateWindow(BaseWindow):
         self.diff_view.setHtml(self._diff_html)
         self._sync_expanded()
 
-    # ── manage / AI (line-level review of protected files) ─────────────────────
+    # ── manage (line-level review of protected files) ──────────────────────────
     def _open_manage(self):
         if self._plan is None:
             self._status("Run a check first.")
@@ -650,7 +654,7 @@ class UpdateWindow(BaseWindow):
             if is_sensitive_path(pth) and pth not in paths:
                 paths.append(pth)
 
-        from systema.agents.update_agent import ReviewSession
+        from systema.agents.update_hunks import ReviewSession
         session = ReviewSession()
         for pth in paths:
             tagged = self.service.review(pth)
@@ -667,7 +671,7 @@ class UpdateWindow(BaseWindow):
         dlg.exec()
 
     def _on_managed_save(self, resolved: dict):
-        """Persist the hand-/AI-resolved files and drop them from the plan list."""
+        """Persist the hand-resolved files and drop them from the plan list."""
         written, last_backup = [], ""
         for path, text in resolved.items():
             last_backup = self.service.write_managed_file(path, text)
@@ -928,10 +932,43 @@ class UpdateWindow(BaseWindow):
             self.apply_btn.setEnabled(False)
             self.revert_btn.setEnabled(False)
             self.baseline_btn.setEnabled(False)
+            self._start_spinner()
         else:
+            self._stop_spinner()
             self._update_sel_count()
             self._refresh_revert()
             self._refresh_baseline()
+
+    # ── loading spinner (shown in the file list while a check runs) ──────────
+    _SPIN = ("◐", "◓", "◑", "◒")
+
+    def _start_spinner(self):
+        """Show an animated placeholder row so an empty list never looks stuck."""
+        self._stop_spinner()
+        self._spin_i = 0
+        self._loading_item = QListWidgetItem(f"{self._SPIN[0]}   Loading changes…")
+        self._loading_item.setFlags(Qt.ItemFlag.NoItemFlags)  # non-selectable
+        self._loading_item.setForeground(QColor(self._p["muted"]))
+        self.file_list.addItem(self._loading_item)
+        if self._spin_timer is None:
+            self._spin_timer = QTimer(self)
+            self._spin_timer.timeout.connect(self._tick_spin)
+        self._spin_timer.start(120)
+
+    def _tick_spin(self):
+        if self._loading_item is None:
+            return
+        self._spin_i = (self._spin_i + 1) % len(self._SPIN)
+        self._loading_item.setText(f"{self._SPIN[self._spin_i]}   Loading changes…")
+
+    def _stop_spinner(self):
+        if self._spin_timer is not None:
+            self._spin_timer.stop()
+        if self._loading_item is not None:
+            row = self.file_list.row(self._loading_item)
+            if row >= 0:
+                self.file_list.takeItem(row)
+            self._loading_item = None
 
     def _refresh_version_label(self):
         branch = self.branch_combo.currentText() if hasattr(self, "branch_combo") else "main"
@@ -947,6 +984,7 @@ class UpdateWindow(BaseWindow):
         self.activateWindow()
 
     def closeEvent(self, event):
+        self._stop_spinner()
         try:
             if self.service.has_pending_plan:
                 self.service.discard()

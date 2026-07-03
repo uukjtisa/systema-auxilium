@@ -205,3 +205,40 @@ def apply_decisions(segments: list[Segment], decisions: dict[int, str]) -> str:
         if s.kind == "hunk" and s.hunk is not None and s.hunk.index in decisions:
             s.hunk.decision = decisions[s.hunk.index]
     return assemble(segments)
+
+
+# ── review session model (used by the Manage-Update dialog) ───────────────────
+@dataclass
+class FileReview:
+    """One file under review: its ordered segments + convenience accessors."""
+    path: str
+    segments: list[Segment]
+    sensitive: bool = False
+
+    @property
+    def hunks(self):
+        return [s.hunk for s in self.segments if s.kind == "hunk"]
+
+    def hunk(self, index: int):
+        for h in self.hunks:
+            if h.index == index:
+                return h
+        return None
+
+    def assembled(self) -> str:
+        return assemble(self.segments)
+
+
+@dataclass
+class ReviewSession:
+    """The whole review: several files the user resolves together."""
+    files: dict[str, FileReview] = field(default_factory=dict)
+
+    def add(self, path: str, tagged: list[tuple[str, str]], sensitive: bool = False):
+        self.files[path] = FileReview(path, build_segments(tagged), sensitive)
+
+    def summary(self) -> dict:
+        return {p: {"sensitive": fr.sensitive,
+                    "hunks": len(fr.hunks),
+                    "secrets": sum(1 for h in fr.hunks if h.touches_secrets)}
+                for p, fr in self.files.items()}

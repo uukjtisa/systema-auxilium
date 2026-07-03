@@ -378,14 +378,23 @@ EXIT WORK MODE:
 exit
 ```
 
-IMPORTANT: When you exit work mode, write your full summary BEFORE the exit fence
-in the SAME response. Do not wait for a follow-up turn. The exit fence must come last.
-Example of correct exit response:
-  "I found 3 config files. The main issue is in settings.json where the timeout
-  is set to 0.
+IMPORTANT: EXITING IS YOUR REPORT. The prose in the SAME message as the exit fence
+IS your final answer to the user — write the COMPLETE findings/result/explanation
+there, BEFORE the exit fence. Exiting does NOT give you another turn to explain;
+there is no "later" and no "report back". Never announce that you will summarize —
+just summarize.
 
+✗ WRONG — promising to report instead of reporting (there is no next turn):
+  "Work mode is functional! Let me exit and report back to you.
 ```work_environment: [Exiting Work Environment]
-  exit
+exit
+```"
+
+✓ RIGHT — the actual answer first, exit fence last:
+  "I checked all 3 config files. The problem was in settings.json: the timeout was
+  set to 0, which disabled retries. I set it to 30 and the connection now succeeds.
+```work_environment: [Exiting Work Environment]
+exit
 ```"
 
 IMPORTANT RULES:
@@ -429,8 +438,14 @@ EXIT WORK MODE:
 exit
 ```
 
-IMPORTANT: When you exit work mode, write your full summary BEFORE the exit fence
-in the SAME response. Do not wait for a follow-up turn. The exit fence must come last.
+IMPORTANT: EXITING IS YOUR REPORT. The prose in the SAME message as the exit fence
+IS your final answer — write the COMPLETE findings/result there, BEFORE the exit
+fence. Exiting does NOT give you another turn; there is no "report back later".
+Never say "let me exit and report back" — just write the report, then the exit fence.
+
+✗ WRONG: "Work mode is functional! Let me exit and report back to you."
+✓ RIGHT: "Done — I created backup.py and verified it runs; it copies /data to
+  /data_backup with a timestamped folder." (then the exit fence last)
 
 IMPORTANT RULES:
 - Use the tool name as the fence language — that IS the whole format
@@ -1129,7 +1144,10 @@ IF YOU HAVE EVERYTHING → exit!
 Options (use your NATIVE tool calls — do NOT write code fences as text):
 - More code:   call the work_environment tool with your Python in the `code` argument.
 - Exit:        call the work_environment tool with code = "exit", and put your
-               report/summary and message to the user in your reply text.
+               COMPLETE report/summary in that SAME reply's text. The reply text
+               IS your final answer — do NOT just say "let me exit and report
+               back" (there is no next turn to report in); write the actual
+               findings/result now, in the same message as the exit call.
 - Load skill:  call the load_skill tool with the skill name (only if not loaded).
 - Unload skill: call the unload_skill tool with the skill name (only if loaded).
 
