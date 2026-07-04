@@ -204,6 +204,8 @@ class SettingsWindow(BaseWindow):
         """)
         self.container.setObjectName("container")
 
+        self._suppress_dirty = False   # True while programmatically populating widgets
+        self._dirty = False
         self.init_ui()
         self.load_settings()
 
@@ -211,6 +213,9 @@ class SettingsWindow(BaseWindow):
         wrapper_layout = QVBoxLayout(self)
         wrapper_layout.setContentsMargins(0, 0, 0, 0)
         wrapper_layout.addWidget(self.container)
+
+        # Wire AFTER the container is parented to self, or findChildren() sees nothing.
+        self._wire_dirty_tracking()
 
         # Apply rounded mask
         self.apply_rounded_mask()
@@ -808,6 +813,84 @@ class SettingsWindow(BaseWindow):
             "Useful for knowing when you're approaching model context limits."))
         gen_lay.addWidget(gen_display_group)
 
+        # ── Desktop Shortcut (cross-OS, admin/normal hot-toggle) ─────────────
+        sc_group = QGroupBox("Desktop Shortcut")
+        sc_group.setStyleSheet(_GROUP)
+        sc_lay = QVBoxLayout(sc_group)
+        sc_lay.addWidget(_info_box(
+            "Create a Systema Auxilium shortcut on your Desktop. Choose whether it "
+            "launches normally or elevated — switching is applied instantly to the "
+            "existing shortcut (Windows: UAC shield, Linux: pkexec, macOS: admin prompt)."))
+        # Segmented toggle — the selected privilege is clearly highlighted and
+        # prefixed with a check, and reflects the existing shortcut's real state.
+        self._sc_priv_group = QButtonGroup(self)
+        self._sc_priv_group.setExclusive(True)
+        _priv_css = f"""
+            QPushButton {{ background-color: {_ELEV}; color: {_MUTED};
+                border: 1px solid {_BORDER}; border-radius: 8px;
+                padding: 10px 16px; font-size: 12px; text-align: left; }}
+            QPushButton:hover {{ border-color: {_ACCENT}; color: {_TEXT}; }}
+            QPushButton:checked {{ background-color: {_ACCENT}; color: #05070a;
+                border-color: {_ACCENT}; font-weight: 600; }}
+        """
+        self._sc_radio_normal = QPushButton("Normal privileges")
+        self._sc_radio_admin = QPushButton("Run as administrator")
+        for _pb in (self._sc_radio_normal, self._sc_radio_admin):
+            _pb.setCheckable(True)
+            _pb.setCursor(_Qt.CursorShape.PointingHandCursor)
+            _pb.setStyleSheet(_priv_css)
+            self._sc_priv_group.addButton(_pb)
+        self._sc_radio_normal.setChecked(True)
+        self._sc_priv_group.buttonToggled.connect(lambda *_: self._update_priv_labels())
+        _sc_radio_row = QHBoxLayout()
+        _sc_radio_row.addWidget(self._sc_radio_normal, stretch=1)
+        _sc_radio_row.addWidget(self._sc_radio_admin, stretch=1)
+        sc_lay.addLayout(_sc_radio_row)
+        self._update_priv_labels()
+        _sc_btn_row = QHBoxLayout()
+        _sc_apply_btn = QPushButton("Create / Update Shortcut")
+        _sc_apply_btn.setStyleSheet(_BTN)
+        _sc_apply_btn.clicked.connect(self._apply_shortcut)
+        _sc_remove_btn = QPushButton("Remove")
+        _sc_remove_btn.setStyleSheet(_BTN)
+        _sc_remove_btn.clicked.connect(self._remove_shortcut)
+        _sc_btn_row.addWidget(_sc_apply_btn, stretch=1)
+        _sc_btn_row.addWidget(_sc_remove_btn)
+        sc_lay.addLayout(_sc_btn_row)
+        self._sc_status_lbl = QLabel("")
+        self._sc_status_lbl.setWordWrap(True)
+        self._sc_status_lbl.setStyleSheet(
+            f"color: {_MUTED}; font-size: 10px; background: transparent; padding-top: 4px;")
+        sc_lay.addWidget(self._sc_status_lbl)
+        gen_lay.addWidget(sc_group)
+        self._refresh_shortcut_status()
+
+        # ── Start at Login (cross-OS, per-user, NO admin) ────────────────────
+        as_group = QGroupBox("Start at Login")
+        as_group.setStyleSheet(_GROUP)
+        as_lay = QVBoxLayout(as_group)
+        as_lay.addWidget(_info_box(
+            "Launch Systema Auxilium automatically when you log in — for THIS user "
+            "only (no admin, never system-wide). Windows: a shortcut in your Startup "
+            "folder; Linux: an XDG autostart entry; macOS: a per-user LaunchAgent."))
+        _as_btn_row = QHBoxLayout()
+        _as_enable_btn = QPushButton("Enable")
+        _as_enable_btn.setStyleSheet(_BTN)
+        _as_enable_btn.clicked.connect(self._apply_autostart)
+        _as_disable_btn = QPushButton("Disable")
+        _as_disable_btn.setStyleSheet(_BTN)
+        _as_disable_btn.clicked.connect(self._remove_autostart)
+        _as_btn_row.addWidget(_as_enable_btn, stretch=1)
+        _as_btn_row.addWidget(_as_disable_btn, stretch=1)
+        as_lay.addLayout(_as_btn_row)
+        self._as_status_lbl = QLabel("")
+        self._as_status_lbl.setWordWrap(True)
+        self._as_status_lbl.setStyleSheet(
+            f"color: {_MUTED}; font-size: 10px; background: transparent; padding-top: 4px;")
+        as_lay.addWidget(self._as_status_lbl)
+        gen_lay.addWidget(as_group)
+        self._refresh_autostart_status()
+
         gen_lay.addStretch()
         tabs.addTab(gen_scroll, "General")
 
@@ -1306,25 +1389,23 @@ class SettingsWindow(BaseWindow):
                 pol_lay.addLayout(_row)
         self._refresh_preset_combo()
 
-        self.approval_memory_checkbox = QCheckBox(
-            "Remember approvals — don't ask again for identical code")
-        self.approval_memory_checkbox.setChecked(True)
-        self.approval_memory_checkbox.setStyleSheet(_CHECK)
-        pol_lay.addWidget(self.approval_memory_checkbox)
-
         self.review_safe_code_checkbox = QCheckBox(
             "Review even safe code (prompt for everything, incl. plain print)")
         self.review_safe_code_checkbox.setChecked(False)
         self.review_safe_code_checkbox.setStyleSheet(_CHECK)
         self.review_safe_code_checkbox.setToolTip(
-            "By default, code with no risky operations (plain print, math, a bare "
-            "import) runs without a prompt even under Supervised Execution — only "
-            "caution/danger operations are reviewed.\nTick this to be prompted for "
-            "EVERY code execution, no matter how trivial.")
+            "Sub-option of Supervised Execution — only has effect while Supervised "
+            "is ON.\nBy default, code with no risky operations (plain print, math, a "
+            "bare import) runs without a prompt; only caution/danger operations are "
+            "reviewed.\nTick this to be prompted for EVERY code execution, no matter "
+            "how trivial.")
         pol_lay.addWidget(self.review_safe_code_checkbox)
 
-        _forget_btn = QPushButton("Forget remembered approvals")
+        _forget_btn = QPushButton("Clear this session's allow-list")
         _forget_btn.setStyleSheet(_BTN)
+        _forget_btn.setToolTip(
+            "Undo any \"Don't ask again this session\" choices made in the code "
+            "approval dialog. Does not touch your saved policy.")
         _forget_btn.clicked.connect(self._forget_approvals)
         pol_lay.addWidget(_forget_btn)
 
@@ -1499,58 +1580,6 @@ class SettingsWindow(BaseWindow):
             "Enter this as IP:port in the phone app. A change takes effect the next "
             "time you open the packet (close & reopen it from the floating icon)."))
         sys_lay.addWidget(packet_group)
-
-        # ── Desktop Shortcut (cross-OS, admin/normal hot-toggle) ─────────────
-        sc_group = QGroupBox("Desktop Shortcut")
-        sc_group.setStyleSheet(_GROUP)
-        sc_lay = QVBoxLayout(sc_group)
-        sc_lay.addWidget(_info_box(
-            "Create a Systema Auxilium shortcut on your Desktop. Choose whether it "
-            "launches normally or elevated — switching is applied instantly to the "
-            "existing shortcut (Windows: UAC shield, Linux: pkexec, macOS: admin prompt)."))
-        # Segmented toggle — the selected privilege is clearly highlighted and
-        # prefixed with a check, and reflects the existing shortcut's real state.
-        self._sc_priv_group = QButtonGroup(self)
-        self._sc_priv_group.setExclusive(True)
-        _priv_css = f"""
-            QPushButton {{ background-color: {_ELEV}; color: {_MUTED};
-                border: 1px solid {_BORDER}; border-radius: 8px;
-                padding: 10px 16px; font-size: 12px; text-align: left; }}
-            QPushButton:hover {{ border-color: {_ACCENT}; color: {_TEXT}; }}
-            QPushButton:checked {{ background-color: {_ACCENT}; color: #05070a;
-                border-color: {_ACCENT}; font-weight: 600; }}
-        """
-        self._sc_radio_normal = QPushButton("Normal privileges")
-        self._sc_radio_admin = QPushButton("Run as administrator")
-        for _pb in (self._sc_radio_normal, self._sc_radio_admin):
-            _pb.setCheckable(True)
-            _pb.setCursor(_Qt.CursorShape.PointingHandCursor)
-            _pb.setStyleSheet(_priv_css)
-            self._sc_priv_group.addButton(_pb)
-        self._sc_radio_normal.setChecked(True)
-        self._sc_priv_group.buttonToggled.connect(lambda *_: self._update_priv_labels())
-        _sc_radio_row = QHBoxLayout()
-        _sc_radio_row.addWidget(self._sc_radio_normal, stretch=1)
-        _sc_radio_row.addWidget(self._sc_radio_admin, stretch=1)
-        sc_lay.addLayout(_sc_radio_row)
-        self._update_priv_labels()
-        _sc_btn_row = QHBoxLayout()
-        _sc_apply_btn = QPushButton("Create / Update Shortcut")
-        _sc_apply_btn.setStyleSheet(_BTN)
-        _sc_apply_btn.clicked.connect(self._apply_shortcut)
-        _sc_remove_btn = QPushButton("Remove")
-        _sc_remove_btn.setStyleSheet(_BTN)
-        _sc_remove_btn.clicked.connect(self._remove_shortcut)
-        _sc_btn_row.addWidget(_sc_apply_btn, stretch=1)
-        _sc_btn_row.addWidget(_sc_remove_btn)
-        sc_lay.addLayout(_sc_btn_row)
-        self._sc_status_lbl = QLabel("")
-        self._sc_status_lbl.setWordWrap(True)
-        self._sc_status_lbl.setStyleSheet(
-            f"color: {_MUTED}; font-size: 10px; background: transparent; padding-top: 4px;")
-        sc_lay.addWidget(self._sc_status_lbl)
-        sys_lay.addWidget(sc_group)
-        self._refresh_shortcut_status()
 
         # ── Software Updates (self-update via gitplucker) ────────────────────
         upd_group = QGroupBox("Software Updates")
@@ -1827,8 +1856,53 @@ class SettingsWindow(BaseWindow):
         except Exception as e:
             self._sc_status_lbl.setText(f"✗  {e}")
 
+    # ── Start at login (cross-OS, per-user, no admin) ───────────────────────
+    def _refresh_autostart_status(self):
+        try:
+            from systema.common import autostart as _as
+            if _as.is_enabled():
+                self._as_status_lbl.setText("✓ Starts automatically at login (this user).")
+            else:
+                self._as_status_lbl.setText("Not set to start at login.")
+        except Exception as e:
+            self._as_status_lbl.setText(f"Autostart status unavailable: {e}")
+
+    def _apply_autostart(self):
+        try:
+            from systema.common import autostart as _as
+            ok, msg = _as.enable_autostart()
+            self._as_status_lbl.setText(("✓  " if ok else "✗  ") + msg)
+        except Exception as e:
+            self._as_status_lbl.setText(f"✗  {e}")
+
+    def _remove_autostart(self):
+        try:
+            from systema.common import autostart as _as
+            ok, msg = _as.disable_autostart()
+            self._as_status_lbl.setText(("✓  " if ok else "✗  ") + msg)
+        except Exception as e:
+            self._as_status_lbl.setText(f"✗  {e}")
+
     def load_settings(self):
         """Load settings from controller"""
+        # Populating widgets programmatically must NOT trip the 'unsaved' flag.
+        self._suppress_dirty = True
+        try:
+            self._load_settings_impl()
+        finally:
+            self._suppress_dirty = False
+            self._dirty = False
+            # Loaded values become the new baseline to diff future edits against.
+            if hasattr(self, '_tracked_widgets'):
+                self._capture_baseline()
+            try:
+                self.footer_status_label.setText("")
+                self.footer_status_label.setStyleSheet(
+                    "color:transparent; font-size:11px; background:transparent;")
+            except Exception:
+                pass
+
+    def _load_settings_impl(self):
         # Load General settings
         self.open_chat_on_startup_checkbox.setChecked(
             self.controller.settings.get('open_chat_on_startup', False)
@@ -1867,15 +1941,13 @@ class SettingsWindow(BaseWindow):
         supervised_mode = self.controller.settings.get('supervised_execution', True)  # Default ON
         self.supervised_checkbox.setChecked(supervised_mode)
 
-        # Load execution policy + approval memory + audit view
+        # Load execution policy + audit view
         try:
             _pol = self.controller.settings.get('security_exec_policy', {}) or {}
             for _cat, _combo in getattr(self, '_policy_combos', {}).items():
                 _val = _pol.get(_cat, 'ask')
                 _idx = _combo.findText(_val if _val in ('ask', 'allow', 'deny') else 'ask')
                 _combo.setCurrentIndex(max(0, _idx))
-            self.approval_memory_checkbox.setChecked(
-                self.controller.settings.get('security_approval_memory', True))
             self.review_safe_code_checkbox.setChecked(
                 self.controller.settings.get('security_review_safe_code', False))
             self._refresh_preset_combo()
@@ -2061,6 +2133,24 @@ class SettingsWindow(BaseWindow):
             _idx = _combo.findText(_val if _val in ('ask', 'allow', 'deny') else 'ask')
             _combo.setCurrentIndex(max(0, _idx))
 
+    def refresh_security_policy_ui(self):
+        """Re-sync the per-category policy combos from the saved
+        security_exec_policy. Called by the controller after the code-approval
+        dialog persists an ask->allow promotion ("Always allow these operations"),
+        so an open Settings window reflects the change live. Only categories
+        present in the saved policy are touched, so unsaved edits are preserved."""
+        try:
+            _pol = (getattr(self.controller, 'settings', {}) or {}).get(
+                'security_exec_policy', {}) or {}
+            for _cat, _combo in getattr(self, '_policy_combos', {}).items():
+                if _cat not in _pol:
+                    continue
+                _val = _pol.get(_cat, 'ask')
+                _idx = _combo.findText(_val if _val in ('ask', 'allow', 'deny') else 'ask')
+                _combo.setCurrentIndex(max(0, _idx))
+        except Exception:
+            pass
+
     def _refresh_preset_combo(self, select: str | None = None):
         """Repopulate the preset dropdown (built-ins first, then custom)."""
         try:
@@ -2136,15 +2226,17 @@ class SettingsWindow(BaseWindow):
             QMessageBox.warning(self, "Could not delete preset", str(e))
 
     def _forget_approvals(self):
-        """Clear the 'don't ask again' approval memory (session + persistent)."""
+        """Clear the ephemeral session allow-list — the operation categories the
+        user chose "Don't ask again this session" for in the approval dialog."""
         try:
-            from systema.security.code_guard import ApprovalMemory
-            mem = ApprovalMemory()
-            n = mem.persistent_count
-            mem.forget_all()
-            QMessageBox.information(self, "Approvals cleared",
-                                    f"Forgot {n} remembered approval(s). "
-                                    "Code will be prompted for again.")
+            tm = getattr(getattr(self.controller, 'ai', None), 'tool_manager', None)
+            cats = getattr(tm, 'session_allowed_categories', None) if tm else None
+            n = len(cats) if cats else 0
+            if cats:
+                cats.clear()
+            QMessageBox.information(self, "Session allow-list cleared",
+                                    f"Cleared {n} session-allowed operation type(s). "
+                                    "These will be prompted for again.")
         except Exception as e:
             QMessageBox.warning(self, "Could not clear", str(e))
 
@@ -2175,6 +2267,93 @@ class SettingsWindow(BaseWindow):
         except Exception:
             pass
         self._refresh_audit_view()
+
+    # ── unsaved-changes indicator (real-time, value-compared) ───────────────
+    _DIRTY_SIGNAL = {}   # populated lazily in _wire_dirty_tracking
+
+    def _wire_dirty_tracking(self):
+        """Track every editable setting widget and, on ANY change, recompute
+        whether the current values still match the baseline captured at load.
+        This way undoing a change (toggling back to the saved value) clears the
+        'not saved' indicator in real time, instead of latching on forever."""
+        from PyQt6.QtWidgets import (QCheckBox, QRadioButton, QComboBox, QSpinBox,
+                                     QDoubleSpinBox, QSlider, QLineEdit,
+                                     QPlainTextEdit, QTextEdit)
+        self._tracked_widgets = []
+
+        def _wire(widgets, signal_name, skip_readonly=False):
+            for w in widgets:
+                if skip_readonly and w.isReadOnly():
+                    continue
+                self._tracked_widgets.append(w)
+                # recompute on every change (value/text signals fire on programmatic
+                # edits too, but _recompute_dirty compares to baseline and the load
+                # guard prevents spurious flips during population).
+                getattr(w, signal_name).connect(self._recompute_dirty)
+
+        _wire(self.findChildren(QCheckBox), 'toggled')
+        _wire(self.findChildren(QRadioButton), 'toggled')
+        _wire(self.findChildren(QComboBox), 'currentIndexChanged')
+        _wire(self.findChildren(QLineEdit), 'textChanged')
+        _wire(self.findChildren((QSpinBox, QDoubleSpinBox)), 'valueChanged')
+        _wire(self.findChildren(QSlider), 'valueChanged')
+        _wire(self.findChildren((QPlainTextEdit, QTextEdit)), 'textChanged', skip_readonly=True)
+        self._capture_baseline()
+
+    def _widget_value(self, w):
+        """Comparable snapshot of a widget's current value; None if it's gone."""
+        from PyQt6.QtWidgets import (QCheckBox, QRadioButton, QComboBox, QSpinBox,
+                                     QDoubleSpinBox, QSlider, QLineEdit,
+                                     QPlainTextEdit, QTextEdit)
+        try:
+            if isinstance(w, (QCheckBox, QRadioButton)):
+                return w.isChecked()
+            if isinstance(w, QComboBox):
+                return w.currentIndex()
+            if isinstance(w, (QSpinBox, QDoubleSpinBox, QSlider)):
+                return w.value()
+            if isinstance(w, QLineEdit):
+                return w.text()
+            if isinstance(w, (QPlainTextEdit, QTextEdit)):
+                return w.toPlainText()
+        except RuntimeError:
+            return None
+        return None
+
+    def _capture_baseline(self):
+        """Snapshot current widget values as the 'saved' reference to diff against."""
+        self._baseline = {id(w): self._widget_value(w)
+                          for w in getattr(self, '_tracked_widgets', [])}
+
+    def _recompute_dirty(self, *args):
+        """Show the indicator iff any tracked widget differs from the baseline."""
+        if getattr(self, '_suppress_dirty', False):
+            return
+        base = getattr(self, '_baseline', {})
+        dirty = False
+        for w in getattr(self, '_tracked_widgets', []):
+            try:
+                if self._widget_value(w) != base.get(id(w)):
+                    dirty = True
+                    break
+            except RuntimeError:
+                continue
+        self._dirty = dirty
+        if not hasattr(self, 'footer_status_label'):
+            return
+        if dirty:
+            try:
+                _ACCENT = self._palette()[4]
+            except Exception:
+                _ACCENT = "#e0a95f"
+            self.footer_status_label.setStyleSheet(
+                f"color:{_ACCENT}; font-size:11px; font-weight:600; background:transparent;")
+            self.footer_status_label.setText(
+                "● Settings changed — not saved yet. Click \"Save Settings\".")
+        else:
+            self.footer_status_label.setStyleSheet(
+                "color:transparent; font-size:11px; background:transparent;")
+            self.footer_status_label.setText("")
 
     def save_settings(self):
         """Save settings to controller"""
@@ -2208,13 +2387,11 @@ class SettingsWindow(BaseWindow):
         supervised_mode = self.supervised_checkbox.isChecked()
         self.controller.settings['supervised_execution'] = supervised_mode
 
-        # Save execution policy + approval memory
+        # Save execution policy
         try:
             self.controller.settings['security_exec_policy'] = {
                 _cat: _combo.currentText()
                 for _cat, _combo in getattr(self, '_policy_combos', {}).items()}
-            self.controller.settings['security_approval_memory'] = \
-                self.approval_memory_checkbox.isChecked()
             self.controller.settings['security_review_safe_code'] = \
                 self.review_safe_code_checkbox.isChecked()
         except Exception:
@@ -2334,7 +2511,12 @@ class SettingsWindow(BaseWindow):
         except Exception:
             pass
 
-        # Show confirmation (footer was just rebuilt by the retint — safe)
+        # Show confirmation (footer was just rebuilt by the retint — safe).
+        # Re-baseline so the just-saved values count as the new 'clean' state
+        # (covers the case where the theme retint didn't rebuild the widgets).
+        self._dirty = False
+        if hasattr(self, '_tracked_widgets'):
+            self._capture_baseline()
         self.show_status_message("✓ Settings saved successfully!")
 
     def _set_tok_graph_mode(self, mode):
@@ -2425,6 +2607,7 @@ class SettingsWindow(BaseWindow):
             self.init_ui()
             self.load_settings()
             self.layout().addWidget(self.container)
+            self._wire_dirty_tracking()   # after re-parenting, or findChildren sees nothing
             if hasattr(self, '_tabs') and 0 <= saved_tab < self._tabs.count():
                 self._tabs.setCurrentIndex(saved_tab)
             # Repopulate the token graph — the rebuild creates fresh empty canvases

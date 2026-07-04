@@ -128,6 +128,7 @@ ESSENTIAL = [
     "PyQt6", "Pillow", "pystray", "psutil", "send2trash", "pyautogui",
     "requests", "markdown2", "matplotlib", "pyparsing",
     "anthropic", "google-genai", "openai",
+    "updater-gitplucker>=0.7.0",   # self-update from GitHub (Settings ▸ Check for Updates)
     "fastembed", "numpy", "onnxruntime==1.19.2",
     "sounddevice", "webrtcvad-wheels", "SpeechRecognition", "edge-tts", "pygame",
 ]
@@ -368,25 +369,36 @@ python "%~dp0main.py"
 pause
 ''',
     "add_autostart.bat": r'''@echo off
-REM Adds Systema Auxilium to start at user login WITH ADMIN PRIVILEGES
+REM Adds Systema Auxilium to start at THIS user's login — per-user, NO admin.
+REM Drops a shortcut in the user's Startup folder that launches run.bat on login.
 set "SCRIPT_DIR=%~dp0"
 set "RUN_BAT=%SCRIPT_DIR%run.bat"
-schtasks /create /tn "SystemaAuxilium_AutoStart" /tr "\"%RUN_BAT%\"" /sc onlogon /ru "%USERDOMAIN%\%USERNAME%" /rl HIGHEST /f
-if %ERRORLEVEL% EQU 0 (
-    echo Scheduled task 'SystemaAuxilium_AutoStart' added with admin rights.
-    echo Task points to: %RUN_BAT%
+set "ICON=%SCRIPT_DIR%assets\systema_auxilium.ico"
+set "STARTUP=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
+set "LNK=%STARTUP%\Systema Auxilium.lnk"
+REM Best-effort: clear any legacy admin scheduled task from older setups.
+schtasks /delete /tn "SystemaAuxilium_AutoStart" /f >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut('%LNK%'); $s.TargetPath = '%RUN_BAT%'; $s.WorkingDirectory = '%SCRIPT_DIR%'; $s.IconLocation = '%ICON%'; $s.WindowStyle = 7; $s.Description = 'Systema Auxilium - start at login'; $s.Save()"
+if exist "%LNK%" (
+    echo Autostart enabled for this user only ^(no admin^).
+    echo Shortcut: %LNK%
+    echo Systema Auxilium will launch on next login.
 ) else (
-    echo Failed to create task. Please run this script as Administrator.
+    echo Failed to create the autostart shortcut.
 )
 pause
 ''',
     "remove_autostart.bat": r'''@echo off
-echo Removing scheduled task 'SystemaAuxilium_AutoStart'...
-schtasks /delete /tn "SystemaAuxilium_AutoStart" /f
-if %ERRORLEVEL% EQU 0 (
-    echo Scheduled task removed successfully.
+REM Removes Systema Auxilium from THIS user's login autostart (per-user).
+set "STARTUP=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
+set "LNK=%STARTUP%\Systema Auxilium.lnk"
+REM Best-effort: also clear any legacy admin scheduled task from older setups.
+schtasks /delete /tn "SystemaAuxilium_AutoStart" /f >nul 2>&1
+if exist "%LNK%" (
+    del "%LNK%"
+    echo Autostart entry removed: %LNK%
 ) else (
-    echo Failed to remove task. It may not exist or you need admin privileges.
+    echo No autostart entry found at: %LNK%
 )
 pause
 ''',
@@ -638,8 +650,8 @@ def final_summary():
     if IS_WIN:
         print(c("    • Run the app:        ", "grey") + "run.bat")
         print(c("    • Open venv terminal: ", "grey") + "open_env.bat")
-        print(c("    • Enable autostart:   ", "grey") + "add_autostart.bat (as Admin)")
-        print(c("    • Disable autostart:  ", "grey") + "remove_autostart.bat (as Admin)")
+        print(c("    • Enable autostart:   ", "grey") + "add_autostart.bat (per-user, no admin)")
+        print(c("    • Disable autostart:  ", "grey") + "remove_autostart.bat")
     else:
         print(c("    • Run the app:        ", "grey") + "bash run.sh")
         print(c("    • Open venv terminal: ", "grey") + "bash open_env.sh")

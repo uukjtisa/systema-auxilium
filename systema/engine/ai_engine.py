@@ -14,6 +14,7 @@ from systema.engine.prompts.global_instructions import (
     get_system_prompt,
     EMPTY_EXIT_SUMMARY_PROMPT,
     PREFILLING,
+    PREFILLING_NATIVE,
     WORK_MODE_OUTPUT_ONLY_PROMPT,
 )
 
@@ -104,7 +105,37 @@ class AIEngine:
         self.include_controller_ref = False
         self.include_notify_tool = False
 
+        # Ephemeral image analysis: paths queued by attach_image_to_context() are
+        # fed to the provider's chat_image() on the NEXT work-mode step, exactly
+        # once, then deleted — never pinned, never stored in history (token-cheap).
+        import threading as _threading
+        self._pending_context_images = []
+        self._images_lock = _threading.Lock()
+
         log.info(f"[AIEngine.__init__] ── Initialization complete | provider='{self.ai_provider}'")
+
+    # ── ephemeral image context (mirrors TaskAIEngine) ──────────────────────
+    def queue_context_image(self, path: str):
+        """Queue an image path to feed to the provider once on the next work
+        step. Thread-safe (callable from a work_environment/execute_code thread)."""
+        with self._images_lock:
+            self._pending_context_images.append(path)
+
+    def _drain_context_images(self) -> list:
+        with self._images_lock:
+            pending = list(self._pending_context_images)
+            self._pending_context_images.clear()
+        return pending
+
+    def supports_image_analysis(self) -> bool:
+        """True if the active provider script exposes chat_image() — the capability
+        attach_image_to_context() needs. Never raises."""
+        try:
+            module = self._load_provider_module()
+            return bool(module and hasattr(module, 'chat_image')
+                        and callable(getattr(module, 'chat_image')))
+        except Exception:
+            return False
 
     # ═══════════════════════════════════════════════════════════════════════════
     # VOICE / VOICE-SETTINGS METHODS
@@ -372,9 +403,13 @@ class AIEngine:
                 if prefilling_mode == 'session' and prefilling_session_id == _active_id:
                     log.warning("[AIEngine._build_messages] Seed session is active — "
                                 "falling back to premade PREFILLING to avoid self-reference")
+                # Native mode gets the native primer (native function calls, no
+                # fences/JSON) so the premade history doesn't push the model toward
+                # writing fences as text.
+                _prefill_src = PREFILLING_NATIVE if self._tool_mode() == 'native' else PREFILLING
                 prefill_msgs = [
                     {'role': m['role'], 'content': m['content']}
-                    for m in PREFILLING.get('messages', [])
+                    for m in _prefill_src.get('messages', [])
                 ]
                 log.debug(f"[AIEngine._build_messages] Premade prefilling: "
                           f"{len(prefill_msgs)} messages")
@@ -751,7 +786,24 @@ class AIEngine:
         log.debug(f"[AIEngine.continue_work_mode] Work mode prompt appended (full) | "
                   f"prompt_len={len(work_prompt)} | history_len={len(self.conversation_history)}")
 
-        ai_text = self._call_provider()
+        # Ephemeral image context: if the AI queued image(s) via
+        # attach_image_to_context() during the step it just ran, feed them to the
+        # provider's chat_image() for THIS one continuation call, then delete the
+        # files. They are never pinned to the chat or written into history, so the
+        # tokens are spent exactly once (same contract as a task session).
+        _pending = self._drain_context_images()
+        if _pending:
+            log.info(f"[AIEngine.continue_work_mode] Feeding {len(_pending)} ephemeral "
+                     "context image(s) to the provider for this turn only")
+            ai_text = self._call_provider(images=_pending)
+            import os as _os
+            for _p in _pending:
+                try:
+                    _os.remove(_p)
+                except Exception:
+                    pass
+        else:
+            ai_text = self._call_provider()
         if not ai_text:
             log.error("[AIEngine.continue_work_mode] ✗ No AI text returned")
             return self._make_error_result(f"Error: No response from {self.ai_provider} provider")
@@ -816,12 +868,17 @@ class AIEngine:
         # ── Single-exec guardrail ──────────────────────────────────────────────────
         ai_text, _violated, _ = self.tool_manager.enforce_single_exec_policy(ai_text)
         if _violated:
-            from systema.engine.prompts.global_instructions import EXEC_CODE_TOOLCALL_VIOLATION_PROMPT
+            from systema.engine.prompts.global_instructions import (
+                EXEC_CODE_TOOLCALL_VIOLATION_PROMPT,
+                EXEC_CODE_TOOLCALL_VIOLATION_PROMPT_NATIVE)
+            _viol = (EXEC_CODE_TOOLCALL_VIOLATION_PROMPT_NATIVE
+                     if self._tool_mode() == 'native'
+                     else EXEC_CODE_TOOLCALL_VIOLATION_PROMPT)
             # Append directly to conversation_history so the AI carries this
             # correction forward in ALL future turns, not just the next one.
             self.conversation_history.append({
                 'role': 'system',
-                'content': EXEC_CODE_TOOLCALL_VIOLATION_PROMPT
+                'content': _viol
             })
         # ──────────────────────────────────────────────────────────────────────────
 
@@ -953,15 +1010,12 @@ class AIEngine:
                      f"code_len={len(code)} | visible_text_len={len(visible_text)}")
             self.log(f"Work environment call detected")
 
-            log.debug("[AIEngine._process_ai_response] → Calling tool_manager.run_work_environment()")
-            # Set BEFORE run_work_environment so interrupt_response() can detect active work
-            self.tool_manager.in_work_mode = True
-            work_output = self.tool_manager.run_work_environment(code)
-
-            if work_output == "EXITED_WORK_MODE":
-                # Shouldn't happen on first entry — AI should never exit immediately.
-                # Kept as a safety net only.
-                log.warning("[AIEngine._process_ai_response] Unexpected immediate exit on work mode entry")
+            # A bare `exit`/empty work-call is not real code — the exit sentinel
+            # was removed (work mode now ends when the AI replies with no tool
+            # call). Fold it into an immediate finish. Shouldn't happen on entry;
+            # kept as a safety net for habituated / resumed sessions.
+            if code.strip().lower() in ('exit', ''):
+                log.warning("[AIEngine._process_ai_response] Bare exit/empty work-call on entry — finishing")
                 self.tool_manager.in_work_mode = False
                 if ai_text and ai_text.strip():
                     self.conversation_history.append({'role': 'assistant', 'content': ai_text})
@@ -973,6 +1027,11 @@ class AIEngine:
                     'exited_work_mode': True,
                     'session_name': session_name
                 }
+
+            log.debug("[AIEngine._process_ai_response] → Calling tool_manager.run_work_environment()")
+            # Set BEFORE run_work_environment so interrupt_response() can detect active work
+            self.tool_manager.in_work_mode = True
+            work_output = self.tool_manager.run_work_environment(code)
 
             log.debug(f"[AIEngine._process_ai_response] Storing work output | "
                       f"length={len(work_output)} chars | in_work_mode → True")
@@ -1074,8 +1133,13 @@ class AIEngine:
         # ── Single-exec guardrail ──────────────────────────────────────────────────
         ai_text, _violated, _ = self.tool_manager.enforce_single_exec_policy(ai_text)
         if _violated:
-            from systema.engine.prompts.global_instructions import EXEC_CODE_TOOLCALL_VIOLATION_PROMPT
-            self._pending_exec_violation_prompt = EXEC_CODE_TOOLCALL_VIOLATION_PROMPT
+            from systema.engine.prompts.global_instructions import (
+                EXEC_CODE_TOOLCALL_VIOLATION_PROMPT,
+                EXEC_CODE_TOOLCALL_VIOLATION_PROMPT_NATIVE)
+            self._pending_exec_violation_prompt = (
+                EXEC_CODE_TOOLCALL_VIOLATION_PROMPT_NATIVE
+                if self._tool_mode() == 'native'
+                else EXEC_CODE_TOOLCALL_VIOLATION_PROMPT)
         # ──────────────────────────────────────────────────────────────────────────
 
         log.debug("[AIEngine._process_work_mode_response] Checking for consecutive work_environment call...")
@@ -1094,7 +1158,9 @@ class AIEngine:
         # ── Check for load_skill call (work_environment exclusive) ────────────
         load_skill_result = self.tool_manager.parse_load_skill(ai_text)
         if load_skill_result:
-            from systema.engine.prompts.global_instructions import SKILL_LOADED_WORK_PROMPT, SKILL_ALREADY_LOADED_PROMPT
+            from systema.engine.prompts.global_instructions import (
+                SKILL_LOADED_WORK_PROMPT, SKILL_LOADED_WORK_PROMPT_NATIVE,
+                SKILL_ALREADY_LOADED_PROMPT)
             skill_name, remaining_text = load_skill_result
             log.info(f"[AIEngine._process_work_mode_response] load_skill detected → '{skill_name}'")
 
@@ -1123,7 +1189,10 @@ class AIEngine:
                 self.conversation_history.append({'role': 'assistant', 'content': ai_text})
 
             work_output = self.tool_manager.last_work_output or "No previous output"
-            skill_loaded_msg = SKILL_LOADED_WORK_PROMPT.format(
+            _skill_tmpl = (SKILL_LOADED_WORK_PROMPT_NATIVE
+                           if self._tool_mode() == 'native'
+                           else SKILL_LOADED_WORK_PROMPT)
+            skill_loaded_msg = _skill_tmpl.format(
                 skill_name=skill_name,
                 work_output=work_output
             )
@@ -1142,7 +1211,9 @@ class AIEngine:
         # ── Check for unload_skill call ────────────────────────────────────────
         unload_skill_result = self.tool_manager.parse_unload_skill(ai_text)
         if unload_skill_result:
-            from systema.engine.prompts.global_instructions import SKILL_UNLOADED_WORK_PROMPT, SKILL_NOT_LOADED_PROMPT
+            from systema.engine.prompts.global_instructions import (
+                SKILL_UNLOADED_WORK_PROMPT, SKILL_UNLOADED_WORK_PROMPT_NATIVE,
+                SKILL_NOT_LOADED_PROMPT)
             skill_name, remaining_text = unload_skill_result
             log.info(f"[AIEngine._process_work_mode_response] unload_skill detected → '{skill_name}'")
 
@@ -1166,7 +1237,10 @@ class AIEngine:
 
             log.info(f"[AIEngine._process_work_mode_response] Skill '{skill_name}' unloaded")
             work_output = self.tool_manager.last_work_output or "No previous output"
-            unloaded_msg = SKILL_UNLOADED_WORK_PROMPT.format(
+            _unload_tmpl = (SKILL_UNLOADED_WORK_PROMPT_NATIVE
+                            if self._tool_mode() == 'native'
+                            else SKILL_UNLOADED_WORK_PROMPT)
+            unloaded_msg = _unload_tmpl.format(
                 skill_name=skill_name,
                 work_output=work_output
             )
@@ -1189,12 +1263,12 @@ class AIEngine:
                      f"code_len={len(code)} | visible_text_len={len(visible_text)}")
             self.log(f"Consecutive work environment call detected")
 
-            log.debug("[AIEngine._process_work_mode_response] → run_work_environment()")
-            work_output = self.tool_manager.run_work_environment(code)
-
-            if work_output == "EXITED_WORK_MODE":
-                log.info("[AIEngine._process_work_mode_response] Work environment exited — "
-                         "clearing in_work_mode flag (skills persist)")
+            # Bare `exit`/empty work-call → the exit sentinel was removed, so fold
+            # it into the finish path (never executed). Normal finishing is a reply
+            # with no work call at all (the else-branch below).
+            if code.strip().lower() in ('exit', ''):
+                log.info("[AIEngine._process_work_mode_response] Bare exit/empty work-call — "
+                         "finishing work mode (skills persist)")
                 self.tool_manager.in_work_mode = False
 
                 # Slim down the last work-mode ping now that work mode is exiting.
@@ -1238,6 +1312,8 @@ class AIEngine:
                     'exited_work_mode': True
                 }
 
+            log.debug("[AIEngine._process_work_mode_response] → run_work_environment()")
+            work_output = self.tool_manager.run_work_environment(code)
             log.debug(f"[AIEngine._process_work_mode_response] Work output received | "
                       f"output_len={len(work_output)} chars | storing for next iteration")
             self.tool_manager.last_work_output = work_output
@@ -1303,16 +1379,38 @@ class AIEngine:
                     log.debug("[AIEngine._process_work_mode_response] Last work-mode ping slimmed on exit")
                     break
 
+            # ── Empty-finish guard ── this reply (no tool call) IS the report; an
+            # empty one means the user sees nothing, so prompt for a real summary.
+            if not ai_text or not ai_text.strip():
+                log.warning("[AIEngine._process_work_mode_response] Finished work mode with an empty reply — "
+                            "injecting summary reminder and re-calling provider")
+                self.conversation_history.append({'role': 'system', 'content': EMPTY_EXIT_SUMMARY_PROMPT})
+                ai_text2 = self._call_provider()
+                if ai_text2:
+                    return self._process_ai_response(ai_text2)
+                return {
+                    'response': "",
+                    'has_work_call': False,
+                    'in_work_mode': False,
+                    'thinking': False,
+                    'session_name': session_name,
+                    'exited_work_mode': True,
+                }
+
             self.conversation_history.append({'role': 'assistant', 'content': ai_text})
             log.debug("[AIEngine._process_work_mode_response] Normal response appended to history | "
                       f"total entries={len(self.conversation_history)}")
 
+            # exited_work_mode=True is REQUIRED — it stops the controller's
+            # work_mode_timer and fires the exit UI. This is now the primary finish
+            # path (the explicit exit sentinel was removed).
             return {
                 'response': ai_text,
                 'has_work_call': False,
                 'in_work_mode': False,
                 'session_name': session_name,
-                'thinking': False
+                'thinking': False,
+                'exited_work_mode': True,
             }
 
     # ═══════════════════════════════════════════════════════════════════════════

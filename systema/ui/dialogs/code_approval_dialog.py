@@ -13,9 +13,11 @@ supervised mode. Rebuilt as a small *personal coding agent*:
     Shows a "responding" indicator and locks input while it works. Per-request
     token usage is displayed.
   • Proposed edits arrive as a DIFF with one-click Apply / Dismiss.
-  • "Don't ask again for identical code" remembers the approved hash
-    (systema.security.code_guard.ApprovalMemory) so the same snippet skips the
-    prompt next time.
+  • Tag-based "don't ask again" — approve, then either silence these operation
+    types for the rest of the session (ephemeral) or "always allow these
+    operations" (promotes them ask->allow in the saved security policy). No code
+    hashes are stored.
+  • Reject carries an optional reason back to the AI (REASON: <text>).
 
 Compatibility: the static ``get_approval(code, execution_type, ai_engine,
 parent=None) -> (approved, modified_code)`` API and the ``code_edit`` / ``result``
@@ -31,12 +33,11 @@ from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                              QTextEdit, QListWidget, QListWidgetItem, QSplitter,
-                             QWidget, QCheckBox, QFrame)
+                             QWidget, QCheckBox, QFrame, QLineEdit)
 
 from systema.agents.code_agent import CodeAgent
-from systema.security.code_guard import (scan_code, summarize_findings, redact_secrets,
-                                         ApprovalMemory, SEV_DANGER, SEV_CAUTION,
-                                         SEV_INFO)
+from systema.security.code_guard import (scan_code, refine_file_ops, summarize_findings,
+                                         redact_secrets, SEV_DANGER, SEV_CAUTION, SEV_INFO)
 from systema.ui import theme
 
 
@@ -95,6 +96,8 @@ class CodeApprovalDialog(QDialog):
         self.ai_engine = ai_engine
         self.result = None                 # 'accept' | 'reject' | None
         self.modified_code = code
+        self.reject_reason = ""            # optional text captured on Reject
+        self._last_findings = []           # latest static-scan findings
 
         self._worker = None
         self._typing_timer = None
@@ -111,7 +114,6 @@ class CodeApprovalDialog(QDialog):
 
         from systema.common.token_meter import TokenMeter
         self._meter = TokenMeter("Code Reviewer")
-        self._memory = ApprovalMemory()
 
         self._build()
         self._refresh_security()
@@ -155,14 +157,33 @@ class CodeApprovalDialog(QDialog):
         split.setSizes([680, 420])
         root.addWidget(split, stretch=1)
 
-        # footer: memory checkbox + Reject / Accept
+        # footer: tag-based "don't ask again" controls + reason + Reject / Accept
         foot = QHBoxLayout()
-        self.remember_cb = QCheckBox("Don't ask again for identical code")
-        self.remember_cb.setStyleSheet(
-            f"QCheckBox {{ color: {p['muted']}; font-size: 11px; background: transparent; }}"
-            f"QCheckBox::indicator {{ width: 14px; height: 14px; }}")
-        foot.addWidget(self.remember_cb)
+        cb_css = (f"QCheckBox {{ color: {p['muted']}; font-size: 11px; background: transparent; }}"
+                  f"QCheckBox::indicator {{ width: 14px; height: 14px; }}")
+        self.session_allow_cb = QCheckBox("Don't ask again this session")
+        self.session_allow_cb.setStyleSheet(cb_css)
+        self.session_allow_cb.setToolTip(
+            "Auto-approve these operation types for the rest of this session "
+            "(ephemeral — cleared on restart).")
+        self.persist_allow_cb = QCheckBox("Always allow these operations")
+        self.persist_allow_cb.setStyleSheet(cb_css)
+        self.persist_allow_cb.setToolTip(
+            "Set these operation types to 'allow' in your saved security policy "
+            "(Settings > Security). Never overrides a 'deny'.")
+        foot.addWidget(self.session_allow_cb)
+        foot.addWidget(self.persist_allow_cb)
         foot.addStretch()
+
+        self.reason_edit = QLineEdit()
+        self.reason_edit.setPlaceholderText("Reason for rejecting (optional)")
+        self.reason_edit.setFixedWidth(240)
+        self.reason_edit.setStyleSheet(
+            f"QLineEdit {{ background: {p['bg']}; color: {p['text']}; "
+            f"border: 1px solid {p['border']}; border-radius: 6px; "
+            f"padding: 4px 8px; font-size: 11px; }}")
+        self.reason_edit.returnPressed.connect(self.on_reject)
+        foot.addWidget(self.reason_edit)
 
         reject_btn = QPushButton("Reject")
         reject_btn.setStyleSheet(self._btn(kind="danger"))
@@ -290,10 +311,26 @@ class CodeApprovalDialog(QDialog):
             self._scan_timer.timeout.connect(self._refresh_security)
         self._scan_timer.start(250)
 
+    def _scan(self, code):
+        """Static scan + namespace-aware create/edit/write refinement, so the
+        categories shown here (and acted on by 'always allow') match exactly what
+        the execution gate will apply."""
+        findings = scan_code(code)
+        try:
+            ns = None
+            tm = getattr(self.ai_engine, "tool_manager", None)
+            py = (getattr(tm, "tools", {}) or {}).get("python") if tm else None
+            ns = getattr(py, "namespace", None)
+            findings = refine_file_ops(findings, code, ns)
+        except Exception:
+            pass
+        return findings
+
     def _refresh_security(self):
         p = self.p
         code = self.code_edit.toPlainText()
-        findings = scan_code(code)
+        findings = self._scan(code)
+        self._last_findings = findings
         self.risk_list.clear()
         for f in findings:
             snippet, _ = redact_secrets(f.snippet)
@@ -302,13 +339,9 @@ class CodeApprovalDialog(QDialog):
             it.setForeground(QColor(p[self._SEV_COLOR_KEY.get(f.severity, "text")]))
             self.risk_list.addItem(it)
 
-        known = self._memory.is_approved(code)
         summary = summarize_findings(findings)
-        if known:
-            self.scan_lbl.setText(f"{summary}. This exact code was approved before.")
-        else:
-            self.scan_lbl.setText(summary + (". Review before approving."
-                                             if findings else "."))
+        self.scan_lbl.setText(summary + (". Review before approving."
+                                         if findings else "."))
 
     # ── AI panel ─────────────────────────────────────────────────────────────
     def _ai_busy(self, busy):
@@ -437,48 +470,79 @@ class CodeApprovalDialog(QDialog):
         self.proposal_box.hide()
 
     # ── accept / reject ──────────────────────────────────────────────────────
+    def _risky_categories(self):
+        """Operation categories of the caution/danger findings in the current
+        code — the ones a "don't ask again" choice should act on."""
+        try:
+            findings = self._last_findings or self._scan(self.code_edit.toPlainText())
+            return sorted({f.category for f in findings
+                           if f.severity in (SEV_DANGER, SEV_CAUTION)})
+        except Exception:
+            return []
+
     def on_reject(self):
         self._stop_worker()
         self.result = 'reject'
+        try:
+            self.reject_reason = self.reason_edit.text().strip()
+        except Exception:
+            self.reject_reason = ""
         self.close()
 
     def on_accept(self):
         self._stop_worker()
         self.result = 'accept'
         self.modified_code = self.code_edit.toPlainText().strip()
-        if self.remember_cb.isChecked():
-            try:
-                self._memory.remember(self.modified_code, persist=True,
-                                      note=f"approved via dialog ({self.execution_type})")
-            except Exception:
-                pass
-            # Also relax the execution policy: set the risk categories this code
-            # uses to 'allow' so they show up (and are editable) in Settings >
-            # Security. "Don't ask again" then applies both to this exact code
-            # (hash memory) and to these operation types (policy).
-            self._allow_categories_in_policy()
+        cats = self._risky_categories()
+        if cats and self.session_allow_cb.isChecked():
+            self._session_allow_categories(cats)
+        if cats and self.persist_allow_cb.isChecked():
+            self._allow_categories_in_policy(cats)
         self.accept()
 
-    def _allow_categories_in_policy(self):
-        """Flip every risk category present in the current code to 'allow' in the
-        saved execution policy (persisted via the controller). No-op if there's no
-        controller or no risky categories."""
+    def _session_allow_categories(self, cats):
+        """Add these operation categories to the interpreter's ephemeral session
+        allow-list (ToolManager.session_allowed_categories) so identical-category
+        runs skip the prompt until restart. No-op if unreachable."""
+        try:
+            tm = getattr(self.ai_engine, "tool_manager", None)
+            if tm is None:
+                return
+            if getattr(tm, "session_allowed_categories", None) is None:
+                tm.session_allowed_categories = set()
+            tm.session_allowed_categories.update(cats)
+        except Exception:
+            pass
+
+    def _allow_categories_in_policy(self, cats=None):
+        """Promote the given risk categories from 'ask' to 'allow' in the saved
+        execution policy (persisted via the controller). Only ask->allow is
+        promoted — an explicit 'deny' is never overridden. Live-refreshes an open
+        Settings window. No-op without a controller or promotable categories."""
         controller = self._controller
         if controller is None or not hasattr(controller, "settings"):
             return
         try:
-            from systema.security.code_guard import (scan_code, PolicyEngine,
-                                                     POLICY_ALLOW)
-            cats = sorted({f.category for f in scan_code(self.code_edit.toPlainText())})
+            from systema.security.code_guard import (PolicyEngine, POLICY_ALLOW,
+                                                     POLICY_ASK)
+            if cats is None:
+                cats = self._risky_categories()
             if not cats:
                 return
             rules = dict(PolicyEngine(controller.settings).rules)   # full current set
+            changed = False
             for c in cats:
-                if c in rules:
+                if rules.get(c) == POLICY_ASK:      # never override allow/deny
                     rules[c] = POLICY_ALLOW
+                    changed = True
+            if not changed:
+                return
             PolicyEngine.save(controller.settings, rules)           # writes security_exec_policy
             if hasattr(controller, "save_settings"):
                 controller.save_settings()
+            # Live-refresh an open Settings window's policy combos, if any.
+            if hasattr(controller, "refresh_open_settings_security"):
+                controller.refresh_open_settings_security()
         except Exception:
             pass
 

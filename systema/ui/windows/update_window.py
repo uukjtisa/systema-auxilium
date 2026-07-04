@@ -64,10 +64,15 @@ _LEGEND = [
     ("local_del",  "removed locally"),
 ]
 
+# Height (px) of the Files / Review header rows. Pinned equal on both panes so
+# the two content boxes line up — the right row holds 34px-tall buttons.
+_HDR_HEIGHT = 36
+
 # Extra item roles.
 _ROLE_PATH = Qt.ItemDataRole.UserRole
 _ROLE_IS_CHANGE = Qt.ItemDataRole.UserRole + 1   # True => textual-diff file
-_ROLE_SENSITIVE = Qt.ItemDataRole.UserRole + 2   # True => holds user secrets/accounts
+_ROLE_SENSITIVE = Qt.ItemDataRole.UserRole + 2   # True => in a user-owned data folder
+_ROLE_PROTECTED_RISKY = Qt.ItemDataRole.UserRole + 3  # True => protected AND overwrites/deletes (MOD/DEL) — manual-only
 
 # Warning colour for protected (sensitive) files in the list.
 _SENSITIVE_COLOUR = "#e0a24e"
@@ -198,19 +203,25 @@ class UpdateWindow(BaseWindow):
         split.setStyleSheet(
             f"QSplitter::handle {{ background: {p['border']}; width: 2px; }}")
 
-        # Left pane: a header row (matching the review toolbar's height) above the
-        # file list, so both panes' content areas line up vertically.
+        # Left pane: a header row PINNED to the exact same height as the review
+        # toolbar (which is as tall as its buttons), so both panes' content areas
+        # line up vertically. Without the fixed height the bare "Files" label is
+        # shorter than the button row on the right and the two boxes misalign.
         list_pane = QWidget()
         list_pane.setStyleSheet("background: transparent;")
         lp = QVBoxLayout(list_pane)
         lp.setContentsMargins(0, 0, 0, 0)
         lp.setSpacing(6)
-        files_hdr = QHBoxLayout()
+        list_hdr = QWidget()
+        list_hdr.setStyleSheet("background: transparent;")
+        list_hdr.setFixedHeight(_HDR_HEIGHT)
+        files_hdr = QHBoxLayout(list_hdr)
+        files_hdr.setContentsMargins(0, 0, 0, 0)
         files_lbl = QLabel("Files")
         files_lbl.setStyleSheet(f"color: {p['text']}; font-size: 12px; background: transparent;")
         files_hdr.addWidget(files_lbl)
         files_hdr.addStretch()
-        lp.addLayout(files_hdr)
+        lp.addWidget(list_hdr)
 
         self.file_list = QListWidget()
         self.file_list.setStyleSheet(
@@ -224,14 +235,20 @@ class UpdateWindow(BaseWindow):
         lp.addWidget(self.file_list, stretch=1)
         split.addWidget(list_pane)
 
-        # Right pane: a small toolbar (wrap toggle + expand) above the diff view.
+        # Right pane: a small toolbar (wrap toggle + expand) above the diff view,
+        # in a container fixed to the same height as the Files header so the two
+        # content boxes line up.
         diff_pane = QWidget()
         diff_pane.setStyleSheet("background: transparent;")
         dp = QVBoxLayout(diff_pane)
         dp.setContentsMargins(0, 0, 0, 0)
         dp.setSpacing(6)
 
-        tools = QHBoxLayout()
+        tools_hdr = QWidget()
+        tools_hdr.setStyleSheet("background: transparent;")
+        tools_hdr.setFixedHeight(_HDR_HEIGHT)
+        tools = QHBoxLayout(tools_hdr)
+        tools.setContentsMargins(0, 0, 0, 0)
         tools.setSpacing(8)
         review_lbl = QLabel("Review")
         review_lbl.setStyleSheet(f"color: {p['text']}; font-size: 12px; background: transparent;")
@@ -245,7 +262,7 @@ class UpdateWindow(BaseWindow):
         self.manage_btn = self.make_button("Manage", p, kind="ghost")
         self.manage_btn.setToolTip(
             "Resolve changes hunk-by-hunk (or line-by-line) yourself — the safe way "
-            "to handle PROTECTED provider files without losing your accounts. "
+            "to handle PROTECTED files (your providers / skills) without losing your work. "
             "Includes the current file and every protected file.")
         self.manage_btn.clicked.connect(self._open_manage)
         tools.addWidget(self.manage_btn)
@@ -253,7 +270,7 @@ class UpdateWindow(BaseWindow):
         self.expand_btn.setToolTip("Open this review in a larger, resizable window.")
         self.expand_btn.clicked.connect(self._open_expanded)
         tools.addWidget(self.expand_btn)
-        dp.addLayout(tools)
+        dp.addWidget(tools_hdr)
 
         self.diff_view = QTextEdit()
         self.diff_view.setReadOnly(True)
@@ -491,7 +508,7 @@ class UpdateWindow(BaseWindow):
         p = self._p
         from PyQt6.QtGui import QColor
         from systema.app.updater_service import is_sensitive_path
-        sensitive_count = 0
+        risky_count = 0
         for fc in plan.file_changes:
             if fc.change.value == "unchanged":
                 continue
@@ -500,23 +517,33 @@ class UpdateWindow(BaseWindow):
             # A file has a reviewable textual difference if it's a text file with
             # a content change (added / modified / merged).
             is_change = is_text and fc.change.value in _TEXTDIFF_CHANGES
-            # Protected: holds user-configured secrets/accounts (providers/**).
+            # In a user-owned data folder (providers/skills)?
             sensitive = is_sensitive_path(fc.path)
-            if sensitive:
-                sensitive_count += 1
+            # Risky-protected = a protected file that would OVERWRITE or DELETE the
+            # user's local version (MOD / DEL / MERGE / CONFLICT). A protected NEW
+            # only creates a file, so it can't cause data loss and is treated as a
+            # normal addition (auto-selectable).
+            risky_protected = sensitive and fc.change.value != "added"
+            if risky_protected:
+                risky_count += 1
 
-            prefix = "PROTECT " if sensitive else f"{tag:8}"
-            label = f"{prefix} {fc.path}" + ("" if is_text else "   [binary]")
+            # Two aligned columns: the change tag, then a PROT marker for anything
+            # in a protected folder — so both dimensions are visible at a glance.
+            prot = "PROT" if sensitive else "    "
+            label = f"{tag:8} {prot}  {fc.path}" + ("" if is_text else "   [binary]")
             item = QListWidgetItem(label)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            # Auto-check ONLY textual-diff files — but NEVER a protected file: those
-            # must be ticked by hand so an update can't silently touch an account.
-            auto = is_change and not sensitive
+            # Auto-check textual-diff files, but NEVER a risky-protected one — those
+            # (a MOD/DEL of a providers/skills file) must be ticked by hand so an
+            # update can't silently overwrite or delete the user's work.
+            auto = is_change and not risky_protected
             item.setCheckState(Qt.CheckState.Checked if auto else Qt.CheckState.Unchecked)
             item.setData(_ROLE_PATH, fc.path)
             item.setData(_ROLE_IS_CHANGE, is_change)
             item.setData(_ROLE_SENSITIVE, sensitive)
-            if sensitive:
+            item.setData(_ROLE_PROTECTED_RISKY, risky_protected)
+            if risky_protected:
+                # Red warning — this is where silent overwrite / data loss lives.
                 item.setForeground(QColor(_SENSITIVE_COLOUR))
                 hl = QColor(_SENSITIVE_COLOUR)
                 hl.setAlpha(40)
@@ -530,11 +557,17 @@ class UpdateWindow(BaseWindow):
                     hl.setAlpha(55)
                     item.setBackground(hl)
             tip = fc.note or ""
-            if sensitive:
-                tip = ("PROTECTED — this file holds your configured provider "
-                       "accounts/keys. Applying it can overwrite or delete your "
-                       "settings (data loss). Review the diff and tick it only if "
-                       "you really want the upstream version. "
+            if risky_protected:
+                verb = "delete" if fc.change.value == "deleted" else "overwrite"
+                tip = (f"PROTECTED — this file lives in a folder you own "
+                       f"(providers / skills). Applying will {verb} your local "
+                       "version (possible data loss). It is unticked; review the "
+                       "diff and use Manage to resolve it hunk-by-hunk, or tick it "
+                       "only if you really want the upstream version. "
+                       + (tip if tip else "")).strip()
+            elif sensitive:  # protected NEW — additive, safe
+                tip = ("New file in a folder you own (providers / skills). It only "
+                       "adds a file — nothing of yours is overwritten or deleted. "
                        + (tip if tip else "")).strip()
             if not is_text:
                 tip = (tip + "  " if tip else "") + "binary file - no text diff to review"
@@ -542,16 +575,28 @@ class UpdateWindow(BaseWindow):
                 item.setToolTip(tip)
             self.file_list.addItem(item)
 
-        if sensitive_count:
+        if risky_count:
             self._banner(
-                f"{sensitive_count} protected file(s) hold your configured provider "
-                "accounts/keys. They are unticked and highlighted — an update won't "
-                "touch them unless you tick them yourself after reviewing the diff.")
+                f"{risky_count} PROTECTED change(s) would overwrite or delete files "
+                "in folders you own (providers / skills). They are unticked and "
+                "highlighted — an update won't touch them unless you tick them "
+                "yourself, or resolve them hunk-by-hunk via Manage.")
 
         if plan.dependency_changes:
-            names = ", ".join(d.requirement for d in plan.dependency_changes)
-            self.deps_lbl.setText(
-                f"Dependencies to install for selected files: {names}")
+            # requirements.txt diff (gitplucker >= 0.7): show added / changed /
+            # removed distinctly. Older lib versions lack these helpers, so fall
+            # back to a flat requirement list.
+            try:
+                summ = plan.dependency_summary()
+                rows = "   ".join(d.describe() for d in plan.dependency_changes)
+                txt = (f"Dependency changes — {summ}:   {rows}" if summ
+                       else f"Dependency changes:   {rows}")
+                if plan.removed_dependencies:
+                    txt += "   (removed deps are reported only, not uninstalled)"
+            except AttributeError:
+                names = ", ".join(d.requirement for d in plan.dependency_changes)
+                txt = f"Dependencies to install for selected files: {names}"
+            self.deps_lbl.setText(txt)
         if plan.conflicts:
             self._status(
                 f"{len(plan.conflicts)} conflict(s): you and upstream edited the same lines. "
@@ -745,10 +790,12 @@ class UpdateWindow(BaseWindow):
         return out
 
     def _set_all_checked(self, checked: bool):
-        # "Select all" never auto-ticks protected files — they stay manual-only.
+        # "Select all" never auto-ticks a risky-protected file (a MOD/DEL of a
+        # providers/skills file) — those stay manual-only. A protected NEW is
+        # additive and ticks like any other addition.
         for i in range(self.file_list.count()):
             it = self.file_list.item(i)
-            if checked and it.data(_ROLE_SENSITIVE):
+            if checked and it.data(_ROLE_PROTECTED_RISKY):
                 it.setCheckState(Qt.CheckState.Unchecked)
             else:
                 it.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
@@ -756,18 +803,22 @@ class UpdateWindow(BaseWindow):
 
     def _select_changes(self):
         """Tick only the files that have a textual difference (the highlighted ones).
-        Protected files are always skipped — they must be approved by hand."""
+        Risky-protected files (a MOD/DEL of a providers/skills file) are skipped —
+        they must be approved by hand — but a protected NEW is additive and ticks."""
         for i in range(self.file_list.count()):
             it = self.file_list.item(i)
-            pick = it.data(_ROLE_IS_CHANGE) and not it.data(_ROLE_SENSITIVE)
+            pick = it.data(_ROLE_IS_CHANGE) and not it.data(_ROLE_PROTECTED_RISKY)
             it.setCheckState(Qt.CheckState.Checked if pick else Qt.CheckState.Unchecked)
         self._update_sel_count()
 
-    def _checked_sensitive_paths(self) -> list[str]:
+    def _checked_risky_protected_paths(self) -> list[str]:
+        """Selected protected files whose change would overwrite/delete local work
+        (MOD/DEL). A protected NEW is additive and is deliberately excluded — it
+        needs no scary confirmation."""
         out = []
         for i in range(self.file_list.count()):
             it = self.file_list.item(i)
-            if it.checkState() == Qt.CheckState.Checked and it.data(_ROLE_SENSITIVE):
+            if it.checkState() == Qt.CheckState.Checked and it.data(_ROLE_PROTECTED_RISKY):
                 out.append(it.data(_ROLE_PATH))
         return out
 
@@ -807,9 +858,10 @@ class UpdateWindow(BaseWindow):
             if warn.clickedButton() is wait_btn:
                 return
 
-        # Strong, explicit confirmation when a protected (provider/account) file
-        # is selected — this is where silent data loss would happen.
-        sens = self._checked_sensitive_paths()
+        # Strong, explicit confirmation when a risky-protected file (a MOD/DEL of a
+        # providers/skills file) is selected — this is where silent data loss would
+        # happen. Protected NEW files are additive and skip this warning.
+        sens = self._checked_risky_protected_paths()
         if sens:
             listing = "\n".join(f"  • {s}" for s in sens[:12])
             more = f"\n  … and {len(sens) - 12} more" if len(sens) > 12 else ""
@@ -817,11 +869,11 @@ class UpdateWindow(BaseWindow):
             sbox.setWindowTitle("Overwrite protected files?")
             sbox.setIcon(QMessageBox.Icon.Critical)
             sbox.setText(
-                f"{len(sens)} selected file(s) are PROTECTED — they hold your "
-                "configured provider accounts/keys:\n\n"
+                f"{len(sens)} selected file(s) are PROTECTED — they live in folders "
+                "you own (provider scripts with your accounts/keys, or your skills):\n\n"
                 f"{listing}{more}\n\n"
-                "Applying the upstream version will OVERWRITE (or delete) your "
-                "configuration — the account you set up can be lost. A backup is "
+                "Applying the upstream version will OVERWRITE or DELETE your local "
+                "copy — the account or skill you set up can be lost. A backup is "
                 "still written to data/updates/, but this is not reversible from "
                 "inside the app beyond that snapshot.\n\n"
                 "Overwrite these anyway?")

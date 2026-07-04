@@ -503,21 +503,27 @@ class FloatingWindow(QWidget):
         menu.exec(QCursor.pos())
 
     def toggle_debug(self):
-        """Toggle debug mode"""
-        current = self.controller.get_debug_mode()
-        self.controller.set_debug_mode(not current)
+        """Toggle debug mode. The UI side-effects (open/close the debug window,
+        repaint, post a chat notice) are applied centrally by the controller via
+        apply_debug_mode(), so this path and the Settings-window save path behave
+        identically."""
+        self.controller.set_debug_mode(not self.controller.get_debug_mode())
 
-        if not current:  # Now enabled
+    def apply_debug_mode(self, enabled):
+        """Apply the debug-mode UI side-effects. Called by
+        AssistantController.set_debug_mode() on an actual state change, regardless
+        of whether the change originated from this window's context menu, the
+        system-tray menu, or the Settings window's Save button."""
+        if enabled:
             self.open_debug_window()
             if self.chat_window:
                 self.chat_window.add_system_message("Debug mode enabled - Tool conversations visible")
-            self.update()
-        else:  # Now disabled
+        else:
             if self.debug_window:
                 self.debug_window.hide()
             if self.chat_window:
                 self.chat_window.add_system_message("Debug mode disabled")
-            self.update()
+        self.update()
 
     def open_appearance_settings(self):
         """Open appearance settings window"""

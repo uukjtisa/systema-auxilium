@@ -17,7 +17,7 @@ requests              # HTTP for provider scripts & skills
 markdown2             # Markdown rendering in chat
 matplotlib            # LaTeX / plot rendering
 pyparsing             # Markdown / table parsing helper
-updater-gitplucker>=0.6.0  # Self-update from GitHub (Settings > System/General > Check for Updates)
+updater-gitplucker>=0.7.0  # Self-update from GitHub (Settings > System/General > Check for Updates)
 
 # ── AI Provider SDKs (used by the bundled provider scripts) ─────────────────
 anthropic             # Anthropic Claude API

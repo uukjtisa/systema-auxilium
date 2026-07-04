@@ -5,12 +5,17 @@ The code-execution safety layer, modeled on how mature AI-agent harnesses gate
 tool use (static analysis -> policy -> informed approval -> audit):
 
   scan_code(code)            AST + text risk scanner -> list[Finding]
+  refine_file_ops(...)       namespace-aware create/edit/write disambiguation
   PolicyEngine               per-category allow / ask / deny rules (from settings)
-  ApprovalMemory             "don't ask again for identical code" (hash-keyed)
   AuditLog                   append-only JSONL of every execution + approval
   redact_secrets(text)       strip API keys/tokens/emails before text leaves
                              the machine (e.g. inside AI-helper prompts)
-  code_hash(code)            canonical hash used by memory + audit
+  code_hash(code)            canonical hash used by the audit log
+
+"Don't ask again" is tag-based, not code-hash-based: the approval dialog either
+adds the risky categories to an ephemeral session allow-list (on the ToolManager)
+or promotes them ask->allow in the saved PolicyEngine rules. No code hashes are
+persisted.
 
 Everything is pure Python + stdlib so it is trivially unit-testable and reusable
 by the tool manager, the approval dialog, and the sub-agents.
@@ -21,6 +26,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 import re
 import time
 from dataclasses import dataclass, field, asdict
@@ -35,7 +41,9 @@ SEV_INFO, SEV_CAUTION, SEV_DANGER = "info", "caution", "danger"
 
 CAT_PROCESS = "process"        # subprocess / os.system / shell
 CAT_FILE_DELETE = "file_delete"  # rmtree / unlink / rmdir / remove
-CAT_FILE_WRITE = "file_write"   # open(w/a/x) / write_text / touch / mkdir
+CAT_FILE_CREATE = "file_create"  # mkdir / makedirs / touch / symlink / open(x) / new-path write
+CAT_FILE_EDIT = "file_edit"      # write to a path that already exists
+CAT_FILE_WRITE = "file_write"   # ambiguous content write (create-or-edit, unresolved)
 CAT_FILE_MOVE = "file_move"     # rename / replace / shutil.move
 CAT_FILE_COPY = "file_copy"     # copy / copy2 / copytree
 CAT_NETWORK = "network"        # requests / urllib / sockets / http
@@ -46,7 +54,9 @@ CAT_SECRETS = "secrets"        # literal API keys / tokens in the code
 CATEGORY_LABELS = {
     CAT_PROCESS: "Spawns processes / shell commands",
     CAT_FILE_DELETE: "Deletes files or directories",
-    CAT_FILE_WRITE: "Writes / creates / edits files",
+    CAT_FILE_CREATE: "Creates new files / dirs / links",
+    CAT_FILE_EDIT: "Edits existing files",
+    CAT_FILE_WRITE: "Writes files (create-or-edit, unresolved)",
     CAT_FILE_MOVE: "Moves / renames files",
     CAT_FILE_COPY: "Copies files or directory trees",
     CAT_NETWORK: "Talks to the network",
@@ -58,7 +68,8 @@ CATEGORY_LABELS = {
 # categories are grouped in the settings UI so the (now finer) list never
 # overwhelms — each tuple is (group title, [categories in that group]).
 CATEGORY_GROUPS: list[tuple[str, list[str]]] = [
-    ("File operations", [CAT_FILE_WRITE, CAT_FILE_MOVE, CAT_FILE_COPY, CAT_FILE_DELETE]),
+    ("File operations", [CAT_FILE_CREATE, CAT_FILE_EDIT, CAT_FILE_WRITE,
+                         CAT_FILE_MOVE, CAT_FILE_COPY, CAT_FILE_DELETE]),
     ("Code & processes", [CAT_PROCESS, CAT_DYNAMIC]),
     ("System & network", [CAT_SYSTEM, CAT_NETWORK]),
     ("Credentials", [CAT_SECRETS]),
@@ -105,9 +116,10 @@ _CALL_RULES: dict[str, tuple[str, str, str]] = {
     "shutil.copytree": (CAT_FILE_COPY, SEV_CAUTION, "copies a directory tree"),
     # moves / renames
     "shutil.move": (CAT_FILE_MOVE, SEV_CAUTION, "moves a file/directory"),
-    # content writes
+    # content writes (ambiguous create-or-edit; refined by refine_file_ops)
     "Path.write_text": (CAT_FILE_WRITE, SEV_CAUTION, "writes a file"),
     "Path.write_bytes": (CAT_FILE_WRITE, SEV_CAUTION, "writes a file"),
+    "write_file": (CAT_FILE_WRITE, SEV_CAUTION, "writes a file"),
     # network
     "requests.get": (CAT_NETWORK, SEV_CAUTION, "HTTP request"),
     "requests.post": (CAT_NETWORK, SEV_CAUTION, "HTTP request"),
@@ -170,16 +182,19 @@ _CALL_RULES: dict[str, tuple[str, str, str]] = {
     "os.truncate": (CAT_FILE_DELETE, SEV_CAUTION, "truncates a file"),
     "os.rename": (CAT_FILE_MOVE, SEV_CAUTION, "renames/moves a path"),
     "os.replace": (CAT_FILE_MOVE, SEV_CAUTION, "replaces a path"),
-    "os.mkdir": (CAT_FILE_WRITE, SEV_CAUTION, "creates a directory"),
-    "os.makedirs": (CAT_FILE_WRITE, SEV_CAUTION, "creates directories"),
-    "os.symlink": (CAT_FILE_WRITE, SEV_CAUTION, "creates a symlink"),
-    "os.link": (CAT_FILE_WRITE, SEV_CAUTION, "creates a hard link"),
+    "os.mkdir": (CAT_FILE_CREATE, SEV_CAUTION, "creates a directory"),
+    "os.makedirs": (CAT_FILE_CREATE, SEV_CAUTION, "creates directories"),
+    "os.symlink": (CAT_FILE_CREATE, SEV_CAUTION, "creates a symlink"),
+    "os.link": (CAT_FILE_CREATE, SEV_CAUTION, "creates a hard link"),
+    "os.mkfifo": (CAT_FILE_CREATE, SEV_CAUTION, "creates a FIFO/named pipe"),
     "Path.rename": (CAT_FILE_MOVE, SEV_CAUTION, "renames/moves a path"),
     "Path.replace": (CAT_FILE_MOVE, SEV_CAUTION, "replaces a path"),
-    "Path.mkdir": (CAT_FILE_WRITE, SEV_CAUTION, "creates a directory"),
-    "Path.touch": (CAT_FILE_WRITE, SEV_CAUTION, "creates a file"),
-    "shutil.make_archive": (CAT_FILE_WRITE, SEV_CAUTION, "creates an archive"),
-    "shutil.unpack_archive": (CAT_FILE_WRITE, SEV_CAUTION, "extracts an archive"),
+    "Path.mkdir": (CAT_FILE_CREATE, SEV_CAUTION, "creates a directory"),
+    "Path.touch": (CAT_FILE_CREATE, SEV_CAUTION, "creates a file"),
+    "Path.symlink_to": (CAT_FILE_CREATE, SEV_CAUTION, "creates a symlink"),
+    "Path.hardlink_to": (CAT_FILE_CREATE, SEV_CAUTION, "creates a hard link"),
+    "shutil.make_archive": (CAT_FILE_CREATE, SEV_CAUTION, "creates an archive"),
+    "shutil.unpack_archive": (CAT_FILE_CREATE, SEV_CAUTION, "extracts an archive"),
     # more network
     "requests.patch": (CAT_NETWORK, SEV_CAUTION, "HTTP request"),
     "requests.head": (CAT_NETWORK, SEV_INFO, "HTTP request"),
@@ -339,16 +354,23 @@ def scan_code(code: str) -> list[Finding]:
                                             snippet(node.lineno),
                                             f"{name}() — {note}"))
                 elif name == "open":
-                    # open(..., 'w'/'a'/'x') is a write
+                    # open(..., 'w'/'a'/'x') is a write. 'x' is exclusive-create
+                    # (fails if the target exists) so it is unambiguously a
+                    # file_create; 'w'/'a'/'+' are ambiguous content writes tagged
+                    # file_write and resolved to create/edit later by
+                    # refine_file_ops when the path can be pinned down.
                     mode = ""
                     if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
                         mode = str(node.args[1].value)
                     for kw in node.keywords:
                         if kw.arg == "mode" and isinstance(kw.value, ast.Constant):
                             mode = str(kw.value.value)
-                    if any(c in mode for c in "wax+"):
-                        _verb = ("creates" if "x" in mode else
-                                 "appends to" if "a" in mode else "writes")
+                    if "x" in mode:
+                        findings.append(Finding(CAT_FILE_CREATE, SEV_CAUTION, node.lineno,
+                                                snippet(node.lineno),
+                                                f"open(mode={mode!r}) — creates a file"))
+                    elif any(c in mode for c in "wa+"):
+                        _verb = "appends to" if "a" in mode else "writes"
                         findings.append(Finding(CAT_FILE_WRITE, SEV_CAUTION, node.lineno,
                                                 snippet(node.lineno),
                                                 f"open(mode={mode!r}) — {_verb} a file"))
@@ -398,6 +420,8 @@ _POLICY_KEY = "security_exec_policy"      # settings key: {category: allow|ask|d
 _DEFAULT_POLICY = {
     CAT_PROCESS: POLICY_ASK,
     CAT_FILE_DELETE: POLICY_ASK,
+    CAT_FILE_CREATE: POLICY_ASK,
+    CAT_FILE_EDIT: POLICY_ASK,
     CAT_FILE_WRITE: POLICY_ASK,
     CAT_FILE_MOVE: POLICY_ASK,
     CAT_FILE_COPY: POLICY_ASK,
@@ -414,10 +438,12 @@ _PRESETS_KEY = "security_policy_presets"   # settings key: {name: {cat: policy}}
 BUILTIN_PRESETS: dict[str, dict[str, str]] = {
     # Prompt on everything risky — the safest interactive default.
     "Strict": {c: POLICY_ASK for c in _DEFAULT_POLICY},
-    # Let routine file writes/copies through; still review moves, deletes,
-    # processes, network, dynamic code and system calls.
+    # Let routine file writes/creates/edits/copies through; still review moves,
+    # deletes, processes, network, dynamic code and system calls.
     "Balanced": {
         **{c: POLICY_ASK for c in _DEFAULT_POLICY},
+        CAT_FILE_CREATE: POLICY_ALLOW,
+        CAT_FILE_EDIT: POLICY_ALLOW,
         CAT_FILE_WRITE: POLICY_ALLOW,
         CAT_FILE_COPY: POLICY_ALLOW,
     },
@@ -425,6 +451,8 @@ BUILTIN_PRESETS: dict[str, dict[str, str]] = {
     # process spawns, deletes, dynamic code and OS-internal calls.
     "Trusting": {
         **{c: POLICY_ASK for c in _DEFAULT_POLICY},
+        CAT_FILE_CREATE: POLICY_ALLOW,
+        CAT_FILE_EDIT: POLICY_ALLOW,
         CAT_FILE_WRITE: POLICY_ALLOW,
         CAT_FILE_COPY: POLICY_ALLOW,
         CAT_FILE_MOVE: POLICY_ALLOW,
@@ -442,11 +470,22 @@ BUILTIN_PRESETS: dict[str, dict[str, str]] = {
 
 def normalize_policy(rules: dict | None) -> dict:
     """Return a full {category: policy} map: defaults overlaid with valid keys
-    from ``rules`` (a preset or a saved policy). Unknown keys/values dropped."""
+    from ``rules`` (a preset or a saved policy). Unknown keys/values dropped.
+
+    Back-compat: file_create/file_edit split off from file_write. When the caller
+    provides a file_write rule but not the finer ones, the finer categories
+    inherit file_write's value so pre-split policies keep behaving the same until
+    the user tunes them."""
+    rules = rules or {}
     out = dict(_DEFAULT_POLICY)
-    for k, v in (rules or {}).items():
+    for k, v in rules.items():
         if k in out and v in (POLICY_ALLOW, POLICY_ASK, POLICY_DENY):
             out[k] = v
+    fw = rules.get(CAT_FILE_WRITE)
+    if fw in (POLICY_ALLOW, POLICY_ASK, POLICY_DENY):
+        for _finer in (CAT_FILE_CREATE, CAT_FILE_EDIT):
+            if _finer not in rules:
+                out[_finer] = fw
     return out
 
 
@@ -504,58 +543,110 @@ class PolicyEngine:
                                  if k in _DEFAULT_POLICY}
 
 
-# ── approval memory ──────────────────────────────────────────────────────────
-class ApprovalMemory:
-    """Remembers approved code by hash so identical re-runs skip the prompt.
+# ── file-op refinement (namespace-aware create / edit / write) ───────────────
+_WRITE_METHODS = ("write_text", "write_bytes")   # Path.write_* content writers
 
-    Session scope always applies; ``persist=True`` entries survive restarts in
-    data/security/approved_hashes.json. Any code change = new hash = new prompt.
-    """
 
-    _FILE = _SEC_DIR / "approved_hashes.json"
+def _resolve_path(node: "ast.AST", ns: dict):
+    """Best-effort: turn an AST argument into a filesystem path string, using
+    string literals in the code or a variable/Path already bound in the live
+    interpreter *ns*. Returns None when it can't be pinned down with confidence
+    (dynamic expressions, f-strings, joins on unknown vars, etc.)."""
+    try:
+        # 1. plain string literal: open("foo.txt", "w")
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        # 2. Path("lit") / Path(var) / PurePath(...) wrapping a resolvable arg
+        if isinstance(node, ast.Call):
+            nm = _dotted_name(node.func) or ""
+            if nm.split(".")[-1] in ("Path", "PurePath", "PosixPath", "WindowsPath") \
+                    and node.args:
+                return _resolve_path(node.args[0], ns)
+            return None
+        # 3. a bare variable already bound in the namespace (str / bytes / PathLike)
+        if isinstance(node, ast.Name) and node.id in ns:
+            val = ns[node.id]
+            if isinstance(val, bytes):
+                return val.decode("utf-8", "replace")
+            if isinstance(val, str):
+                return val
+            try:
+                return os.fspath(val)          # pathlib.Path / os.PathLike
+            except Exception:
+                return None
+    except Exception:
+        return None
+    return None
 
-    def __init__(self):
-        self._session: set[str] = set()
-        self._persistent: dict[str, dict] = {}
+
+def refine_file_ops(findings, code, namespace=None):
+    """Refine ambiguous content-write findings (file_write) into file_create or
+    file_edit where the target path can be resolved — from a string literal in the
+    code, or from a variable already bound in the live interpreter *namespace* —
+    using os.path.exists (exists -> edit, new path -> create). Writes whose target
+    can't be resolved keep the conservative file_write category.
+
+    Pure and defensive: returns the findings unchanged on any error, when there is
+    no namespace to consult, or when nothing is refinable. Only file_write findings
+    are ever relabeled; create-primitives (mkdir/touch/open('x')/...) already carry
+    file_create and are left alone."""
+    try:
+        if not findings or not any(f.category == CAT_FILE_WRITE for f in findings):
+            return findings
+        tree = ast.parse(code)
+    except Exception:
+        return findings
+
+    ns = namespace if isinstance(namespace, dict) else {}
+
+    # Map source line -> resolved path for the content-write call on that line.
+    line_path: dict[int, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _dotted_name(node.func) or ""
+        target = None
+        if name in ("open", "write_file") and node.args:
+            target = node.args[0]
+        elif name.split(".")[-1] in _WRITE_METHODS and isinstance(node.func, ast.Attribute):
+            target = node.func.value        # the Path-like receiver
+        if target is None:
+            continue
+        resolved = _resolve_path(target, ns)
+        if resolved and node.lineno not in line_path:
+            line_path[node.lineno] = resolved
+
+    if not line_path:
+        return findings
+
+    refined = []
+    for f in findings:
+        if f.category != CAT_FILE_WRITE:
+            refined.append(f)
+            continue
+        path = line_path.get(f.line)
+        if not path:
+            refined.append(f)             # unresolved -> stay file_write
+            continue
         try:
-            if self._FILE.exists():
-                self._persistent = json.loads(self._FILE.read_text(encoding="utf-8"))
+            exists = os.path.exists(path)
         except Exception:
-            self._persistent = {}
-
-    def is_approved(self, code: str) -> bool:
-        h = code_hash(code)
-        return h in self._session or h in self._persistent
-
-    def remember(self, code: str, persist: bool = False, note: str = "") -> None:
-        h = code_hash(code)
-        self._session.add(h)
-        if persist:
-            self._persistent[h] = {"ts": time.time(), "note": note[:200]}
-            self._save()
-
-    def forget_all(self) -> None:
-        self._session.clear()
-        self._persistent.clear()
-        self._save()
-
-    @property
-    def persistent_count(self) -> int:
-        return len(self._persistent)
-
-    def _save(self) -> None:
-        try:
-            self._FILE.parent.mkdir(parents=True, exist_ok=True)
-            self._FILE.write_text(json.dumps(self._persistent, indent=1),
-                                  encoding="utf-8")
-        except Exception:
-            pass
+            refined.append(f)
+            continue
+        if exists:
+            refined.append(Finding(CAT_FILE_EDIT, f.severity, f.line, f.snippet,
+                                   f.note + " [existing path -> edit]"))
+        else:
+            refined.append(Finding(CAT_FILE_CREATE, f.severity, f.line, f.snippet,
+                                   f.note + " [new path -> create]"))
+    return refined
 
 
 # ── audit log ────────────────────────────────────────────────────────────────
 class AuditLog:
     """Append-only JSONL of every gated execution: what ran, its hash, how it
-    was approved (user / memory / policy / agent-edit), and the scan summary."""
+    was approved (user / policy / session-allow / agent-edit), and the scan
+    summary."""
 
     _FILE = _SEC_DIR / "audit.jsonl"
 
@@ -568,7 +659,7 @@ class AuditLog:
             "hash": code_hash(code)[:16],
             "type": execution_type,
             "decision": decision,          # approved | rejected | denied | auto
-            "source": source,              # user | memory | policy | unsupervised
+            "source": source,              # user | policy | session-allow | safe | unsupervised
             "risk": summarize_findings(findings or []),
             "lines": code.count("\n") + 1,
         }

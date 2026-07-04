@@ -50,24 +50,32 @@ _EXCLUDES = [
     "*.lock", "**/*.lock",
 ]
 
-# Paths that hold user-configured secrets / accounts (e.g. API keys inside
-# provider scripts). Unlike _EXCLUDES these STAY VISIBLE in the plan so the user
-# can review a genuine upstream change — but they are auto-unselected, flagged
-# "PROTECTED", and applying one takes an explicit opt-in + a strong warning, so
-# an update can never silently overwrite or delete a configured account.
+# User-owned "data folders": paths the user edits and populates themselves —
+# provider scripts (API keys / accounts) and skill files. Updates legitimately
+# touch these sometimes, so unlike _EXCLUDES they STAY VISIBLE in the plan; but a
+# content change to one (MOD / DEL) is auto-UNSELECTED, flagged "PROTECTED", and
+# takes an explicit opt-in + a strong warning, so an update can never silently
+# overwrite or delete the user's work. A brand-new file (NEW) in one of these is
+# only additive and is treated normally — it can't overwrite or delete anything.
+#
+# (data/** itself is the strongest tier: it's in _EXCLUDES above, so the user's
+# runtime — sessions, memory, tasks, logs — never even appears in a plan and can
+# never be overwritten or proposed for deletion.)
 _SENSITIVE_GLOBS = [
     "providers/**",
+    "skills/**",
 ]
 
 
 def is_sensitive_path(relpath: str) -> bool:
-    """True if ``relpath`` holds user-configured secrets/accounts (providers)."""
+    """True if ``relpath`` is inside a user-owned data folder (providers/skills)
+    whose content changes must be reviewed and applied by hand."""
     rp = str(relpath).replace("\\", "/")
     try:
         from gitplucker.fsutil import glob_match
         return glob_match(rp, _SENSITIVE_GLOBS)
     except Exception:
-        return rp.startswith("providers/")
+        return rp.startswith("providers/") or rp.startswith("skills/")
 
 
 def make_updater(branch: str = DEFAULT_BRANCH, token: str | None = None,

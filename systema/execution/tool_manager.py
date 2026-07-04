@@ -98,9 +98,19 @@ class ToolManager:
         self.ai_engine = ai_engine
         # Override: None = defer to settings_callback; True/False = force on/off
         self.supervised_execution = None
-        # When True, skip the ENTIRE gate (scan/policy/memory/dialog) and auto-run.
+        # When True, skip the ENTIRE gate (scan/policy/dialog) and auto-run.
         # Used by background scheduled tasks that opt into bypassing supervision.
         self.bypass_security = False
+        # Tag-based "don't ask again for this session" — operation categories the
+        # user session-approved from the code-approval dialog. Ephemeral: never
+        # persisted, wiped on restart. The gate auto-approves a run whose risky
+        # categories are all in this set.
+        self.session_allowed_categories = set()
+        # Optional free-text reason the user typed when rejecting a run in the
+        # approval dialog; surfaced to the AI so it knows WHY. Set on the main
+        # thread before the approval callback fires (happens-before the worker
+        # read via the approval Event).
+        self._last_reject_reason = ""
         # Capability gates — enforced by run_work_environment/run_execute_code,
         # not just narrated in the system prompt. Set by TaskAIEngine from task dict.
         self.allow_workmode = True
@@ -693,15 +703,32 @@ class ToolManager:
             supervised_enabled = settings.get('supervised_execution', True)  # Default ON
         log.debug(f"[ToolManager._check_supervised_execution] supervised_enabled={supervised_enabled}")
 
-        # ── Security layer: static scan -> policy -> approval memory ─────────
+        # ── Supervised Execution = master kill-switch ────────────────────────
+        # When it is OFF the user has chosen to FULLY trust the AI: auto-approve
+        # everything with no prompt, and do NOT apply the policy at all — not even
+        # a 'deny' category blocks. The whole allow / ask / deny policy (and
+        # review_safe_code) only governs behavior while Supervised is ON.
+        if not supervised_enabled:
+            log.info("[ToolManager._check_supervised_execution] Supervised OFF — "
+                     "auto-approving (master kill-switch, policy not applied)")
+            self._audit_decision(code, execution_type, 'auto', 'unsupervised')
+            return True, code
+
+        # ── Security layer: static scan -> policy -> session allow-list ──────
         # Layered like a mature agent harness. Defensive: a fault in the safety
         # layer must never itself block a run — fall back to plain supervision.
         self._pending_scan_findings = None
         try:
             from systema.security import code_guard as guard
             findings = guard.scan_code(code)
+            # Namespace-aware refinement: resolve write targets to create vs edit
+            # where possible (see code_guard.refine_file_ops); no-op if unavailable.
+            try:
+                _ns = self.tools['python'].namespace if 'python' in self.tools else None
+                findings = guard.refine_file_ops(findings, code, _ns)
+            except Exception:
+                pass
             engine = guard.PolicyEngine(settings)
-            memory_on = settings.get('security_approval_memory', True)
 
             # The gate is POLICY-authoritative, not severity-authoritative. A
             # category's rule (ask / allow / deny) decides what happens to the
@@ -723,14 +750,7 @@ class ToolManager:
                     "Adjust it in Settings > Security to allow this.")
                 return False, code
 
-            # 2. Identical code approved before — skip the prompt.
-            if memory_on and guard.ApprovalMemory().is_approved(code):
-                guard.AuditLog.record(code=code, execution_type=execution_type,
-                                      decision='approved', source='memory', findings=findings)
-                log.info("[ToolManager._check_supervised_execution] approved from memory (known hash)")
-                return True, code
-
-            # 3. Gate on the REAL operations (caution/danger). INFO-level signals
+            # 2. Gate on the REAL operations (caution/danger). INFO-level signals
             #    (a bare `import`, os.chdir, plain print) never force a prompt on
             #    their own — that keeps trivial code from nagging. Users who want
             #    to review absolutely everything set 'security_review_safe_code'.
@@ -740,6 +760,21 @@ class ToolManager:
                 guard.AuditLog.record(code=code, execution_type=execution_type,
                                       decision='auto', source='safe', findings=findings)
                 log.debug("[ToolManager._check_supervised_execution] no caution/danger ops — auto-approving safe code")
+                return True, code
+
+            # 3. Session allow-list — the user chose "don't ask again this session"
+            #    for these operation types in an earlier approval (ephemeral, wiped
+            #    on restart). Auto-approve when EVERY risky category of this run is
+            #    session-allowed. Deny (step 1) already took precedence, so a denied
+            #    category can never be silenced this way.
+            _sess = getattr(self, 'session_allowed_categories', None) or set()
+            _risky_cats = {f.category for f in risky}
+            if risky and _risky_cats and _risky_cats.issubset(_sess):
+                guard.AuditLog.record(code=code, execution_type=execution_type,
+                                      decision='auto', source='session-allow',
+                                      findings=findings, extra={'categories': sorted(_risky_cats)})
+                log.info(f"[ToolManager._check_supervised_execution] session-allowed "
+                         f"{sorted(_risky_cats)} — auto-approving")
                 return True, code
 
             # 4. Among the real operations, the per-category policy decides.
@@ -776,6 +811,7 @@ class ToolManager:
 
         # Show approval dialog on main thread
         log.debug("[ToolManager._check_supervised_execution] Emitting request_approval signal to main thread")
+        self._last_reject_reason = ""   # cleared per run; set by the dialog on Reject
         try:
             # Create event to block worker thread until approval is received
             approval_event = threading.Event()
@@ -886,6 +922,8 @@ class ToolManager:
 
             approved = dialog.result == 'accept'
             modified_code = dialog.modified_code if approved else code
+            if not approved:
+                self._last_reject_reason = getattr(dialog, 'reject_reason', '') or ''
             log.info(f"[ToolManager._show_approval_dialog_on_main_thread] Dialog closed | "
                      f"approved={approved} | code_was_modified={modified_code != code}")
 
@@ -1027,12 +1065,10 @@ class ToolManager:
         log.info(f"[ToolManager.run_work_environment] ── Executing code | "
                  f"code_len={len(code)} | preview='{code_preview}' ──")
 
-        # Check for exit command
-        if code.lower() == 'exit':
-            log.info("[ToolManager.run_work_environment] Exit command detected — returning EXITED_WORK_MODE")
-            QTimer.singleShot(0, lambda: self._chat.set_session_list_locked(False)) # TODO: remove QTimer.singleShot workaround once session_list locking is on main thread
-            self.in_work_mode = False
-            return "EXITED_WORK_MODE"
+        # NOTE: the explicit `exit` sentinel was removed — work mode now ends when
+        # the AI replies with no work_environment/execute_code call (auto-exit,
+        # handled in AIEngine). A bare `exit`/empty work-call is folded into that
+        # finish path BEFORE this method is called, so it never reaches execution.
 
         # Capability gate — real enforcement, not just prompt text
         if not self.allow_workmode:
@@ -1045,7 +1081,11 @@ class ToolManager:
 
         if not approved:
             log.warning("[ToolManager.run_work_environment] ✗ Execution rejected by user")
-            return "ERROR:\nCode execution rejected by user"
+            reason = getattr(self, '_last_reject_reason', '') or ''
+            msg = "Code execution rejected by user"
+            if reason:
+                msg += f"\nREASON: {reason}"
+            return "ERROR:\n" + msg
 
         # Use modified code if user edited it
         if modified_code != code:
@@ -1166,9 +1206,13 @@ class ToolManager:
                 log.warning("[ToolManager.run_execute_code] ✗ Code execution rejected by user")
                 if log_callback:
                     log_callback("❌ Code execution rejected by user", "WARNING")
+                reason = getattr(self, '_last_reject_reason', '') or ''
+                message = "Code execution was rejected"
+                if reason:
+                    message += f"\nREASON: {reason}"
                 return {
                     'success': False,
-                    'message': "Code execution was rejected",
+                    'message': message,
                     'error': None,
                     'stdout': '',
                     'stderr': ''

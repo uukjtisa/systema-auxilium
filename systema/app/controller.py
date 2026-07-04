@@ -221,8 +221,31 @@ class AssistantController(QObject):
             except Exception as e:
                 return f"[take_screenshot] ERROR: {e}"
 
+        def _agent_attach_image_to_context(path):
+            """Feed an image to the AI as PRIVATE, one-turn context (NOT pinned to
+            the chat, not shown to the user). It is sent to the provider's
+            chat_image() on the next work step, then deleted from disk — the tokens
+            are spent exactly once. Requires a provider that supports image
+            analysis (defines chat_image()).
+
+            Usage inside code execution:
+                attach_image_to_context(r"C:\\path\\to\\image.png")
+            """
+            import os
+            if not os.path.isfile(path):
+                return f"[attach_image_to_context] File not found: {path}"
+            if not self.ai.supports_image_analysis():
+                return ("[attach_image_to_context] The active provider can't analyze "
+                        "images (it has no chat_image()). Use attach_image_to_chat() "
+                        "to pin the image for the user instead.")
+            self.ai.queue_context_image(path)
+            return (f"[attach_image_to_context] Queued for ONE-TURN analysis: {path}. "
+                    "Describe what you see in your very next reply — it is removed "
+                    "after this turn to save tokens.")
+
         self._agent_attach_image = _agent_attach_image
         self._agent_take_screenshot = _agent_take_screenshot
+        self._agent_attach_image_to_context = _agent_attach_image_to_context
         self._inject_interpreter_namespaces()
 
         # Apply settings
@@ -524,6 +547,22 @@ class AssistantController(QObject):
                     fn(theme_key)
                 except Exception as e:
                     log.error(f"[broadcast_theme] {type(win).__name__}: {e}")
+
+    def refresh_open_settings_security(self):
+        """Live-refresh an open Settings window's security policy combos after the
+        approval dialog persists a policy change (ask->allow via "Always allow
+        these operations"). No-op if Settings isn't open or lacks the hook. Called
+        from the approval dialog on the GUI thread, so it is thread-safe."""
+        floating = getattr(self, 'ui', None)
+        win = getattr(floating, 'settings_window', None) if floating else None
+        if win is None:
+            return
+        fn = getattr(win, 'refresh_security_policy_ui', None)
+        if callable(fn):
+            try:
+                fn()
+            except Exception as e:
+                log.error(f"[refresh_open_settings_security] {type(win).__name__}: {e}")
 
     def log(self, message, level="INFO"):
         """Emit message to UI log panel."""
@@ -1207,11 +1246,23 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         return self.settings.get('debug_mode', False)
 
     def set_debug_mode(self, enabled):
-        """Set debug mode"""
+        """Set debug mode — the single source of truth for both the floating-window
+        menu and the Settings window. Centralizes the UI side-effects (open/close
+        the debug window, repaint, post a chat notice) in FloatingWindow.apply_debug_mode
+        so both entry points behave identically. Change-gated so re-saving Settings
+        with debug already in its current state doesn't re-pop the debug window."""
+        enabled = bool(enabled)
+        if self.settings.get('debug_mode', False) == enabled:
+            return
         log.info(f"[AssistantController.set_debug_mode] enabled={enabled}")
         self.settings['debug_mode'] = enabled
         self.save_settings()
         self.log(f"Debug mode: {'enabled' if enabled else 'disabled'}", "SUCCESS")
+        try:
+            if self.ui is not None:
+                self.ui.apply_debug_mode(enabled)
+        except Exception as e:
+            log.warning(f"[AssistantController.set_debug_mode] UI side-effect failed: {e}")
 
     def set_tts_voice(self, voice):
         """Set TTS voice"""
@@ -1960,6 +2011,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         ns = self.ai.tool_manager.tools['python'].namespace
         ns['controller'] = self
         ns['attach_image_to_chat'] = self._agent_attach_image
+        ns['attach_image_to_context'] = self._agent_attach_image_to_context
         ns['take_screenshot'] = self._agent_take_screenshot
         ns['notify'] = self.notify
         ns['memorize'] = self.memorize

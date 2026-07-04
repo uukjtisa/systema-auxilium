@@ -772,19 +772,44 @@ class AndroidBridge:
             self.add_ai_message(result["response"])
 
     def render_loaded_messages(self):
-        """Replay current session history into the phone."""
+        """Replay current session history into the phone.
+
+        Mirrors the desktop: work-mode chatter (assistant narration between
+        entering a work_environment and exiting it) is hidden; the step execution
+        notes and the exit summary are kept."""
         try:
+            import re
+            _WE_RE = re.compile(r'```[ \t]*work_environment\b[^\n]*\n(.*?)```', re.DOTALL)
             self.clear_chat_silent()
+            tm = self.controller.ai.tool_manager
             history = self.controller.ai.conversation_history
+            in_work_mode = False
             for msg in history:
                 role    = msg.get("role", "")
-                content = msg.get("content", "")
-                if isinstance(content, list):
-                    content = " ".join(
-                        block.get("text", "") for block in content
+                raw = msg.get("content", "")
+                if isinstance(raw, list):
+                    raw = " ".join(
+                        block.get("text", "") for block in raw
                         if isinstance(block, dict) and block.get("type") == "text"
                     )
-                content = self.controller.ai.tool_manager.strip_tool_calls(content)
+                if not isinstance(raw, str):
+                    raw = ""
+
+                # Exit sentinel removed: a work step is an assistant turn running a
+                # work_environment fence (narration hidden); work mode ends at the
+                # first assistant turn WITHOUT a work_environment code fence — that
+                # turn is the report, rendered below. (Legacy bare `exit` fence still
+                # counts as a finishing turn.)
+                if role == "assistant":
+                    _we = _WE_RE.search(raw)
+                    if _we and _we.group(1).strip().lower() not in ("exit", ""):
+                        in_work_mode = True   # a work step — hide the narration
+                        continue
+                    in_work_mode = False      # finish / normal reply — fall through to render
+                elif role == "user":
+                    in_work_mode = False
+
+                content = tm.strip_tool_calls(raw)
                 if role == "ui_event":
                     if msg.get("_type") == "memory_context":
                         self._dispatch({

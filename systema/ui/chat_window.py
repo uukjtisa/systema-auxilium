@@ -2320,19 +2320,48 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         self._skills_ui_card_timer = None
 
     def render_loaded_messages(self):
-        """Render messages from loaded session"""
+        """Render messages from loaded session.
+
+        Work-mode chatter is hidden on reload: everything the agent 'said' while
+        inside a work_environment (between entering work mode and exiting it) is
+        internal workspace narration, not a real reply. We keep each step's
+        execution NOTE (the ui_event) and the EXIT turn's summary (the report meant
+        for the user), but drop the assistant text bubbles in between."""
         try:
+            import re
+            _WE_RE = re.compile(r'```[ \t]*work_environment\b[^\n]*\n(.*?)```', re.DOTALL)
             self.clear_chat_silent()
+            tm = self.controller.ai.tool_manager
             history = self.controller.ai.conversation_history
+            in_work_mode = False
             for msg in history:
                 role = msg.get("role", "")
-                content = msg.get("content", "")
-                if isinstance(content, list):
-                    content = " ".join(
-                        block.get("text", "") for block in content
+                raw = msg.get("content", "")
+                if isinstance(raw, list):
+                    raw = " ".join(
+                        block.get("text", "") for block in raw
                         if isinstance(block, dict) and block.get("type") == "text"
                     )
-                content = self.controller.ai.tool_manager.strip_tool_calls(content)
+                if not isinstance(raw, str):
+                    raw = ""
+
+                # ── Work-mode chatter suppression (assistant bubbles only) ──────
+                # The exit sentinel was removed: a work step is an assistant turn
+                # that runs a work_environment fence (its narration is internal, so
+                # hide it). Work mode ends at the first assistant turn WITHOUT a
+                # work_environment code fence — that turn is the report, rendered
+                # normally below. (A legacy bare `exit` fence counts as a finishing
+                # turn too, so its summary still shows.)
+                if role == "assistant":
+                    _we = _WE_RE.search(raw)
+                    if _we and _we.group(1).strip().lower() not in ("exit", ""):
+                        in_work_mode = True   # a work step — hide the narration
+                        continue
+                    in_work_mode = False      # finish / normal reply — fall through to render
+                elif role == "user":
+                    in_work_mode = False   # a user turn ends any dangling work mode
+
+                content = tm.strip_tool_calls(raw)
                 if role == "ui_event":
                     if msg.get("_type") == "memory_context":
                         _ctx_id = msg.get("_memory_context_id", "")
