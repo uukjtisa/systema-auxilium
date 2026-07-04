@@ -89,9 +89,9 @@ Swap the body for your own signal.
 
 ### Let an AI write your trigger
 
-The trigger template (`data/tasks/interval-scripts/_template.py` and the copy
-under `skills/create-task/templates/`) contains a fill-in-the-brackets prompt.
-Paste it into any AI, describe your signal, and drop the result in.
+The trigger template (`data/tasks/interval-scripts/_template.py`) contains a
+fill-in-the-brackets prompt. Paste it into any AI, describe your signal, and drop
+the result in.
 
 > Wrap network or I/O in `try/except` and return `False` on error, so a transient
 > failure just skips the cycle instead of crashing the poll.

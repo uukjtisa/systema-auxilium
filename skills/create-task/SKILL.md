@@ -23,9 +23,12 @@ Appends one function to `functions.json`. Functions registered here become calla
 **Args:** `arg1` — JSON-encoded function dict: `{"name": "<fn_name>", "code": "<full def ...>"}`
 **Output:** `OK: <name>` or `ERROR: <reason>`
 
-## Templates
+## Canonical formats
 
-`templates/_template.py` — starter for script-trigger ping scripts. Copy it to `{app_root}/data/tasks/interval-scripts/<your_script>.py` and implement `fire_ping()`.
+This skill writes three JSON/Python shapes. Each has one authoritative reference here:
+- **A task** → the [Task Schema](#task-schema) block below (goes into `tasks.json`).
+- **A function** → the [function entry](#adding-a-function-to-functionsjson) (goes into `functions.json`).
+- **A script trigger** → the [`fire_ping()` starter](#script-trigger) (goes into `data/tasks/interval-scripts/`).
 
 ## Task Schema
 
@@ -146,27 +149,34 @@ Format: `YYYY-MM-DDTHH:MM`. If all have passed, task deactivates immediately.
 
 ### Script Trigger
 
-For event-driven tasks. The script lives in `{app_root}/data/tasks/interval-scripts/<name>.py`.
+For event-driven tasks. The script lives in `{app_root}/data/tasks/interval-scripts/<name>.py`. The task poller re-imports it and calls `fire_ping()` every `script_poll_ms` milliseconds.
 
-**Contract (from `_template.py`):**
+**Contract:**
 - Must define `fire_ping() -> bool`
 - Return `True` once to fire the ping; return `False` to skip this poll cycle
 - **Must reset its own trigger condition** — if it keeps returning `True`, the ping fires every poll tick
-- **Script is reloaded on every poll — no in-memory state persists.** Save state to disk (e.g. a `.json` file in `Path.home()`)
+- **The file is re-imported on every poll — no in-memory state survives between calls.** Keep any state on disk (a file, a small JSON, a database), never in a module-level variable
+- Wrap network / I-O in `try/except` and return `False` on error, so a transient failure just skips the cycle instead of crashing the poll
 
 ```python
-# Minimal example — fire when a sentinel file appears
+# Annotated starter — fire once each time a sentinel file appears, then consume
+# it so the ping does not repeat. Replace the whole body with your own signal:
+# an HTTP poll, a message-queue check, a mailbox query, a sensor read, a clock check.
 from pathlib import Path
 
+TRIGGER_FILE = Path.home() / "systema_trigger.flag"
+
 def fire_ping() -> bool:
-    flag = Path.home() / "my_trigger.flag"
-    if flag.exists():
-        flag.unlink()   # ← reset so it doesn't re-fire
-        return True
+    try:
+        if TRIGGER_FILE.exists():
+            TRIGGER_FILE.unlink()      # reset: consume the signal so it fires once
+            return True
+    except OSError:
+        pass
     return False
 ```
 
-See `templates/_template.py` for the full annotated starter.
+Copy `{app_root}/data/tasks/interval-scripts/_template.py` as your starting point — it carries this contract plus a fill-in-the-brackets prompt you can paste into any AI to generate a trigger for your signal. Two working listeners ship next to it as references: `discord_listener.py` and `email_listener.py`.
 
 ---
 

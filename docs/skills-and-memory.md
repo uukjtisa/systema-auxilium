@@ -19,7 +19,8 @@ context; unloading removes them.
 
 Examples that ship with the app include a self-knowledge skill (lets the
 assistant explain what it is and check its own status/updates) and a create-task
-skill (with a trigger template under `skills/create-task/templates/`).
+skill (its trigger-script template lives at
+`data/tasks/interval-scripts/_template.py`).
 
 To add a skill, create a folder under `skills/` with its instructions and any
 helper scripts, then let the assistant load it.
