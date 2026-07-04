@@ -38,6 +38,10 @@ observing the result and iterating until the task is done.
 It runs locally as a PyQt6 desktop app. The reasoning comes from a configurable LLM provider
 of your choice; everything else, including code execution, runs on your machine.
 
+> **Full documentation lives in [`docs/`](docs/).** Every subsystem — providers,
+> tool calling, work mode, security, tasks, updates, voice/TTS, skills & memory,
+> and the Android bridge — has its own page. Start at [docs/README.md](docs/README.md).
+
 ---
 
 ## A Glimpse of It
@@ -118,9 +122,13 @@ edits, no restart.
 
 **Included scripts:**
 
-- LLM: `anthropic_provider.py` (Claude), `gemini_provider.py` (Gemini),
-  `custom_provider_llm7_io.py` (LLM7.io, OpenAI-compatible, native tool calling),
-  `provider_cloudflare_kimi_k2_6.py` (Cloudflare Workers AI / Kimi, native tool calling)
+- LLM (all support native function calling unless noted):
+  - `anthropic_provider.py` — Anthropic Claude
+  - `gemini_provider.py` — Google Gemini
+  - `provider_cloudflare_kimi_k2_6.py`, `provider_cloudflare_kimi_k2_7_code.py` — Cloudflare Workers AI / Kimi K2
+  - `provider_nvidia_glm51.py`, `provider_nvidia_deepseek_v4_flash.py`, `provider_nvidia_deepseek_v4_pro.py` — NVIDIA Inference API
+  - `provider_opencode_zen.py` — OpenCode Zen (free, OpenAI-compatible gateway)
+  - `llama-cpp-provider.py` — fully offline local GGUF models (native tool calling is opt-in and model-dependent)
 - TTS: `elevenlabs_tts.py` (expressive voice synthesis)
 
 Each folder ships a `_template.py` with a ready-to-use skeleton, full docstrings, and a

@@ -62,6 +62,18 @@ CHAT_FORMAT  = None      # e.g. "llama-3", "chatml", "mistral-instruct".
 VERBOSE      = False     # True to print llama.cpp load/inference logs to console.
 # ──────────────────────────────────────────────────────────────────────────────
 
+# ── Native tool calling (opt-in, model-dependent) ──────────────────────────────
+# llama-cpp-python CAN do OpenAI-style function calling, but ONLY if the loaded
+# GGUF model and chat template actually support tools. Many local models do not
+# and will just chat instead of emitting tool_calls. So this ships DISABLED:
+# leave it False (Systema's universal Compatibility mode drives tools via the
+# system prompt and works with any local model). Flip it to True only after you
+# confirm your model returns real tool_calls — a tool-capable model plus
+# CHAT_FORMAT = "chatml-function-calling" is the usual recipe. chat_tools() below
+# is fully implemented either way.
+SUPPORTS_NATIVE_TOOLS = False
+NATIVE_DIALECT        = "openai"
+
 
 # Key under which the loaded model + its config live on the persistent `sys`
 # module, so the instance survives this file being re-imported each request.
@@ -154,3 +166,50 @@ def chat(system_prompt: str, messages: list) -> str:
     if not reply:
         raise RuntimeError("Local model returned an empty response.")
     return reply
+
+
+def chat_tools(system_prompt: str, messages: list, tools: list, images=None) -> dict:
+    """Native function-calling entrypoint (OpenAI dialect).
+
+    ``llm.create_chat_completion`` already returns an OpenAI-shaped dict, so
+    native_adapters converts the tool schema going in and parses the reply going
+    out into the normalized result the app expects:
+        {"text": str | None, "tool_calls": [{"id","name","arguments"}, ...]}
+    Requires a tool-capable GGUF model (see the SUPPORTS_NATIVE_TOOLS note above).
+    """
+    from systema.engine import native_adapters as na
+
+    llm = _get_llm()
+    result = llm.create_chat_completion(
+        messages=_build_messages(system_prompt, messages),
+        tools=na.to_openai_tools(tools),
+        tool_choice="auto",
+        temperature=TEMPERATURE,
+        top_p=TOP_P,
+        max_tokens=MAX_TOKENS,
+        repeat_penalty=REPEAT_PENALTY,
+    )
+    return na.parse_openai(result)
+
+
+# ── Quick test ────────────────────────────────────────────────────────────────
+# Run directly to load the model and verify a reply:  python llama-cpp-provider.py
+# (Skipped automatically until MODEL_PATH points at a real .gguf file.)
+
+if __name__ == "__main__":
+    import os as _os
+
+    print(f"Testing llama.cpp provider... model_path={MODEL_PATH}")
+    print("-" * 60)
+    if not _os.path.isfile(MODEL_PATH):
+        print("MODEL_PATH does not point at a .gguf file yet — set it, then re-run.")
+    else:
+        try:
+            result = chat(
+                system_prompt="You are a helpful assistant.",
+                messages=[{"role": "user", "content": "Say 'Provider test successful.' and nothing else."}],
+            )
+            print("Response:", result)
+            print("Test passed.")
+        except Exception as e:
+            print(f"Test failed: {e}")

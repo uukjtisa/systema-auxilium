@@ -28,6 +28,14 @@ TOP_P         = 1
 MAX_TOKENS    = 16384
 SHOW_REASONING = False  # Set True to include <think>...</think> in the reply
 
+# ── Native tool calling ────────────────────────────────────────────────────────
+# NVIDIA's Inference API is OpenAI-compatible, so it speaks the OpenAI
+# function-calling dialect. Opt into Systema's native tool-calling mode (Settings
+# -> System -> Tool Calling Mode -> Native). If a model ever ignores the tools
+# channel, switch that setting back to Compatibility — nothing breaks.
+SUPPORTS_NATIVE_TOOLS = True
+NATIVE_DIALECT        = "openai"
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 client = OpenAI(
@@ -85,6 +93,32 @@ def chat(system_prompt: str, messages: list[dict]) -> str:
     return reply or "No response received."
 
 
+def chat_tools(system_prompt: str, messages: list[dict], tools: list,
+               images=None) -> dict:
+    """Native function-calling entrypoint (OpenAI dialect, non-streaming).
+
+    ``tools`` are Systema's CANONICAL tool definitions; native_adapters converts
+    them and parses the reply into the normalized result the app expects:
+        {"text": str | None, "tool_calls": [{"id","name","arguments"}, ...]}
+    """
+    from systema.engine import native_adapters as na
+
+    full_messages = (
+        [{"role": "system", "content": system_prompt}] if system_prompt else []
+    ) + messages
+
+    completion = client.chat.completions.create(
+        model=MODEL,
+        messages=full_messages,
+        temperature=TEMPERATURE,
+        top_p=TOP_P,
+        max_tokens=MAX_TOKENS,
+        tools=na.to_openai_tools(tools),
+        tool_choice="auto",
+    )
+    return na.parse_openai(completion.model_dump())
+
+
 # ── Quick test ────────────────────────────────────────────────────────────────
 # Run directly to verify your API key and connection before using in Systema.
 #   python provider_nvidia_glm51.py
@@ -102,6 +136,28 @@ if __name__ == "__main__":
         )
         print("Response:", result)
         print("-" * 48)
-        print("✅ Test passed. Provider is working correctly.")
+        print("Test passed. Provider is working correctly.")
     except Exception as e:
-        print(f"❌ Test failed: {e}")
+        print(f"Test failed: {e}")
+
+    print("\nTesting native tool calling (chat_tools)...")
+    demo_tools = [{
+        "name": "get_weather",
+        "description": "Get the current weather for a city.",
+        "parameters": {"type": "object",
+                       "properties": {"city": {"type": "string"}},
+                       "required": ["city"]},
+    }]
+    try:
+        out = chat_tools(
+            system_prompt="You are a helpful assistant. Use tools when appropriate.",
+            messages=[{"role": "user", "content": "What's the weather in Tokyo? Use the tool."}],
+            tools=demo_tools,
+        )
+        calls = out.get("tool_calls") or []
+        print("Text:", out.get("text"))
+        print("Tool calls:", calls)
+        print("Native tool calling works." if calls else
+              "No tool_calls returned — use Compatibility mode for this model.")
+    except Exception as e:
+        print(f"Native tool-calling test failed: {e}")
