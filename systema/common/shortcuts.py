@@ -44,7 +44,10 @@ _NO_WINDOW = 0x08000000 if IS_WIN else 0   # CREATE_NO_WINDOW for quiet subproce
 # ── Paths & launch target ─────────────────────────────────────────────────────
 
 def desktop_dir() -> Path:
-    """The current user's real Desktop folder (honours OneDrive / XDG redirects)."""
+    """The real Desktop folder to place the shortcut in. When the app runs elevated
+    (sudo/pkexec), this is the INVOKING login user's Desktop, NOT root's — otherwise
+    the shortcut lands on /root/Desktop and the user's session never shows it (and
+    removal can't find it). Honours OneDrive / XDG redirects for the normal case."""
     try:
         if IS_WIN:
             out = subprocess.run(
@@ -55,6 +58,11 @@ def desktop_dir() -> Path:
             if p and Path(p).is_dir():
                 return Path(p)
             return Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Desktop"
+        # Elevated: the login user's Desktop directly (xdg-user-dir as root would
+        # return root's redirect, not theirs).
+        tu = _target_user()
+        if tu is not None:
+            return tu[1] / "Desktop"
         if IS_LINUX:
             home = Path.home()
             out = subprocess.run(["xdg-user-dir", "DESKTOP"], capture_output=True, text=True)
@@ -66,7 +74,7 @@ def desktop_dir() -> Path:
                 return Path(p)
     except Exception:
         pass
-    return Path.home() / "Desktop"
+    return _home() / "Desktop"
 
 
 def _shortcut_name() -> str:
@@ -86,7 +94,7 @@ def _shortcut_candidates() -> list:
     name = _shortcut_name()
     cands = [shortcut_path()]
     if not IS_WIN:
-        home = Path.home()
+        home = _home()      # login user's home when elevated (not root's)
         for d in (home / "Desktop", home):
             cands.append(d / name)
     seen, ordered = set(), []
@@ -131,6 +139,55 @@ def _run_script() -> Path | None:
     name = "run.bat" if IS_WIN else ("run.command" if IS_MAC else "run.sh")
     p = ROOT / name
     return p if p.exists() else None
+
+
+# ── invoking login user (when the app runs elevated) ──────────────────────────
+def _target_user():
+    """The real LOGIN user to install user-visible entries (desktop shortcut,
+    autostart) for. When the app runs ELEVATED (euid 0) via sudo/pkexec from a
+    normal user's desktop session, Path.home() is /root — so a shortcut would be
+    created on /root/Desktop and an autostart entry in /root/.config, neither of
+    which the user's own session shows or reads (this is why creating/removing the
+    shortcut appeared broken). This resolves the invoking user (SUDO_USER /
+    PKEXEC_UID). Returns (name, home, uid, gid), or None when we should just use the
+    current user (Windows, not elevated, or a genuine root session)."""
+    if IS_WIN:
+        return None      # UAC elevation keeps the same user profile/home
+    try:
+        if not hasattr(os, "geteuid") or os.geteuid() != 0:
+            return None
+        import pwd as _pwd
+        su = os.environ.get("SUDO_USER")
+        if su and not su.isdigit():
+            pw = _pwd.getpwnam(su)
+        else:
+            uid = os.environ.get("PKEXEC_UID") or (su if (su and su.isdigit()) else None)
+            if not uid:
+                return None
+            pw = _pwd.getpwuid(int(uid))
+        if pw.pw_uid == 0:
+            return None
+        return (pw.pw_name, Path(pw.pw_dir), pw.pw_uid, pw.pw_gid)
+    except Exception:
+        return None
+
+
+def _home() -> Path:
+    """Home of the login user we're installing for (see _target_user)."""
+    tu = _target_user()
+    return tu[1] if tu is not None else Path.home()
+
+
+def _chown_to_target(path) -> None:
+    """chown a generated entry to the login user when elevated, so their session
+    owns it instead of a root-owned file sitting in their home/Desktop."""
+    tu = _target_user()
+    if tu is None:
+        return
+    try:
+        os.chown(path, tu[2], tu[3])
+    except Exception:
+        pass
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -255,6 +312,7 @@ def _linux_create(as_admin: bool):
     try:
         path.write_text(content, encoding="utf-8")
         os.chmod(path, 0o755)
+        _chown_to_target(path)      # own it as the login user when elevated
     except Exception as e:
         return False, f"Could not write shortcut: {e}"
     # Best-effort: mark trusted so GNOME lets it launch on double-click.
@@ -314,6 +372,7 @@ def _mac_create(as_admin: bool):
     try:
         path.write_text(body, encoding="utf-8")
         os.chmod(path, 0o755)
+        _chown_to_target(path)      # own it as the login user when elevated
     except Exception as e:
         return False, f"Could not write shortcut: {e}"
     return True, f"Shortcut created on the Desktop ({'admin' if as_admin else 'normal'})."

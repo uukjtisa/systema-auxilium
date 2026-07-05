@@ -39,6 +39,7 @@ _NO_WINDOW = _sc._NO_WINDOW
 _MAC_LABEL = "com.systema-auxilium.autostart"
 _LINUX_DESKTOP = "systema-auxilium.desktop"
 _SYSTEMD_UNIT = "systema-auxilium.service"
+_WIN_TASK = "SystemaAuxilium-Autostart"   # scheduled task = ELEVATED Windows autostart
 
 
 # ── target path per OS ────────────────────────────────────────────────────────
@@ -47,47 +48,11 @@ def _win_startup_dir() -> Path:
     return Path(base) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
 
 
-def _target_user():
-    """The real LOGIN user autostart should be installed for.
-
-    When the app is launched ELEVATED (euid 0) via sudo/pkexec from a normal user's
-    desktop session, Path.home() is /root — so an autostart entry would land in
-    /root/.config, which the user's graphical session (running as the normal user)
-    NEVER reads, and it silently never fires. This resolves the invoking user
-    (SUDO_USER / PKEXEC_UID) so we can install into THEIR home instead. Returns
-    (name, home, uid, gid), or None when we should just use the current user (not
-    elevated, or a genuine root desktop session)."""
-    if not IS_LINUX:
-        return None
-    try:
-        if not hasattr(os, "geteuid") or os.geteuid() != 0:
-            return None
-        import pwd as _pwd
-        su = os.environ.get("SUDO_USER")
-        if su and not su.isdigit():
-            pw = _pwd.getpwnam(su)
-        else:
-            uid = os.environ.get("PKEXEC_UID") or (su if (su and su.isdigit()) else None)
-            if not uid:
-                return None
-            pw = _pwd.getpwuid(int(uid))
-        if pw.pw_uid == 0:
-            return None
-        return (pw.pw_name, Path(pw.pw_dir), pw.pw_uid, pw.pw_gid)
-    except Exception:
-        return None
-
-
-def _chown_to_target(path) -> None:
-    """chown a generated entry to the login user (when elevated) so their session
-    owns/can read it, instead of a root-owned file sitting in their home."""
-    tu = _target_user()
-    if tu is None:
-        return
-    try:
-        os.chown(path, tu[2], tu[3])
-    except Exception:
-        pass
+# Login-user resolution is shared with the desktop-shortcut targeting (see
+# shortcuts._target_user) so autostart and the shortcut install into the SAME
+# login user's home when the app runs elevated, instead of root's.
+_target_user = _sc._target_user
+_chown_to_target = _sc._chown_to_target
 
 
 def _xdg_config_home() -> Path:
@@ -166,6 +131,52 @@ $s.Save()
     return True, "Systema Auxilium will now start automatically at login."
 
 
+# ── Windows ELEVATED autostart = a logon Scheduled Task with highest privileges ──
+# A Startup-folder .lnk can't run elevated (Windows silently ignores the admin bit
+# at logon), so admin autostart uses schtasks /RL HIGHEST triggered ONLOGON.
+def _win_launch_command() -> str:
+    script = _sc._run_script()
+    if script is not None:
+        return f'"{script}"'
+    exe, main = _sc._launch_parts()
+    return f'"{exe}" "{main}"'
+
+
+def _win_scheduled_exists() -> bool:
+    try:
+        r = subprocess.run(["schtasks", "/Query", "/TN", _WIN_TASK],
+                           capture_output=True, text=True, creationflags=_NO_WINDOW)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _win_scheduled_enable():
+    tr = _win_launch_command()
+    r = subprocess.run(
+        ["schtasks", "/Create", "/TN", _WIN_TASK, "/TR", tr,
+         "/SC", "ONLOGON", "/RL", "HIGHEST", "/F"],
+        capture_output=True, text=True, creationflags=_NO_WINDOW)
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "").strip()
+        needs_admin = any(w in err.lower() for w in ("denied", "access", "administrator"))
+        return False, ("Could not create the elevated autostart task"
+                       + (" — this needs administrator rights. Relaunch Systema Auxilium as "
+                          "administrator (or use normal autostart)." if needs_admin
+                          else (f": {err}" if err else ".")))
+    _log(f"windows schtasks (admin, ONLOGON) -> {tr}")
+    return True, "Systema Auxilium will now start at login as administrator (scheduled task)."
+
+
+def _win_scheduled_disable() -> bool:
+    try:
+        r = subprocess.run(["schtasks", "/Delete", "/TN", _WIN_TASK, "/F"],
+                           capture_output=True, text=True, creationflags=_NO_WINDOW)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Linux — XDG autostart .desktop running `bash "run.sh"`
 # ══════════════════════════════════════════════════════════════════════════════
@@ -237,34 +248,39 @@ def _linux_launcher_script():
     return wrapper
 
 
-def _linux_exec_line() -> str:
-    """Exec line for the autostart .desktop: runs a generated wrapper (breadcrumb
-    + settle delay) that in turn launches the run script. Falls back to launching
-    the run script (or venv python + main.py) directly if the wrapper can't be
-    written — always through bash so a missing +x bit / noexec mount can't stop
-    it from launching at login."""
+def _linux_exec_line(as_admin: bool = False) -> str:
+    """Exec line for the autostart .desktop: runs the generated wrapper (session
+    wait + launch) through bash. For ADMIN, the wrapper is elevated via pkexec (a
+    polkit prompt), passing DISPLAY/XAUTHORITY so the elevated GUI still finds the
+    screen (same mechanism as the admin desktop shortcut). Falls back to the run
+    script / venv python directly if the wrapper can't be written."""
     wrapper = _linux_launcher_script()
     if wrapper is not None:
-        return f'bash "{wrapper}"'
-    script = _sc._run_script()
-    if script is not None:
-        try:
-            os.chmod(script, 0o755)
-        except Exception:
-            pass
-        return f'bash "{script}"'
-    exe, main = _sc._launch_parts()
-    return f'"{exe}" "{main}"'
+        base = f'bash "{wrapper}"'
+    else:
+        script = _sc._run_script()
+        if script is not None:
+            try:
+                os.chmod(script, 0o755)
+            except Exception:
+                pass
+            base = f'bash "{script}"'
+        else:
+            exe, main = _sc._launch_parts()
+            base = f'"{exe}" "{main}"'
+    if as_admin:
+        return f"sh -c 'pkexec env DISPLAY=$DISPLAY XAUTHORITY=$XAUTHORITY {base}'"
+    return base
 
 
-def _linux_enable():
+def _linux_enable(as_admin: bool = False):
     path = autostart_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     # A themable icon NAME (not the Windows .ico path — it won't resolve on Linux
     # and a broken icon looks off). Missing from the theme just shows a generic
     # icon, which is harmless and never disables the entry.
     icon = APP_NAME.lower().replace(" ", "-")
-    exec_line = _linux_exec_line()
+    exec_line = _linux_exec_line(as_admin)
     content = (
         "[Desktop Entry]\n"
         "Type=Application\n"
@@ -287,10 +303,14 @@ def _linux_enable():
         return False, f"Could not enable autostart: {e}"
     tu = _target_user()
     who = f" for user '{tu[0]}'" if tu else ""
+    priv = " as administrator" if as_admin else ""
     _log(f"linux autostart .desktop -> {path} (Exec={exec_line}){who}")
-    return True, (f"Systema Auxilium will now start automatically at login{who}."
+    return True, (f"Systema Auxilium will now start automatically at login{priv}{who}."
                   + ("  (installed into the login user's config, not root's — because "
-                     "you're running elevated)" if tu else ""))
+                     "you're running elevated)" if tu else "")
+                  + ("  Note: elevated autostart needs a polkit agent to prompt at login; "
+                     "if it doesn't fire, switch to normal or run as your normal user."
+                     if as_admin else ""))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -401,22 +421,44 @@ def _linux_method() -> str:
     return "none"
 
 
+def _linux_autostart_is_admin():
+    """True if the XDG autostart entry elevates via pkexec; None if no entry."""
+    p = autostart_path()
+    if not p.exists():
+        return None
+    try:
+        for line in p.read_text(encoding="utf-8").splitlines():
+            if line.startswith("Exec="):
+                return "pkexec" in line
+    except Exception:
+        pass
+    return False
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # macOS — LaunchAgent (RunAtLoad) running run.command
 # ══════════════════════════════════════════════════════════════════════════════
-def _mac_enable():
+def _mac_enable(as_admin: bool = False):
     script = _sc._run_script()
     if script is not None:
         try:
             os.chmod(script, 0o755)
         except Exception:
             pass
-        prog = f'  <array><string>/bin/bash</string><string>{script}</string></array>\n'
-        launched = f"bash {script}"
+        raw = f'bash "{script}"'
     else:
         exe, main = _sc._launch_parts()
-        prog = f'  <array><string>{exe}</string><string>{main}</string></array>\n'
-        launched = f"{exe} {main}"
+        raw = f'"{exe}" "{main}"'
+    if as_admin:
+        # AppleScript prompts for the admin password at login, then runs elevated.
+        esc = raw.replace('\\', '\\\\').replace('"', '\\"')
+        prog = ('  <array><string>/bin/bash</string><string>-c</string>'
+                f'<string>osascript -e \'do shell script "{esc}" with administrator '
+                'privileges\'</string></array>\n')
+        launched = f"osascript(admin): {raw}"
+    else:
+        prog = f'  <array><string>/bin/bash</string><string>-c</string><string>{raw}</string></array>\n'
+        launched = raw
     path = autostart_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     plist = (
@@ -440,30 +482,50 @@ def _mac_enable():
     except Exception:
         pass
     _log(f"macos launchagent -> {launched}")
-    return True, "Systema Auxilium will now start automatically at login."
+    priv = " as administrator" if as_admin else ""
+    return True, f"Systema Auxilium will now start automatically at login{priv}."
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Public API
 # ══════════════════════════════════════════════════════════════════════════════
-def enable_autostart(method: str = "xdg"):
-    """Enable start-at-login (per-user, normal privilege). Returns (ok, message).
+def _disable_win_startup_lnk():
+    p = autostart_path()      # the Startup-folder .lnk
+    if p.exists():
+        try:
+            p.unlink()
+        except Exception:
+            pass
 
-    On Linux ``method`` selects the mechanism: 'xdg' (default — the desktop
-    autostart entry, the professional standard for GUI apps) or 'systemd' (a
-    --user service; a DE-independent fallback). The two are MUTUALLY EXCLUSIVE —
-    enabling one disables the other — so a login never double-launches (which would
-    otherwise pop the 'already running' notice)."""
+
+def enable_autostart(as_admin: bool = False, method: str = "xdg"):
+    """Enable start-at-login. Returns (ok, message).
+
+    ``as_admin`` — start ELEVATED at login. Windows: a logon Scheduled Task with
+    highest privileges (a Startup .lnk can't elevate); Linux: the XDG entry elevates
+    via pkexec; macOS: the LaunchAgent wraps the launch in an admin osascript. Normal
+    (``as_admin=False``) uses the plain per-user mechanism.
+
+    ``method`` (Linux only) — 'xdg' (default) or 'systemd' (a --user fallback, NORMAL
+    privilege only). Every mechanism is mutually exclusive with the others (enabling
+    one disables the rest) so a login never double-launches."""
     try:
         if IS_WIN:
+            if as_admin:
+                _disable_win_startup_lnk()          # mutually exclusive with the task
+                return _win_scheduled_enable()
+            _win_scheduled_disable()
             return _win_enable()
         if IS_MAC:
-            return _mac_enable()
+            return _mac_enable(as_admin)
         if str(method).lower() == "systemd":
+            if as_admin:
+                return (False, "A systemd --user service runs as your normal user and can't be "
+                               "elevated. Use the 'Desktop entry (XDG)' method for admin autostart.")
             _disable_linux_xdg()
             return _systemd_enable()
         _systemd_disable()
-        return _linux_enable()
+        return _linux_enable(as_admin)
     except Exception as e:
         return False, f"Unexpected error: {e}"
 
@@ -471,18 +533,22 @@ def enable_autostart(method: str = "xdg"):
 def disable_autostart():
     """Disable start-at-login (removes every mechanism). Returns (ok, message)."""
     try:
+        if IS_WIN:
+            had = autostart_path().exists() or _win_scheduled_exists()
+            _win_scheduled_disable()
+            _disable_win_startup_lnk()
+            return True, ("Autostart disabled." if had else "Autostart was not enabled.")
         if IS_LINUX:
             had = _systemd_is_enabled() or autostart_path().exists()
             _systemd_disable()
             _disable_linux_xdg()
             return True, ("Autostart disabled." if had else "Autostart was not enabled.")
-        path = autostart_path()
-        if IS_MAC and path.exists():
+        path = autostart_path()      # macOS LaunchAgent
+        if path.exists():
             try:
                 subprocess.run(["launchctl", "unload", str(path)], capture_output=True, text=True)
             except Exception:
                 pass
-        if path.exists():
             path.unlink()
             return True, "Autostart disabled."
         return True, "Autostart was not enabled."
@@ -518,22 +584,49 @@ def run_now():
         return False, f"Could not launch: {e}"
 
 
+def _mac_autostart_is_admin():
+    p = autostart_path()
+    if not p.exists():
+        return None
+    try:
+        return "with administrator privileges" in p.read_text(encoding="utf-8")
+    except Exception:
+        return None
+
+
 def is_enabled() -> bool:
     """True if any autostart entry currently exists."""
+    if IS_WIN:
+        return autostart_path().exists() or _win_scheduled_exists()
     if IS_LINUX:
         return _linux_method() != "none"
     return autostart_path().exists()
 
 
 def status() -> dict:
-    """{'enabled': bool, 'path': str, 'method': str} — for UI state."""
+    """{'enabled', 'path', 'method', 'admin'} — for UI state. ``admin`` is True/False
+    for the active entry, or None when none exists."""
+    if IS_WIN:
+        if _win_scheduled_exists():
+            return {"enabled": True, "path": f"Scheduled Task: {_WIN_TASK}",
+                    "method": "schtasks", "admin": True}
+        p = autostart_path()
+        if p.exists():
+            return {"enabled": True, "path": str(p), "method": "startup", "admin": False}
+        return {"enabled": False, "path": str(p), "method": "none", "admin": None}
     if IS_LINUX:
         m = _linux_method()
-        p = _systemd_unit_path() if m == "systemd" else autostart_path()
-        return {"enabled": m != "none", "path": str(p), "method": m}
-    p = autostart_path()
+        if m == "systemd":
+            return {"enabled": True, "path": str(_systemd_unit_path()),
+                    "method": "systemd", "admin": False}
+        if m == "xdg":
+            return {"enabled": True, "path": str(autostart_path()),
+                    "method": "xdg", "admin": _linux_autostart_is_admin()}
+        return {"enabled": False, "path": str(autostart_path()), "method": "none", "admin": None}
+    p = autostart_path()   # macOS
     return {"enabled": p.exists(), "path": str(p),
-            "method": ("native" if p.exists() else "none")}
+            "method": ("native" if p.exists() else "none"),
+            "admin": _mac_autostart_is_admin()}
 
 
 def diagnose() -> str:
@@ -544,13 +637,19 @@ def diagnose() -> str:
     lines = []
     osname = "Windows" if IS_WIN else "macOS" if IS_MAC else "Linux"
     st = status()
+    adm = st.get("admin")
+    adm_s = "admin" if adm else ("normal" if adm is False else "—")
     lines.append(f"OS: {osname}")
-    lines.append(f"Enabled: {st['enabled']}   (method: {st.get('method')})")
+    lines.append(f"Enabled: {st['enabled']}   (method: {st.get('method')}, privilege: {adm_s})")
     lines.append(f"Entry: {st['path']}")
-    try:
-        lines.append(f"  exists: {Path(st['path']).exists()}")
-    except Exception:
-        pass
+    if IS_WIN:
+        lines.append(f"Startup .lnk: {autostart_path()}  (exists: {autostart_path().exists()})")
+        lines.append(f"Scheduled task '{_WIN_TASK}' (admin): exists: {_win_scheduled_exists()}")
+    else:
+        try:
+            lines.append(f"  exists: {Path(st['path']).exists()}")
+        except Exception:
+            pass
     if IS_LINUX:
         elevated = hasattr(os, "geteuid") and os.geteuid() == 0
         uid = os.geteuid() if hasattr(os, "geteuid") else "?"

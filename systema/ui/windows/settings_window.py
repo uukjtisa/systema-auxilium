@@ -848,13 +848,13 @@ class SettingsWindow(BaseWindow):
         sc_lay.addLayout(_sc_radio_row)
         self._update_priv_labels()
         _sc_btn_row = QHBoxLayout()
-        _sc_apply_btn = QPushButton("Create / Update Shortcut")
-        _sc_apply_btn.setStyleSheet(_BTN)
-        _sc_apply_btn.clicked.connect(self._apply_shortcut)
+        self._sc_apply_btn = QPushButton("Create Shortcut")
+        self._sc_apply_btn.setStyleSheet(_BTN)
+        self._sc_apply_btn.clicked.connect(self._apply_shortcut)
         _sc_remove_btn = QPushButton("Remove")
         _sc_remove_btn.setStyleSheet(_BTN)
         _sc_remove_btn.clicked.connect(self._remove_shortcut)
-        _sc_btn_row.addWidget(_sc_apply_btn, stretch=1)
+        _sc_btn_row.addWidget(self._sc_apply_btn, stretch=1)
         _sc_btn_row.addWidget(_sc_remove_btn)
         sc_lay.addLayout(_sc_btn_row)
         self._sc_status_lbl = QLabel("")
@@ -865,15 +865,39 @@ class SettingsWindow(BaseWindow):
         gen_lay.addWidget(sc_group)
         self._refresh_shortcut_status()
 
-        # ── Start at Login (cross-OS, per-user, NORMAL privilege only) ───────
+        # ── Start at Login (cross-OS, per-user; normal OR elevated) ──────────
         as_group = QGroupBox("Start at Login")
         as_group.setStyleSheet(_GROUP)
         as_lay = QVBoxLayout(as_group)
         as_lay.addWidget(_info_box(
-            "Launch Systema Auxilium automatically when you log in — for THIS user "
-            "only (no admin, never system-wide). Windows: a Startup-folder shortcut; "
-            "Linux: an XDG autostart entry; macOS: a per-user LaunchAgent. It launches "
-            "through your run script. Use “Test now” to verify it without logging out."))
+            "Launch Systema Auxilium automatically when you log in (for THIS user). "
+            "Choose normal or elevated: Windows normal = a Startup shortcut, elevated = "
+            "a logon Scheduled Task (admin); Linux/macOS elevate via pkexec / an admin "
+            "prompt. On Linux, when the app runs elevated the entry is installed for the "
+            "invoking login user (not root). Use “Test now” to verify it."))
+        # Privilege toggle (normal / administrator) — segmented, mirrors the shortcut.
+        self._as_priv_group = QButtonGroup(self)
+        self._as_priv_group.setExclusive(True)
+        _as_priv_css = (
+            f"QPushButton {{ background-color: {_ELEV}; color: {_MUTED};"
+            f" border: 1px solid {_BORDER}; border-radius: 8px;"
+            f" padding: 8px 14px; font-size: 12px; text-align: left; }}"
+            f"QPushButton:hover {{ border-color: {_ACCENT}; color: {_TEXT}; }}"
+            f"QPushButton:checked {{ background-color: {_ACCENT}; color: #05070a;"
+            f" border-color: {_ACCENT}; font-weight: 600; }}")
+        self._as_priv_normal = QPushButton("Normal privileges")
+        self._as_priv_admin = QPushButton("Start as administrator")
+        for _pb in (self._as_priv_normal, self._as_priv_admin):
+            _pb.setCheckable(True)
+            _pb.setCursor(_Qt.CursorShape.PointingHandCursor)
+            _pb.setStyleSheet(_as_priv_css)
+            self._as_priv_group.addButton(_pb)
+        self._as_priv_normal.setChecked(True)
+        self._as_priv_group.buttonToggled.connect(lambda *_: self._update_priv_labels())
+        _as_priv_row = QHBoxLayout()
+        _as_priv_row.addWidget(self._as_priv_normal, stretch=1)
+        _as_priv_row.addWidget(self._as_priv_admin, stretch=1)
+        as_lay.addLayout(_as_priv_row)
         # Linux only: choose the mechanism. XDG (default) is the standard GUI method;
         # systemd is a DE-independent fallback if XDG doesn't fire on this machine.
         import sys as _sys
@@ -904,16 +928,16 @@ class SettingsWindow(BaseWindow):
             _m_row.addStretch()
             as_lay.addLayout(_m_row)
         _as_btn_row = QHBoxLayout()
-        _as_enable_btn = QPushButton("Enable")
-        _as_enable_btn.setStyleSheet(_BTN)
-        _as_enable_btn.clicked.connect(self._apply_autostart)
+        self._as_enable_btn = QPushButton("Enable")
+        self._as_enable_btn.setStyleSheet(_BTN)
+        self._as_enable_btn.clicked.connect(self._apply_autostart)
         _as_disable_btn = QPushButton("Disable")
         _as_disable_btn.setStyleSheet(_BTN)
         _as_disable_btn.clicked.connect(self._remove_autostart)
         _as_test_btn = QPushButton("Test now")
         _as_test_btn.setStyleSheet(_BTN)
         _as_test_btn.clicked.connect(self._test_autostart)
-        _as_btn_row.addWidget(_as_enable_btn, stretch=1)
+        _as_btn_row.addWidget(self._as_enable_btn, stretch=1)
         _as_btn_row.addWidget(_as_disable_btn, stretch=1)
         _as_btn_row.addWidget(_as_test_btn)
         as_lay.addLayout(_as_btn_row)
@@ -1853,7 +1877,9 @@ class SettingsWindow(BaseWindow):
 
     # ── Desktop shortcut (cross-OS) ─────────────────────────────────────────
     def _update_priv_labels(self):
-        """Prefix a check mark on the selected privilege so it's unmistakable."""
+        """Prefix a check mark on the selected privilege so it's unmistakable.
+        The shortcut and autostart toggles are updated independently — this runs
+        once during the shortcut build, before the autostart radios exist."""
         try:
             self._sc_radio_normal.setText(
                 ("✓  " if self._sc_radio_normal.isChecked() else "") + "Normal privileges")
@@ -1861,13 +1887,29 @@ class SettingsWindow(BaseWindow):
                 ("✓  " if self._sc_radio_admin.isChecked() else "") + "Run as administrator")
         except Exception:
             pass
+        try:
+            self._as_priv_normal.setText(
+                ("✓  " if self._as_priv_normal.isChecked() else "") + "Normal privileges")
+            self._as_priv_admin.setText(
+                ("✓  " if self._as_priv_admin.isChecked() else "") + "Start as administrator")
+        except Exception:
+            pass
 
     def _sync_shortcut_radios(self):
+        """Reflect the existing shortcut's real privilege + relabel the apply button
+        (Create ⇄ Update) — WITHOUT touching the status text, so an apply/remove
+        message stays visible."""
+        exists = False
         try:
             from systema.common import shortcuts as _sc
             st = _sc.status()
+            exists = bool(st["exists"])
             if st["exists"] and st["admin"] is not None:
                 (self._sc_radio_admin if st["admin"] else self._sc_radio_normal).setChecked(True)
+        except Exception:
+            pass
+        try:
+            self._sc_apply_btn.setText("Update Shortcut" if exists else "Create Shortcut")
         except Exception:
             pass
         self._update_priv_labels()
@@ -1892,6 +1934,7 @@ class SettingsWindow(BaseWindow):
             self._sc_status_lbl.setText(("✓  " if ok else "✗  ") + msg)
         except Exception as e:
             self._sc_status_lbl.setText(f"✗  {e}")
+        self._sync_shortcut_radios()
 
     def _remove_shortcut(self):
         try:
@@ -1901,8 +1944,32 @@ class SettingsWindow(BaseWindow):
             self._sc_radio_normal.setChecked(True)
         except Exception as e:
             self._sc_status_lbl.setText(f"✗  {e}")
+        self._sync_shortcut_radios()
 
-    # ── Start at login (cross-OS, per-user, normal privilege only) ──────────
+    # ── Start at login (cross-OS, per-user, normal OR elevated) ─────────────
+    def _sync_autostart_ui(self):
+        """Relabel Enable ⇄ Update and reflect the existing entry's real privilege —
+        WITHOUT touching the status text, so an apply/remove message stays visible."""
+        enabled = False
+        admin = None
+        try:
+            from systema.common import autostart as _as
+            st = _as.status()
+            enabled = bool(st.get("enabled"))
+            admin = st.get("admin")
+        except Exception:
+            pass
+        try:
+            self._as_enable_btn.setText("Update" if enabled else "Enable")
+        except Exception:
+            pass
+        try:
+            if enabled and admin is not None:
+                (self._as_priv_admin if admin else self._as_priv_normal).setChecked(True)
+        except Exception:
+            pass
+        self._update_priv_labels()
+
     def _refresh_autostart_status(self):
         try:
             from systema.common import autostart as _as
@@ -1910,21 +1977,27 @@ class SettingsWindow(BaseWindow):
             if st.get("enabled"):
                 m = st.get("method")
                 extra = f"  [{m}]" if m and m not in ("native", None) else ""
+                admin = st.get("admin")
+                lvl = (f"  ·  {'administrator' if admin else 'normal'}"
+                       if admin is not None else "")
                 self._as_status_lbl.setText(
-                    f"✓ Starts automatically at login (this user).{extra}")
+                    f"✓ Starts automatically at login (this user).{extra}{lvl}")
             else:
                 self._as_status_lbl.setText("Not set to start at login.")
         except Exception as e:
             self._as_status_lbl.setText(f"Autostart status unavailable: {e}")
+        self._sync_autostart_ui()
 
     def _apply_autostart(self):
         try:
             from systema.common import autostart as _as
             method = getattr(self, "_as_method", "xdg")
-            ok, msg = _as.enable_autostart(method)
+            as_admin = self._as_priv_admin.isChecked()
+            ok, msg = _as.enable_autostart(as_admin=as_admin, method=method)
             self._as_status_lbl.setText(("✓  " if ok else "✗  ") + msg)
         except Exception as e:
             self._as_status_lbl.setText(f"✗  {e}")
+        self._sync_autostart_ui()
 
     def _diagnose_autostart(self):
         """Show the autostart 'doctor' report — the facts that decide whether the
@@ -1974,8 +2047,10 @@ class SettingsWindow(BaseWindow):
             from systema.common import autostart as _as
             ok, msg = _as.disable_autostart()
             self._as_status_lbl.setText(("✓  " if ok else "✗  ") + msg)
+            self._as_priv_normal.setChecked(True)
         except Exception as e:
             self._as_status_lbl.setText(f"✗  {e}")
+        self._sync_autostart_ui()
 
     def _test_autostart(self):
         """Launch the app right now via the same run script autostart uses, so the

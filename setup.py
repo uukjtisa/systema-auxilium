@@ -86,10 +86,13 @@ PRECONFIG = [
     {"key": "shortcut", "label": "Create a Desktop shortcut",
      "desc": "Adds a Systema Auxilium launcher to your Desktop", "default": True},
     {"key": "admin",    "label": "Run the desktop shortcut as administrator",
-     "desc": "Elevated shortcut launch (UAC / pkexec / admin prompt). Autostart is always normal.",
+     "desc": "Elevated shortcut launch (UAC / pkexec / admin prompt).",
      "default": False},
     {"key": "autostart", "label": "Start automatically at login",
      "desc": "Registers Systema Auxilium to launch when you log in", "default": False},
+    {"key": "autostart_admin", "label": "Start autostart as administrator",
+     "desc": "Elevated at login (Windows: a logon Scheduled Task; Linux/macOS: admin prompt).",
+     "default": False},
 ]
 
 # Requirements notes preserved verbatim in the generated requirements.txt footer.
@@ -708,14 +711,17 @@ def do_shortcut(create: bool, as_admin: bool, r: Reporter):
     (r.ok if ok else r.fail)(msg)
 
 
-def do_autostart(enable: bool, r: Reporter):
-    """Autostart is per-user, normal privilege only (elevated autostart is not
-    supported — it never launches reliably at login on any OS)."""
+def do_autostart(enable: bool, r: Reporter, as_admin: bool = False):
+    """Enable/disable start-at-login (per-user). ``as_admin`` starts it ELEVATED at
+    login — Windows: a logon Scheduled Task (a Startup shortcut can't elevate);
+    Linux: the XDG entry re-launches via pkexec; macOS: an admin osascript wrap.
+    Normal (the default) uses the plain per-user mechanism. On Linux, when this
+    runs elevated the entry is installed for the invoking login user, not root."""
     _, aut = load_app_modules()
     if aut is None:
         r.fail("Autostart module unavailable (systema/common/autostart.py).")
         return
-    ok, msg = (aut.enable_autostart() if enable else aut.disable_autostart())
+    ok, msg = (aut.enable_autostart(as_admin=as_admin) if enable else aut.disable_autostart())
     (r.ok if ok else r.fail)(msg)
 
 
@@ -773,16 +779,16 @@ def verify(r: Reporter):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_full_setup(selected_optional_keys, preconfig, r: Reporter):
-    """preconfig: dict with keys shortcut/admin/autostart (bools)."""
+    """preconfig: dict with keys shortcut/admin/autostart/autostart_admin (bools)."""
     try:
         create_venv(r)
         install_deps(selected_optional_keys, r)
         write_helpers(r)
         as_admin = bool(preconfig.get("admin"))
         if preconfig.get("shortcut"):
-            do_shortcut(True, as_admin, r)   # admin applies to the shortcut only
+            do_shortcut(True, as_admin, r)   # this admin flag applies to the shortcut
         if preconfig.get("autostart"):
-            do_autostart(True, r)            # autostart is always normal privilege
+            do_autostart(True, r, as_admin=bool(preconfig.get("autostart_admin")))
         verify(r)
         r.step("Setup complete")
         r.ok(f"Launch with: {'run.bat' if IS_WIN else 'bash ' + RUN_SCRIPT}")
@@ -821,9 +827,11 @@ def _ask_yes_no(question, default_yes=True):
     return ans in ("y", "yes")
 
 
-def _pick_privilege() -> bool:
-    """Return True for admin, False for normal."""
-    ans = _ask("  Privilege — [1] Normal (recommended)  [2] Run as administrator: ", "1")
+def _pick_privilege(what: str = "") -> bool:
+    """Return True for admin, False for normal. ``what`` labels which thing the
+    privilege applies to (e.g. 'shortcut', 'autostart') so it's never ambiguous."""
+    tag = f" for the {what}" if what else ""
+    ans = _ask(f"  Privilege{tag} — [1] Normal (recommended)  [2] Run as administrator: ", "1")
     return ans.strip() == "2"
 
 
@@ -852,11 +860,11 @@ def _select_optionals_terminal():
 def _select_preconfig_terminal():
     print(c("\nPre-configuration:", "bold"))
     shortcut = _ask_yes_no("  Create a Desktop shortcut?", True)
+    admin = _pick_privilege("shortcut") if shortcut else False
     autostart = _ask_yes_no("  Start automatically at login?", False)
-    admin = False
-    if shortcut or autostart:
-        admin = _pick_privilege()
-    return {"shortcut": shortcut, "autostart": autostart, "admin": admin}
+    autostart_admin = _pick_privilege("autostart") if autostart else False
+    return {"shortcut": shortcut, "autostart": autostart,
+            "admin": admin, "autostart_admin": autostart_admin}
 
 
 def terminal_main():
@@ -885,14 +893,14 @@ def terminal_main():
             run_recovery(r)
         elif choice == "3":
             if _ask_yes_no("  Enable autostart? (No = disable)", True):
-                do_autostart(True, r)
+                do_autostart(True, r, as_admin=_pick_privilege("autostart"))
                 if _ask_yes_no("  Test it now (launch via the run script)?", False):
                     do_autostart_test(r)
             else:
                 do_autostart(False, r)
         elif choice == "4":
             if _ask_yes_no("  Create/update shortcut? (No = remove)", True):
-                do_shortcut(True, _pick_privilege(), r)
+                do_shortcut(True, _pick_privilege("shortcut"), r)
             else:
                 do_shortcut(False, False, r)
         elif choice == "5":
@@ -1018,7 +1026,7 @@ class SetupGUI:
             ("Recover run scripts", lambda: self._run(lambda r: run_recovery(r)), "normal",
              "Regenerate run / launch scripts + requirements.txt (venv untouched)."),
             ("Autostart…", lambda: self.show_privilege("autostart"), "normal",
-             "Enable, disable or test start-at-login (per-user, normal privilege)."),
+             "Enable, disable or test start-at-login (per-user, normal or elevated)."),
             ("Desktop shortcut…", lambda: self.show_privilege("shortcut"), "normal",
              "Create/update or remove the desktop shortcut (normal or admin)."),
             ("Install Python 3.10 + prerequisites", lambda: self._bootstrap(), "normal",
@@ -1064,16 +1072,21 @@ class SetupGUI:
         self._sc_var = tk.BooleanVar(value=True)
         self._as_var = tk.BooleanVar(value=False)
         self._admin_var = tk.BooleanVar(value=False)
+        self._as_admin_var = tk.BooleanVar(value=False)
         tk.Checkbutton(canvas_wrap, text="  Create a Desktop shortcut", variable=self._sc_var,
                        bg=_BG, fg=_TEXT, selectcolor=_ELEV, activebackground=_BG,
                        activeforeground=_TEXT, font=("Segoe UI", 10), anchor="w",
                        highlightthickness=0, bd=0).pack(fill="x")
+        tk.Checkbutton(canvas_wrap, text="       ↳ run the desktop shortcut as administrator",
+                       variable=self._admin_var, bg=_BG, fg=_YELLOW, selectcolor=_ELEV,
+                       activebackground=_BG, activeforeground=_YELLOW, font=("Segoe UI", 9),
+                       anchor="w", highlightthickness=0, bd=0).pack(fill="x")
         tk.Checkbutton(canvas_wrap, text="  Start automatically at login", variable=self._as_var,
                        bg=_BG, fg=_TEXT, selectcolor=_ELEV, activebackground=_BG,
                        activeforeground=_TEXT, font=("Segoe UI", 10), anchor="w",
                        highlightthickness=0, bd=0).pack(fill="x")
-        tk.Checkbutton(canvas_wrap, text="  Run the shortcut as administrator (autostart is always normal)",
-                       variable=self._admin_var, bg=_BG, fg=_YELLOW, selectcolor=_ELEV,
+        tk.Checkbutton(canvas_wrap, text="       ↳ start autostart as administrator (elevated at login)",
+                       variable=self._as_admin_var, bg=_BG, fg=_YELLOW, selectcolor=_ELEV,
                        activebackground=_BG, activeforeground=_YELLOW, font=("Segoe UI", 9),
                        anchor="w", highlightthickness=0, bd=0).pack(fill="x")
 
@@ -1085,7 +1098,7 @@ class SetupGUI:
     def _begin_setup(self):
         opt = {k for k, v in self._opt_vars.items() if v.get()}
         pre = {"shortcut": self._sc_var.get(), "autostart": self._as_var.get(),
-               "admin": self._admin_var.get()}
+               "admin": self._admin_var.get(), "autostart_admin": self._as_admin_var.get()}
         self._run(lambda r: run_full_setup(opt, pre, r))
 
     # ── autostart / shortcut sub-view ──
@@ -1101,21 +1114,32 @@ class SetupGUI:
                  anchor="w", justify="left", wraplength=680).pack(anchor="w", pady=(0, 10))
         row = tk.Frame(self.body, bg=_BG)
         if kind == "autostart":
-            # Normal privilege only — elevated autostart isn't supported (never
-            # launches reliably at login). Launches through the run script.
-            tk.Label(self.body, text="Runs your run script at login (per-user, normal "
-                     "privilege). Use “Test now” to launch it immediately without logging out.",
+            # Normal OR elevated. Windows normal = a Startup shortcut, elevated = a
+            # logon Scheduled Task; Linux/macOS elevate via pkexec / an admin prompt.
+            # Launches through the run script.
+            tk.Label(self.body, text="Runs your run script at login (per-user). Choose normal or "
+                     "elevated — Windows normal = a Startup shortcut, elevated = a logon Scheduled "
+                     "Task; Linux/macOS elevate via pkexec / an admin prompt. Use “Test now” to "
+                     "launch it immediately without logging out.",
                      bg=_BG, fg=_MUTED, font=("Segoe UI", 9), anchor="w", justify="left",
                      wraplength=680).pack(anchor="w", pady=(0, 8))
+            as_priv = tk.StringVar(value=self._current_priv("autostart"))
+            for val, label in (("normal", "Normal privileges"),
+                               ("admin", "Start as administrator (elevated at login)")):
+                tk.Radiobutton(self.body, text="  " + label, variable=as_priv, value=val,
+                               bg=_BG, fg=_TEXT if val == "normal" else _YELLOW, selectcolor=_ELEV,
+                               activebackground=_BG, font=("Segoe UI", 10), anchor="w",
+                               highlightthickness=0, bd=0).pack(fill="x")
             row.pack(fill="x", pady=(12, 0))
-            self._btn(row, "Enable", lambda: self._run(
-                lambda r: do_autostart(True, r)), "accent").pack(side="left")
+            self._btn(row, "Enable / Update", lambda: self._run(
+                lambda r: do_autostart(True, r, as_admin=as_priv.get() == "admin")),
+                "accent").pack(side="left")
             self._btn(row, "Disable", lambda: self._run(
                 lambda r: do_autostart(False, r)), "normal").pack(side="left", padx=(8, 0))
             self._btn(row, "Test now", lambda: self._run(
                 lambda r: do_autostart_test(r)), "normal").pack(side="left", padx=(8, 0))
         else:
-            priv = tk.StringVar(value="normal")
+            priv = tk.StringVar(value=self._current_priv("shortcut"))
             for val, label in (("normal", "Normal privileges"),
                                ("admin", "Run as administrator (elevation prompt each launch)")):
                 tk.Radiobutton(self.body, text="  " + label, variable=priv, value=val,
@@ -1129,13 +1153,34 @@ class SetupGUI:
                 lambda r: do_shortcut(False, False, r)), "normal").pack(side="left", padx=(8, 0))
         self._btn(row, "Back", self.show_landing, "normal").pack(side="right")
 
+    def _current_priv(self, kind):
+        """Reflect the existing entry's privilege so the radio opens on its real
+        state ('admin'/'normal'); defaults to 'normal' when nothing exists."""
+        sc, aut = load_app_modules()
+        try:
+            if kind == "autostart" and aut is not None:
+                st = aut.status()
+                if st.get("enabled") and st.get("admin"):
+                    return "admin"
+            if kind == "shortcut" and sc is not None:
+                st = sc.status()
+                if st.get("exists") and st.get("admin"):
+                    return "admin"
+        except Exception:
+            pass
+        return "normal"
+
     def _status_text(self, kind):
         sc, aut = load_app_modules()
         try:
             if kind == "autostart" and aut is not None:
                 st = aut.status()
-                return ("Currently: enabled — runs at login." if st["enabled"]
-                        else "Currently: not set to start at login.")
+                if st["enabled"]:
+                    lvl = "administrator" if st.get("admin") else "normal"
+                    m = st.get("method")
+                    mtxt = f", {m}" if m and m not in ("native", None) else ""
+                    return f"Currently: enabled — runs at login ({lvl}{mtxt})."
+                return "Currently: not set to start at login."
             if kind == "shortcut" and sc is not None:
                 st = sc.status()
                 if st["exists"]:
