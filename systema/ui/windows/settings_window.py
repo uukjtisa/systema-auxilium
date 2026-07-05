@@ -874,6 +874,35 @@ class SettingsWindow(BaseWindow):
             "only (no admin, never system-wide). Windows: a Startup-folder shortcut; "
             "Linux: an XDG autostart entry; macOS: a per-user LaunchAgent. It launches "
             "through your run script. Use “Test now” to verify it without logging out."))
+        # Linux only: choose the mechanism. XDG (default) is the standard GUI method;
+        # systemd is a DE-independent fallback if XDG doesn't fire on this machine.
+        import sys as _sys
+        self._as_method = "xdg"
+        if _sys.platform.startswith("linux"):
+            try:
+                from systema.common import autostart as _as0
+                _cur_method = _as0.status().get("method")
+            except Exception:
+                _cur_method = None
+            _m_row = QHBoxLayout()
+            _m_lbl = QLabel("Method:")
+            _m_lbl.setStyleSheet(f"color: {_MUTED}; font-size: 11px; background: transparent;")
+            self._as_radio_xdg = QRadioButton("Desktop entry (XDG)")
+            self._as_radio_systemd = QRadioButton("systemd user service")
+            for _r in (self._as_radio_xdg, self._as_radio_systemd):
+                _r.setStyleSheet(f"QRadioButton {{ color: {_TEXT}; font-size: 11px;"
+                                 " background: transparent; }")
+            if _cur_method == "systemd":
+                self._as_radio_systemd.setChecked(True); self._as_method = "systemd"
+            else:
+                self._as_radio_xdg.setChecked(True)
+            self._as_radio_xdg.toggled.connect(lambda on: on and setattr(self, "_as_method", "xdg"))
+            self._as_radio_systemd.toggled.connect(lambda on: on and setattr(self, "_as_method", "systemd"))
+            _m_row.addWidget(_m_lbl)
+            _m_row.addWidget(self._as_radio_xdg)
+            _m_row.addWidget(self._as_radio_systemd)
+            _m_row.addStretch()
+            as_lay.addLayout(_m_row)
         _as_btn_row = QHBoxLayout()
         _as_enable_btn = QPushButton("Enable")
         _as_enable_btn.setStyleSheet(_BTN)
@@ -888,6 +917,18 @@ class SettingsWindow(BaseWindow):
         _as_btn_row.addWidget(_as_disable_btn, stretch=1)
         _as_btn_row.addWidget(_as_test_btn)
         as_lay.addLayout(_as_btn_row)
+        # Doctor row: Diagnose reports what decides whether autostart fires; View log
+        # shows the login-time breadcrumb the Linux launcher writes.
+        _as_btn_row2 = QHBoxLayout()
+        _as_diag_btn = QPushButton("Diagnose")
+        _as_diag_btn.setStyleSheet(_BTN)
+        _as_diag_btn.clicked.connect(self._diagnose_autostart)
+        _as_log_btn = QPushButton("View log")
+        _as_log_btn.setStyleSheet(_BTN)
+        _as_log_btn.clicked.connect(self._view_autostart_log)
+        _as_btn_row2.addWidget(_as_diag_btn, stretch=1)
+        _as_btn_row2.addWidget(_as_log_btn, stretch=1)
+        as_lay.addLayout(_as_btn_row2)
         self._as_status_lbl = QLabel("")
         self._as_status_lbl.setWordWrap(True)
         self._as_status_lbl.setStyleSheet(
@@ -1865,8 +1906,12 @@ class SettingsWindow(BaseWindow):
     def _refresh_autostart_status(self):
         try:
             from systema.common import autostart as _as
-            if _as.is_enabled():
-                self._as_status_lbl.setText("✓ Starts automatically at login (this user).")
+            st = _as.status()
+            if st.get("enabled"):
+                m = st.get("method")
+                extra = f"  [{m}]" if m and m not in ("native", None) else ""
+                self._as_status_lbl.setText(
+                    f"✓ Starts automatically at login (this user).{extra}")
             else:
                 self._as_status_lbl.setText("Not set to start at login.")
         except Exception as e:
@@ -1875,10 +1920,54 @@ class SettingsWindow(BaseWindow):
     def _apply_autostart(self):
         try:
             from systema.common import autostart as _as
-            ok, msg = _as.enable_autostart()
+            method = getattr(self, "_as_method", "xdg")
+            ok, msg = _as.enable_autostart(method)
             self._as_status_lbl.setText(("✓  " if ok else "✗  ") + msg)
         except Exception as e:
             self._as_status_lbl.setText(f"✗  {e}")
+
+    def _diagnose_autostart(self):
+        """Show the autostart 'doctor' report — the facts that decide whether the
+        login-time autostart fires, plus the tail of the launcher log."""
+        try:
+            from systema.common import autostart as _as
+            report = _as.diagnose()
+        except Exception as e:
+            report = f"Could not run diagnostics: {e}"
+        from PyQt6.QtWidgets import QMessageBox
+        box = QMessageBox(self)
+        box.setWindowTitle("Autostart diagnostics")
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText("Autostart doctor — what decides whether it fires at login "
+                    "(open Details):")
+        box.setDetailedText(report)
+        box.exec()
+
+    def _view_autostart_log(self):
+        """Show the login-time breadcrumb log written by the Linux launcher."""
+        try:
+            from systema.common import autostart as _as
+            logf = _as.autostart_log_path()
+        except Exception as e:
+            self._as_status_lbl.setText(f"✗  {e}")
+            return
+        if not logf.exists():
+            self._as_status_lbl.setText(
+                "No autostart log yet — it's written when the login autostart fires "
+                "(Linux). Enable autostart, then log out and back in.")
+            return
+        try:
+            text = logf.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            self._as_status_lbl.setText(f"✗  could not read log: {e}")
+            return
+        from PyQt6.QtWidgets import QMessageBox
+        box = QMessageBox(self)
+        box.setWindowTitle("Autostart log")
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText(str(logf))
+        box.setDetailedText(text[-6000:] or "(empty)")
+        box.exec()
 
     def _remove_autostart(self):
         try:

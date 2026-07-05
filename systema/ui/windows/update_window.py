@@ -73,6 +73,7 @@ _ROLE_PATH = Qt.ItemDataRole.UserRole
 _ROLE_IS_CHANGE = Qt.ItemDataRole.UserRole + 1   # True => textual-diff file
 _ROLE_SENSITIVE = Qt.ItemDataRole.UserRole + 2   # True => in a user-owned data folder
 _ROLE_PROTECTED_RISKY = Qt.ItemDataRole.UserRole + 3  # True => protected AND overwrites/deletes (MOD/DEL) — manual-only
+_ROLE_SETTLED = Qt.ItemDataRole.UserRole + 4     # True => user settled this file (decided; won't notify)
 
 # Warning colour for protected (sensitive) files in the list.
 _SENSITIVE_COLOUR = "#e0a24e"
@@ -168,15 +169,17 @@ class UpdateWindow(BaseWindow):
             f"color: {p['text']}; font-size: 12px; background: transparent;")
         body.addWidget(self.summary_lbl)
 
-        # Stacked commit messages ("what's changed since your version").
+        # Stacked commit messages ("what's changed since your version"). This lives
+        # in the top (collapsible) pane of the outer vertical splitter assembled
+        # below — no fixed max height, so it can be dragged smaller or collapsed to
+        # give the diff preview room (it was "almost unseen" on small changes).
         self.commits_view = QTextEdit()
         self.commits_view.setReadOnly(True)
-        self.commits_view.setMaximumHeight(96)
+        self.commits_view.setMinimumHeight(0)
         self.commits_view.setVisible(False)
         self.commits_view.setStyleSheet(
             f"QTextEdit {{ background-color: {p['surface']}; border: 1px solid {p['border']};"
             f" border-radius: 8px; padding: 6px 8px; font-size: 11px; color: {p['text']}; }}")
-        body.addWidget(self.commits_view)
 
         # Select all / none row
         sel_row = QHBoxLayout()
@@ -187,15 +190,22 @@ class UpdateWindow(BaseWindow):
         self.select_all_btn.clicked.connect(lambda: self._set_all_checked(True))
         self.select_none_btn = self.make_button("Select none", p, kind="ghost")
         self.select_none_btn.clicked.connect(lambda: self._set_all_checked(False))
+        self.dismiss_btn = self.make_button("Ignore rest (settle)", p, kind="ghost")
+        self.dismiss_btn.setToolTip(
+            "Mark the changes you're NOT applying as 'settled' without applying them — "
+            "they stop showing as pending and won't trigger update notifications, until "
+            "a new commit changes one of them upstream.")
+        self.dismiss_btn.clicked.connect(self._dismiss_settle)
         sel_row.addWidget(self.select_changes_btn)
         sel_row.addWidget(self.select_all_btn)
         sel_row.addWidget(self.select_none_btn)
+        sel_row.addWidget(self.dismiss_btn)
         sel_row.addStretch()
         self.sel_count_lbl = QLabel("")
         self.sel_count_lbl.setStyleSheet(
             f"color: {p['muted']}; font-size: 11px; background: transparent;")
         sel_row.addWidget(self.sel_count_lbl)
-        body.addLayout(sel_row)
+        # sel_row is added into the review container below (kept attached to the list).
 
         # Split: file list (left) + diff review (right)
         split = QSplitter(Qt.Orientation.Horizontal)
@@ -283,7 +293,32 @@ class UpdateWindow(BaseWindow):
         dp.addWidget(self.diff_view, stretch=1)
         split.addWidget(diff_pane)
         split.setSizes([330, 520])
-        body.addWidget(split, stretch=1)
+
+        # Bottom pane of the outer splitter: the file-selection row + the files|diff
+        # splitter, grouped so the row stays attached to the list.
+        review_container = QWidget()
+        review_container.setStyleSheet("background: transparent;")
+        rc = QVBoxLayout(review_container)
+        rc.setContentsMargins(0, 0, 0, 0)
+        rc.setSpacing(6)
+        rc.addLayout(sel_row)
+        rc.addWidget(split, stretch=1)
+        review_container.setMinimumHeight(220)
+
+        # Outer VERTICAL splitter: drag to trade height between the commit-messages
+        # box (collapsible — shrink it to nothing so the diff preview isn't
+        # "almost unseen" on small changes) and the review block below.
+        outer_split = QSplitter(Qt.Orientation.Vertical)
+        outer_split.setStyleSheet(
+            f"QSplitter::handle {{ background: {p['border']}; height: 2px; }}")
+        outer_split.addWidget(self.commits_view)
+        outer_split.addWidget(review_container)
+        outer_split.setCollapsible(0, True)     # commits box can collapse fully
+        outer_split.setCollapsible(1, False)    # review block always visible
+        outer_split.setStretchFactor(0, 0)
+        outer_split.setStretchFactor(1, 1)
+        outer_split.setSizes([90, 470])         # small commits, large review by default
+        body.addWidget(outer_split, stretch=1)
 
         # Dependencies + status line
         self.deps_lbl = QLabel("")
@@ -508,7 +543,13 @@ class UpdateWindow(BaseWindow):
         p = self._p
         from PyQt6.QtGui import QColor
         from systema.updater.service import is_sensitive_path
+        self.file_list.clear()   # safe re-render (e.g. after Dismiss / settle)
+        branch = self.branch_combo.currentText()
+        # Reconcile the settled store with THIS plan: survivors are files the user
+        # already decided on and whose upstream content hasn't changed since.
+        settled = self.service.prune_settled_against_plan(branch, plan)
         risky_count = 0
+        settled_count = 0
         for fc in plan.file_changes:
             if fc.change.value == "unchanged":
                 continue
@@ -524,25 +565,38 @@ class UpdateWindow(BaseWindow):
             # only creates a file, so it can't cause data loss and is treated as a
             # normal addition (auto-selectable).
             risky_protected = sensitive and fc.change.value != "added"
-            if risky_protected:
-                risky_count += 1
+            # Settled = the user already decided on this file (applied the rest /
+            # kept theirs) at a commit, and upstream hasn't changed it since.
+            is_settled = fc.path in settled
+            if is_settled:
+                settled_count += 1            # settled wins visually + in the count,
+            elif risky_protected:             # but risky_protected stays accurate so a
+                risky_count += 1              # manual re-tick still gets the warning
 
-            # Two aligned columns: the change tag, then a PROT marker for anything
-            # in a protected folder — so both dimensions are visible at a glance.
+            # Aligned columns: the change tag (or SETTLED), then a PROT marker for
+            # anything in a protected folder — both dimensions visible at a glance.
             prot = "PROT" if sensitive else "    "
-            label = f"{tag:8} {prot}  {fc.path}" + ("" if is_text else "   [binary]")
+            if is_settled:
+                short = (settled.get(fc.path, {}).get("commit", "") or "").split("+")[-1][:7] or "?"
+                label = f"{'SETTLED':8} {prot}  {fc.path}   (from {short})"
+            else:
+                label = f"{tag:8} {prot}  {fc.path}" + ("" if is_text else "   [binary]")
             item = QListWidgetItem(label)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            # Auto-check textual-diff files, but NEVER a risky-protected one — those
-            # (a MOD/DEL of a providers/skills file) must be ticked by hand so an
-            # update can't silently overwrite or delete the user's work.
-            auto = is_change and not risky_protected
+            # Settled files are never auto-ticked and are excluded from the "changes"
+            # set, so Select-changes and the actionable count skip them. Otherwise
+            # auto-check textual-diff files, but NEVER a risky-protected one.
+            eff_is_change = is_change and not is_settled
+            auto = eff_is_change and not risky_protected
             item.setCheckState(Qt.CheckState.Checked if auto else Qt.CheckState.Unchecked)
             item.setData(_ROLE_PATH, fc.path)
-            item.setData(_ROLE_IS_CHANGE, is_change)
+            item.setData(_ROLE_IS_CHANGE, eff_is_change)
             item.setData(_ROLE_SENSITIVE, sensitive)
             item.setData(_ROLE_PROTECTED_RISKY, risky_protected)
-            if risky_protected:
+            item.setData(_ROLE_SETTLED, is_settled)
+            if is_settled:
+                item.setForeground(QColor(self._p["muted"]))   # muted; decided
+            elif risky_protected:
                 # Red warning — this is where silent overwrite / data loss lives.
                 item.setForeground(QColor(_SENSITIVE_COLOUR))
                 hl = QColor(_SENSITIVE_COLOUR)
@@ -557,7 +611,13 @@ class UpdateWindow(BaseWindow):
                     hl.setAlpha(55)
                     item.setBackground(hl)
             tip = fc.note or ""
-            if risky_protected:
+            if is_settled:
+                short = (settled.get(fc.path, {}).get("commit", "") or "").split("+")[-1][:7] or "?"
+                tip = (f"SETTLED — you decided on this file at commit {short}. It is "
+                       "unchanged upstream since, so it won't trigger update "
+                       "notifications; it re-appears as a normal change only if a new "
+                       "commit modifies it. " + (tip if tip else "")).strip()
+            elif risky_protected:
                 verb = "delete" if fc.change.value == "deleted" else "overwrite"
                 tip = (f"PROTECTED — this file lives in a folder you own "
                        f"(providers / skills). Applying will {verb} your local "
@@ -581,6 +641,11 @@ class UpdateWindow(BaseWindow):
                 "in folders you own (providers / skills). They are unticked and "
                 "highlighted — an update won't touch them unless you tick them "
                 "yourself, or resolve them hunk-by-hunk via Manage.")
+
+        if settled_count:
+            self.summary_lbl.setText(
+                self.summary_lbl.text()
+                + f"   ·   {settled_count} settled (won't notify until changed upstream)")
 
         if plan.dependency_changes:
             # requirements.txt diff (gitplucker >= 0.7): show added / changed /
@@ -795,7 +860,8 @@ class UpdateWindow(BaseWindow):
         # additive and ticks like any other addition.
         for i in range(self.file_list.count()):
             it = self.file_list.item(i)
-            if checked and it.data(_ROLE_PROTECTED_RISKY):
+            # Never auto-tick a risky-protected OR a settled (already-decided) file.
+            if checked and (it.data(_ROLE_PROTECTED_RISKY) or it.data(_ROLE_SETTLED)):
                 it.setCheckState(Qt.CheckState.Unchecked)
             else:
                 it.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
@@ -810,6 +876,39 @@ class UpdateWindow(BaseWindow):
             pick = it.data(_ROLE_IS_CHANGE) and not it.data(_ROLE_PROTECTED_RISKY)
             it.setCheckState(Qt.CheckState.Checked if pick else Qt.CheckState.Unchecked)
         self._update_sel_count()
+
+    def _dismiss_settle(self):
+        """Mark every still-actionable change shown as 'settled' WITHOUT applying —
+        stops them showing as pending and stops the startup nag until a new commit
+        changes one of them upstream."""
+        if self._plan is None or self._busy:
+            self._status("Run a check first.")
+            return
+        branch = self.branch_combo.currentText()
+        already = set(self.service.settled_files(branch).keys())
+        items = [(fc.path, getattr(fc, "remote_hash", None))
+                 for fc in self._plan.file_changes
+                 if fc.change.value != "unchanged" and fc.path not in already]
+        if not items:
+            self._status("Nothing to settle — everything shown is already settled.")
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("Ignore these changes?")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(
+            f"Mark {len(items)} shown change(s) as settled WITHOUT applying them?\n\n"
+            "They stop appearing as pending and won't trigger update notifications, "
+            "until a NEW commit changes one of them upstream (then it re-appears as a "
+            "normal change).")
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        if box.exec() != QMessageBox.StandardButton.Yes:
+            return
+        n = self.service.settle_files(branch, items, self._plan.target_version)
+        self.service.set_acknowledged(branch, self._plan.target_version)
+        self._on_plan(self._plan)   # re-render — they now show as SETTLED
+        self._status(f"Settled {n} change(s). You won't be notified until a new commit "
+                     "changes them.")
 
     def _checked_risky_protected_paths(self) -> list[str]:
         """Selected protected files whose change would overwrite/delete local work

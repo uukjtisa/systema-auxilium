@@ -20,7 +20,9 @@ Design notes
 
 from __future__ import annotations
 
+import json
 import os
+import time
 import traceback
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
@@ -155,6 +157,7 @@ class UpdaterService(QObject):
         self._plan = None
         self._worker = None                 # keep a ref so QThread isn't GC'd
         self._seed_worker = None
+        self._settle_after_apply = None     # settle plan captured before an apply
         log.info("[UpdaterService.__init__] ready | repo=%s | state=%s" % (REPO, _STATE_DIR))
 
     # ── availability ───────────────────────────────────────────────────────
@@ -251,6 +254,117 @@ class UpdaterService(QObject):
     def set_auto_install_deps(self, on: bool) -> None:
         self._set_flag("update_auto_deps", on)
 
+    # ── "settled" store ─────────────────────────────────────────────────────
+    # A partial apply (only=…) deliberately does NOT advance gitplucker's version
+    # marker (unselected files weren't updated), so has_update_available() keeps
+    # returning True and the startup probe re-notifies forever. The "settled" store
+    # records the files the user DECIDED not to apply (PROTECTED / unwanted) at a
+    # baseline (their upstream content hash) + the origin commit, plus the commit
+    # the user last acknowledged. The startup nag is suppressed while HEAD == that
+    # acknowledged commit; a settled file re-appears only when a NEW commit changes
+    # its upstream content (its remote_hash moves). Kept in data/updates/ (excluded
+    # from the update payload). Schema:
+    #   { "<branch>": {"acknowledged": "<target_version>",
+    #                  "files": {"<relpath>": {"remote_hash","commit","settled_at"}}}}
+    def _settled_path(self):
+        return _STATE_DIR / "settled.json"
+
+    def _settled_load(self) -> dict:
+        try:
+            p = self._settled_path()
+            if p.exists():
+                return json.loads(p.read_text(encoding="utf-8")) or {}
+        except Exception as e:
+            log.warning(f"[UpdaterService._settled_load] {e}")
+        return {}
+
+    def _settled_save(self, data: dict) -> None:
+        try:
+            _STATE_DIR.mkdir(parents=True, exist_ok=True)
+            self._settled_path().write_text(
+                json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+        except Exception as e:
+            log.warning(f"[UpdaterService._settled_save] {e}")
+
+    def settled_files(self, branch: str) -> dict:
+        """{relpath: {remote_hash, commit, settled_at}} for this branch."""
+        return (self._settled_load().get(branch, {}) or {}).get("files", {}) or {}
+
+    def settle_files(self, branch: str, items, commit) -> int:
+        """Record files as settled. ``items`` = iterable of (relpath, remote_hash).
+        Returns the number stored."""
+        items = [(str(p), h or "") for p, h in items if p]
+        if not items:
+            return 0
+        data = self._settled_load()
+        files = data.setdefault(branch, {}).setdefault("files", {})
+        now = time.strftime("%Y-%m-%dT%H:%M:%S")
+        for path, rhash in items:
+            files[path] = {"remote_hash": rhash, "commit": commit or "", "settled_at": now}
+        self._settled_save(data)
+        log.info(f"[UpdaterService.settle_files] settled {len(items)} file(s) on "
+                 f"'{branch}' @ {commit}")
+        return len(items)
+
+    def unsettle(self, branch: str, path: str) -> None:
+        data = self._settled_load()
+        files = data.get(branch, {}).get("files", {})
+        if str(path) in files:
+            del files[str(path)]
+            self._settled_save(data)
+
+    def clear_settled_branch(self, branch: str) -> None:
+        """Drop all settled files + acknowledged marker for a branch (used after a
+        FULL apply, which advances the version marker past everything)."""
+        data = self._settled_load()
+        if branch in data:
+            data[branch]["files"] = {}
+            data[branch]["acknowledged"] = None
+            self._settled_save(data)
+
+    def acknowledged_version(self, branch: str) -> str | None:
+        return self._settled_load().get(branch, {}).get("acknowledged")
+
+    def set_acknowledged(self, branch: str, version) -> None:
+        data = self._settled_load()
+        data.setdefault(branch, {})["acknowledged"] = version or ""
+        self._settled_save(data)
+
+    def prune_settled_against_plan(self, branch: str, plan) -> dict:
+        """Reconcile the settled store with a fresh plan and return the survivors
+        ({relpath: entry}). Drops an entry when its file is no longer in the plan
+        (upstream now matches local) or when its upstream content changed since it
+        was settled (a new commit touched it → re-offer it as a normal change)."""
+        try:
+            files_now = {fc.path: getattr(fc, "remote_hash", None)
+                         for fc in plan.file_changes if fc.change.value != "unchanged"}
+        except Exception:
+            files_now = {}
+        data = self._settled_load()
+        files = data.get(branch, {}).get("files", {})
+        changed = False
+        for path in list(files.keys()):
+            entry = files[path]
+            if path not in files_now:
+                del files[path]; changed = True; continue
+            rnow = files_now.get(path)
+            if rnow and entry.get("remote_hash") and rnow != entry["remote_hash"]:
+                del files[path]; changed = True     # upstream moved → un-settle
+        if changed:
+            self._settled_save(data)
+        return files
+
+    @staticmethod
+    def _sha_match(a: str | None, b: str | None) -> bool:
+        """True if two version stamps / shas refer to the same commit (compares the
+        short-sha tail of ``YYYY-MM-DD+shortsha`` or a bare sha, min 7 chars)."""
+        if not a or not b:
+            return False
+        a = str(a).split("+")[-1]
+        b = str(b).split("+")[-1]
+        n = min(len(a), len(b))
+        return n >= 7 and a[:n] == b[:n]
+
     # ── build ──────────────────────────────────────────────────────────────
     def _build_updater(self, branch: str):
         settings = getattr(self.controller, "settings", {}) or {}
@@ -337,6 +451,17 @@ class UpdaterService(QObject):
         # of letting Windows translate every "\n" into "\r\n".
         target.write_text(text, encoding="utf-8", newline="")
         log.info(f"[UpdaterService.write_managed_file] wrote {rp} (backup in {backup_dir})")
+        # A hand-resolved file is a decision: settle it at the current plan's commit
+        # so it stops nagging until upstream changes it again.
+        try:
+            if self._plan is not None:
+                fc = next((f for f in self._plan.file_changes if f.path == rp), None)
+                branch = getattr(self, "_branch", None) or self.saved_branch
+                self.settle_files(branch, [(rp, getattr(fc, "remote_hash", None) if fc else None)],
+                                  self._plan.target_version)
+                self.set_acknowledged(branch, self._plan.target_version)
+        except Exception:
+            pass
         return str(backup_dir)
 
     # ── apply ──────────────────────────────────────────────────────────────
@@ -348,6 +473,20 @@ class UpdaterService(QObject):
         log.info(f"[UpdaterService.apply] applying update | only={None if only is None else len(only)} file(s)")
         self.apply_started.emit()
         plan = self._plan
+        branch = getattr(self, "_branch", None) or self.saved_branch
+        # Capture the settle plan BEFORE threading (the plan is cleared on success):
+        # a partial apply settles the changed files the user chose NOT to apply (so
+        # they stop nagging); a full apply just clears the branch's settled state
+        # because the version marker advances past everything.
+        if only is not None:
+            selected = set(only)
+            leftovers = [(fc.path, getattr(fc, "remote_hash", None))
+                         for fc in plan.file_changes
+                         if fc.change.value != "unchanged" and fc.path not in selected]
+            self._settle_after_apply = {"branch": branch, "items": leftovers,
+                                        "commit": plan.target_version, "partial": True}
+        else:
+            self._settle_after_apply = {"branch": branch, "partial": False}
         w = _FnWorker(lambda: self._updater.apply(plan, only=only))
         w.ok.connect(self._on_apply_ok)
         w.err.connect(self.apply_failed)
@@ -356,6 +495,18 @@ class UpdaterService(QObject):
 
     def _on_apply_ok(self, result):
         self._plan = None
+        pend = self._settle_after_apply
+        self._settle_after_apply = None
+        if result.success and pend:
+            branch = pend.get("branch") or self.saved_branch
+            if pend.get("partial"):
+                if pend.get("items"):
+                    self.settle_files(branch, pend["items"], pend.get("commit"))
+                # Remember the commit the user has now dealt with, so the startup
+                # probe stops nagging until a genuinely new commit lands.
+                self.set_acknowledged(branch, pend.get("commit"))
+            else:
+                self.clear_settled_branch(branch)   # full apply advanced the version
         log.info(f"[UpdaterService._on_apply_ok] success={result.success} | {result.message}")
         self.apply_finished.emit(result)
 
@@ -383,10 +534,24 @@ class UpdaterService(QObject):
             u = self._build_updater(branch)
             avail = u.has_update_available(REPO, branch)
             commits = u.pending_commits(REPO, branch) if avail else []
-            return avail, commits
+            head_sha = (commits[0].get("sha") if commits else "") or ""
+            return avail, commits, head_sha
+
+        def _on_probe(res):
+            avail, commits, head_sha = res
+            if avail:
+                ack = self.acknowledged_version(branch)
+                if ack and head_sha and self._sha_match(ack, head_sha):
+                    # The user already dealt with this exact commit (applied what they
+                    # wanted, settled the rest) — only settled files remain, so don't
+                    # nag. A genuinely new commit moves HEAD and re-enables the notice.
+                    log.info("[UpdaterService.check_startup_notify] suppressed — HEAD "
+                             f"already acknowledged ({ack})")
+                    avail = False
+            self.update_available.emit(bool(avail), branch, commits if avail else [])
 
         w = _FnWorker(_probe)
-        w.ok.connect(lambda res: self.update_available.emit(bool(res[0]), branch, res[1]))
+        w.ok.connect(_on_probe)
         w.err.connect(lambda msg: log.warning(f"[UpdaterService] startup probe failed: {msg}"))
         self._probe_worker = w
         w.start()

@@ -696,7 +696,11 @@ class AIEngine:
                     for c in raw_calls
                 ],
             }
-        fences = self.tool_manager.tool_calls_to_fences(raw_calls)
+        # Single-source the user-facing narration: if the model wrote free text
+        # this turn, that IS the reply — suppress each call's message_to_user so
+        # it isn't rendered a second time (the native double-speak bug). Only when
+        # there's no free text do we fall back to message_to_user.
+        fences = self.tool_manager.tool_calls_to_fences(raw_calls, include_messages=not bool(text))
         ai_text = (text + ("\n\n" if text and fences else "") + fences).strip()
         log.info(f"[AIEngine._provider_script_native] ✓ native result | text_len={len(text)} | "
                  f"tool_calls={len(raw_calls)} | reconstructed_len={len(ai_text)}")

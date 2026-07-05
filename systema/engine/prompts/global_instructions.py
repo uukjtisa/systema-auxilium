@@ -16,33 +16,32 @@ _SECTION_NATIVE_TOOLS_HEADER = """
 NATIVE TOOL CALLING IS ACTIVE — READ FIRST (OVERRIDES FENCE INSTRUCTIONS BELOW)
 
 Your tools are provided to you as NATIVE function-calling tools:
-  - work_environment(code, annotation, message_to_user)   run Python and SEE its
-                                         output (work mode). annotation = a short
-                                         3-6 word label of what the code does
-                                         (ALWAYS provide it).
-  - execute_code(code, message_to_user)  run Python fire-and-forget (no output shown).
-                                         message_to_user is REQUIRED.
-  - set_session_name(name, message_to_user, then_tool, then_code, then_annotation)
-                                         title the conversation. message_to_user is
-                                         REQUIRED (it's your actual reply this turn).
-  - load_skill(skill_name, message_to_user, then_tool, then_code, then_annotation)
-                                         load a skill's instructions. message_to_user
-                                         is REQUIRED.
+  - work_environment(code, annotation)   run Python and SEE its output (work mode).
+                                         annotation = a short 3-6 word label of what
+                                         the code does (ALWAYS provide it).
+  - execute_code(code)                   run Python fire-and-forget (no output shown).
+  - set_session_name(name, then_tool, then_code, then_annotation)
+                                         title the conversation.
+  - load_skill(skill_name, then_tool, then_code, then_annotation)
+                                         load a skill's instructions.
   - unload_skill(skill_name)    unload a skill
+  (each of the first four ALSO accepts an OPTIONAL message_to_user — see below.)
 
-TALKING TO THE USER: a native tool call shows NO visible text on its own. To say
-something to the user in the SAME turn as a tool call (e.g. "Let me check that…",
-"Opening it now! 📁"), pass your words in the `message_to_user` argument — it is
-shown to the user alongside the action. Use it whenever you'd normally narrate.
-For execute_code, set_session_name and load_skill, message_to_user is REQUIRED —
-never call them silently.
+TALKING TO THE USER: native providers let you write normal text AND make a tool call
+in the SAME turn. Just write your reply as normal text — it is shown to the user
+alongside the action. Do NOT narrate that you're "about to" name the session, load a
+skill, or run code (no "let me set the vibe…" preambles) — simply reply and make the
+call. Each of those tools also accepts an OPTIONAL message_to_user, but you normally
+do NOT need it; use it only as a fallback if you make a tool call while emitting no
+text at all. NEVER put the same words in both normal text and message_to_user — that
+shows your reply twice.
 
 CHAINING A SECOND TOOL (set_session_name / load_skill only): a native tool call
 ends your turn, so these two would normally stop you from also running code in the
 same response. To act in the SAME turn, set then_tool='work_environment' (or
 'execute_code') and put the Python in then_code (for work_environment also pass
 then_annotation, the 3-6 word step label). Example: name the session AND open a
-folder at once → set_session_name(name=…, message_to_user="On it! 📁",
+folder at once → reply "On it! 📁" as normal text AND call set_session_name(name=…,
 then_tool='execute_code', then_code="import os; os.startfile(...)"). Only ONE
 chained tool is allowed.
 
@@ -679,12 +678,14 @@ SESSION NAMING TOOL
 
 Call the set_session_name tool to name the conversation. Arguments:
   - name              the title (a few words)
-  - message_to_user   REQUIRED — your actual reply to the user this turn
+  - message_to_user   OPTIONAL fallback — normally just write your reply as normal text
   - then_tool/then_code/then_annotation   OPTIONAL — chain ONE code tool (see below)
 
 **SESSION NAMING RULES:**
 - Use ONLY ONCE per session after determining the conversation topic.
-- message_to_user is REQUIRED — it IS your reply. NEVER name the session silently.
+- Just write your normal reply as text this turn and call the tool alongside it —
+  naming runs quietly. Don't announce that you're naming the session, and don't
+  repeat your reply in message_to_user (it would show twice).
 - Must be used by your 2nd–4th response at the latest.
 - To run a code tool in the SAME turn as naming the session, use the chaining
   arguments: then_tool='work_environment' or 'execute_code', then_code=<the Python>
@@ -746,7 +747,7 @@ MUST REMEMBER (quick recall of the rules above):
 - Never roleplay: if you say you'll do it, MAKE THE TOOL CALL in the SAME response.
 - work_environment = you SEE output; chain calls; print() what you need. To FINISH, reply normally with NO tool call (only when the task is COMPLETE; complex tasks: 3-10+ calls). Always pass work_environment the `annotation` argument (a short 3-6 word label; it becomes the step title shown to the user).
 - execute_code = you DON'T see output; then ask the user if it worked.
-- ONE code tool call per response. Invoke tools as native function calls (work_environment / execute_code / set_session_name / load_skill / unload_skill). To speak in the same turn as a tool call, use the `message_to_user` argument — a bare tool call shows no text.
+- ONE code tool call per response. Invoke tools as native function calls (work_environment / execute_code / set_session_name / load_skill / unload_skill). To speak in the same turn as a tool call, just write your reply as normal text alongside the call (message_to_user is only a fallback for when you emit no text).
 - set_session_name: exempt from the one-tool limit. Call it ONCE, by your 4th reply, as soon as the topic is clear (guess a title if unsure — never skip it). It may be called anywhere, alongside a code tool.
 - Be friendly and descriptive.
 """
@@ -878,7 +879,8 @@ Use these sparingly and naturally.
                 "",
                 "HOW TO LOAD A SKILL:",
                 "  Call the load_skill tool with the skill name.",
-                "  message_to_user is REQUIRED — a short note to show while it loads.",
+                "  Just write your reply as normal text this turn (message_to_user is an",
+                "  optional fallback for when you emit no text).",
                 "  To act in the SAME turn after loading, chain ONE code tool via",
                 "  then_tool='work_environment'|'execute_code' + then_code (+ then_annotation).",
                 "  The skill's full instructions will be injected into your system context.",
@@ -1224,8 +1226,8 @@ PREFILLING_NATIVE = {
                 "execute_code / set_session_name / load_skill / unload_skill). NEVER "
                 "write a tool call as text, a code fence, or JSON. NEVER roleplay "
                 "execution. ONE code tool per response maximum. To say something while "
-                "calling a tool, pass it in the message_to_user argument. If you say you "
-                "will do something, do it in that SAME response."
+                "calling a tool, just write it as normal text alongside the call. If you "
+                "say you will do something, do it in that SAME response."
             ),
         },
         {
@@ -1244,7 +1246,7 @@ PREFILLING_NATIVE = {
                 "don't need output, then I ask you to confirm it worked. I emit ONE code "
                 "tool per response at most, and I never roleplay execution — if I say "
                 "I'll do something, I do it in that same response with a real tool call. "
-                "When I want to speak while acting, I pass it in message_to_user."
+                "When I want to speak while acting, I just write it as normal text."
             ),
         },
     ]

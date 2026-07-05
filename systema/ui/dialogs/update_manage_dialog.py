@@ -65,9 +65,15 @@ class UpdateManageDialog(QDialog):
         split.setChildrenCollapsible(False)
         split.setStyleSheet(f"QSplitter::handle {{ background: {p['border']}; width: 2px; }}")
 
-        split.addWidget(self._build_left())
-        split.addWidget(self._build_middle())
-        split.setSizes([340, 620])
+        left_pane = self._build_left()
+        mid_pane = self._build_middle()
+        left_pane.setMinimumWidth(230)     # files/hunks never squeezed to a sliver
+        mid_pane.setMinimumWidth(380)      # nor the hunk detail/preview
+        split.addWidget(left_pane)
+        split.addWidget(mid_pane)
+        split.setStretchFactor(0, 0)
+        split.setStretchFactor(1, 1)       # the detail/preview gets the extra width
+        split.setSizes([300, 760])
         root.addWidget(split, stretch=1)
 
         foot = QHBoxLayout()

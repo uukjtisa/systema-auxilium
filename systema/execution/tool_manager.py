@@ -250,9 +250,9 @@ class ToolManager:
                  "as this step's title.",
                  False),
                 ('message_to_user',
-                 "Optional. A short user-facing message to show WHILE this runs (e.g. 'Let me "
-                 "check that for you…'). A native tool call shows no text on its own, so put any "
-                 "words meant for the user here.",
+                 "Optional fallback. Normally just write your reply as normal text alongside this "
+                 "call — it is shown to the user. Only put words here if you won't emit any text "
+                 "this turn.",
                  False),
             ],
         },
@@ -264,10 +264,10 @@ class ToolManager:
             'param': ('code', 'The Python code to execute. Output is not returned to you.'),
             'extra_params': [
                 ('message_to_user',
-                 "REQUIRED. A short user-facing message to show alongside this action (e.g. "
-                 "'Opening your Downloads folder! 📁'). A native tool call shows no text on its "
-                 "own, so your words to the user MUST go here — never run code silently.",
-                 True),
+                 "Optional fallback. Normally just write your reply as normal text alongside this "
+                 "call — it is shown to the user. Only put words here if you won't emit any text "
+                 "this turn.",
+                 False),
             ],
         },
         'set_session_name': {
@@ -275,10 +275,10 @@ class ToolManager:
             'param': ('name', 'A short title — just a few words.'),
             'extra_params': [
                 ('message_to_user',
-                 "REQUIRED. The actual reply to show the user this turn. A native tool call shows "
-                 "no text on its own, so your words to the user MUST go here — never name the "
-                 "session silently.",
-                 True),
+                 "Optional fallback. Just write your reply as normal text this turn — naming the "
+                 "session runs quietly in the background. Only put words here if you won't emit any "
+                 "text this turn.",
+                 False),
                 ('then_tool',
                  "Optional. Chain ONE code-execution tool to run in this SAME turn: either "
                  "'work_environment' or 'execute_code'. Use it when you want to name the session "
@@ -302,10 +302,10 @@ class ToolManager:
             'param': ('skill_name', 'The exact name of the skill to load.'),
             'extra_params': [
                 ('message_to_user',
-                 "REQUIRED. A short user-facing message to show while the skill loads (e.g. "
-                 "'Loading the data-viz skill… 📊'). A native tool call shows no text on its own, "
-                 "so your words to the user MUST go here.",
-                 True),
+                 "Optional fallback. Normally just write your reply as normal text alongside this "
+                 "call — it is shown to the user. Only put words here if you won't emit any text "
+                 "this turn.",
+                 False),
                 ('then_tool',
                  "Optional. Chain ONE code-execution tool to run in this SAME turn, right after "
                  "the skill loads: either 'work_environment' or 'execute_code'.",
@@ -377,11 +377,16 @@ class ToolManager:
             return f"```work_environment: [{annotation.strip()}]\n{code}\n```"
         return f"```{tool_name}\n{code}\n```"
 
-    def tool_calls_to_fences(self, tool_calls: list) -> str:
+    def tool_calls_to_fences(self, tool_calls: list, include_messages: bool = True) -> str:
         """Reconstruct canonical fence text from normalized native tool calls
         (each {"name","arguments"}). This lets native-mode responses flow through
         the exact same fence-parsing pipeline as compat mode — the engine never
-        has to branch on tool format below _call_provider."""
+        has to branch on tool format below _call_provider.
+
+        ``include_messages`` controls whether each call's ``message_to_user`` is
+        re-emitted as a text prefix. The caller passes False when the model
+        already produced free assistant text this turn (that text is then the
+        single user-facing reply) so the narration isn't rendered twice."""
         parts = []
         for call in (tool_calls or []):
             name = call.get('name')
@@ -394,12 +399,11 @@ class ToolManager:
             body = args.get(pname, '')
             if not isinstance(body, str):
                 body = str(body)
-            # Optional user-facing message. A native tool call carries no visible
-            # text on its own, so the model passes any words for the user via
-            # message_to_user — emit it as plain text BEFORE the fence so the
-            # existing pipeline surfaces it (exactly like text-before-a-fence in
-            # compat mode).
-            msg = args.get('message_to_user', '')
+            # Optional user-facing message, emitted as plain text BEFORE the fence
+            # (exactly like text-before-a-fence in compat mode) — but ONLY as a
+            # fallback when the model wrote no free text this turn. When it did,
+            # include_messages is False so we don't render the reply twice.
+            msg = args.get('message_to_user', '') if include_messages else ''
             prefix = (msg.strip() + "\n\n") if isinstance(msg, str) and msg.strip() else ""
             # work_environment carries an optional annotation, folded into the
             # annotated fence form so the UI step title isn't a generic default.
