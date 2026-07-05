@@ -344,8 +344,11 @@ def main():
     app.setFont(font)
 
     # App-wide click-to-focus fix for frameless/always-on-top windows (X11).
-    app._focus_activator = _ClickFocusActivator()   # keep a ref so it isn't GC'd
-    app.installEventFilter(app._focus_activator)
+    # Windows/macOS already focus on click, and on Windows this used to disturb the
+    # native always-on-top behavior — so keep it a non-Windows-only fix.
+    if sys.platform != "win32":
+        app._focus_activator = _ClickFocusActivator()   # keep a ref so it isn't GC'd
+        app.installEventFilter(app._focus_activator)
 
     controller = AssistantController()
     controller.show()

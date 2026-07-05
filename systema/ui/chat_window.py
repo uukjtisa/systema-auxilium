@@ -36,6 +36,7 @@ from systema.ui.chat.theming import ThemingMixin
 import re
 import markdown2
 import os
+import sys
 import json
 import threading
 from pathlib import Path
@@ -1357,14 +1358,17 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         # Grab focus on open so the input is usable immediately — X11 won't focus a
         # frameless / always-on-top window on its own. Deferred so it lands after
         # the window is actually mapped. Preserves the always-on-top intent.
-        def _grab_focus():
-            try:
-                self.raise_()
-                self.activateWindow()
-                self.input_field.text_input.setFocus()
-            except Exception:
-                pass
-        QTimer.singleShot(0, _grab_focus)
+        # Non-Windows only: Windows focuses on click natively and this used to
+        # disturb its native behavior, so there we keep the original fade-in-only.
+        if sys.platform != "win32":
+            def _grab_focus():
+                try:
+                    self.raise_()
+                    self.activateWindow()
+                    self.input_field.text_input.setFocus()
+                except Exception:
+                    pass
+            QTimer.singleShot(0, _grab_focus)
 
     def toggle_sidebar(self):
         """Toggle sidebar visibility with a smooth slide animation."""

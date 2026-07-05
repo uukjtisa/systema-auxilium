@@ -253,7 +253,8 @@ class BaseWindow(QWidget):
         self._pal_cache = palette
         self._shell_radius = radius
         self._init_chrome_state()
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window
+                            | Qt.WindowType.WindowStaysOnTopHint)
         self.setMinimumSize(*min_size)
 
         outer = QVBoxLayout(self)
