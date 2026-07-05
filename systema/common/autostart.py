@@ -47,9 +47,58 @@ def _win_startup_dir() -> Path:
     return Path(base) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
 
 
+def _target_user():
+    """The real LOGIN user autostart should be installed for.
+
+    When the app is launched ELEVATED (euid 0) via sudo/pkexec from a normal user's
+    desktop session, Path.home() is /root — so an autostart entry would land in
+    /root/.config, which the user's graphical session (running as the normal user)
+    NEVER reads, and it silently never fires. This resolves the invoking user
+    (SUDO_USER / PKEXEC_UID) so we can install into THEIR home instead. Returns
+    (name, home, uid, gid), or None when we should just use the current user (not
+    elevated, or a genuine root desktop session)."""
+    if not IS_LINUX:
+        return None
+    try:
+        if not hasattr(os, "geteuid") or os.geteuid() != 0:
+            return None
+        import pwd as _pwd
+        su = os.environ.get("SUDO_USER")
+        if su and not su.isdigit():
+            pw = _pwd.getpwnam(su)
+        else:
+            uid = os.environ.get("PKEXEC_UID") or (su if (su and su.isdigit()) else None)
+            if not uid:
+                return None
+            pw = _pwd.getpwuid(int(uid))
+        if pw.pw_uid == 0:
+            return None
+        return (pw.pw_name, Path(pw.pw_dir), pw.pw_uid, pw.pw_gid)
+    except Exception:
+        return None
+
+
+def _chown_to_target(path) -> None:
+    """chown a generated entry to the login user (when elevated) so their session
+    owns/can read it, instead of a root-owned file sitting in their home."""
+    tu = _target_user()
+    if tu is None:
+        return
+    try:
+        os.chown(path, tu[2], tu[3])
+    except Exception:
+        pass
+
+
 def _xdg_config_home() -> Path:
-    """Honor $XDG_CONFIG_HOME (falling back to ~/.config). Getting this wrong is a
-    real 'autostart doesn't fire' cause: the entry lands where the DE never looks."""
+    """The config root the autostart entry belongs in. Honors $XDG_CONFIG_HOME, but
+    when the app runs ELEVATED we use the LOGIN user's ~/.config (see _target_user)
+    — otherwise the entry lands in /root/.config and the desktop session, running as
+    the normal user, never reads it (the #1 'autostart doesn't fire' cause on a box
+    where the app is started via an elevated shortcut)."""
+    tu = _target_user()
+    if tu is not None:
+        return tu[1] / ".config"
     x = os.environ.get("XDG_CONFIG_HOME")
     if x and x.strip():
         return Path(x.strip())
@@ -182,6 +231,7 @@ def _linux_launcher_script():
         wrapper.parent.mkdir(parents=True, exist_ok=True)
         wrapper.write_text(content, encoding="utf-8")
         os.chmod(wrapper, 0o755)
+        _chown_to_target(wrapper)       # so the login user owns/can run it when elevated
     except Exception:
         return None
     return wrapper
@@ -231,10 +281,16 @@ def _linux_enable():
     try:
         path.write_text(content, encoding="utf-8")
         os.chmod(path, 0o755)
+        _chown_to_target(path)          # own it as the login user when elevated
+        _chown_to_target(path.parent)
     except Exception as e:
         return False, f"Could not enable autostart: {e}"
-    _log(f"linux autostart .desktop -> Exec={exec_line}")
-    return True, "Systema Auxilium will now start automatically at login."
+    tu = _target_user()
+    who = f" for user '{tu[0]}'" if tu else ""
+    _log(f"linux autostart .desktop -> {path} (Exec={exec_line}){who}")
+    return True, (f"Systema Auxilium will now start automatically at login{who}."
+                  + ("  (installed into the login user's config, not root's — because "
+                     "you're running elevated)" if tu else ""))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -263,6 +319,16 @@ def _systemd_is_enabled() -> bool:
 
 
 def _systemd_enable():
+    tu = _target_user()
+    if tu is not None:
+        return (False, f"You're running elevated (as root), but a systemd --user service "
+                       f"can't be enabled for another user ('{tu[0]}') from root. Use the "
+                       f"'Desktop entry (XDG)' method (it now installs into {tu[0]}'s config), "
+                       f"or run the app as your normal user and enable it there.")
+    if not _systemctl_user_available():
+        return (False, "No reachable 'systemctl --user' manager in this session, so a systemd "
+                       "user service can't be enabled. Use the 'Desktop entry (XDG)' method "
+                       "instead (or run the app in a normal desktop login session).")
     wrapper = _linux_launcher_script()
     if wrapper is None:
         return False, "Could not create the autostart launcher script."
@@ -486,6 +552,19 @@ def diagnose() -> str:
     except Exception:
         pass
     if IS_LINUX:
+        elevated = hasattr(os, "geteuid") and os.geteuid() == 0
+        uid = os.geteuid() if hasattr(os, "geteuid") else "?"
+        lines.append(f"Running as: uid={uid} ({'ROOT / elevated' if elevated else 'normal user'})")
+        tu = _target_user()
+        if tu is not None:
+            lines.append(f"⚠ Elevated launch: autostart is installed for the invoking LOGIN "
+                         f"user '{tu[0]}' ({tu[1]}), NOT root — so your desktop session can read "
+                         f"it. (If it still doesn't fire, log in as '{tu[0]}' and check there.)")
+        elif elevated:
+            lines.append("⚠ Running as ROOT with no SUDO_USER/PKEXEC_UID: entries go to "
+                         "/root/.config. If your DESKTOP session is a normal user, that session "
+                         "never reads them and autostart CANNOT fire — start the app as your "
+                         "normal user (not an elevated shortcut) to enable autostart.")
         lines.append(f"XDG_CONFIG_HOME: {os.environ.get('XDG_CONFIG_HOME') or '(unset → ~/.config)'}")
         lines.append(f"Session: DISPLAY={os.environ.get('DISPLAY') or '(none)'}  "
                      f"WAYLAND_DISPLAY={os.environ.get('WAYLAND_DISPLAY') or '(none)'}")

@@ -629,6 +629,11 @@ class UpdateWindow(BaseWindow):
                 tip = ("New file in a folder you own (providers / skills). It only "
                        "adds a file — nothing of yours is overwritten or deleted. "
                        + (tip if tip else "")).strip()
+            if fc.change.value == "conflict":
+                tip = ("CONFLICT — you and upstream changed the SAME lines. Applying "
+                       "only writes <<<<<<< markers and leaves the file conflicted; it "
+                       "does NOT resolve it. Use Manage to fix it hunk-by-hunk, then "
+                       "restart. " + (tip if tip else "")).strip()
             if not is_text:
                 tip = (tip + "  " if tip else "") + "binary file - no text diff to review"
             if tip:
@@ -665,7 +670,8 @@ class UpdateWindow(BaseWindow):
         if plan.conflicts:
             self._status(
                 f"{len(plan.conflicts)} conflict(s): you and upstream edited the same lines. "
-                "These start unticked - applying one inserts <<<<<<< markers to resolve by hand.")
+                "Resolve these with Manage (hunk-by-hunk) — applying alone only writes "
+                "<<<<<<< markers and leaves the file conflicted until you fix it by hand.")
 
         # Heuristic: if the local tree diverges a lot from the repo and we're not
         # already in dev mode, the user may be running an ahead-of-repo dev copy.
@@ -778,7 +784,15 @@ class UpdateWindow(BaseWindow):
         from systema.ui.dialogs.update_manage_dialog import UpdateManageDialog
         dlg = UpdateManageDialog(self.controller, session, self._p,
                                  on_save=self._on_managed_save, parent=self)
+        self._pending_restart_offer = False
         dlg.exec()
+        # Offer the restart AFTER the modal Manage dialog has fully closed. Offering
+        # it from inside the dialog's exec() loop (the on_save callback) leaves the
+        # app in a nested-modal state where restart_app() can't cleanly close it —
+        # which is why the Manage restart didn't behave like the main apply restart.
+        if getattr(self, "_pending_restart_offer", False):
+            self._pending_restart_offer = False
+            self._offer_restart()
 
     def _on_managed_save(self, resolved: dict):
         """Persist the hand-resolved files and drop them from the plan list."""
@@ -795,7 +809,8 @@ class UpdateWindow(BaseWindow):
         self._update_sel_count()
         self._status(f"Saved your resolved version of {len(written)} file(s). "
                      f"Backup: {last_backup}. Restart to run them.")
-        self._offer_restart()
+        # Defer to _open_manage (after the modal dialog closes) — see note there.
+        self._pending_restart_offer = True
 
     # ── viewer: wrap toggle + expand pop-out ───────────────────────────────────
     def _on_wrap_toggled(self, on: bool):
@@ -992,8 +1007,9 @@ class UpdateWindow(BaseWindow):
                "A backup is written to data/updates/ before anything changes.\n"
                "Restart Systema Auxilium afterwards.")
         if conflicts:
-            msg += (f"\n\nNote: {len(conflicts)} selected file(s) have conflicts and will be "
-                    "written with <<<<<<< markers for you to resolve.")
+            msg += (f"\n\nNote: {len(conflicts)} selected file(s) have CONFLICTS. Applying only "
+                    "writes <<<<<<< markers and leaves them conflicted — it will NOT resolve "
+                    "them. Cancel and use Manage to resolve conflicts hunk-by-hunk instead.")
         if only is None:
             msg += "\n\n(Applying ALL changes advances the version marker.)"
         else:
