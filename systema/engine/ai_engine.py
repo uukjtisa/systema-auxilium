@@ -9,6 +9,7 @@ UNIFIED: Single _build_messages() for all providers. Each _http_* helper
 
 from systema.common.logger import _make_logger, _NoOpLogger
 from systema.execution.tool_manager import ToolManager
+from systema.engine import native_adapters as na
 from systema.memory.memory_manager import get_memory_manager
 from systema.engine.prompts.global_instructions import (
     get_system_prompt,
@@ -47,6 +48,19 @@ class AIEngine:
         if controller:
             log.debug(f"[AIEngine.__init__] Controller passed successfully! | {self.controller}")
         self.conversation_history = []
+        # Native tool-calling: the structured {text, tool_calls} the provider
+        # returned for the CURRENT turn, stashed by _provider_script_native and
+        # consumed by _append_assistant (attached as metadata to the assistant
+        # entry). Set fresh per _call_provider; None in compat / text-only turns.
+        self._pending_native = None
+        # Debug observability (surfaced in the Debug window): the tool transport
+        # used this turn, its native tool-call count, and the exact wire payload +
+        # raw provider result — so the user can confirm native is live and inspect
+        # the sent structure vs. the received response.
+        self.last_tool_transport = 'compat'
+        self.last_native_tool_calls = 0
+        self.last_sent_messages = None
+        self.last_raw_provider_result = None
         log.debug("[AIEngine.__init__] conversation_history initialized (empty)")
 
 
@@ -461,6 +475,88 @@ class AIEngine:
 
         return system_prompt, merged
 
+    def _append_assistant(self, ai_text: str) -> dict:
+        """Append an assistant turn, attaching native tool-call metadata when the
+        turn came from a native provider call (self._pending_native). The stored
+        `content` stays the reconstructed fence text — display, compat sending and
+        the session JSON are all unchanged. The `_tool_calls` + `_assistant_text`
+        metadata is what the NATIVE send path (_build_native_convo) turns into real
+        tool_use / tool_result blocks. Compat / text turns get a plain entry. The
+        metadata persists to the session file for free, like the existing
+        `_is_work_prompt` key."""
+        entry = {'role': 'assistant', 'content': ai_text}
+        pend = self._pending_native
+        if pend and pend.get('tool_calls'):
+            entry['_tool_calls'] = pend['tool_calls']
+            entry['_assistant_text'] = pend.get('text') or ''
+        self._pending_native = None
+        self.conversation_history.append(entry)
+        return entry
+
+    def _build_native_convo(self, messages):
+        """Turn the unified message list into (system_prompt, neutral_convo) for
+        native sending. The first system message becomes the system prompt.
+        Assistant entries carrying `_tool_calls` metadata become real tool-CALL
+        turns, and the system entries that immediately follow them are consumed as
+        their tool RESULTS — positional pairing, bounded by the call count and
+        stopping at the first non-system entry, synth-filled with "(no output)" so
+        every tool_use is answered (no dialect ever sees an unpaired call).
+        Everything else becomes a plain text turn; assistant text without metadata
+        (legacy / compat-origin) is defensively fence-stripped so it can never leak
+        a fence into the native channel. na.build_messages() renders the neutral
+        convo into the provider's dialect."""
+        system_prompt = None
+        entries = []
+        for m in messages:
+            if m.get('role') == 'system' and system_prompt is None:
+                system_prompt = m.get('content')
+            else:
+                entries.append(m)
+
+        neutral = []
+        i, n = 0, len(entries)
+        while i < n:
+            m = entries[i]
+            role = m.get('role')
+            calls = m.get('_tool_calls') if role == 'assistant' else None
+            if calls:
+                # Gather up to len(calls) following system entries as this turn's
+                # results (a real user/assistant turn is never a tool result).
+                results = []
+                j = i + 1
+                while j < n and len(results) < len(calls) and entries[j].get('role') == 'system':
+                    results.append(entries[j].get('content') or '')
+                    j += 1
+                tool_results = [
+                    {'id': c['id'], 'name': c['name'],
+                     'content': results[k] if k < len(results) else '(no output)'}
+                    for k, c in enumerate(calls)
+                ]
+                neutral.append({
+                    'role': 'assistant',
+                    'content': (m.get('_assistant_text') or '').strip() or None,
+                    'tool_calls': [{'id': c['id'], 'name': c['name'],
+                                    'arguments': c.get('arguments') or {}} for c in calls],
+                })
+                neutral.append({'role': 'tool', 'results': tool_results})
+                i = j
+                continue
+
+            content = m.get('content') or ''
+            if role == 'assistant':
+                content = self.tool_manager.strip_tool_calls(content)
+                if content.strip():
+                    neutral.append({'role': 'assistant', 'content': content})
+            elif role == 'user':
+                neutral.append({'role': 'user', 'content': content})
+            elif role == 'system':
+                # A system entry not consumed as a tool result → inject as a user
+                # turn (mirrors _extract_system_and_convo's handling).
+                if content.strip():
+                    neutral.append({'role': 'user', 'content': f'[SYSTEM]: {content}'})
+            i += 1
+        return system_prompt, neutral
+
     # ═══════════════════════════════════════════════════════════════════════════
     # UNIFIED PROVIDER DISPATCHER
     # ═══════════════════════════════════════════════════════════════════════════
@@ -535,11 +631,31 @@ class AIEngine:
         )
 
     def _provider_script_native(self, module, messages, images=None) -> str | None:
-        """Native tool-calling path. Calls the provider's chat_tools() with the
-        canonical tool registry, then reconstructs the equivalent fence text so
-        the rest of the engine processes it exactly like a compat response."""
+        """Native tool-calling path. Rebuilds the conversation as REAL native
+        tool_use / tool_result messages (via native_adapters) so the provider
+        never sees reconstructed fence text in the history, then reconstructs the
+        equivalent fence text from THIS turn's tool_calls for the display /
+        execution pipeline and stashes the structured calls (self._pending_native)
+        for _append_assistant to attach to the stored assistant entry."""
         import traceback
-        system_prompt, convo = self._extract_system_and_convo(messages)
+        dialect = getattr(module, 'NATIVE_DIALECT', 'openai')
+        system_prompt, neutral = self._build_native_convo(messages)
+        # Image edge: vision providers build their image message by REPLACING the
+        # last message (_build_vision_message → a user turn). If the tail is a tool
+        # result (work-mode + a queued context image), replacing it would drop the
+        # result and orphan the assistant's tool_call (→ provider 400). Append a
+        # placeholder user turn so the provider replaces THAT and the tool result
+        # survives, keeping every tool_use answered. (No effect without images.)
+        if images and neutral and neutral[-1].get('role') == 'tool':
+            neutral.append({'role': 'user',
+                            'content': 'Here are the image(s) I attached for this step — please use them.'})
+        try:
+            convo = na.build_messages(dialect, neutral)
+        except Exception as e:
+            log.error(f"[AIEngine._provider_script_native] ✗ build_messages({dialect!r}) failed: {e}\n"
+                      f"{traceback.format_exc()}")
+            # Degrade to plain text turns so the turn still goes through.
+            system_prompt, convo = self._extract_system_and_convo(messages)
         # Keep the native tools list in lockstep with the prompt. Hijacked prompts
         # are background tasks, which disable session naming — so don't offer
         # set_session_name there (it would contradict the task prompt).
@@ -559,10 +675,31 @@ class AIEngine:
             return None
 
         text = (result.get('text') or "").strip()
-        fences = self.tool_manager.tool_calls_to_fences(result.get('tool_calls') or [])
+        raw_calls = result.get('tool_calls') or []
+        # Debug observability: record what actually went over the wire this turn
+        # (the dialect-shaped payload + the raw normalized result) and the tool
+        # transport, so the Debug window can show native-vs-plain + the structure.
+        self.last_tool_transport = 'native'
+        self.last_native_tool_calls = len(raw_calls)
+        self.last_sent_messages = convo
+        self.last_raw_provider_result = result
+        # Stash the structured calls (with stable ids) so _append_assistant can
+        # attach them to the stored assistant entry as native metadata. Only when
+        # there ARE calls — a plain text turn leaves _pending_native None.
+        if raw_calls:
+            self._pending_native = {
+                'text': text,
+                'tool_calls': [
+                    {'id': c.get('id') or na._new_call_id(),
+                     'name': c.get('name', ''),
+                     'arguments': c.get('arguments') or {}}
+                    for c in raw_calls
+                ],
+            }
+        fences = self.tool_manager.tool_calls_to_fences(raw_calls)
         ai_text = (text + ("\n\n" if text and fences else "") + fences).strip()
         log.info(f"[AIEngine._provider_script_native] ✓ native result | text_len={len(text)} | "
-                 f"tool_calls={len(result.get('tool_calls') or [])} | reconstructed_len={len(ai_text)}")
+                 f"tool_calls={len(raw_calls)} | reconstructed_len={len(ai_text)}")
         return ai_text or None
 
     def _provider_script(self, messages, images=None, module=None) -> str | None:
@@ -582,6 +719,8 @@ class AIEngine:
             return None
 
         system_prompt, convo = self._extract_system_and_convo(messages)
+        # Debug observability: the compat wire payload (fenced text turns).
+        self.last_sent_messages = convo
 
         try:
             if images and hasattr(module, 'chat_image') and callable(module.chat_image):
@@ -599,6 +738,7 @@ class AIEngine:
             self.log("Custom script chat() must return a non-empty string", "ERROR")
             return None
 
+        self.last_raw_provider_result = result
         log.info(f"[AIEngine._http_custom_script] ✓ Response | length={len(result)} chars")
         return result
 
@@ -609,6 +749,11 @@ class AIEngine:
         """
         if images is None and image is not None:
             images = [image]
+
+        # Fresh per turn — only the native path (with tool_calls) sets this; a
+        # compat or text-only turn leaves it None so no stale native metadata
+        # attaches to the next assistant entry.
+        self._pending_native = None
 
         log.debug(f"[AIEngine._call_provider] script='{self.custom_script_path}' | "
                   f"images={len(images) if images else 0}")
@@ -639,6 +784,13 @@ class AIEngine:
                     log.info("[AIEngine._call_provider] Native mode requested but provider "
                              "lacks chat_tools/SUPPORTS_NATIVE_TOOLS — falling back to compat")
                     _native_module = None
+
+            # Debug transport label (the native path sets its own 'native' label;
+            # here we only label the compat / native-unsupported-fallback cases).
+            if _native_module is None:
+                self.last_tool_transport = ('native→compat (provider lacks native support)'
+                                            if self._tool_mode() == 'native' else 'compat')
+                self.last_native_tool_calls = 0
 
             attempt = 0
             result = None
@@ -883,7 +1035,7 @@ class AIEngine:
         # ──────────────────────────────────────────────────────────────────────────
 
         if self.tool_execution_lockout:
-            self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+            self._append_assistant(ai_text)
             return {
                 'response': ai_text,
                 'has_work_call': False,
@@ -917,7 +1069,7 @@ class AIEngine:
             else:
                 success, msg = False, "ERROR: No skill manager"
             if not success:
-                self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+                self._append_assistant(ai_text)
                 self.conversation_history.append({
                     'role': 'system',
                     'content': SKILL_ALREADY_LOADED_PROMPT.format(skill_name=skill_name, reason=msg)
@@ -943,7 +1095,7 @@ class AIEngine:
                     _r = self._process_ai_response(remaining_text)
                     _r['skill_loaded'] = skill_name
                     return _r
-                self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+                self._append_assistant(ai_text)
                 self.conversation_history.append({
                     'role': 'system',
                     'content': SKILL_LOADED_CHAT_PROMPT.format(skill_name=skill_name)
@@ -974,13 +1126,13 @@ class AIEngine:
             else:
                 success, msg = False, "ERROR: No skill manager"
             if not success:
-                self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+                self._append_assistant(ai_text)
                 self.conversation_history.append({
                     'role': 'system',
                     'content': SKILL_NOT_LOADED_PROMPT.format(skill_name=skill_name, reason=msg)
                 })
             else:
-                self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+                self._append_assistant(ai_text)
                 self.conversation_history.append({
                     'role': 'system',
                     'content': SKILL_UNLOADED_CHAT_PROMPT.format(skill_name=skill_name)
@@ -1018,7 +1170,7 @@ class AIEngine:
                 log.warning("[AIEngine._process_ai_response] Bare exit/empty work-call on entry — finishing")
                 self.tool_manager.in_work_mode = False
                 if ai_text and ai_text.strip():
-                    self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+                    self._append_assistant(ai_text)
                 return {
                     'response': visible_text if visible_text and visible_text.strip() else "",
                     'has_work_call': False,
@@ -1037,7 +1189,7 @@ class AIEngine:
                       f"length={len(work_output)} chars | in_work_mode → True")
             self.tool_manager.last_work_output = work_output
 
-            self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+            self._append_assistant(ai_text)
             log.debug("[AIEngine._process_ai_response] Full ai_text (with JSON) appended to history")
 
             return {
@@ -1064,7 +1216,7 @@ class AIEngine:
             log.info(f"[AIEngine._process_ai_response] execute_code result: success={result['success']} | "
                      f"has_error={bool(result.get('error'))}")
 
-            self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+            self._append_assistant(ai_text)
 
             response_text = visible_text
             if not result['success'] and result.get('error'):
@@ -1085,7 +1237,7 @@ class AIEngine:
         # No execution calls - normal response
         log.info(f"[AIEngine._process_ai_response] No tool calls detected — normal text response | "
                  f"length={len(ai_text)} chars")
-        self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+        self._append_assistant(ai_text)
         log.debug("assistant response appended to history | "
                   f"total history entries={len(self.conversation_history)}")
 
@@ -1172,7 +1324,7 @@ class AIEngine:
             if not success:
                 log.warning(f"[AIEngine._process_work_mode_response] load_skill failed: {msg}")
                 already_msg = SKILL_ALREADY_LOADED_PROMPT.format(skill_name=skill_name, reason=msg)
-                self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+                self._append_assistant(ai_text)
                 self.conversation_history.append({'role': 'system', 'content': already_msg})
                 return {
                     'response': f"⚠ {msg}",
@@ -1186,7 +1338,7 @@ class AIEngine:
                      f"total loaded: {list(self.skill_manager.get_loaded_skills().keys())}")
 
             if remaining_text and remaining_text.strip():
-                self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+                self._append_assistant(ai_text)
 
             work_output = self.tool_manager.last_work_output or "No previous output"
             _skill_tmpl = (SKILL_LOADED_WORK_PROMPT_NATIVE
@@ -1225,7 +1377,7 @@ class AIEngine:
             if not success:
                 log.warning(f"[AIEngine._process_work_mode_response] unload_skill failed: {msg}")
                 not_loaded_msg = SKILL_NOT_LOADED_PROMPT.format(skill_name=skill_name, reason=msg)
-                self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+                self._append_assistant(ai_text)
                 self.conversation_history.append({'role': 'system', 'content': not_loaded_msg})
                 return {
                     'response': f"⚠ {msg}",
@@ -1244,7 +1396,7 @@ class AIEngine:
                 skill_name=skill_name,
                 work_output=work_output
             )
-            self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+            self._append_assistant(ai_text)
             self.conversation_history.append({'role': 'system', 'content': unloaded_msg})
             return {
                 'response': f"Unloading skill: {skill_name}...",
@@ -1282,7 +1434,7 @@ class AIEngine:
                         break
 
                 if ai_text and ai_text.strip():
-                    self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+                    self._append_assistant(ai_text)
                     log.debug("[AIEngine._process_work_mode_response] ai_text appended to history (exit)")
 
                 # ── Empty-exit guard ──────────────────────────────────────────
@@ -1318,7 +1470,7 @@ class AIEngine:
                       f"output_len={len(work_output)} chars | storing for next iteration")
             self.tool_manager.last_work_output = work_output
 
-            self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+            self._append_assistant(ai_text)
             log.debug("[AIEngine._process_work_mode_response] ai_text (with JSON) appended to history")
 
             return {
@@ -1350,7 +1502,7 @@ class AIEngine:
                 result = self.tool_manager.run_execute_code(code, self.log_callback)
                 log.info(f"[AIEngine._process_work_mode_response] execute_code result: "
                          f"success={result['success']}")
-                self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+                self._append_assistant(ai_text)
                 response_text = visible_text
                 if not result['success'] and result.get('error'):
                     response_text = response_text + f"\n\n```Error\n{result['error']}\n```"
@@ -1397,7 +1549,7 @@ class AIEngine:
                     'exited_work_mode': True,
                 }
 
-            self.conversation_history.append({'role': 'assistant', 'content': ai_text})
+            self._append_assistant(ai_text)
             log.debug("[AIEngine._process_work_mode_response] Normal response appended to history | "
                       f"total entries={len(self.conversation_history)}")
 

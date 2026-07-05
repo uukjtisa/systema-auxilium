@@ -13,22 +13,31 @@
 ### Quick setup (all platforms)
 
 Run the unified setup script with any system Python. It auto-detects your OS,
-creates a `.venv`, generates the right helper scripts, and installs dependencies
-from `requirements.txt`:
+creates a `.venv`, lets you pick optional modules, generates the helper scripts,
+and installs the dependencies:
 
 ```bash
-python setup.py        # Windows
-python3 setup.py       # Linux / macOS
+python setup.py            # Windows
+python3 setup.py           # Linux / macOS
+python setup.py --cli      # force the terminal menu (skip the GUI)
+python setup.py --recover  # only regenerate the helper scripts (venv untouched)
 ```
+
+It shows a small graphical window when tkinter + a display are available, else a
+terminal menu (on Kali/Debian, `sudo apt install python3-tk` enables the GUI).
+The dependency list lives in `setup.py`, which **generates `requirements.txt`**
+from it — so they never drift, and the self-updater + `pip install -r` still work.
 
 Afterwards you get helper scripts in the project root:
 
 - **Windows:** `run.bat`, `open_env.bat`, `add_autostart.bat`, `remove_autostart.bat`
-- **Linux / macOS:** `run.sh`, `open_env.sh`, `add_autostart.sh`, `remove_autostart.sh`
+- **Linux / macOS:** `run.sh` / `run.command`, `open_env.sh`, `add_autostart.sh`, `remove_autostart.sh`
 
-`add_autostart` / `remove_autostart` register the app to launch at login **for
-the current user only** (no system-wide or admin changes). `setup.py` also offers
-to move itself into `setup-scripts/` for a clean project root.
+Start-at-login and the desktop shortcut can run with **normal or administrator**
+privileges (choose in setup or in Settings → General). A `__DO_NOT_DELETE__.txt`
+in the root lists every file the app depends on — if a generated script is lost,
+`python setup.py --recover` regenerates them all. `setup.py` also offers to move
+itself into `setup-scripts/`.
 
 ### Manual setup
 

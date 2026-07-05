@@ -541,12 +541,14 @@ class FloatingWindow(QWidget):
         self.debug_window.raise_()
         self.debug_window.activateWindow()
 
-    def show_debug_message(self, sender, message):
-        """Show debug message (called from controller)"""
+    def show_debug_message(self, sender, message, unfiltered=False):
+        """Show debug message (called from controller). unfiltered=True bypasses
+        the type-filter checkboxes so the entry is always shown (used for the
+        SENT/RECEIVED wire panels)."""
         if self.controller.get_debug_mode():
             if self.debug_window is None:
                 self.open_debug_window()
-            self.debug_window.add_message(sender, message)
+            self.debug_window.add_message(sender, message, force=unfiltered)
 
     def show_thinking(self):
         """Show thinking in chat window"""
@@ -592,7 +594,7 @@ class FloatingWindow(QWidget):
         # Auto-open Android Bridge if setting is enabled
         open_packet_on_startup = self.controller.settings.get('open_packet_on_startup', False)
         if open_packet_on_startup and (self.android_bridge is None or not self.android_bridge.isVisible()):
-            from systema.ui.windows.android_bridge import AndroidBridge
+            from systema.net.android_bridge import AndroidBridge
             if self.android_bridge is None:
                 self.android_bridge = AndroidBridge(self.controller)
             self.android_bridge.show()
@@ -815,7 +817,7 @@ class FloatingWindow(QWidget):
             self.android_bridge.hide()
             self.android_bridge = None
         else:
-            from systema.ui.windows.android_bridge import AndroidBridge
+            from systema.net.android_bridge import AndroidBridge
             if self.android_bridge is None:
                 self.android_bridge = AndroidBridge(self.controller)
             self.android_bridge.show()

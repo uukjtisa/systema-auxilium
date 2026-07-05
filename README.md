@@ -223,21 +223,35 @@ Wi-Fi LAN using `IP:port`.
 ### Quick setup (all platforms)
 
 Run the unified setup script with any system Python. It auto-detects your OS, creates a `.venv`,
-generates the right helper scripts, and installs dependencies from `requirements.txt`:
+lets you pick optional feature modules, generates the helper scripts, and installs dependencies:
 
 ```bash
-python setup.py        # Windows
-python3 setup.py       # Linux / macOS
+python setup.py            # Windows
+python3 setup.py           # Linux / macOS
+python setup.py --cli      # force the terminal menu (skip the GUI)
+python setup.py --recover  # only regenerate the helper scripts (venv untouched)
 ```
+
+`setup.py` opens a small **graphical window** when tkinter and a display are available, and falls
+back to a robust **terminal menu** otherwise (Kali/Debian ship Python without `python3-tk`; install
+it with `sudo apt install python3-tk` if you want the GUI). The dependency list lives in `setup.py`
+and it **generates `requirements.txt`** from it, so the two never drift — that generated file is kept
+because the in-app self-updater reads it and `pip install -r requirements.txt` still works.
 
 Afterwards you will have helper scripts in the project root:
 
 - **Windows:** `run.bat`, `open_env.bat`, `add_autostart.bat`, `remove_autostart.bat`
-- **Linux / macOS:** `run.sh`, `open_env.sh`, `add_autostart.sh`, `remove_autostart.sh`
+- **Linux / macOS:** `run.sh` / `run.command`, `open_env.sh`, `add_autostart.sh`, `remove_autostart.sh`
+  (Linux also gets a double-click `Systema Auxilium.desktop`)
 
-`setup.py` then offers to move itself into a `setup-scripts/` folder (defaults to yes for a clean
-root; answer no to keep it handy for re-runs). It is self-contained and replaces the old
-per-platform setup scripts.
+⚠ **Do not delete the generated scripts, `requirements.txt`, `main.py`, `systema/`, `assets/` or
+`data/`** — the app, its Restart button, autostart and the self-updater depend on them. A
+`__DO_NOT_DELETE__.txt` in the project root lists them all with why. If a generated script is ever
+lost, regenerate them with `python setup.py --recover` (no reinstall needed).
+
+`setup.py` then offers to move itself into a `setup-scripts/` folder (defaults to no; the app's
+recovery + updater expect it in the root). It is self-contained and replaces the old per-platform
+setup scripts.
 
 Tested on Windows 11, Windows 10, and Kali Linux (Python 3.10). The macOS path is untested.
 

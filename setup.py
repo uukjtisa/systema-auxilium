@@ -2,31 +2,40 @@
 """
 setup.py — Systema Auxilium unified cross-platform installer
 ================================================================================
-One script for Windows / Linux / macOS. Auto-detects your OS and:
+One script for Windows / Linux / macOS. It:
 
   1. Creates a .venv virtual environment (prefers Python 3.10, falls back).
-  2. Lets you pick optional feature modules in an interactive TUI
-     (essential modules are locked and always installed).
-  3. Lets you pick pre-configuration steps (desktop shortcut, autostart).
-  4. Installs the chosen dependencies into the venv.
-  5. Generates the platform helper scripts (run / open_env / autostart).
-  6. Applies your pre-configuration choices and verifies the venv.
+  2. Lets you pick optional feature modules (essentials are always installed).
+  3. Installs dependencies robustly (verifies every essential landed; retries any
+     that slip through — no more silent "some failed").
+  4. Generates the platform helper scripts (run / open_env / autostart wrappers /
+     double-click launchers) and a __DO_NOT_DELETE__ reminder.
+  5. Optionally creates a desktop shortcut / enables start-at-login — using the
+     SAME code the in-app Settings uses (admin or normal privileges).
+
+It runs a small **graphical** window when tkinter + a display are available, and
+falls back to a robust **numbered-menu terminal** flow otherwise (Kali/Debian
+ship Python without python3-tk, headless/SSH sessions have no display).
+
+Dependencies live in ONE place — the ESSENTIAL / OPTIONAL_GROUPS lists below —
+and requirements.txt is GENERATED from them (kept because the in-app self-updater
+and `pip install -r requirements.txt` both read it).
 
 Run it with any system Python:
-    python setup.py        (Windows)
-    python3 setup.py       (Linux / macOS)
+    python setup.py           (Windows)     python setup.py --cli   (force terminal)
+    python3 setup.py          (Linux/macOS) python3 setup.py --recover (regen scripts)
 
 Everything here is stdlib-only, so it runs before any dependency exists.
-Non-interactive shells (no TTY) automatically fall back to sensible defaults.
 ================================================================================
 """
 
 import os
 import sys
+import queue
 import shutil
 import platform
+import threading
 import subprocess
-import importlib.util
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -37,90 +46,9 @@ IS_MAC = SYSTEM == "Darwin"
 IS_LINUX = not IS_WIN and not IS_MAC
 ARCHIVE_DIR = ROOT / "setup-scripts"
 
-# ── ANSI palette (auto-disabled if the terminal can't do colour) ──────────────
-_C = {
-    "reset": "\033[0m", "dim": "\033[2m", "bold": "\033[1m",
-    "cyan": "\033[36m", "green": "\033[32m", "yellow": "\033[33m",
-    "red": "\033[31m", "blue": "\033[34m", "mag": "\033[35m",
-    "grey": "\033[90m", "inv": "\033[7m",
-}
-
-
-def _enable_ansi() -> bool:
-    """Turn on ANSI/VT processing. Returns True if colour output is usable."""
-    if not sys.stdout.isatty():
-        return False
-    if IS_WIN:
-        try:
-            import ctypes
-            k = ctypes.windll.kernel32
-            for handle in (-11, -12):   # STDOUT, STDERR
-                h = k.GetStdHandle(handle)
-                mode = ctypes.c_uint32()
-                if k.GetConsoleMode(h, ctypes.byref(mode)):
-                    k.SetConsoleMode(h, mode.value | 0x0004)  # VT processing
-        except Exception:
-            return False
-    return True
-
-
-ANSI = _enable_ansi()
-
-
-def c(text, *styles):
-    if not ANSI:
-        return text
-    return "".join(_C[s] for s in styles) + text + _C["reset"]
-
-
-def clear():
-    if ANSI:
-        sys.stdout.write("\033[2J\033[H")
-        sys.stdout.flush()
-
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ASCII banner
-# ══════════════════════════════════════════════════════════════════════════════
-
-_BANNER = r"""
-   ____            _                          _             _ _ _
-  / ___| _   _ ___| |_ ___ _ __ ___   __ _   / \  _   ___  _(_) (_)_   _ _ __ ___
-  \___ \| | | / __| __/ _ \ '_ ` _ \ / _` | / _ \| | | \ \/ / | | | | | | '_ ` _ \
-   ___) | |_| \__ \ ||  __/ | | | | | (_| |/ ___ \ |_| |>  <| | | | |_| | | | | | |
-  |____/ \__, |___/\__\___|_| |_| |_|\__,_/_/   \_\__,_/_/\_\_|_|_|\__,_|_| |_| |_|
-         |___/
-"""
-
-
-def show_banner():
-    clear()
-    print(c(_BANNER, "cyan", "bold"))
-    tag = "  AI Desktop Assistant  ·  Cross-Platform Installer"
-    print(c(tag, "grey"))
-    print(c(f"  {SYSTEM} · Python {platform.python_version()}", "grey"))
-    print(c("  " + "─" * 74, "grey"))
-    print()
-
-
-def step(text):
-    print(c(f"▸ {text}", "cyan", "bold"))
-
-
-def ok(text):
-    print(c(f"  ✓ {text}", "green"))
-
-
-def warn(text):
-    print(c(f"  ! {text}", "yellow"))
-
-
-def fail(text):
-    print(c(f"  ✗ {text}", "red"))
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Module & pre-configuration catalogue
+# Dependency catalogue — THE single source of truth (requirements.txt is derived)
 # ══════════════════════════════════════════════════════════════════════════════
 
 # Essentials are ALWAYS installed and cannot be unchecked.
@@ -156,130 +84,161 @@ OPTIONAL_GROUPS = [
 PRECONFIG = [
     {"key": "shortcut", "label": "Create a Desktop shortcut",
      "desc": "Adds a Systema Auxilium launcher to your Desktop", "default": True},
-    {"key": "admin",    "label": "  └ Launch that shortcut as administrator",
-     "desc": "Shortcut requests elevated privileges (UAC / polkit / sudo)", "default": False},
+    {"key": "admin",    "label": "Run the shortcut / autostart as administrator",
+     "desc": "Elevated launch (UAC / pkexec / admin prompt). Normal is recommended.",
+     "default": False},
     {"key": "autostart", "label": "Start automatically at login",
      "desc": "Registers Systema Auxilium to launch when you log in", "default": False},
 ]
 
+# Requirements notes preserved verbatim in the generated requirements.txt footer.
+_REQ_NOTES = """\
+# ============================================================================
+# PLATFORM NOTES
+# ============================================================================
+# Windows:
+#   - Visual C++ Redistributable 2015-2022 (x64):
+#     https://aka.ms/vs/17/release/vc_redist.x64.exe
+#   - Keep onnxruntime==1.19.2 (1.20+ causes DLL init failures).
+#
+# Linux (Debian/Ubuntu/Kali):
+#   sudo apt-get install python3-pyqt6 python3-tk portaudio19-dev
+#   - python3-tk is only needed for the setup.py GUI (the app itself doesn't use it).
+#   - "Run as administrator" options use `pkexec` (package: policykit-1).
+#
+# macOS:
+#   brew install portaudio
+#   - Grant Accessibility permission in System Settings -> Privacy & Security.
+# ============================================================================
+"""
+
+
+def _dist_name(spec: str) -> str:
+    """Strip version/extras/markers from a requirement to its distribution name."""
+    import re
+    return re.split(r"[<>=!~;\[ ]", spec.strip(), 1)[0].strip()
+
+
+def generate_requirements() -> str:
+    """Render the canonical requirements.txt from the catalogue above. Essentials
+    and default-on optional groups are uncommented; other optionals are listed
+    commented under their group label. This file is GENERATED — the running app's
+    self-updater diffs it, so it must stay a real, current file."""
+    lines = [
+        "# ============================================================================",
+        "# SYSTEMA AUXILIUM - REQUIREMENTS   (AUTO-GENERATED by setup.py)",
+        "# ----------------------------------------------------------------------------",
+        "# DO NOT hand-edit and DO NOT delete: this file is regenerated by setup.py and",
+        "# is read by the in-app self-updater (Settings > Check for Updates) to install",
+        "# new dependencies after an update. To change deps, edit setup.py's ESSENTIAL /",
+        "# OPTIONAL_GROUPS and re-run setup (or `python setup.py --recover`).",
+        "# Basic install:   pip install -r requirements.txt",
+        "# Recommended:     python setup.py   (builds a .venv + interactive picker)",
+        "# ============================================================================",
+        "",
+        "# -- Essentials (always installed) -------------------------------------------",
+    ]
+    lines += list(ESSENTIAL)
+    lines.append("")
+    lines.append("# ============================================================================")
+    lines.append("# OPTIONAL feature groups (default-on are uncommented; toggle in setup.py)")
+    lines.append("# ============================================================================")
+    for g in OPTIONAL_GROUPS:
+        lines.append("")
+        default = " (recommended)" if g["default"] else ""
+        lines.append(f"# --- {g['label']}{default} ---")
+        lines.append(f"#     {g['desc']}")
+        for pkg in g["pkgs"]:
+            lines.append(pkg if g["default"] else f"# {pkg}")
+    lines.append("")
+    lines.append(_REQ_NOTES)
+    return "\n".join(lines) + "\n"
+
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Minimal cross-platform single-key reader + checklist TUI
+# Reporter — a tiny sink the backend logs through; console or GUI-queue backed
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _read_key():
-    """Return one of: 'up','down','space','enter','toggle_all','skip','quit',
-    or the lowercase character pressed. Blocks for a single keypress."""
+_C = {
+    "reset": "\033[0m", "dim": "\033[2m", "bold": "\033[1m",
+    "cyan": "\033[36m", "green": "\033[32m", "yellow": "\033[33m",
+    "red": "\033[31m", "grey": "\033[90m",
+}
+
+
+def _enable_ansi() -> bool:
+    if not sys.stdout or not sys.stdout.isatty():
+        return False
     if IS_WIN:
-        import msvcrt
-        ch = msvcrt.getwch()
-        if ch in ("\x00", "\xe0"):           # arrow / function prefix
-            ch2 = msvcrt.getwch()
-            return {"H": "up", "P": "down"}.get(ch2, "")
-        return _map_key(ch)
-    # POSIX raw read
-    import termios, tty
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        ch = sys.stdin.read(1)
-        if ch == "\x1b":                     # escape sequence
-            seq = sys.stdin.read(2)
-            return {"[A": "up", "[B": "down"}.get(seq, "quit")
-        return _map_key(ch)
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        try:
+            import ctypes
+            k = ctypes.windll.kernel32
+            for handle in (-11, -12):
+                h = k.GetStdHandle(handle)
+                mode = ctypes.c_uint32()
+                if k.GetConsoleMode(h, ctypes.byref(mode)):
+                    k.SetConsoleMode(h, mode.value | 0x0004)
+        except Exception:
+            return False
+    return True
 
 
-def _map_key(ch):
-    if ch in ("\r", "\n"):
-        return "enter"
-    if ch == " ":
-        return "space"
-    if ch in ("\x03", "\x1b", "q", "Q"):
-        return "quit"
-    if ch in ("a", "A"):
-        return "toggle_all"
-    if ch in ("s", "S"):
-        return "skip"
-    return ch.lower()
+ANSI = _enable_ansi()
 
 
-def checklist(title, items, subtitle=""):
-    """Interactive checkbox list.
-
-    items: list of dicts with keys: label, desc, checked(bool), locked(bool).
-    Returns the (possibly mutated) items list; on non-TTY, returns defaults.
-    Controls: ↑/↓ move · Space toggle · A all/none · S skip(defaults) · Enter confirm.
-    """
-    if not sys.stdin.isatty() or not ANSI:
-        # Headless: accept defaults silently.
-        return items
-
-    idx = 0
-    n = len(items)
-    while True:
-        clear()
-        print(c(_BANNER, "cyan", "bold"))
-        print(c(f"  {title}", "bold"))
-        if subtitle:
-            print(c(f"  {subtitle}", "grey"))
-        print(c("  " + "─" * 74, "grey"))
-        print()
-        for i, it in enumerate(items):
-            cursor = c("❯", "cyan", "bold") + " " if i == idx else "  "
-            if it.get("locked"):
-                box = c("[■]", "grey")
-                lab = c(it["label"], "grey")
-                tag = c(" locked", "grey", "dim")
-            else:
-                box = c("[✓]", "green") if it["checked"] else "[ ]"
-                lab = c(it["label"], "bold") if i == idx else it["label"]
-                tag = ""
-            print(f"   {cursor}{box} {lab}{tag}")
-            if i == idx and it.get("desc"):
-                print(c(f"        {it['desc']}", "grey"))
-        print()
-        print(c("   ↑/↓ move   Space toggle   A all/none   S skip   Enter confirm",
-                "grey"))
-        sys.stdout.flush()
-
-        key = _read_key()
-        if key == "up":
-            idx = (idx - 1) % n
-        elif key == "down":
-            idx = (idx + 1) % n
-        elif key == "space":
-            if not items[idx].get("locked"):
-                items[idx]["checked"] = not items[idx]["checked"]
-        elif key == "toggle_all":
-            newval = not all(it["checked"] for it in items if not it.get("locked"))
-            for it in items:
-                if not it.get("locked"):
-                    it["checked"] = newval
-        elif key in ("enter", "skip"):
-            clear()
-            return items
-        elif key == "quit":
-            clear()
-            print(c("Setup cancelled.", "yellow"))
-            sys.exit(0)
+def c(text, *styles):
+    if not ANSI:
+        return text
+    return "".join(_C[s] for s in styles) + text + _C["reset"]
 
 
-def _ask_yes_no(question, default_yes=True):
-    suffix = "[Y/n]" if default_yes else "[y/N]"
-    try:
-        answer = input(f"{question} {suffix} ").strip().lower()
-    except EOFError:
-        return default_yes
-    if not answer:
-        return default_yes
-    return answer in ("y", "yes")
+class Reporter:
+    """Base sink. Backend actions call .step/.ok/.warn/.fail/.info — the frontend
+    decides how to present them."""
+    def step(self, t): pass
+    def ok(self, t): pass
+    def warn(self, t): pass
+    def fail(self, t): pass
+    def info(self, t): pass
+
+
+class ConsoleReporter(Reporter):
+    def step(self, t): print(c(f"▸ {t}", "cyan", "bold"))
+    def ok(self, t): print(c(f"  ✓ {t}", "green"))
+    def warn(self, t): print(c(f"  ! {t}", "yellow"))
+    def fail(self, t): print(c(f"  ✗ {t}", "red"))
+    def info(self, t): print(c(f"    {t}", "grey"))
+
+
+class QueueReporter(Reporter):
+    """Pushes ('kind', text) tuples onto a queue for the GUI thread to drain."""
+    def __init__(self, q): self.q = q
+    def step(self, t): self.q.put(("step", t))
+    def ok(self, t): self.q.put(("ok", t))
+    def warn(self, t): self.q.put(("warn", t))
+    def fail(self, t): self.q.put(("fail", t))
+    def info(self, t): self.q.put(("info", t))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# [1] Virtual environment
+# Shared app modules (shortcut + autostart) — the SAME code Settings uses
+# ══════════════════════════════════════════════════════════════════════════════
+
+def load_app_modules():
+    """Import systema.common.shortcuts + autostart directly. systema/__init__ is
+    import-light and both modules are stdlib-only, so this works under bare system
+    Python before the venv exists. Returns (shortcuts, autostart) or (None, None)."""
+    try:
+        if str(ROOT) not in sys.path:
+            sys.path.insert(0, str(ROOT))
+        from systema.common import shortcuts, autostart
+        return shortcuts, autostart
+    except Exception:
+        return None, None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Virtual environment
 # ══════════════════════════════════════════════════════════════════════════════
 
 def find_python310():
@@ -308,383 +267,766 @@ def find_python310():
     return None
 
 
-def create_venv():
-    step("[1/6] Virtual environment (.venv)")
-    if VENV.exists():
-        ok(".venv already exists — reusing it.")
-        print()
-        return
-    argv310 = find_python310()
-    if argv310:
-        ok(f"Python 3.10 detected ({' '.join(argv310)}).")
-        base = argv310
-    else:
-        warn(f"Python 3.10 not found. Using current Python {platform.python_version()}.")
-        base = [sys.executable]
-    subprocess.run(base + ["-m", "venv", str(VENV)], check=True)
-    ok("Virtual environment created.")
-    print()
-
-
 def venv_python() -> Path:
     return VENV / ("Scripts/python.exe" if IS_WIN else "bin/python")
 
 
+def create_venv(r: Reporter):
+    r.step("Virtual environment (.venv)")
+    if VENV.exists():
+        r.ok(".venv already exists — reusing it.")
+        return
+    argv310 = find_python310()
+    if argv310:
+        r.ok(f"Python 3.10 detected ({' '.join(argv310)}).")
+        base = argv310
+    else:
+        r.warn(f"Python 3.10 not found. Using current Python {platform.python_version()}.")
+        base = [sys.executable]
+    subprocess.run(base + ["-m", "venv", str(VENV)], check=True)
+    r.ok("Virtual environment created.")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
-# [4] Install dependencies
+# Robust dependency install
 # ══════════════════════════════════════════════════════════════════════════════
 
-def install_deps(packages):
-    step("[4/6] Installing dependencies")
+def _pip_installed(py: Path, spec: str) -> bool:
+    """True if the distribution for `spec` is importable/installed in the venv."""
+    try:
+        r = subprocess.run([str(py), "-m", "pip", "show", _dist_name(spec)],
+                           capture_output=True, text=True)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _missing(py: Path, specs) -> list:
+    """Subset of `specs` whose distribution is not present in the venv."""
+    return [s for s in specs if not _pip_installed(py, s)]
+
+
+def install_deps(selected_optional_keys, r: Reporter):
+    """Install essentials (verified + retried) then each selected optional group
+    separately, so one bad package never silently takes the rest down."""
+    r.step("Installing dependencies")
     py = venv_python()
     if not py.exists():
-        warn(f"venv python not found at {py} — skipping install.")
-        print()
+        r.warn(f"venv python not found at {py} — skipping install.")
         return
-    print(c("  Upgrading pip…", "grey"))
-    subprocess.run([str(py), "-m", "pip", "install", "--upgrade", "pip"],
+
+    r.info("Upgrading pip / setuptools / wheel…")
+    subprocess.run([str(py), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"],
                    check=False, stdout=subprocess.DEVNULL)
-    print(c(f"  Installing {len(packages)} packages "
-            "(this can take a few minutes)…", "grey"))
-    result = subprocess.run([str(py), "-m", "pip", "install", *packages], check=False)
-    if result.returncode == 0:
-        ok("All dependencies installed.")
+
+    # ── Essentials: one batch, then verify + retry the stragglers individually ──
+    r.info(f"Installing {len(ESSENTIAL)} essential packages…")
+    subprocess.run([str(py), "-m", "pip", "install", *ESSENTIAL], check=False)
+    missing = _missing(py, ESSENTIAL)
+    for spec in missing:
+        r.warn(f"{_dist_name(spec)} missing after batch install — retrying on its own…")
+        subprocess.run([str(py), "-m", "pip", "install", spec], check=False)
+    still = _missing(py, ESSENTIAL)
+    if still:
+        for spec in still:
+            r.fail(f"Essential package FAILED to install: {spec}")
     else:
-        warn("Some dependencies failed — check the pip output above.")
-    print()
+        r.ok("All essential packages verified present.")
+    # Explicit, named check for the self-updater dependency the user hit before.
+    if _pip_installed(py, "updater-gitplucker"):
+        r.ok("updater-gitplucker present (self-update ready).")
+    else:
+        r.fail("updater-gitplucker NOT installed — self-update will be unavailable.")
+
+    # ── Optional groups: isolate each so a failure doesn't block the others ──
+    for g in OPTIONAL_GROUPS:
+        if g["key"] not in selected_optional_keys:
+            continue
+        r.info(f"Installing optional: {g['label']}…")
+        subprocess.run([str(py), "-m", "pip", "install", *g["pkgs"]], check=False)
+        gone = _missing(py, g["pkgs"])
+        if gone:
+            r.warn(f"{g['label']}: not fully installed ({', '.join(_dist_name(x) for x in gone)}).")
+        else:
+            r.ok(f"{g['label']} installed.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# [5] Helper scripts (platform-specific)
+# Generated helper scripts + launchers + manifest
 # ══════════════════════════════════════════════════════════════════════════════
 
-_WIN_HELPERS = {
-    "open_env.bat": r'''@echo off
+# OS-specific canonical launch-script names (must match shortcuts._run_script()).
+RUN_SCRIPT = "run.bat" if IS_WIN else ("run.command" if IS_MAC else "run.sh")
+OPENENV_SCRIPT = "open_env.bat" if IS_WIN else ("open_env.command" if IS_MAC else "open_env.sh")
+_AS_ADD = "add_autostart.bat" if IS_WIN else "add_autostart.sh"
+_AS_REMOVE = "remove_autostart.bat" if IS_WIN else "remove_autostart.sh"
+MANIFEST_NAME = "__DO_NOT_DELETE__.txt"
+
+# ── Windows ──
+_WIN_OPEN_ENV = r'''@echo off
 start "" cmd /k "%~dp0.venv\Scripts\activate.bat"
-''',
-    "run.bat": r'''@echo off
+'''
+_WIN_RUN = r'''@echo off
 cd /d "%~dp0"
 call "%~dp0.venv\Scripts\activate.bat"
 python "%~dp0main.py"
 pause
-''',
-    "add_autostart.bat": r'''@echo off
-REM Adds Systema Auxilium to start at THIS user's login — per-user, NO admin.
-REM Drops a shortcut in the user's Startup folder that launches run.bat on login.
-set "SCRIPT_DIR=%~dp0"
-set "RUN_BAT=%SCRIPT_DIR%run.bat"
-set "ICON=%SCRIPT_DIR%assets\systema_auxilium.ico"
-set "STARTUP=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
-set "LNK=%STARTUP%\Systema Auxilium.lnk"
-REM Best-effort: clear any legacy admin scheduled task from older setups.
-schtasks /delete /tn "SystemaAuxilium_AutoStart" /f >nul 2>&1
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut('%LNK%'); $s.TargetPath = '%RUN_BAT%'; $s.WorkingDirectory = '%SCRIPT_DIR%'; $s.IconLocation = '%ICON%'; $s.WindowStyle = 7; $s.Description = 'Systema Auxilium - start at login'; $s.Save()"
-if exist "%LNK%" (
-    echo Autostart enabled for this user only ^(no admin^).
-    echo Shortcut: %LNK%
-    echo Systema Auxilium will launch on next login.
-) else (
-    echo Failed to create the autostart shortcut.
-)
+'''
+# Autostart wrappers go through the shared module so behaviour == Settings.
+_WIN_ADD_AUTOSTART = r'''@echo off
+setlocal
+cd /d "%~dp0"
+set "PY=%~dp0.venv\Scripts\python.exe"
+if not exist "%PY%" set "PY=python"
+"%PY%" -c "import sys,os; sys.path.insert(0, os.getcwd()); from systema.common import autostart as a; ok,msg=a.enable_autostart(); print(msg)"
 pause
-''',
-    "remove_autostart.bat": r'''@echo off
-REM Removes Systema Auxilium from THIS user's login autostart (per-user).
-set "STARTUP=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
-set "LNK=%STARTUP%\Systema Auxilium.lnk"
-REM Best-effort: also clear any legacy admin scheduled task from older setups.
-schtasks /delete /tn "SystemaAuxilium_AutoStart" /f >nul 2>&1
-if exist "%LNK%" (
-    del "%LNK%"
-    echo Autostart entry removed: %LNK%
-) else (
-    echo No autostart entry found at: %LNK%
-)
+'''
+_WIN_REMOVE_AUTOSTART = r'''@echo off
+setlocal
+cd /d "%~dp0"
+set "PY=%~dp0.venv\Scripts\python.exe"
+if not exist "%PY%" set "PY=python"
+"%PY%" -c "import sys,os; sys.path.insert(0, os.getcwd()); from systema.common import autostart as a; ok,msg=a.disable_autostart(); print(msg)"
 pause
-''',
-}
+'''
 
-_NIX_HELPERS_BASE = {
-    "open_env.sh": r'''#!/bin/bash
+# ── POSIX (Linux + macOS) ──
+_NIX_OPEN_ENV = r'''#!/bin/bash
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 bash --rcfile <(echo "source \"$SCRIPT_DIR/.venv/bin/activate\"; echo 'Systema Auxilium venv activated.'")
-''',
-    "run.sh": r'''#!/bin/bash
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/.venv/bin/activate"
-python "$SCRIPT_DIR/main.py"
-''',
-}
-
-_LINUX_ADD_AUTOSTART = r'''#!/bin/bash
-# Adds Systema Auxilium to autostart via XDG autostart (.desktop file)
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUN_SH="$SCRIPT_DIR/run.sh"
-AUTOSTART_DIR="$HOME/.config/autostart"
-DESKTOP_FILE="$AUTOSTART_DIR/systema-auxilium.desktop"
-mkdir -p "$AUTOSTART_DIR"
-cat > "$DESKTOP_FILE" << DESKTOP
-[Desktop Entry]
-Type=Application
-Name=Systema Auxilium
-Exec=bash "$RUN_SH"
-Terminal=false
-Hidden=false
-NoDisplay=false
-X-GNOME-Autostart-enabled=true
-Comment=Systema Auxilium AI Desktop Assistant
-DESKTOP
-echo "Autostart entry created at: $DESKTOP_FILE"
-echo "Systema Auxilium will launch on next login."
 '''
-
-_LINUX_REMOVE_AUTOSTART = r'''#!/bin/bash
-DESKTOP_FILE="$HOME/.config/autostart/systema-auxilium.desktop"
-if [ -f "$DESKTOP_FILE" ]; then
-    rm "$DESKTOP_FILE"
-    echo "Autostart entry removed: $DESKTOP_FILE"
+# Launch DETACHED — no clinging terminal. The app redirects its own session log
+# to data/logs/ (Python-level _Tee), so detaching loses nothing.
+_NIX_RUN = r'''#!/bin/bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+VENVPY="$SCRIPT_DIR/.venv/bin/python"
+[ -x "$VENVPY" ] || VENVPY="$(command -v python3 || command -v python)"
+if command -v setsid >/dev/null 2>&1; then
+    setsid nohup "$VENVPY" "$SCRIPT_DIR/main.py" >/dev/null 2>&1 </dev/null &
 else
-    echo "No autostart entry found at: $DESKTOP_FILE"
+    nohup "$VENVPY" "$SCRIPT_DIR/main.py" >/dev/null 2>&1 </dev/null &
 fi
+disown 2>/dev/null || true
 '''
-
-_MAC_ADD_AUTOSTART = r'''#!/bin/bash
-# Adds Systema Auxilium to autostart via launchd (native macOS)
+_NIX_ADD_AUTOSTART = r'''#!/bin/bash
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUN_SH="$SCRIPT_DIR/run.sh"
-APP_LABEL="com.nic2007.systema-auxilium"
-PLIST_PATH="$HOME/Library/LaunchAgents/$APP_LABEL.plist"
-UID_NUM="$(id -u)"
-mkdir -p "$HOME/Library/LaunchAgents"
-cat > "$PLIST_PATH" << PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>$APP_LABEL</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/bin/bash</string>
-        <string>$RUN_SH</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <false/>
-    <key>StandardOutPath</key>
-    <string>$HOME/Library/Logs/systema-auxilium.log</string>
-    <key>StandardErrorPath</key>
-    <string>$HOME/Library/Logs/systema-auxilium-error.log</string>
-</dict>
-</plist>
-PLIST
-# Modern API first (macOS 10.10+), fall back to legacy load for old systems.
-launchctl bootout "gui/$UID_NUM/$APP_LABEL" 2>/dev/null
-if ! launchctl bootstrap "gui/$UID_NUM" "$PLIST_PATH" 2>/dev/null; then
-    launchctl load "$PLIST_PATH"
-fi
-echo "Autostart registered with launchd: $PLIST_PATH"
-echo "Systema Auxilium will launch on next login."
-echo "Logs: ~/Library/Logs/systema-auxilium.log"
+cd "$SCRIPT_DIR"
+PY="$SCRIPT_DIR/.venv/bin/python"
+[ -x "$PY" ] || PY="$(command -v python3 || command -v python)"
+"$PY" -c "import sys,os; sys.path.insert(0, os.getcwd()); from systema.common import autostart as a; ok,msg=a.enable_autostart(); print(msg)"
+'''
+_NIX_REMOVE_AUTOSTART = r'''#!/bin/bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+PY="$SCRIPT_DIR/.venv/bin/python"
+[ -x "$PY" ] || PY="$(command -v python3 || command -v python)"
+"$PY" -c "import sys,os; sys.path.insert(0, os.getcwd()); from systema.common import autostart as a; ok,msg=a.disable_autostart(); print(msg)"
 '''
 
-_MAC_REMOVE_AUTOSTART = r'''#!/bin/bash
-APP_LABEL="com.nic2007.systema-auxilium"
-PLIST_PATH="$HOME/Library/LaunchAgents/$APP_LABEL.plist"
-UID_NUM="$(id -u)"
-if [ -f "$PLIST_PATH" ]; then
-    if ! launchctl bootout "gui/$UID_NUM/$APP_LABEL" 2>/dev/null; then
-        launchctl unload "$PLIST_PATH" 2>/dev/null
-    fi
-    rm "$PLIST_PATH"
-    echo "Autostart entry removed: $PLIST_PATH"
-else
-    echo "No autostart entry found at: $PLIST_PATH"
-fi
+_MAC_OPENENV_COMMAND = r'''#!/bin/bash
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$DIR/.venv/bin/activate"
+echo "Systema Auxilium venv activated."
+exec "$SHELL"
 '''
 
 
-def write_helpers():
-    step("[5/6] Generating helper scripts")
+def _linux_desktop_launcher() -> str:
+    """Double-click .desktop entry with this install's paths baked in."""
+    run_sh = ROOT / RUN_SCRIPT
+    icon = ROOT / "assets" / "systema_auxilium.ico"
+    return (
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Version=1.0\n"
+        "Name=Systema Auxilium\n"
+        "GenericName=AI Desktop Assistant\n"
+        "Comment=Systema Auxilium AI Desktop Assistant\n"
+        f'Exec=bash "{run_sh}"\n'
+        f"Path={ROOT}\n"
+        f"Icon={icon}\n"
+        "Terminal=false\n"
+        "Categories=Utility;\n"
+    )
+
+
+def generated_files() -> list:
+    """Every file setup.py generates for THIS OS (for the manifest + uninstall)."""
     if IS_WIN:
-        helpers = dict(_WIN_HELPERS)
+        names = [OPENENV_SCRIPT, RUN_SCRIPT, _AS_ADD, _AS_REMOVE]
+    elif IS_MAC:
+        names = [OPENENV_SCRIPT, RUN_SCRIPT, _AS_ADD, _AS_REMOVE]
     else:
-        helpers = dict(_NIX_HELPERS_BASE)
-        if IS_MAC:
-            helpers["add_autostart.sh"] = _MAC_ADD_AUTOSTART
-            helpers["remove_autostart.sh"] = _MAC_REMOVE_AUTOSTART
-        else:
-            helpers["add_autostart.sh"] = _LINUX_ADD_AUTOSTART
-            helpers["remove_autostart.sh"] = _LINUX_REMOVE_AUTOSTART
+        names = [OPENENV_SCRIPT, RUN_SCRIPT, _AS_ADD, _AS_REMOVE, "Systema Auxilium.desktop"]
+    names.append(MANIFEST_NAME)
+    return names
+
+
+def _manifest_content() -> str:
+    launch = "run.bat" if IS_WIN else ("bash run.command" if IS_MAC else "bash run.sh")
+    recover = "python setup.py --recover" if IS_WIN else "python3 setup.py --recover"
+    scripts = "  ".join(generated_files())
+    return (
+        "DO NOT DELETE THESE FILES\n"
+        "=========================\n\n"
+        "Systema Auxilium and its ecosystem depend on the files below. Deleting any\n"
+        "of them breaks a feature — none are safe to remove.\n\n"
+        "Generated launch / helper scripts (regenerate with recovery, see bottom):\n"
+        f"    {scripts}\n"
+        "  - The in-app \"Restart\" button and start-at-login relaunch through the\n"
+        f"    run script ({RUN_SCRIPT}).\n"
+        "  - The desktop shortcut and double-click launcher call the run script.\n\n"
+        "Core files that must never be deleted:\n"
+        "    requirements.txt   - read by the in-app self-updater to install new\n"
+        "                         dependencies after an update; also `pip install -r`.\n"
+        "                         It is AUTO-GENERATED by setup.py — do not hand-edit.\n"
+        "    main.py            - the application entry point.\n"
+        "    systema/           - the application package (all of the app's code).\n"
+        "    assets/            - icons used by the app, shortcuts and launchers.\n"
+        "    data/              - your sessions, chat history, logs and settings.\n"
+        "                         Deleting this erases your history and configuration.\n"
+        "    setup.py           - regenerates the helper scripts and this file.\n\n"
+        "If a generated script is ever lost, you do NOT need to reinstall — regenerate\n"
+        "all of them (your .venv and installed packages are left untouched):\n\n"
+        f"    {recover}\n\n"
+        f"To launch the app:  {launch}\n\n"
+        "This reminder file itself is safe to delete — the files listed above are not.\n"
+    )
+
+
+def write_helpers(r: Reporter):
+    r.step("Generating helper scripts")
+    if IS_WIN:
+        helpers = {OPENENV_SCRIPT: _WIN_OPEN_ENV, RUN_SCRIPT: _WIN_RUN,
+                   _AS_ADD: _WIN_ADD_AUTOSTART, _AS_REMOVE: _WIN_REMOVE_AUTOSTART}
+    else:
+        helpers = {RUN_SCRIPT: _NIX_RUN, _AS_ADD: _NIX_ADD_AUTOSTART,
+                   _AS_REMOVE: _NIX_REMOVE_AUTOSTART}
+        helpers[OPENENV_SCRIPT] = _MAC_OPENENV_COMMAND if IS_MAC else _NIX_OPEN_ENV
     for name, content in helpers.items():
         path = ROOT / name
         path.write_text(content, encoding="utf-8")
         if not IS_WIN:
             os.chmod(path, 0o755)
-        ok(name)
-    print()
+        r.ok(name)
+    if IS_LINUX:
+        path = ROOT / "Systema Auxilium.desktop"
+        path.write_text(_linux_desktop_launcher(), encoding="utf-8")
+        os.chmod(path, 0o755)
+        r.ok("Systema Auxilium.desktop")
+
+    # Regenerate the canonical requirements.txt from the catalogue (single source).
+    (ROOT / "requirements.txt").write_text(generate_requirements(), encoding="utf-8")
+    r.ok("requirements.txt (generated)")
+
+    # Reminder note listing every ecosystem-critical file.
+    (ROOT / MANIFEST_NAME).write_text(_manifest_content(), encoding="utf-8")
+    r.ok(MANIFEST_NAME)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Pre-configuration application (shortcut + autostart)
+# Shortcut / autostart / uninstall — via the shared modules (== Settings)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _load_shortcuts_module():
-    """Import the stdlib-only shortcut manager directly from its file, avoiding
-    a full `import systema` (which would pull in PyQt6 & friends)."""
-    path = ROOT / "systema" / "common" / "shortcuts.py"
-    if not path.exists():
-        return None
-    try:
-        spec = importlib.util.spec_from_file_location("sa_shortcuts", path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return mod
-    except Exception:
-        return None
-
-
-def apply_preconfig(choices):
-    """choices: dict of key->bool for the PRECONFIG items."""
-    if not any(choices.get(k) for k in ("shortcut", "autostart")):
+def do_shortcut(create: bool, as_admin: bool, r: Reporter):
+    sc, _ = load_app_modules()
+    if sc is None:
+        r.fail("Shortcut module unavailable (systema/common/shortcuts.py).")
         return
-    step("[6/6] Applying pre-configuration")
-
-    if choices.get("shortcut"):
-        sc = _load_shortcuts_module()
-        if sc is None:
-            warn("Shortcut module unavailable — skipping desktop shortcut.")
-        else:
-            ok_flag, msg = sc.create_shortcut(as_admin=bool(choices.get("admin")))
-            (ok if ok_flag else warn)(msg)
-
-    if choices.get("autostart"):
-        script = ROOT / ("add_autostart.bat" if IS_WIN else "add_autostart.sh")
-        if not script.exists():
-            warn("Autostart helper missing — skipping.")
-        else:
-            try:
-                if IS_WIN:
-                    subprocess.run(["cmd", "/c", str(script)], check=False)
-                else:
-                    subprocess.run(["bash", str(script)], check=False)
-                ok("Autostart registered.")
-            except Exception as e:
-                warn(f"Could not enable autostart automatically: {e}")
-                warn(f"Run it manually later: {script.name}")
-    print()
+    ok, msg = (sc.set_admin(as_admin) if create else sc.remove_shortcut())
+    (r.ok if ok else r.fail)(msg)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Verify + optional self-hide
-# ══════════════════════════════════════════════════════════════════════════════
+def do_autostart(enable: bool, as_admin: bool, r: Reporter):
+    _, aut = load_app_modules()
+    if aut is None:
+        r.fail("Autostart module unavailable (systema/common/autostart.py).")
+        return
+    if enable and as_admin:
+        r.warn("Admin autostart prompts for elevation at EVERY login — normal is recommended.")
+    ok, msg = (aut.set_admin(as_admin) if enable else aut.disable_autostart())
+    (r.ok if ok else r.fail)(msg)
 
-def verify():
+
+def uninstall_clean(remove_venv: bool, r: Reporter):
+    """Remove generated scripts + autostart + desktop shortcut (+ optionally the
+    venv). NEVER touches data/, main.py or the systema/ source."""
+    r.step("Uninstall / clean")
+    sc, aut = load_app_modules()
+    if aut is not None:
+        try:
+            ok, msg = aut.disable_autostart(); r.ok(f"autostart: {msg}")
+        except Exception as e:
+            r.warn(f"autostart: {e}")
+    if sc is not None:
+        try:
+            ok, msg = sc.remove_shortcut(); r.ok(f"shortcut: {msg}")
+        except Exception as e:
+            r.warn(f"shortcut: {e}")
+    for name in generated_files():
+        p = ROOT / name
+        try:
+            if p.exists():
+                p.unlink(); r.ok(f"removed {name}")
+        except Exception as e:
+            r.warn(f"could not remove {name}: {e}")
+    if remove_venv and VENV.exists():
+        try:
+            shutil.rmtree(VENV); r.ok("removed .venv")
+        except Exception as e:
+            r.warn(f"could not remove .venv: {e}")
+    r.info("Left untouched: data/, main.py, systema/, assets/, requirements.txt.")
+
+
+def verify(r: Reporter):
     py = venv_python()
     if py.exists():
-        r = subprocess.run([str(py), "--version"], capture_output=True, text=True)
-        ok(f"venv ready: {(r.stdout or r.stderr).strip()}")
+        res = subprocess.run([str(py), "--version"], capture_output=True, text=True)
+        r.ok(f"venv ready: {(res.stdout or res.stderr).strip()}")
     else:
-        warn("venv python missing — setup may be incomplete.")
-    print()
+        r.warn("venv python missing — setup may be incomplete.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Orchestrated flows
+# ══════════════════════════════════════════════════════════════════════════════
+
+def run_full_setup(selected_optional_keys, preconfig, r: Reporter):
+    """preconfig: dict with keys shortcut/admin/autostart (bools)."""
+    try:
+        create_venv(r)
+        install_deps(selected_optional_keys, r)
+        write_helpers(r)
+        as_admin = bool(preconfig.get("admin"))
+        if preconfig.get("shortcut"):
+            do_shortcut(True, as_admin, r)
+        if preconfig.get("autostart"):
+            do_autostart(True, as_admin, r)
+        verify(r)
+        r.step("Setup complete")
+        r.ok(f"Launch with: {'run.bat' if IS_WIN else 'bash ' + RUN_SCRIPT}")
+        r.info(f"Lost a script later? Regenerate with: "
+               f"{'python' if IS_WIN else 'python3'} setup.py --recover")
+    except subprocess.CalledProcessError as e:
+        r.fail(f"Error during setup: {e}")
+    except Exception as e:
+        r.fail(f"Unexpected error: {e}")
+
+
+def run_recovery(r: Reporter):
+    """Regenerate helper scripts / launchers / requirements.txt / manifest only —
+    venv and installed packages untouched."""
+    r.step("Script recovery — regenerating helper scripts only")
+    write_helpers(r)
+    r.ok("Recovery complete (venv + packages left untouched).")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Frontend: terminal (robust numbered menus — no raw mode, no screen clears)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _ask(prompt, default=""):
+    try:
+        ans = input(prompt).strip()
+    except EOFError:
+        return default
+    return ans or default
+
+
+def _ask_yes_no(question, default_yes=True):
+    ans = _ask(f"{question} {'[Y/n]' if default_yes else '[y/N]'} ").lower()
+    if not ans:
+        return default_yes
+    return ans in ("y", "yes")
+
+
+def _pick_privilege() -> bool:
+    """Return True for admin, False for normal."""
+    ans = _ask("  Privilege — [1] Normal (recommended)  [2] Run as administrator: ", "1")
+    return ans.strip() == "2"
+
+
+def _select_optionals_terminal():
+    print(c("\nOptional feature modules (essentials are always installed):", "bold"))
+    for i, g in enumerate(OPTIONAL_GROUPS, 1):
+        mark = "on " if g["default"] else "off"
+        print(f"  {i}) [{mark}] {g['label']}")
+        print(c(f"        {g['desc']}", "grey"))
+    print(c("  Enter numbers to TOGGLE (e.g. 1,3), 'a'=all, 'n'=none, blank=accept defaults.",
+            "grey"))
+    checked = {g["key"]: g["default"] for g in OPTIONAL_GROUPS}
+    ans = _ask("  > ").lower()
+    if ans == "a":
+        checked = {g["key"]: True for g in OPTIONAL_GROUPS}
+    elif ans == "n":
+        checked = {g["key"]: False for g in OPTIONAL_GROUPS}
+    elif ans:
+        for tok in ans.replace(" ", "").split(","):
+            if tok.isdigit() and 1 <= int(tok) <= len(OPTIONAL_GROUPS):
+                k = OPTIONAL_GROUPS[int(tok) - 1]["key"]
+                checked[k] = not checked[k]
+    return {k for k, v in checked.items() if v}
+
+
+def _select_preconfig_terminal():
+    print(c("\nPre-configuration:", "bold"))
+    shortcut = _ask_yes_no("  Create a Desktop shortcut?", True)
+    autostart = _ask_yes_no("  Start automatically at login?", False)
+    admin = False
+    if shortcut or autostart:
+        admin = _pick_privilege()
+    return {"shortcut": shortcut, "autostart": autostart, "admin": admin}
+
+
+def terminal_main():
+    r = ConsoleReporter()
+    print(c("\n  Systema Auxilium — Setup", "cyan", "bold"))
+    print(c(f"  {SYSTEM} · Python {platform.python_version()}", "grey"))
+    if _import_tk_error:
+        print(c(f"  (GUI unavailable: {_import_tk_error} — using terminal mode)", "grey"))
+    while True:
+        print(c("\n" + "─" * 60, "grey"))
+        print("  1) Set up / install")
+        print("  2) Recover run scripts")
+        print("  3) Autostart  (enable / disable)")
+        print("  4) Desktop shortcut  (create / remove)")
+        print("  5) Uninstall / clean")
+        print("  6) Quit")
+        choice = _ask(c("  Choose [1-6]: ", "bold"))
+        if choice == "1":
+            opt = _select_optionals_terminal()
+            pre = _select_preconfig_terminal()
+            print()
+            run_full_setup(opt, pre, r)
+            maybe_hide_self()
+        elif choice == "2":
+            run_recovery(r)
+        elif choice == "3":
+            if _ask_yes_no("  Enable autostart? (No = disable)", True):
+                do_autostart(True, _pick_privilege(), r)
+            else:
+                do_autostart(False, False, r)
+        elif choice == "4":
+            if _ask_yes_no("  Create/update shortcut? (No = remove)", True):
+                do_shortcut(True, _pick_privilege(), r)
+            else:
+                do_shortcut(False, False, r)
+        elif choice == "5":
+            if _ask_yes_no("  Remove generated scripts, autostart & shortcut?", False):
+                uninstall_clean(_ask_yes_no("  Also delete the .venv?", False), r)
+        elif choice in ("6", "q", "quit", ""):
+            print(c("  Bye.", "grey"))
+            return
+        else:
+            print(c("  Unknown choice.", "yellow"))
 
 
 def maybe_hide_self():
-    if _ask_yes_no("Hide setup.py (move it into setup-scripts/)?", default_yes=False):
+    if _ask_yes_no("\nHide setup.py (move it into setup-scripts/)?", default_yes=False):
         ARCHIVE_DIR.mkdir(exist_ok=True)
         target = ARCHIVE_DIR / "setup.py"
         try:
             shutil.move(str(Path(__file__).resolve()), str(target))
-            ok(f"setup.py moved to {target.relative_to(ROOT)}.")
-            print(c("     Re-run later with:  python setup-scripts/setup.py", "grey"))
+            print(c(f"  setup.py moved to {target.relative_to(ROOT)}.", "green"))
+            print(c("  Re-run later with:  python setup-scripts/setup.py", "grey"))
         except Exception as e:
-            warn(f"Could not move setup.py: {e}")
-    else:
-        ok("setup.py kept in the project root for easy re-runs.")
+            print(c(f"  Could not move setup.py: {e}", "yellow"))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Orchestration
+# Frontend: tkinter GUI  (minimal, dark; falls back to terminal when unavailable)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def gather_choices():
-    """Run the two TUI pickers; return (packages, preconfig_choices)."""
-    # ── Module picker ──
-    mod_items = [{"label": f"Core essentials ({len(ESSENTIAL)} packages)",
-                  "desc": "PyQt6 GUI, voice, memory, AI provider SDKs — required",
-                  "checked": True, "locked": True}]
-    for g in OPTIONAL_GROUPS:
-        mod_items.append({"label": g["label"], "desc": g["desc"],
-                          "checked": g["default"], "locked": False, "_key": g["key"]})
-    mod_items = checklist(
-        "Select optional feature modules",
-        mod_items,
-        subtitle="Essentials are locked. Toggle the extras you want, then press Enter.")
-
-    packages = list(ESSENTIAL)
-    selected = {it.get("_key") for it in mod_items if it.get("_key") and it["checked"]}
-    for g in OPTIONAL_GROUPS:
-        if g["key"] in selected:
-            packages.extend(g["pkgs"])
-
-    # ── Pre-configuration picker ──
-    pre_items = [{"label": p["label"], "desc": p["desc"],
-                  "checked": p["default"], "locked": False, "_key": p["key"]}
-                 for p in PRECONFIG]
-    pre_items = checklist(
-        "Pre-configuration",
-        pre_items,
-        subtitle="Optional finishing steps. Toggle, then press Enter.")
-    choices = {it["_key"]: it["checked"] for it in pre_items}
-    if not choices.get("shortcut"):
-        choices["admin"] = False   # admin sub-option only meaningful with a shortcut
-    return packages, choices
+_import_tk_error = ""
 
 
-def final_summary():
-    print(c("  " + "─" * 74, "grey"))
-    print(c("  ✓ Setup complete!", "green", "bold"))
-    print()
-    print("  You can now:")
-    if IS_WIN:
-        print(c("    • Run the app:        ", "grey") + "run.bat")
-        print(c("    • Open venv terminal: ", "grey") + "open_env.bat")
-        print(c("    • Enable autostart:   ", "grey") + "add_autostart.bat (per-user, no admin)")
-        print(c("    • Disable autostart:  ", "grey") + "remove_autostart.bat")
-    else:
-        print(c("    • Run the app:        ", "grey") + "bash run.sh")
-        print(c("    • Open venv terminal: ", "grey") + "bash open_env.sh")
-        print(c("    • Enable autostart:   ", "grey") + "bash add_autostart.sh")
-        print(c("    • Disable autostart:  ", "grey") + "bash remove_autostart.sh")
-        if IS_MAC:
-            print()
-            print(c("    macOS may ask permission to control your computer — grant it in", "grey"))
-            print(c("    System Settings → Privacy & Security → Accessibility.", "grey"))
-    print()
+def gui_available() -> bool:
+    global _import_tk_error
+    if "--cli" in sys.argv:
+        _import_tk_error = "forced --cli"
+        return False
+    try:
+        import tkinter  # noqa: F401
+    except Exception as e:
+        _import_tk_error = f"tkinter not installed ({e})"
+        return False
+    if IS_LINUX and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        _import_tk_error = "no display (DISPLAY/WAYLAND unset)"
+        return False
+    try:
+        root = tkinter.Tk()
+        root.withdraw()
+        root.destroy()
+        return True
+    except Exception as e:
+        _import_tk_error = f"cannot open a window ({e})"
+        return False
 
+
+# Palette
+_BG = "#0d1117"; _SURF = "#161b22"; _ELEV = "#1c2330"; _BORDER = "#2b3444"
+_TEXT = "#e6edf3"; _MUTED = "#8b98a9"; _ACCENT = "#4aa8ff"; _GREEN = "#3fb950"
+_RED = "#f85149"; _YELLOW = "#d29922"
+
+
+class SetupGUI:
+    def __init__(self):
+        import tkinter as tk
+        self.tk = tk
+        self.root = tk.Tk()
+        self.root.title("Systema Auxilium — Setup")
+        self.root.configure(bg=_BG)
+        self.root.geometry("760x600")
+        self.root.minsize(680, 520)
+        self.q = queue.Queue()
+        self._busy = False
+        self._build_header()
+        self.body = tk.Frame(self.root, bg=_BG)
+        self.body.pack(fill="both", expand=True, padx=18, pady=(0, 14))
+        self.show_landing()
+        self.root.after(80, self._pump)
+
+    # ── chrome ──
+    def _build_header(self):
+        tk = self.tk
+        head = tk.Frame(self.root, bg=_BG)
+        head.pack(fill="x", padx=18, pady=(16, 8))
+        tk.Label(head, text="Systema Auxilium", bg=_BG, fg=_TEXT,
+                 font=("Segoe UI", 20, "bold")).pack(anchor="w")
+        tk.Label(head, text=f"Cross-platform installer  ·  {SYSTEM}  ·  "
+                 f"Python {platform.python_version()}",
+                 bg=_BG, fg=_MUTED, font=("Segoe UI", 10)).pack(anchor="w")
+        sep = tk.Frame(self.root, bg=_BORDER, height=1)
+        sep.pack(fill="x", padx=18, pady=(6, 10))
+
+    def _btn(self, parent, text, cmd, kind="normal"):
+        tk = self.tk
+        fg = "#05070a" if kind == "accent" else _TEXT
+        bg = _ACCENT if kind == "accent" else _ELEV
+        b = tk.Button(parent, text=text, command=cmd, fg=fg, bg=bg,
+                      activebackground=_ACCENT if kind == "accent" else _SURF,
+                      activeforeground=fg, relief="flat", bd=0, cursor="hand2",
+                      font=("Segoe UI", 11, "bold" if kind == "accent" else "normal"),
+                      padx=16, pady=12, anchor="w", justify="left")
+        return b
+
+    def _clear_body(self):
+        for w in self.body.winfo_children():
+            w.destroy()
+
+    # ── landing ──
+    def show_landing(self):
+        tk = self.tk
+        self._clear_body()
+        rows = [
+            ("Set up / Install", lambda: self.show_setup(), "accent",
+             "Create the .venv, install modules, generate scripts."),
+            ("Recover run scripts", lambda: self._run(lambda r: run_recovery(r)), "normal",
+             "Regenerate run / launch scripts + requirements.txt (venv untouched)."),
+            ("Autostart…", lambda: self.show_privilege("autostart"), "normal",
+             "Enable or disable start-at-login (normal or admin)."),
+            ("Desktop shortcut…", lambda: self.show_privilege("shortcut"), "normal",
+             "Create/update or remove the desktop shortcut (normal or admin)."),
+            ("Uninstall / clean", lambda: self.confirm_uninstall(), "normal",
+             "Remove generated scripts, autostart, shortcut (and optionally .venv)."),
+            ("Quit", self.root.destroy, "normal", ""),
+        ]
+        for text, cmd, kind, desc in rows:
+            card = tk.Frame(self.body, bg=_BG)
+            card.pack(fill="x", pady=5)
+            b = self._btn(card, text, cmd, kind)
+            b.pack(fill="x")
+            if desc:
+                tk.Label(card, text=desc, bg=_BG, fg=_MUTED, font=("Segoe UI", 9),
+                         anchor="w").pack(fill="x", padx=4, pady=(2, 0))
+
+    # ── setup view ──
+    def show_setup(self):
+        tk = self.tk
+        self._clear_body()
+        canvas_wrap = tk.Frame(self.body, bg=_BG)
+        canvas_wrap.pack(fill="both", expand=True)
+        tk.Label(canvas_wrap, text="Optional feature modules", bg=_BG, fg=_TEXT,
+                 font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(2, 2))
+        tk.Label(canvas_wrap, text="Essentials are always installed. Toggle the extras you want.",
+                 bg=_BG, fg=_MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 6))
+        self._opt_vars = {}
+        for g in OPTIONAL_GROUPS:
+            v = tk.BooleanVar(value=g["default"])
+            self._opt_vars[g["key"]] = v
+            cb = tk.Checkbutton(canvas_wrap, text=f"  {g['label']}", variable=v,
+                                bg=_BG, fg=_TEXT, selectcolor=_ELEV, activebackground=_BG,
+                                activeforeground=_TEXT, font=("Segoe UI", 10),
+                                anchor="w", highlightthickness=0, bd=0)
+            cb.pack(fill="x")
+            tk.Label(canvas_wrap, text=f"       {g['desc']}", bg=_BG, fg=_MUTED,
+                     font=("Segoe UI", 8), anchor="w").pack(fill="x", pady=(0, 3))
+
+        tk.Frame(canvas_wrap, bg=_BORDER, height=1).pack(fill="x", pady=8)
+        tk.Label(canvas_wrap, text="Finishing steps", bg=_BG, fg=_TEXT,
+                 font=("Segoe UI", 12, "bold")).pack(anchor="w")
+        self._sc_var = tk.BooleanVar(value=True)
+        self._as_var = tk.BooleanVar(value=False)
+        self._admin_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(canvas_wrap, text="  Create a Desktop shortcut", variable=self._sc_var,
+                       bg=_BG, fg=_TEXT, selectcolor=_ELEV, activebackground=_BG,
+                       activeforeground=_TEXT, font=("Segoe UI", 10), anchor="w",
+                       highlightthickness=0, bd=0).pack(fill="x")
+        tk.Checkbutton(canvas_wrap, text="  Start automatically at login", variable=self._as_var,
+                       bg=_BG, fg=_TEXT, selectcolor=_ELEV, activebackground=_BG,
+                       activeforeground=_TEXT, font=("Segoe UI", 10), anchor="w",
+                       highlightthickness=0, bd=0).pack(fill="x")
+        tk.Checkbutton(canvas_wrap, text="  Run those as administrator (elevation prompt each launch)",
+                       variable=self._admin_var, bg=_BG, fg=_YELLOW, selectcolor=_ELEV,
+                       activebackground=_BG, activeforeground=_YELLOW, font=("Segoe UI", 9),
+                       anchor="w", highlightthickness=0, bd=0).pack(fill="x")
+
+        row = tk.Frame(canvas_wrap, bg=_BG)
+        row.pack(fill="x", pady=(12, 0))
+        self._btn(row, "Begin setup", self._begin_setup, "accent").pack(side="left")
+        self._btn(row, "Back", self.show_landing, "normal").pack(side="left", padx=(8, 0))
+
+    def _begin_setup(self):
+        opt = {k for k, v in self._opt_vars.items() if v.get()}
+        pre = {"shortcut": self._sc_var.get(), "autostart": self._as_var.get(),
+               "admin": self._admin_var.get()}
+        self._run(lambda r: run_full_setup(opt, pre, r))
+
+    # ── privilege sub-view (autostart / shortcut) ──
+    def show_privilege(self, kind):
+        tk = self.tk
+        self._clear_body()
+        title = "Autostart" if kind == "autostart" else "Desktop shortcut"
+        tk.Label(self.body, text=title, bg=_BG, fg=_TEXT,
+                 font=("Segoe UI", 14, "bold")).pack(anchor="w", pady=(4, 2))
+        # live status
+        status = self._status_text(kind)
+        tk.Label(self.body, text=status, bg=_BG, fg=_MUTED, font=("Segoe UI", 9),
+                 anchor="w", justify="left", wraplength=680).pack(anchor="w", pady=(0, 10))
+        priv = tk.StringVar(value="normal")
+        for val, label in (("normal", "Normal privileges"),
+                           ("admin", "Run as administrator (elevation prompt each launch)")):
+            tk.Radiobutton(self.body, text="  " + label, variable=priv, value=val,
+                           bg=_BG, fg=_TEXT if val == "normal" else _YELLOW, selectcolor=_ELEV,
+                           activebackground=_BG, font=("Segoe UI", 10), anchor="w",
+                           highlightthickness=0, bd=0).pack(fill="x")
+        row = tk.Frame(self.body, bg=_BG)
+        row.pack(fill="x", pady=(12, 0))
+        if kind == "autostart":
+            self._btn(row, "Enable", lambda: self._run(
+                lambda r: do_autostart(True, priv.get() == "admin", r)), "accent").pack(side="left")
+            self._btn(row, "Disable", lambda: self._run(
+                lambda r: do_autostart(False, False, r)), "normal").pack(side="left", padx=(8, 0))
+        else:
+            self._btn(row, "Create / Update", lambda: self._run(
+                lambda r: do_shortcut(True, priv.get() == "admin", r)), "accent").pack(side="left")
+            self._btn(row, "Remove", lambda: self._run(
+                lambda r: do_shortcut(False, False, r)), "normal").pack(side="left", padx=(8, 0))
+        self._btn(row, "Back", self.show_landing, "normal").pack(side="right")
+
+    def _status_text(self, kind):
+        sc, aut = load_app_modules()
+        try:
+            if kind == "autostart" and aut is not None:
+                st = aut.status()
+                if st["enabled"]:
+                    return f"Currently: enabled ({'administrator' if st['admin'] else 'normal'})."
+                return "Currently: not set to start at login."
+            if kind == "shortcut" and sc is not None:
+                st = sc.status()
+                if st["exists"]:
+                    return f"Currently: shortcut present ({'administrator' if st['admin'] else 'normal'})."
+                return "Currently: no desktop shortcut."
+        except Exception as e:
+            return f"Status unavailable: {e}"
+        return ""
+
+    def confirm_uninstall(self):
+        from tkinter import messagebox
+        if not messagebox.askyesno(
+                "Uninstall / clean",
+                "Remove the generated scripts, autostart entry and desktop shortcut?\n\n"
+                "Your data/ (history, logs, settings), main.py and the systema/ source "
+                "are NOT touched."):
+            return
+        rm_venv = messagebox.askyesno("Uninstall / clean", "Also delete the .venv "
+                                      "(you'd need to re-run Setup to use the app)?")
+        self._run(lambda r: uninstall_clean(rm_venv, r))
+
+    # ── action runner: worker thread + log view ──
+    def _run(self, fn):
+        if self._busy:
+            return
+        self._busy = True
+        self._clear_body()
+        tk = self.tk
+        self.log = tk.Text(self.body, bg=_SURF, fg=_TEXT, insertbackground=_TEXT,
+                           relief="flat", bd=0, wrap="word", font=("Consolas", 9),
+                           height=20, padx=10, pady=8)
+        self.log.pack(fill="both", expand=True)
+        for tag, col in (("ok", _GREEN), ("warn", _YELLOW), ("fail", _RED),
+                         ("step", _ACCENT), ("info", _MUTED)):
+            self.log.tag_config(tag, foreground=col)
+        self.log.configure(state="disabled")
+        self._back_btn = self._btn(self.body, "Back", self.show_landing, "normal")
+        self._back_btn.pack(anchor="w", pady=(10, 0))
+        self._back_btn.configure(state="disabled")
+
+        def worker():
+            r = QueueReporter(self.q)
+            try:
+                fn(r)
+            finally:
+                self.q.put(("__done__", ""))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _pump(self):
+        try:
+            while True:
+                kind, text = self.q.get_nowait()
+                if kind == "__done__":
+                    self._busy = False
+                    try:
+                        self._back_btn.configure(state="normal")
+                    except Exception:
+                        pass
+                    continue
+                self._append(kind, text)
+        except queue.Empty:
+            pass
+        self.root.after(80, self._pump)
+
+    def _append(self, kind, text):
+        prefix = {"step": "▸ ", "ok": "  ✓ ", "warn": "  ! ", "fail": "  ✗ ", "info": "    "}.get(kind, "")
+        try:
+            self.log.configure(state="normal")
+            self.log.insert("end", prefix + text + "\n", kind)
+            self.log.see("end")
+            self.log.configure(state="disabled")
+        except Exception:
+            pass
+
+    def run(self):
+        self.root.mainloop()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Entry point
+# ══════════════════════════════════════════════════════════════════════════════
 
 def main():
-    show_banner()
-    packages, choices = gather_choices()
-
-    show_banner()
-    try:
-        create_venv()
-        install_deps(packages)
-        write_helpers()
-        apply_preconfig(choices)
-        verify()
-    except subprocess.CalledProcessError as e:
-        fail(f"Error during setup: {e}")
-        sys.exit(1)
-    except KeyboardInterrupt:
-        print()
-        warn("Setup interrupted.")
-        sys.exit(1)
-
-    final_summary()
-    maybe_hide_self()
+    args = [a.lower() for a in sys.argv[1:]]
+    if any(a in ("--recover", "--recovery", "--repair", "--regen") for a in args):
+        run_recovery(ConsoleReporter())
+        return
+    if gui_available():
+        try:
+            SetupGUI().run()
+            return
+        except Exception as e:
+            print(c(f"GUI failed ({e}) — falling back to terminal.", "yellow"))
+    terminal_main()
 
 
 if __name__ == "__main__":

@@ -34,10 +34,14 @@ log = _make_logger("Controller") if _verbose else _NoOpLogger()
 from systema import APP_ROOT as _APP_ROOT
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Detached relauncher used by restart_app(): waits for the old PID to release the
-# single-instance lock, then starts the app again with the same interpreter+argv.
+# Detached relauncher used by restart_app(). Waits for the OLD pid to actually
+# EXIT — which is exactly the moment the single-instance lock/mutex is released, a
+# deterministic condition (bounded so it can never hang), NOT a fixed-time guess —
+# then relaunches via the canonical venv launch script (run.bat / run.sh) from
+# APP_ROOT, cd-proof. Falls back to the same interpreter + argv if that script is
+# missing. Runs detached so it outlives the dying parent.
 _RELAUNCH_SRC = '''import os, sys, time, subprocess
-PID, EXE, ARGV, CWD = {pid}, {exe}, {argv}, {cwd}
+PID, ROOT, SCRIPT, EXE, ARGV = {pid}, {root}, {script}, {exe}, {argv}
 
 def _alive(pid):
     if sys.platform == "win32":
@@ -54,16 +58,33 @@ def _alive(pid):
     except OSError:
         return False
 
-for _ in range(300):
+# Wait for the old instance to exit (release the lock), bounded so we never hang.
+for _ in range(300):            # up to ~30s
     if not _alive(PID):
         break
     time.sleep(0.1)
-time.sleep(0.6)
-flags = 0x00000008 if sys.platform == "win32" else 0  # DETACHED_PROCESS
+time.sleep(0.6)                 # small grace for the OS to drop the mutex/handle
+
 try:
-    subprocess.Popen([EXE] + ARGV, cwd=CWD, creationflags=flags)
+    os.chdir(ROOT)
 except Exception:
-    subprocess.Popen([EXE] + ARGV, cwd=CWD)
+    pass
+
+use_script = bool(SCRIPT) and os.path.exists(SCRIPT)
+try:
+    if sys.platform == "win32":
+        flags = 0x00000008 | 0x08000000   # DETACHED_PROCESS | CREATE_NO_WINDOW
+        cmd = ["cmd", "/c", "call", SCRIPT] if use_script else [EXE] + ARGV
+        subprocess.Popen(cmd, cwd=ROOT, creationflags=flags, close_fds=True)
+    else:
+        cmd = ["sh", SCRIPT] if use_script else [EXE] + ARGV
+        subprocess.Popen(cmd, cwd=ROOT, start_new_session=True, close_fds=True)
+except Exception as e:
+    try:
+        with open(os.path.join(ROOT, "data", "logs", "_relaunch_error.log"), "a") as _f:
+            _f.write(repr(e) + " | ")
+    except Exception:
+        pass
 '''
 
 
@@ -361,7 +382,7 @@ class AssistantController(QObject):
 
         # UPDATER SERVICE — self-update via the gitplucker library (optional dep)
         try:
-            from systema.app.updater_service import UpdaterService
+            from systema.updater.service import UpdaterService
             self.updater_service = UpdaterService(self)
             self.updater_service.update_available.connect(self._on_update_available)
             # Establish a merge baseline once (background) so 3-way review works
@@ -380,31 +401,40 @@ class AssistantController(QObject):
     def restart_app(self):
         """Relaunch Systema Auxilium and quit this instance.
 
-        The app is single-instance (a named mutex + lock file), so the new
-        process must not start until this one has fully exited and released the
-        lock. We spawn a tiny detached relauncher that waits for our PID to die,
-        then starts the app with the same interpreter + argv, and then quit.
+        The app is single-instance, so the new process must not start until this
+        one has EXITED and released the lock. We spawn a detached relauncher that
+        polls until our PID is gone (the exact moment the lock is freed, bounded so
+        it can't hang — no fixed-time guess), then relaunches via the canonical
+        venv launch script (run.bat / run.sh) from APP_ROOT, cd-proof. Falls back to
+        the same interpreter + argv if that script is missing. Quits immediately.
         """
         import sys, os, subprocess
         from pathlib import Path
         from PyQt6.QtWidgets import QApplication
+        from systema import APP_ROOT
 
         try:
-            app_root = Path(__file__).resolve().parents[2]
-            argv = list(sys.argv)
-            cwd = os.path.dirname(os.path.abspath(argv[0])) if argv and argv[0] else os.getcwd()
+            app_root = Path(APP_ROOT)
+            script = app_root / ("run.bat" if sys.platform == "win32" else "run.sh")
             relaunch = app_root / "data" / "_relaunch.py"
             relaunch.parent.mkdir(parents=True, exist_ok=True)
             relaunch.write_text(_RELAUNCH_SRC.format(
-                pid=os.getpid(), exe=repr(sys.executable),
-                argv=repr(argv), cwd=repr(cwd)), encoding="utf-8")
-            flags = 0
+                pid=os.getpid(),
+                root=repr(str(app_root)),
+                script=repr(str(script) if script.exists() else ""),
+                exe=repr(sys.executable),
+                argv=repr(list(sys.argv)),
+            ), encoding="utf-8")
             if sys.platform == "win32":
                 flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | \
                         getattr(subprocess, "DETACHED_PROCESS", 0)
-            subprocess.Popen([sys.executable, str(relaunch)],
-                             cwd=str(app_root), close_fds=True, creationflags=flags)
-            log.info("[AssistantController.restart_app] relauncher spawned; quitting")
+                subprocess.Popen([sys.executable, str(relaunch)], cwd=str(app_root),
+                                 close_fds=True, creationflags=flags)
+            else:
+                subprocess.Popen([sys.executable, str(relaunch)], cwd=str(app_root),
+                                 close_fds=True, start_new_session=True)
+            log.info(f"[AssistantController.restart_app] relauncher spawned "
+                     f"(waits for pid {os.getpid()} to exit → {script.name if script.exists() else 'interpreter'}); quitting")
         except Exception as e:
             log.error(f"[AssistantController.restart_app] failed to spawn relauncher: {e}")
             return False
@@ -1398,6 +1428,59 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             return
         self.handle_work_mode_response(result)
 
+    # ── Debug-window provider observability ─────────────────────────────────────
+    @staticmethod
+    def _truncate_structure(obj, maxlen=800):
+        """Recursively copy a messages/result structure, truncating long strings so
+        the STRUCTURE (roles, tool_calls, tool_result linkage) stays readable in the
+        Debug window without dumping full code/content bodies."""
+        if isinstance(obj, str):
+            return obj if len(obj) <= maxlen else obj[:maxlen] + f"…(+{len(obj) - maxlen} chars)"
+        if isinstance(obj, dict):
+            return {k: AssistantController._truncate_structure(v, maxlen) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [AssistantController._truncate_structure(v, maxlen) for v in obj]
+        return obj
+
+    def _push_provider_debug(self):
+        """Surface, in the Debug window, HOW the last turn talked to the provider:
+        the tool transport (native vs compat — so the user can confirm native is
+        live), the exact SENT payload structure, and the RAW received response.
+        The SENT/RECEIVED entries are pushed UNFILTERED (always shown, regardless of
+        the type-filter checkboxes)."""
+        import json
+        ai = self.ai
+        # 1) transport indicator
+        transport = getattr(ai, 'last_tool_transport', 'compat')
+        if transport == 'native':
+            n = getattr(ai, 'last_native_tool_calls', 0)
+            self.ui.show_debug_message(
+                "system", f"NATIVE tool-calling active — provider returned {n} tool call(s)")
+        elif transport == 'compat':
+            self.ui.show_debug_message("system", "compat (fenced) tool-calling")
+        else:
+            self.ui.show_debug_message("system", f"NATIVE requested, but {transport} — used fenced calls")
+        # 2) SENT payload structure (unfiltered)
+        try:
+            sent = getattr(ai, 'last_sent_messages', None)
+            if sent is not None:
+                pretty = json.dumps(self._truncate_structure(sent), indent=2, ensure_ascii=False)
+                self.ui.show_debug_message(
+                    "system", f"••• SENT → provider (message structure) •••\n{pretty}", unfiltered=True)
+        except Exception as e:
+            self.ui.show_debug_message("system", f"[SENT payload format error: {e}]", unfiltered=True)
+        # 3) RAW received response (unfiltered)
+        try:
+            raw = getattr(ai, 'last_raw_provider_result', None)
+            if isinstance(raw, dict):
+                body = json.dumps(self._truncate_structure(raw), indent=2, ensure_ascii=False)
+            else:
+                body = str(raw)
+            self.ui.show_debug_message(
+                "system", f"••• RECEIVED ← provider (raw) •••\n{body}", unfiltered=True)
+        except Exception as e:
+            self.ui.show_debug_message("system", f"[RECEIVED response format error: {e}]", unfiltered=True)
+
     def handle_ai_response(self, result):
         """Handle AI response from worker thread"""
         log.info(f"[AssistantController.handle_ai_response] ── Response received | "
@@ -1412,6 +1495,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
 
         # Debug mode: show COMPLETE raw AI response with detailed parsing
         if self.settings.get('debug_mode'):
+            self._push_provider_debug()
             raw_response = self.ai.last_raw_response
 
             if raw_response:
@@ -1519,6 +1603,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
 
         # Debug mode: show everything that happened
         if self.settings.get('debug_mode'):
+            self._push_provider_debug()
             if self.ai.tool_manager.in_work_mode:
                 work_output = self.ai.tool_manager.last_work_output
                 if work_output:

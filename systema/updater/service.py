@@ -1,5 +1,5 @@
 """
-systema/app/updater_service.py
+systema/updater/service.py
 UpdaterService — self-update for Systema Auxilium via the gitplucker library.
 
 Wraps the `gitplucker` updater (github.com/uukjtisa/updater-gitplucker) and runs

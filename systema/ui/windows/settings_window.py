@@ -865,14 +865,33 @@ class SettingsWindow(BaseWindow):
         gen_lay.addWidget(sc_group)
         self._refresh_shortcut_status()
 
-        # ── Start at Login (cross-OS, per-user, NO admin) ────────────────────
+        # ── Start at Login (cross-OS, per-user, admin/normal toggle) ─────────
         as_group = QGroupBox("Start at Login")
         as_group.setStyleSheet(_GROUP)
         as_lay = QVBoxLayout(as_group)
         as_lay.addWidget(_info_box(
             "Launch Systema Auxilium automatically when you log in — for THIS user "
-            "only (no admin, never system-wide). Windows: a shortcut in your Startup "
-            "folder; Linux: an XDG autostart entry; macOS: a per-user LaunchAgent."))
+            "only (never system-wide). Windows: a Startup-folder shortcut; Linux: an "
+            "XDG autostart entry; macOS: a per-user LaunchAgent. Normal is recommended; "
+            "'Run as administrator' works but prompts for elevation at every login "
+            "(Windows UAC / Linux pkexec / macOS password)."))
+        # Segmented privilege toggle — identical UX to the Desktop Shortcut group.
+        self._as_priv_group = QButtonGroup(self)
+        self._as_priv_group.setExclusive(True)
+        self._as_radio_normal = QPushButton("Normal privileges")
+        self._as_radio_admin = QPushButton("Run as administrator")
+        for _pb in (self._as_radio_normal, self._as_radio_admin):
+            _pb.setCheckable(True)
+            _pb.setCursor(_Qt.CursorShape.PointingHandCursor)
+            _pb.setStyleSheet(_priv_css)
+            self._as_priv_group.addButton(_pb)
+        self._as_radio_normal.setChecked(True)
+        self._as_priv_group.buttonToggled.connect(lambda *_: self._update_as_priv_labels())
+        _as_radio_row = QHBoxLayout()
+        _as_radio_row.addWidget(self._as_radio_normal, stretch=1)
+        _as_radio_row.addWidget(self._as_radio_admin, stretch=1)
+        as_lay.addLayout(_as_radio_row)
+        self._update_as_priv_labels()
         _as_btn_row = QHBoxLayout()
         _as_enable_btn = QPushButton("Enable")
         _as_enable_btn.setStyleSheet(_BTN)
@@ -1856,21 +1875,45 @@ class SettingsWindow(BaseWindow):
         except Exception as e:
             self._sc_status_lbl.setText(f"✗  {e}")
 
-    # ── Start at login (cross-OS, per-user, no admin) ───────────────────────
+    # ── Start at login (cross-OS, per-user, admin/normal toggle) ────────────
+    def _update_as_priv_labels(self):
+        """Prefix a check mark on the selected privilege so it's unmistakable."""
+        try:
+            self._as_radio_normal.setText(
+                ("✓  " if self._as_radio_normal.isChecked() else "") + "Normal privileges")
+            self._as_radio_admin.setText(
+                ("✓  " if self._as_radio_admin.isChecked() else "") + "Run as administrator")
+        except Exception:
+            pass
+
+    def _sync_autostart_radios(self):
+        try:
+            from systema.common import autostart as _as
+            st = _as.status()
+            if st["enabled"] and st["admin"] is not None:
+                (self._as_radio_admin if st["admin"] else self._as_radio_normal).setChecked(True)
+        except Exception:
+            pass
+        self._update_as_priv_labels()
+
     def _refresh_autostart_status(self):
         try:
             from systema.common import autostart as _as
-            if _as.is_enabled():
-                self._as_status_lbl.setText("✓ Starts automatically at login (this user).")
+            st = _as.status()
+            if st["enabled"]:
+                lvl = "administrator" if st["admin"] else "normal"
+                self._as_status_lbl.setText(f"✓ Starts automatically at login (this user)  ·  {lvl}")
             else:
                 self._as_status_lbl.setText("Not set to start at login.")
         except Exception as e:
             self._as_status_lbl.setText(f"Autostart status unavailable: {e}")
+        self._sync_autostart_radios()
 
     def _apply_autostart(self):
         try:
             from systema.common import autostart as _as
-            ok, msg = _as.enable_autostart()
+            # set_admin() enables if missing and hot-toggles the privilege if present.
+            ok, msg = _as.set_admin(self._as_radio_admin.isChecked())
             self._as_status_lbl.setText(("✓  " if ok else "✗  ") + msg)
         except Exception as e:
             self._as_status_lbl.setText(f"✗  {e}")
@@ -1880,6 +1923,7 @@ class SettingsWindow(BaseWindow):
             from systema.common import autostart as _as
             ok, msg = _as.disable_autostart()
             self._as_status_lbl.setText(("✓  " if ok else "✗  ") + msg)
+            self._as_radio_normal.setChecked(True)
         except Exception as e:
             self._as_status_lbl.setText(f"✗  {e}")
 

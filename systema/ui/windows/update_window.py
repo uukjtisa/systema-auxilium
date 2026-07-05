@@ -507,7 +507,7 @@ class UpdateWindow(BaseWindow):
 
         p = self._p
         from PyQt6.QtGui import QColor
-        from systema.app.updater_service import is_sensitive_path
+        from systema.updater.service import is_sensitive_path
         risky_count = 0
         for fc in plan.file_changes:
             if fc.change.value == "unchanged":
@@ -688,7 +688,7 @@ class UpdateWindow(BaseWindow):
         if self._plan is None:
             self._status("Run a check first.")
             return
-        from systema.app.updater_service import is_sensitive_path
+        from systema.updater.service import is_sensitive_path
         # Target files: the currently-selected one + every protected file in the plan.
         paths = []
         cur = self.file_list.currentItem()
@@ -699,7 +699,7 @@ class UpdateWindow(BaseWindow):
             if is_sensitive_path(pth) and pth not in paths:
                 paths.append(pth)
 
-        from systema.agents.update_hunks import ReviewSession
+        from systema.updater.hunks import ReviewSession
         session = ReviewSession()
         for pth in paths:
             tagged = self.service.review(pth)

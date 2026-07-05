@@ -205,6 +205,8 @@ def _acquire_instance_lock():
         return True, None
 
     else:
+        # POSIX (Linux/macOS): atomic O_EXCL lockfile holding the owner PID, with
+        # liveness-checked stale reclaim so a crashed run never blocks the next one.
         while True:
             try:
                 with open(_LOCK_FILE, 'x') as f:
@@ -213,12 +215,17 @@ def _acquire_instance_lock():
                 return True, None
             except FileExistsError:
                 pid = _read_lock_pid()
-                try:
-                    if pid:
+                if pid:
+                    try:
                         os.kill(pid, 0)
+                        return False, pid          # holder alive → blocked
+                    except PermissionError:
+                        # Exists but owned by another user (EPERM) — still ALIVE,
+                        # so treat as running, never reclaim (would double-launch).
                         return False, pid
-                except OSError:
-                    pass
+                    except ProcessLookupError:
+                        pass                        # ESRCH: dead → reclaim below
+                # Stale (dead PID) or corrupt/empty lockfile → remove and retry.
                 try:
                     _LOCK_FILE.unlink()
                 except FileNotFoundError:

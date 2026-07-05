@@ -1,5 +1,5 @@
 """
-systema/agents/update_hunks.py
+systema/updater/hunks.py
 
 Turn an origin-tagged 3-way review (from gitplucker's review_change /
 UpdaterService.review) into reviewable HUNKS the user can approve, keep, or edit

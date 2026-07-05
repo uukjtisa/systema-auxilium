@@ -296,3 +296,139 @@ def _as_text(content) -> str:
         return json.dumps(content)
     except (TypeError, ValueError):
         return str(content)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 4. NEUTRAL convo  →  full dialect message list
+#
+# The engine assembles a dialect-AGNOSTIC "neutral" convo and this builder emits
+# the concrete per-dialect messages, so the engine never branches on dialect and
+# the provider script can forward the result verbatim.
+#
+# Neutral turn shapes (role + payload):
+#   {"role": "user"|"assistant", "content": str}                      # plain text turn
+#   {"role": "assistant", "content": str|None,                        # tool-CALL turn
+#    "tool_calls": [{"id","name","arguments"}, ...]}
+#   {"role": "tool", "results": [{"id","name","content"}, ...]}       # tool-RESULT turn
+#
+# Contract: every tool_call id in an assistant turn is answered by a result with
+# the same id in the *immediately following* tool turn (the engine guarantees
+# this so no dialect ever sees an unpaired tool_use / tool_call).
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _text_role(role: str) -> str:
+    """Only user/assistant are valid conversation roles; coerce anything else
+    (a stray 'system' that wasn't hoisted out) to a user turn."""
+    return role if role in ("user", "assistant") else "user"
+
+
+def _openai_turn(turn: dict) -> list:
+    role = turn.get("role")
+    if role == "tool":
+        return [
+            {"role": "tool", "tool_call_id": r["id"], "content": _as_text(r.get("content"))}
+            for r in turn.get("results", [])
+        ]
+    if role == "assistant" and turn.get("tool_calls"):
+        return [{
+            "role": "assistant",
+            "content": turn.get("content") or None,
+            "tool_calls": [
+                {"id": c["id"], "type": "function",
+                 "function": {"name": c["name"], "arguments": json.dumps(c.get("arguments", {}))}}
+                for c in turn["tool_calls"]
+            ],
+        }]
+    return [{"role": _text_role(role), "content": _as_text(turn.get("content"))}]
+
+
+def _anthropic_turn(turn: dict) -> list:
+    role = turn.get("role")
+    if role == "tool":
+        return [{
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": r["id"], "content": _as_text(r.get("content"))}
+                for r in turn.get("results", [])
+            ],
+        }]
+    if role == "assistant" and turn.get("tool_calls"):
+        content = []
+        if turn.get("content"):
+            content.append({"type": "text", "text": turn["content"]})
+        for c in turn["tool_calls"]:
+            content.append({"type": "tool_use", "id": c["id"], "name": c["name"],
+                            "input": c.get("arguments", {})})
+        return [{"role": "assistant", "content": content}]
+    return [{"role": _text_role(role), "content": _as_text(turn.get("content"))}]
+
+
+def _gemini_turn(turn: dict) -> list:
+    role = turn.get("role")
+    if role == "tool":
+        return [{
+            "role": "user",
+            "parts": [
+                {"functionResponse": {"name": r.get("name", ""),
+                                      "response": {"result": _as_text(r.get("content"))}}}
+                for r in turn.get("results", [])
+            ],
+        }]
+    grole = "model" if role == "assistant" else "user"
+    if role == "assistant" and turn.get("tool_calls"):
+        parts = []
+        if turn.get("content"):
+            parts.append({"text": turn["content"]})
+        for c in turn["tool_calls"]:
+            parts.append({"functionCall": {"name": c["name"], "args": c.get("arguments", {})}})
+        return [{"role": grole, "parts": parts}]
+    return [{"role": grole, "parts": [{"text": _as_text(turn.get("content"))}]}]
+
+
+def _as_block_list(content) -> list:
+    """Normalize an Anthropic message's content to a list of blocks for merging."""
+    if isinstance(content, list):
+        return list(content)
+    return [{"type": "text", "text": content}] if content else []
+
+
+def _merge_alternation(dialect: str, msgs: list) -> list:
+    """Anthropic and Gemini require strict user/assistant(model) alternation, so
+    fold consecutive same-role messages into one. OpenAI tolerates repeats (and a
+    tool-call message must be followed by its tool messages), so it is left as-is."""
+    if dialect == "anthropic":
+        out = []
+        for m in msgs:
+            if out and out[-1]["role"] == m["role"]:
+                out[-1]["content"] = _as_block_list(out[-1]["content"]) + _as_block_list(m["content"])
+            else:
+                out.append({"role": m["role"], "content": m["content"]})
+        return out
+    if dialect == "gemini":
+        out = []
+        for m in msgs:
+            if out and out[-1]["role"] == m["role"]:
+                out[-1]["parts"] = list(out[-1]["parts"]) + list(m["parts"])
+            else:
+                out.append({"role": m["role"], "parts": list(m["parts"])})
+        return out
+    return msgs
+
+
+def build_messages(dialect: str, neutral_convo: list) -> list:
+    """Turn a neutral, dialect-agnostic convo (see turn shapes above) into the
+    concrete message list for `dialect`. The system prompt is NOT included here —
+    the provider script still receives it separately and prepends/passes it."""
+    if dialect == "openai":
+        per_turn = _openai_turn
+    elif dialect == "anthropic":
+        per_turn = _anthropic_turn
+    elif dialect == "gemini":
+        per_turn = _gemini_turn
+    else:
+        raise ValueError(f"Unknown native dialect: {dialect!r} (expected one of {DIALECTS})")
+
+    msgs = []
+    for turn in (neutral_convo or []):
+        msgs.extend(per_turn(turn))
+    return _merge_alternation(dialect, msgs)

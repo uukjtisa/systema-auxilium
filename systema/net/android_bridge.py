@@ -1,5 +1,5 @@
 """
-ui/android_bridge.py
+systema/net/android_bridge.py
 Android Bridge — mirrors the app over LAN to the Android remote controller.
 Same JSON RPC protocol as ChatWindowTUI, but listens for a phone instead of
 spawning a terminal.

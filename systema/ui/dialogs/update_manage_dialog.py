@@ -19,8 +19,8 @@ from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBo
                              QListWidget, QListWidgetItem, QTextEdit, QPushButton,
                              QSplitter, QWidget, QMessageBox)
 
-from systema.agents.update_hunks import (ReviewSession,
-                                         _DEFAULT_DECISION as _DEFAULT_HUNK_DECISION)
+from systema.updater.hunks import (ReviewSession,
+                                    _DEFAULT_DECISION as _DEFAULT_HUNK_DECISION)
 
 
 def _esc(s: str) -> str:

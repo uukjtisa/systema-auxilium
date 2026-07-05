@@ -132,7 +132,7 @@ class DebugWindow(BaseWindow):
         header_layout.setContentsMargins(16, 0, 16, 0)
 
         # Title
-        title = QLabel("🔧 Debug - Full AI/Tool Exchanges")
+        title = QLabel("Debug — Full AI / Tool Exchanges")
         title.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {_TEXT};")
         header_layout.addWidget(title)
 
@@ -147,7 +147,7 @@ class DebugWindow(BaseWindow):
         """
 
         # Clear button
-        clear_btn = QPushButton("🗑️")
+        clear_btn = QPushButton("⌫")
         clear_btn.setFixedSize(32, 32)
         clear_btn.setStyleSheet(_icon_btn)
         clear_btn.clicked.connect(self.clear_debug)
@@ -156,11 +156,13 @@ class DebugWindow(BaseWindow):
 
         # NEW: CMD toggle button (only if launched from CMD)
         if self.launched_from_cmd:
-            self.cmd_toggle_btn = QPushButton("🪟")
+            self.cmd_toggle_btn = QPushButton(">_")
             self.cmd_toggle_btn.setFixedSize(32, 32)
             self.cmd_toggle_btn.setStyleSheet(_icon_btn)
             self.cmd_toggle_btn.clicked.connect(self.toggle_cmd_window)
-            self.cmd_toggle_btn.setToolTip("Toggle CMD window")
+            self.cmd_toggle_btn.setToolTip(
+                "Toggle console window" if sys.platform == 'win32'
+                else "Show live log terminal")
             header_layout.addWidget(self.cmd_toggle_btn)
 
         # Minimize button
@@ -209,25 +211,25 @@ class DebugWindow(BaseWindow):
         filter_layout.addWidget(filter_label)
 
         # Filter checkboxes — keep the functional per-type colours
-        self.user_checkbox = QCheckBox("👤 User")
+        self.user_checkbox = QCheckBox("User")
         self.user_checkbox.setChecked(self.filters.get('user', True))
         self.user_checkbox.setStyleSheet(f"color: {_MSG_COLORS['user']};")
         self.user_checkbox.stateChanged.connect(lambda: self.update_filter('user', self.user_checkbox.isChecked()))
         filter_layout.addWidget(self.user_checkbox)
 
-        self.ai_checkbox = QCheckBox("🤖 AI")
+        self.ai_checkbox = QCheckBox("AI")
         self.ai_checkbox.setChecked(self.filters.get('ai', True))
         self.ai_checkbox.setStyleSheet(f"color: {_MSG_COLORS['ai']};")
         self.ai_checkbox.stateChanged.connect(lambda: self.update_filter('ai', self.ai_checkbox.isChecked()))
         filter_layout.addWidget(self.ai_checkbox)
 
-        self.tool_checkbox = QCheckBox("🔧 Tool")
+        self.tool_checkbox = QCheckBox("Tool")
         self.tool_checkbox.setChecked(self.filters.get('tool', True))
         self.tool_checkbox.setStyleSheet(f"color: {_MSG_COLORS['tool']};")
         self.tool_checkbox.stateChanged.connect(lambda: self.update_filter('tool', self.tool_checkbox.isChecked()))
         filter_layout.addWidget(self.tool_checkbox)
 
-        self.system_checkbox = QCheckBox("⚙️ System")
+        self.system_checkbox = QCheckBox("System")
         self.system_checkbox.setChecked(self.filters.get('system', True))
         self.system_checkbox.setStyleSheet(f"color: {_MSG_COLORS['system']};")
         self.system_checkbox.stateChanged.connect(lambda: self.update_filter('system', self.system_checkbox.isChecked()))
@@ -236,7 +238,7 @@ class DebugWindow(BaseWindow):
         filter_layout.addStretch()
 
         # System Prompt viewer button
-        sys_prompt_btn = QPushButton("📋 View System Prompt")
+        sys_prompt_btn = QPushButton("View System Prompt")
         sys_prompt_btn.setStyleSheet(f"""
             QPushButton {{
                 background: {_SURFACE2};
@@ -314,7 +316,7 @@ class DebugWindow(BaseWindow):
             if saved_hr_open and hasattr(self, '_hr_body'):
                 self._hr_panel_open = True
                 self._hr_body.setVisible(True)
-                self._hr_toggle_label.setText("▼  ⚡ Hot Reload")
+                self._hr_toggle_label.setText("▼  Hot Reload")
 
             self.apply_rounded_mask()
             self._sync_glass()
@@ -486,7 +488,7 @@ class DebugWindow(BaseWindow):
         h_lay = QHBoxLayout(header)
         h_lay.setContentsMargins(14, 0, 14, 0)
 
-        self._hr_toggle_label = QLabel("▶  ⚡ Hot Reload")
+        self._hr_toggle_label = QLabel("▶  Hot Reload")
         self._hr_toggle_label.setStyleSheet(f"color: {_ACCENT}; font-size: 11px; font-weight: bold;")
         h_lay.addWidget(self._hr_toggle_label)
         h_lay.addStretch()
@@ -520,7 +522,7 @@ class DebugWindow(BaseWindow):
             self._hr_panel_open = not self._hr_panel_open
             self._hr_body.setVisible(self._hr_panel_open)
             self._hr_toggle_label.setText(
-                ("▼" if self._hr_panel_open else "▶") + "  ⚡ Hot Reload"
+                ("▼" if self._hr_panel_open else "▶") + "  Hot Reload"
             )
         header.mousePressEvent = _toggle_panel
 
@@ -718,7 +720,7 @@ class DebugWindow(BaseWindow):
 
         # Header
         header = QLabel(
-            f"📋  Full Effective System Prompt  —  "
+            f"Full Effective System Prompt  —  "
             f"{char_count:,} chars  ·  ~{token_estimate:,} tokens est."
         )
         header.setStyleSheet(f"color: {_ACCENT}; font-size: 11pt; font-weight: bold;")
@@ -749,7 +751,7 @@ class DebugWindow(BaseWindow):
         # Buttons
         btn_row = QHBoxLayout()
 
-        copy_btn = QPushButton("📋 Copy to Clipboard")
+        copy_btn = QPushButton("Copy to Clipboard")
         copy_btn.setStyleSheet(f"""
             QPushButton {{
                 background: {_SURFACE2};
@@ -763,8 +765,8 @@ class DebugWindow(BaseWindow):
         """)
         def _copy():
             QApplication.clipboard().setText(prompt)
-            copy_btn.setText("✅ Copied!")
-            QTimer.singleShot(2000, lambda: copy_btn.setText("📋 Copy to Clipboard"))
+            copy_btn.setText("Copied ✓")
+            QTimer.singleShot(2000, lambda: copy_btn.setText("Copy to Clipboard"))
         copy_btn.clicked.connect(_copy)
 
         close_btn = QPushButton("Close")
@@ -792,29 +794,22 @@ class DebugWindow(BaseWindow):
         """NEW: Update filter state"""
         self.filters[filter_type] = enabled
 
-    def add_message(self, sender, message):
-        """Add debug message with full content"""
-        if not self.filters.get(sender, True):
+    def add_message(self, sender, message, force=False):
+        """Add debug message with full content. force=True bypasses the type
+        filters (used for the always-on SENT/RECEIVED wire panels)."""
+        if not force and not self.filters.get(sender, True):
             return
 
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
-        icons = {
-            'system': '⚙️',
-            'ai': '🤖',
-            'tool': '🔧',
-            'user': '👤'
-        }
-
         color = _MSG_COLORS.get(sender, _ACCENT)
-        icon = icons.get(sender, '•')
 
         message_escaped = message.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
         html = f'''
         <div style="margin: 10px 0; padding: 10px; background: {_theme.rgba(color, 0.06)}; border-left: 4px solid {color}; border-radius: 3px;">
             <div style="color: {color}; font-weight: bold; margin-bottom: 8px;">
-                {icon} {sender.upper()} <span style="color: {_MUTED}; font-size: 8pt; font-weight: normal;">[{timestamp}]</span>
+                {sender.upper()} <span style="color: {_MUTED}; font-size: 8pt; font-weight: normal;">[{timestamp}]</span>
             </div>
             <div style="color: {_TEXT}; white-space: pre-wrap; font-size: 9pt; font-family: 'Courier New', monospace;">
 {message_escaped}
@@ -840,22 +835,30 @@ class DebugWindow(BaseWindow):
         event.ignore()
 
     def toggle_cmd_window(self):
-        """Toggle CMD window visibility (Windows only)"""
-        if sys.platform != 'win32':
-            return
+        """Toggle the terminal view.
 
+        Windows      → show / hide the real console window (the session log pipes
+                       through it).
+        Linux / macOS → open / close a terminal that live-tails the newest session
+                       log; the app itself runs detached, so there is no attached
+                       terminal to reveal.
+        """
+        from systema.common import terminal
         try:
-            import ctypes
-            hwnd = ctypes.windll.kernel32.GetConsoleWindow()
-
-            if hwnd:
+            if sys.platform == 'win32':
                 if self.cmd_visible:
-                    ctypes.windll.user32.ShowWindow(hwnd, 0)
+                    terminal.hide_console()
                     self.cmd_visible = False
-                    self.cmd_toggle_btn.setToolTip("Show CMD window")
+                    self.cmd_toggle_btn.setToolTip("Show console window")
                 else:
-                    ctypes.windll.user32.ShowWindow(hwnd, 5)
+                    terminal.show_console()
                     self.cmd_visible = True
-                    self.cmd_toggle_btn.setToolTip("Hide CMD window")
+                    self.cmd_toggle_btn.setToolTip("Hide console window")
+            else:
+                ok, now_open, msg = terminal.toggle_log_terminal()
+                self.cmd_toggle_btn.setToolTip(
+                    "Hide live log terminal" if now_open else "Show live log terminal")
+                if not ok:
+                    self.add_message("system", msg)
         except Exception as e:
-            self.add_message("system", f"Error toggling CMD: {e}")
+            self.add_message("system", f"Error toggling terminal: {e}")
