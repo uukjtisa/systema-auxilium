@@ -277,9 +277,34 @@ _subprocess.Popen(
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Core imports come AFTER the Tee is in place ──────────────────────────────
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QWidget
+from PyQt6.QtCore import QObject, QEvent
 from systema.app.controller import AssistantController
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+class _ClickFocusActivator(QObject):
+    """App-wide click-to-focus fix.
+
+    Every Systema Auxilium window is frameless + always-on-top (see chat_window /
+    floating_window). On Linux/X11 the window manager's focus-stealing-prevention
+    won't hand keyboard focus to such a window on a bare click, so the input stays
+    unfocusable until a stray keypress activates it. This QApplication-level filter
+    re-activates whichever of our top-level windows you press, so a click ALWAYS
+    grabs focus. It is a harmless no-op where the platform already focuses on click
+    (Windows/macOS) and never consumes the event. Window flags are untouched —
+    frameless + always-on-top are preserved. (Wayland may still ignore programmatic
+    activation; there it degrades gracefully.)
+    """
+    def eventFilter(self, obj, event):
+        try:
+            if event.type() == QEvent.Type.MouseButtonPress and isinstance(obj, QWidget):
+                win = obj.window()
+                if win is not None and not win.isActiveWindow():
+                    win.activateWindow()
+        except Exception:
+            pass
+        return False  # observe only — never block the click
 
 
 def hide_console_window():
@@ -317,6 +342,10 @@ def main():
     font = QFont("Segoe UI", 10)
     font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
     app.setFont(font)
+
+    # App-wide click-to-focus fix for frameless/always-on-top windows (X11).
+    app._focus_activator = _ClickFocusActivator()   # keep a ref so it isn't GC'd
+    app.installEventFilter(app._focus_activator)
 
     controller = AssistantController()
     controller.show()

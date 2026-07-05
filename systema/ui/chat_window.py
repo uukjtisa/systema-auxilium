@@ -1354,6 +1354,17 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         self._open_anim.setEndValue(1.0)
         self._open_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._open_anim.start()
+        # Grab focus on open so the input is usable immediately — X11 won't focus a
+        # frameless / always-on-top window on its own. Deferred so it lands after
+        # the window is actually mapped. Preserves the always-on-top intent.
+        def _grab_focus():
+            try:
+                self.raise_()
+                self.activateWindow()
+                self.input_field.text_input.setFocus()
+            except Exception:
+                pass
+        QTimer.singleShot(0, _grab_focus)
 
     def toggle_sidebar(self):
         """Toggle sidebar visibility with a smooth slide animation."""

@@ -32,6 +32,7 @@ Everything here is stdlib-only, so it runs before any dependency exists.
 import os
 import sys
 import queue
+import shlex
 import shutil
 import platform
 import threading
@@ -84,8 +85,8 @@ OPTIONAL_GROUPS = [
 PRECONFIG = [
     {"key": "shortcut", "label": "Create a Desktop shortcut",
      "desc": "Adds a Systema Auxilium launcher to your Desktop", "default": True},
-    {"key": "admin",    "label": "Run the shortcut / autostart as administrator",
-     "desc": "Elevated launch (UAC / pkexec / admin prompt). Normal is recommended.",
+    {"key": "admin",    "label": "Run the desktop shortcut as administrator",
+     "desc": "Elevated shortcut launch (UAC / pkexec / admin prompt). Autostart is always normal.",
      "default": False},
     {"key": "autostart", "label": "Start automatically at login",
      "desc": "Registers Systema Auxilium to launch when you log in", "default": False},
@@ -282,9 +283,178 @@ def create_venv(r: Reporter):
         base = argv310
     else:
         r.warn(f"Python 3.10 not found. Using current Python {platform.python_version()}.")
+        r.info("To install Python 3.10 + system deps, use the "
+               "\"Install Python 3.10 + prerequisites\" option on the main menu.")
         base = [sys.executable]
     subprocess.run(base + ["-m", "venv", str(VENV)], check=True)
     r.ok("Virtual environment created.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Fresh-machine bootstrap — install Python 3.10 + system deps for the current OS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _read_os_release() -> dict:
+    data = {}
+    try:
+        for line in Path("/etc/os-release").read_text(encoding="utf-8").splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                data[k.strip()] = v.strip().strip('"')
+    except Exception:
+        pass
+    return data
+
+
+def detect_platform_installer() -> dict:
+    """Map the current OS/distro to a package manager + the commands that install
+    Python 3.10 (`py_cmds`) and the app's system dependencies (`sys_cmds`).
+    `note` carries any caveat. Unknown targets return empty command lists."""
+    if IS_WIN:
+        return {"name": "winget", "family": "windows",
+                "py_cmds": [["winget", "install", "-e", "--id", "Python.Python.3.10"]],
+                "sys_cmds": [],
+                "note": "No winget? Get Python 3.10 from "
+                        "https://www.python.org/downloads/release/python-31011/"}
+    if IS_MAC:
+        return {"name": "brew", "family": "macos",
+                "py_cmds": [["brew", "install", "python@3.10"]],
+                "sys_cmds": [["brew", "install", "portaudio"]],
+                "note": "Requires Homebrew (https://brew.sh)."}
+
+    osr = _read_os_release()
+    idlike = (osr.get("ID", "") + " " + osr.get("ID_LIKE", "")).lower()
+
+    if any(x in idlike for x in ("ubuntu", "pop", "mint")) and "ubuntu" in idlike:
+        return {"name": "apt", "family": "debian",
+                "py_cmds": [["sudo", "apt-get", "update"],
+                            ["sudo", "apt-get", "install", "-y", "software-properties-common"],
+                            ["sudo", "add-apt-repository", "-y", "ppa:deadsnakes/ppa"],
+                            ["sudo", "apt-get", "update"],
+                            ["sudo", "apt-get", "install", "-y",
+                             "python3.10", "python3.10-venv", "python3.10-dev"]],
+                "sys_cmds": [["sudo", "apt-get", "install", "-y",
+                              "portaudio19-dev", "python3-tk", "python3-pyqt6", "policykit-1"]],
+                "note": ""}
+    if any(x in idlike for x in ("debian", "kali", "raspbian")):
+        return {"name": "apt", "family": "debian",
+                "py_cmds": [["sudo", "apt-get", "update"],
+                            ["sudo", "apt-get", "install", "-y",
+                             "python3", "python3-venv", "python3-dev", "python3-pip"]],
+                "sys_cmds": [["sudo", "apt-get", "install", "-y",
+                              "portaudio19-dev", "python3-tk", "python3-pyqt6", "policykit-1"]],
+                "note": "Debian/Kali repos don't carry python3.10 — installing the system python3 "
+                        "instead (the app runs on 3.11+). For 3.10 exactly, use pyenv."}
+    if any(x in idlike for x in ("fedora", "rhel", "centos", "rocky", "almalinux")):
+        return {"name": "dnf", "family": "fedora",
+                "py_cmds": [["sudo", "dnf", "install", "-y", "python3.10"]],
+                "sys_cmds": [["sudo", "dnf", "install", "-y",
+                              "portaudio-devel", "python3-tkinter", "python3-qt6", "polkit"]],
+                "note": ""}
+    if any(x in idlike for x in ("arch", "manjaro", "endeavour")):
+        return {"name": "pacman", "family": "arch",
+                "py_cmds": [["sudo", "pacman", "-Sy", "--noconfirm", "python"]],
+                "sys_cmds": [["sudo", "pacman", "-S", "--noconfirm",
+                              "portaudio", "tk", "python-pyqt6", "polkit"]],
+                "note": "Arch ships the latest python (the app runs on it). For 3.10 exactly use pyenv/AUR."}
+    if any(x in idlike for x in ("opensuse", "suse", "sles")):
+        return {"name": "zypper", "family": "suse",
+                "py_cmds": [["sudo", "zypper", "--non-interactive", "install", "python310"]],
+                "sys_cmds": [["sudo", "zypper", "--non-interactive", "install",
+                              "portaudio-devel", "python3-tk", "python3-qt6", "polkit"]],
+                "note": ""}
+    return {"name": "unknown", "family": "linux", "py_cmds": [], "sys_cmds": [],
+            "note": "Unknown distro — install manually: python3.10 (+venv/dev), a portaudio dev "
+                    "package, tk, PyQt6 system libs, and polkit."}
+
+
+_LINUX_TERMS = ["x-terminal-emulator", "qterminal", "konsole", "xterm",
+                "gnome-terminal", "xfce4-terminal", "mate-terminal", "alacritty", "kitty"]
+
+
+def _spawn_terminal(script: str) -> bool:
+    """Run a bash script in a new terminal window (so `sudo` can prompt for a
+    password and the user sees progress). Returns True if a terminal was launched."""
+    if IS_MAC:
+        try:
+            osa = 'tell application "Terminal" to do script "%s"' % script.replace('"', '\\"')
+            subprocess.Popen(["osascript", "-e", osa])
+            return True
+        except Exception:
+            return False
+    for exe in _LINUX_TERMS:
+        if shutil.which(exe) is None:
+            continue
+        if exe in ("gnome-terminal", "mate-terminal"):
+            argv = [exe, "--", "bash", "-c", script]
+        elif exe == "xfce4-terminal":
+            argv = [exe, "-x", "bash", "-c", script]
+        elif exe == "kitty":
+            argv = [exe, "bash", "-c", script]
+        else:
+            argv = [exe, "-e", "bash", "-c", script]
+        try:
+            subprocess.Popen(argv)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def bootstrap_prerequisites(r: Reporter, gui: bool = False):
+    """Install Python 3.10 (where the distro supports it) + the app's system deps,
+    using the detected package manager. Caller confirms first. On Linux GUI runs it
+    in a spawned terminal so sudo can prompt; the terminal frontend runs inline."""
+    info = detect_platform_installer()
+    r.step(f"Install Python 3.10 + prerequisites  ({info['name']})")
+    cmds = list(info["py_cmds"]) + list(info["sys_cmds"])
+    if not cmds:
+        r.warn("No automatic installer mapping for this OS.")
+        if info["note"]:
+            r.info(info["note"])
+        return
+    if info["note"]:
+        r.info(info["note"])
+    for c in cmds:
+        r.info("$ " + " ".join(c))
+
+    if IS_WIN or IS_MAC:
+        # winget (UAC as needed) / brew — no tty password, run inline.
+        for c in cmds:
+            try:
+                res = subprocess.run(c)
+                if res.returncode != 0:
+                    r.warn(f"exited {res.returncode}: {' '.join(c)}")
+            except FileNotFoundError:
+                r.fail(f"{c[0]} not found — see the note above.")
+            except Exception as e:
+                r.warn(f"{' '.join(c)} -> {e}")
+    else:
+        # Linux: sudo needs a password. GUI → spawn a terminal; CLI → run inline.
+        joined = "; ".join(" ".join(shlex.quote(a) for a in c) for c in cmds)
+        if gui:
+            script = ("set -e; " + joined +
+                      '; echo; echo "[done] prerequisites installed"; '
+                      'read -p "Press Enter to close..." _')
+            if _spawn_terminal(script):
+                r.ok("Opened a terminal to install prerequisites — enter your sudo password there.")
+            else:
+                r.warn("No terminal emulator found. Run these commands manually:")
+                for c in cmds:
+                    r.info("  " + " ".join(c))
+            return
+        for c in cmds:
+            try:
+                res = subprocess.run(c)
+                if res.returncode != 0:
+                    r.warn(f"exited {res.returncode}: {' '.join(c)}")
+            except Exception as e:
+                r.warn(f"{' '.join(c)} -> {e}")
+
+    if find_python310():
+        r.ok("Python 3.10 is now available.")
+    else:
+        r.info("Using the available python3 (the app also runs on 3.11+).")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -538,14 +708,24 @@ def do_shortcut(create: bool, as_admin: bool, r: Reporter):
     (r.ok if ok else r.fail)(msg)
 
 
-def do_autostart(enable: bool, as_admin: bool, r: Reporter):
+def do_autostart(enable: bool, r: Reporter):
+    """Autostart is per-user, normal privilege only (elevated autostart is not
+    supported — it never launches reliably at login on any OS)."""
     _, aut = load_app_modules()
     if aut is None:
         r.fail("Autostart module unavailable (systema/common/autostart.py).")
         return
-    if enable and as_admin:
-        r.warn("Admin autostart prompts for elevation at EVERY login — normal is recommended.")
-    ok, msg = (aut.set_admin(as_admin) if enable else aut.disable_autostart())
+    ok, msg = (aut.enable_autostart() if enable else aut.disable_autostart())
+    (r.ok if ok else r.fail)(msg)
+
+
+def do_autostart_test(r: Reporter):
+    """Launch the app now via the same run script autostart uses."""
+    _, aut = load_app_modules()
+    if aut is None:
+        r.fail("Autostart module unavailable (systema/common/autostart.py).")
+        return
+    ok, msg = aut.run_now()
     (r.ok if ok else r.fail)(msg)
 
 
@@ -600,9 +780,9 @@ def run_full_setup(selected_optional_keys, preconfig, r: Reporter):
         write_helpers(r)
         as_admin = bool(preconfig.get("admin"))
         if preconfig.get("shortcut"):
-            do_shortcut(True, as_admin, r)
+            do_shortcut(True, as_admin, r)   # admin applies to the shortcut only
         if preconfig.get("autostart"):
-            do_autostart(True, as_admin, r)
+            do_autostart(True, r)            # autostart is always normal privilege
         verify(r)
         r.step("Setup complete")
         r.ok(f"Launch with: {'run.bat' if IS_WIN else 'bash ' + RUN_SCRIPT}")
@@ -692,8 +872,9 @@ def terminal_main():
         print("  3) Autostart  (enable / disable)")
         print("  4) Desktop shortcut  (create / remove)")
         print("  5) Uninstall / clean")
-        print("  6) Quit")
-        choice = _ask(c("  Choose [1-6]: ", "bold"))
+        print("  6) Install Python 3.10 + prerequisites")
+        print("  7) Quit")
+        choice = _ask(c("  Choose [1-7]: ", "bold"))
         if choice == "1":
             opt = _select_optionals_terminal()
             pre = _select_preconfig_terminal()
@@ -704,9 +885,11 @@ def terminal_main():
             run_recovery(r)
         elif choice == "3":
             if _ask_yes_no("  Enable autostart? (No = disable)", True):
-                do_autostart(True, _pick_privilege(), r)
+                do_autostart(True, r)
+                if _ask_yes_no("  Test it now (launch via the run script)?", False):
+                    do_autostart_test(r)
             else:
-                do_autostart(False, False, r)
+                do_autostart(False, r)
         elif choice == "4":
             if _ask_yes_no("  Create/update shortcut? (No = remove)", True):
                 do_shortcut(True, _pick_privilege(), r)
@@ -715,7 +898,17 @@ def terminal_main():
         elif choice == "5":
             if _ask_yes_no("  Remove generated scripts, autostart & shortcut?", False):
                 uninstall_clean(_ask_yes_no("  Also delete the .venv?", False), r)
-        elif choice in ("6", "q", "quit", ""):
+        elif choice == "6":
+            info = detect_platform_installer()
+            print(c(f"  Package manager: {info['name']}", "grey"))
+            for cmd in info["py_cmds"] + info["sys_cmds"]:
+                print(c("    $ " + " ".join(cmd), "grey"))
+            if info["note"]:
+                print(c("  " + info["note"], "yellow"))
+            if (info["py_cmds"] or info["sys_cmds"]) and _ask_yes_no(
+                    "  Run these now (sudo will prompt)?", False):
+                bootstrap_prerequisites(r, gui=False)
+        elif choice in ("7", "q", "quit", ""):
             print(c("  Bye.", "grey"))
             return
         else:
@@ -825,9 +1018,11 @@ class SetupGUI:
             ("Recover run scripts", lambda: self._run(lambda r: run_recovery(r)), "normal",
              "Regenerate run / launch scripts + requirements.txt (venv untouched)."),
             ("Autostart…", lambda: self.show_privilege("autostart"), "normal",
-             "Enable or disable start-at-login (normal or admin)."),
+             "Enable, disable or test start-at-login (per-user, normal privilege)."),
             ("Desktop shortcut…", lambda: self.show_privilege("shortcut"), "normal",
              "Create/update or remove the desktop shortcut (normal or admin)."),
+            ("Install Python 3.10 + prerequisites", lambda: self._bootstrap(), "normal",
+             "Fresh machine? Install Python 3.10 + system deps for your OS."),
             ("Uninstall / clean", lambda: self.confirm_uninstall(), "normal",
              "Remove generated scripts, autostart, shortcut (and optionally .venv)."),
             ("Quit", self.root.destroy, "normal", ""),
@@ -877,7 +1072,7 @@ class SetupGUI:
                        bg=_BG, fg=_TEXT, selectcolor=_ELEV, activebackground=_BG,
                        activeforeground=_TEXT, font=("Segoe UI", 10), anchor="w",
                        highlightthickness=0, bd=0).pack(fill="x")
-        tk.Checkbutton(canvas_wrap, text="  Run those as administrator (elevation prompt each launch)",
+        tk.Checkbutton(canvas_wrap, text="  Run the shortcut as administrator (autostart is always normal)",
                        variable=self._admin_var, bg=_BG, fg=_YELLOW, selectcolor=_ELEV,
                        activebackground=_BG, activeforeground=_YELLOW, font=("Segoe UI", 9),
                        anchor="w", highlightthickness=0, bd=0).pack(fill="x")
@@ -893,7 +1088,7 @@ class SetupGUI:
                "admin": self._admin_var.get()}
         self._run(lambda r: run_full_setup(opt, pre, r))
 
-    # ── privilege sub-view (autostart / shortcut) ──
+    # ── autostart / shortcut sub-view ──
     def show_privilege(self, kind):
         tk = self.tk
         self._clear_body()
@@ -904,21 +1099,30 @@ class SetupGUI:
         status = self._status_text(kind)
         tk.Label(self.body, text=status, bg=_BG, fg=_MUTED, font=("Segoe UI", 9),
                  anchor="w", justify="left", wraplength=680).pack(anchor="w", pady=(0, 10))
-        priv = tk.StringVar(value="normal")
-        for val, label in (("normal", "Normal privileges"),
-                           ("admin", "Run as administrator (elevation prompt each launch)")):
-            tk.Radiobutton(self.body, text="  " + label, variable=priv, value=val,
-                           bg=_BG, fg=_TEXT if val == "normal" else _YELLOW, selectcolor=_ELEV,
-                           activebackground=_BG, font=("Segoe UI", 10), anchor="w",
-                           highlightthickness=0, bd=0).pack(fill="x")
         row = tk.Frame(self.body, bg=_BG)
-        row.pack(fill="x", pady=(12, 0))
         if kind == "autostart":
+            # Normal privilege only — elevated autostart isn't supported (never
+            # launches reliably at login). Launches through the run script.
+            tk.Label(self.body, text="Runs your run script at login (per-user, normal "
+                     "privilege). Use “Test now” to launch it immediately without logging out.",
+                     bg=_BG, fg=_MUTED, font=("Segoe UI", 9), anchor="w", justify="left",
+                     wraplength=680).pack(anchor="w", pady=(0, 8))
+            row.pack(fill="x", pady=(12, 0))
             self._btn(row, "Enable", lambda: self._run(
-                lambda r: do_autostart(True, priv.get() == "admin", r)), "accent").pack(side="left")
+                lambda r: do_autostart(True, r)), "accent").pack(side="left")
             self._btn(row, "Disable", lambda: self._run(
-                lambda r: do_autostart(False, False, r)), "normal").pack(side="left", padx=(8, 0))
+                lambda r: do_autostart(False, r)), "normal").pack(side="left", padx=(8, 0))
+            self._btn(row, "Test now", lambda: self._run(
+                lambda r: do_autostart_test(r)), "normal").pack(side="left", padx=(8, 0))
         else:
+            priv = tk.StringVar(value="normal")
+            for val, label in (("normal", "Normal privileges"),
+                               ("admin", "Run as administrator (elevation prompt each launch)")):
+                tk.Radiobutton(self.body, text="  " + label, variable=priv, value=val,
+                               bg=_BG, fg=_TEXT if val == "normal" else _YELLOW, selectcolor=_ELEV,
+                               activebackground=_BG, font=("Segoe UI", 10), anchor="w",
+                               highlightthickness=0, bd=0).pack(fill="x")
+            row.pack(fill="x", pady=(12, 0))
             self._btn(row, "Create / Update", lambda: self._run(
                 lambda r: do_shortcut(True, priv.get() == "admin", r)), "accent").pack(side="left")
             self._btn(row, "Remove", lambda: self._run(
@@ -930,9 +1134,8 @@ class SetupGUI:
         try:
             if kind == "autostart" and aut is not None:
                 st = aut.status()
-                if st["enabled"]:
-                    return f"Currently: enabled ({'administrator' if st['admin'] else 'normal'})."
-                return "Currently: not set to start at login."
+                return ("Currently: enabled — runs at login." if st["enabled"]
+                        else "Currently: not set to start at login.")
             if kind == "shortcut" and sc is not None:
                 st = sc.status()
                 if st["exists"]:
@@ -953,6 +1156,24 @@ class SetupGUI:
         rm_venv = messagebox.askyesno("Uninstall / clean", "Also delete the .venv "
                                       "(you'd need to re-run Setup to use the app)?")
         self._run(lambda r: uninstall_clean(rm_venv, r))
+
+    def _bootstrap(self):
+        from tkinter import messagebox
+        info = detect_platform_installer()
+        cmds = info["py_cmds"] + info["sys_cmds"]
+        if not cmds:
+            messagebox.showinfo("Install prerequisites",
+                                "No automatic installer for this OS.\n\n" + (info["note"] or ""))
+            return
+        preview = "\n".join("$ " + " ".join(c) for c in cmds)
+        note = ("\n\n" + info["note"]) if info["note"] else ""
+        extra = ("\n\nA terminal will open so you can enter your sudo password."
+                 if not (IS_WIN or IS_MAC) else "")
+        if not messagebox.askyesno(
+                "Install Python 3.10 + prerequisites",
+                f"Run these with {info['name']}?\n\n{preview}{note}{extra}"):
+            return
+        self._run(lambda r: bootstrap_prerequisites(r, gui=True))
 
     # ── action runner: worker thread + log view ──
     def _run(self, fn):

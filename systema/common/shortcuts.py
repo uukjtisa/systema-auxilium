@@ -56,19 +56,45 @@ def desktop_dir() -> Path:
                 return Path(p)
             return Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Desktop"
         if IS_LINUX:
+            home = Path.home()
             out = subprocess.run(["xdg-user-dir", "DESKTOP"], capture_output=True, text=True)
             p = out.stdout.strip()
-            if p and Path(p).is_dir():
+            # xdg-user-dir returns $HOME itself when no Desktop is configured — in
+            # that case DON'T drop the launcher loose in $HOME; prefer ~/Desktop so
+            # it stays findable and removable.
+            if p and Path(p).is_dir() and Path(p) != home:
                 return Path(p)
     except Exception:
         pass
     return Path.home() / "Desktop"
 
 
-def shortcut_path() -> Path:
-    """Where the Systema Auxilium desktop shortcut lives for this OS."""
+def _shortcut_name() -> str:
     ext = ".lnk" if IS_WIN else (".command" if IS_MAC else ".desktop")
-    return desktop_dir() / f"{APP_NAME}{ext}"
+    return f"{APP_NAME}{ext}"
+
+
+def shortcut_path() -> Path:
+    """Primary location of the Systema Auxilium desktop shortcut for this OS."""
+    return desktop_dir() / _shortcut_name()
+
+
+def _shortcut_candidates() -> list:
+    """All plausible locations the shortcut could live, so status/removal never
+    strand a launcher when desktop-dir resolution drifts (xdg vs ~/Desktop vs $HOME).
+    Primary (shortcut_path) first; de-duplicated, order preserved."""
+    name = _shortcut_name()
+    cands = [shortcut_path()]
+    if not IS_WIN:
+        home = Path.home()
+        for d in (home / "Desktop", home):
+            cands.append(d / name)
+    seen, ordered = set(), []
+    for c in cands:
+        if c not in seen:
+            seen.add(c)
+            ordered.append(c)
+    return ordered
 
 
 def _venv_python(windowless: bool = True) -> Path | None:
@@ -171,8 +197,8 @@ def _win_set_admin_bit(as_admin: bool):
         return False, f"Could not edit shortcut privileges: {e}"
 
 
-def _win_is_admin():
-    lnk = shortcut_path()
+def _win_is_admin(lnk: "Path | None" = None):
+    lnk = lnk or shortcut_path()
     if not lnk.exists():
         return None
     try:
@@ -240,8 +266,8 @@ def _linux_create(as_admin: bool):
     return True, f"Shortcut created on the Desktop ({'admin' if as_admin else 'normal'})."
 
 
-def _linux_is_admin():
-    path = shortcut_path()
+def _linux_is_admin(path: "Path | None" = None):
+    path = path or shortcut_path()
     if not path.exists():
         return None
     try:
@@ -293,14 +319,23 @@ def _mac_create(as_admin: bool):
     return True, f"Shortcut created on the Desktop ({'admin' if as_admin else 'normal'})."
 
 
-def _mac_is_admin():
-    path = shortcut_path()
+def _mac_is_admin(path: "Path | None" = None):
+    path = path or shortcut_path()
     if not path.exists():
         return None
     try:
         return "with administrator privileges" in path.read_text(encoding="utf-8")
     except Exception:
         return None
+
+
+def _admin_at(path: "Path") -> "bool | None":
+    """Privilege level of a shortcut at a specific path (for candidate scanning)."""
+    if IS_WIN:
+        return _win_is_admin(path)
+    if IS_MAC:
+        return _mac_is_admin(path)
+    return _linux_is_admin(path)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -334,11 +369,15 @@ def set_admin(as_admin: bool):
 
 
 def remove_shortcut():
-    """Delete the desktop shortcut. Returns (ok, message)."""
-    path = shortcut_path()
+    """Delete the desktop shortcut. Scans every candidate location so a path drift
+    (xdg-user-dir vs ~/Desktop vs $HOME) can't strand the launcher. Returns (ok, msg)."""
+    removed = []
     try:
-        if path.exists():
-            path.unlink()
+        for p in _shortcut_candidates():
+            if p.exists():
+                p.unlink()
+                removed.append(str(p))
+        if removed:
             return True, "Shortcut removed."
         return True, "No shortcut to remove."
     except Exception as e:
@@ -346,17 +385,18 @@ def remove_shortcut():
 
 
 def is_admin_shortcut():
-    """True/False if a shortcut exists (admin state), or None if none exists."""
-    if IS_WIN:
-        return _win_is_admin()
-    if IS_MAC:
-        return _mac_is_admin()
-    return _linux_is_admin()
+    """True/False privilege of the existing shortcut (any candidate location), or
+    None if none exists."""
+    for p in _shortcut_candidates():
+        if p.exists():
+            return _admin_at(p)
+    return None
 
 
 def status() -> dict:
-    """{'exists': bool, 'path': str, 'admin': bool|None} — for UI state."""
-    p = shortcut_path()
-    exists = p.exists()
-    return {"exists": exists, "path": str(p),
-            "admin": is_admin_shortcut() if exists else None}
+    """{'exists': bool, 'path': str, 'admin': bool|None} — for UI state. Reports the
+    first shortcut found across candidate locations."""
+    for p in _shortcut_candidates():
+        if p.exists():
+            return {"exists": True, "path": str(p), "admin": _admin_at(p)}
+    return {"exists": False, "path": str(shortcut_path()), "admin": None}

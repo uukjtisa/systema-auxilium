@@ -3,26 +3,22 @@ systema/common/autostart.py
 Cross-platform "start at login" manager for Systema Auxilium.
 
 Stdlib-only, and a sibling of systema/common/shortcuts.py — it reuses that
-module's launch-target + privilege helpers so autostart always points at exactly
-the same thing the desktop shortcut does (run script if present, else venv python
-+ main.py) and supports the SAME admin / normal privilege toggle.
+module's launch-target helpers so autostart always launches exactly the same
+thing the desktop shortcut / normal launch does: the generated RUN SCRIPT
+(run.bat / run.sh / run.command), falling back to the venv python + main.py only
+when no run script exists yet.
+
+Autostart is **per-user and normal-privilege only** on every OS. Elevated
+autostart is deliberately NOT supported: Windows silently ignores elevated
+Startup-folder items at login, and Linux pkexec/​macOS admin prompts don't fire
+in the autostart context — so it never worked and only caused confusion.
 
   • Windows — a .lnk in the user's Startup folder
                (%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup).
-  • Linux    — an XDG autostart .desktop in ~/.config/autostart/.
+  • Linux    — an XDG autostart .desktop in ~/.config/autostart/ that runs
+               `bash "run.sh"` (via bash so a missing +x bit / noexec mount can't
+               silently stop it from launching at login).
   • macOS    — a LaunchAgent plist in ~/Library/LaunchAgents/ (RunAtLoad).
-
-Privilege toggle (`as_admin`) mirrors shortcuts.py: Windows flips the .lnk
-run-as-admin bit in place; Linux launches through `pkexec`; macOS wraps the
-launch in an admin `osascript`.
-
-⚠  Admin autostart is inherently awkward — NORMAL is recommended and is the
-   default. Admin is opt-in:
-     • Windows — an elevated Startup .lnk pops a UAC prompt at every login, and
-       some Windows builds skip elevated Startup items entirely.
-     • Linux   — pkexec prompts for a password at every login.
-     • macOS   — a per-user LaunchAgent cannot truly elevate; the admin wrapper
-       prompts for a password at each login.
 
 Every public function returns (ok: bool, message: str) or a status dict; nothing
 raises, so UI callers can show the message directly.
@@ -59,10 +55,19 @@ def autostart_path() -> Path:
     return Path.home() / ".config" / "autostart" / _LINUX_DESKTOP
 
 
+def _log(msg: str) -> None:
+    """Breadcrumb to stdout (captured by the app's session-log _Tee) so a
+    login-time autostart failure is diagnosable."""
+    try:
+        print(f"[autostart] {msg}")
+    except Exception:
+        pass
+
+
 # ══════════════════════════════════════════════════════════════════════════════
-# Windows — a .lnk in the Startup folder, with an optional run-as-admin bit
+# Windows — a .lnk in the Startup folder pointing at run.bat (normal privilege)
 # ══════════════════════════════════════════════════════════════════════════════
-def _win_enable(as_admin: bool = False):
+def _win_enable():
     script = _sc._run_script()
     if script is not None:
         target, arguments = str(script), ""
@@ -88,64 +93,43 @@ $s.Save()
                        capture_output=True, text=True, creationflags=_NO_WINDOW)
     if r.returncode != 0 or not lnk.exists():
         return False, f"Could not enable autostart: {r.stderr.strip() or 'PowerShell failed'}"
-    ok, msg = _win_set_admin_bit(as_admin)
-    if not ok:
-        return False, msg
-    return True, ("Systema Auxilium will now start automatically at login"
-                  + (" as administrator (a UAC prompt appears each login)." if as_admin else "."))
-
-
-def _win_set_admin_bit(as_admin: bool):
-    """Flip ONLY the run-as-admin bit in the Startup .lnk, preserving other flags.
-    Reuses the same offset/bit constants shortcuts.py uses for the desktop .lnk."""
-    lnk = autostart_path()
-    if not lnk.exists():
-        return False, "Autostart entry does not exist yet."
-    try:
-        data = bytearray(lnk.read_bytes())
-        off = _sc._LNK_ADMIN_OFFSET
-        if len(data) <= off:
-            return False, "Autostart shortcut is malformed (too short)."
-        if as_admin:
-            data[off] |= _sc._LNK_ADMIN_BIT
-        else:
-            data[off] &= ~_sc._LNK_ADMIN_BIT
-        lnk.write_bytes(data)
-        return True, "ok"
-    except Exception as e:
-        return False, f"Could not set autostart privileges: {e}"
-
-
-def _win_is_admin():
-    lnk = autostart_path()
-    if not lnk.exists():
-        return None
-    try:
-        data = lnk.read_bytes()
-        off = _sc._LNK_ADMIN_OFFSET
-        if len(data) <= off:
-            return None
-        return bool(data[off] & _sc._LNK_ADMIN_BIT)
-    except Exception:
-        return None
+    _log(f"windows startup .lnk -> {target} {arguments}".strip())
+    return True, "Systema Auxilium will now start automatically at login."
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Linux — XDG autostart .desktop (pkexec when admin)
+# Linux — XDG autostart .desktop running `bash "run.sh"`
 # ══════════════════════════════════════════════════════════════════════════════
-def _linux_enable(as_admin: bool = False):
+def _linux_exec_line() -> str:
+    """Launch the run script through bash (robust to a missing +x bit / noexec),
+    falling back to the venv python + main.py when no run script exists yet."""
+    script = _sc._run_script()
+    if script is not None:
+        try:
+            os.chmod(script, 0o755)
+        except Exception:
+            pass
+        return f'bash "{script}"'
+    exe, main = _sc._launch_parts()
+    return f'"{exe}" "{main}"'
+
+
+def _linux_enable():
     path = autostart_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     icon = str(_sc.ICON_ICO) if _sc.ICON_ICO.exists() else APP_NAME.lower().replace(" ", "-")
+    exec_line = _linux_exec_line()
     content = (
         "[Desktop Entry]\n"
         "Type=Application\n"
         f"Name={APP_NAME}\n"
         "Comment=Systema Auxilium AI Desktop Assistant\n"
-        f"Exec={_sc._linux_exec_line(as_admin)}\n"
+        f"Exec={exec_line}\n"
         f"Path={ROOT}\n"
         f"Icon={icon}\n"
         "Terminal=false\n"
+        "Hidden=false\n"
+        "NoDisplay=false\n"
         "X-GNOME-Autostart-enabled=true\n"
     )
     try:
@@ -153,42 +137,28 @@ def _linux_enable(as_admin: bool = False):
         os.chmod(path, 0o755)
     except Exception as e:
         return False, f"Could not enable autostart: {e}"
-    return True, ("Systema Auxilium will now start automatically at login"
-                  + (" as administrator (pkexec prompts each login)." if as_admin else "."))
-
-
-def _linux_is_admin():
-    path = autostart_path()
-    if not path.exists():
-        return None
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if line.startswith("Exec="):
-                return "pkexec" in line
-    except Exception:
-        pass
-    return None
+    _log(f"linux autostart .desktop -> Exec={exec_line}")
+    return True, "Systema Auxilium will now start automatically at login."
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# macOS — LaunchAgent (RunAtLoad); admin wraps the launch in an osascript prompt
+# macOS — LaunchAgent (RunAtLoad) running run.command
 # ══════════════════════════════════════════════════════════════════════════════
-def _mac_enable(as_admin: bool = False):
-    exe, main = _sc._launch_parts()
+def _mac_enable():
+    script = _sc._run_script()
+    if script is not None:
+        try:
+            os.chmod(script, 0o755)
+        except Exception:
+            pass
+        prog = f'  <array><string>/bin/bash</string><string>{script}</string></array>\n'
+        launched = f"bash {script}"
+    else:
+        exe, main = _sc._launch_parts()
+        prog = f'  <array><string>{exe}</string><string>{main}</string></array>\n'
+        launched = f"{exe} {main}"
     path = autostart_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    if as_admin:
-        # AppleScript prompts for the admin password at login, then runs elevated.
-        # `&` must be XML-escaped inside the plist <string>.
-        inner = f'cd \\"{ROOT}\\" &amp;&amp; \\"{exe}\\" \\"{main}\\"'
-        prog = ("  <array>\n"
-                "    <string>/bin/bash</string>\n"
-                "    <string>-c</string>\n"
-                f"    <string>osascript -e 'do shell script \"{inner}\" "
-                "with administrator privileges'</string>\n"
-                "  </array>\n")
-    else:
-        prog = f'  <array><string>{exe}</string><string>{main}</string></array>\n'
     plist = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
@@ -209,31 +179,21 @@ def _mac_enable(as_admin: bool = False):
         subprocess.run(["launchctl", "load", str(path)], capture_output=True, text=True)
     except Exception:
         pass
-    return True, ("Systema Auxilium will now start automatically at login"
-                  + (" as administrator (a password prompt appears each login)." if as_admin else "."))
-
-
-def _mac_is_admin():
-    path = autostart_path()
-    if not path.exists():
-        return None
-    try:
-        return "with administrator privileges" in path.read_text(encoding="utf-8")
-    except Exception:
-        return None
+    _log(f"macos launchagent -> {launched}")
+    return True, "Systema Auxilium will now start automatically at login."
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Public API
 # ══════════════════════════════════════════════════════════════════════════════
-def enable_autostart(as_admin: bool = False):
-    """Enable start-at-login (normal by default). Returns (ok, message)."""
+def enable_autostart():
+    """Enable start-at-login (per-user, normal privilege). Returns (ok, message)."""
     try:
         if IS_WIN:
-            return _win_enable(as_admin)
+            return _win_enable()
         if IS_MAC:
-            return _mac_enable(as_admin)
-        return _linux_enable(as_admin)
+            return _mac_enable()
+        return _linux_enable()
     except Exception as e:
         return False, f"Unexpected error: {e}"
 
@@ -255,21 +215,32 @@ def disable_autostart():
         return False, f"Could not disable autostart: {e}"
 
 
-def set_admin(as_admin: bool):
-    """Set the privilege level of the autostart entry, enabling it if missing.
-    Returns (ok, message). Mirrors shortcuts.set_admin()."""
+def run_now():
+    """Launch the app immediately via the SAME run script autostart uses — for a
+    'test autostart now' button. If the app is already running its single-instance
+    guard will just show the 'already running' notice, which still proves the run
+    script executes. Returns (ok, message)."""
+    script = _sc._run_script()
     try:
-        if not is_enabled():
-            return enable_autostart(as_admin)
         if IS_WIN:
-            ok, msg = _win_set_admin_bit(as_admin)     # in-place bit flip, no rebuild
-            if not ok:
-                return False, msg
-            return True, f"Autostart set to {'run as administrator' if as_admin else 'normal'}."
-        # Linux / macOS: rewrite the entry with the new privilege form.
-        return enable_autostart(as_admin)
+            if script is not None:
+                subprocess.Popen(["cmd", "/c", "call", str(script)], cwd=str(ROOT),
+                                 creationflags=0x00000008 | 0x08000000)  # DETACHED|NO_WINDOW
+            else:
+                exe, main = _sc._launch_parts()
+                subprocess.Popen([exe, main], cwd=str(ROOT),
+                                 creationflags=0x00000008 | 0x08000000)
+        else:
+            if script is not None:
+                subprocess.Popen(["bash", str(script)], cwd=str(ROOT), start_new_session=True)
+            else:
+                exe, main = _sc._launch_parts()
+                subprocess.Popen([exe, main], cwd=str(ROOT), start_new_session=True)
+        target = str(script) if script is not None else "python main.py"
+        _log(f"run_now -> {target}")
+        return True, f"Launched via the run script ({Path(target).name})."
     except Exception as e:
-        return False, f"Unexpected error: {e}"
+        return False, f"Could not launch: {e}"
 
 
 def is_enabled() -> bool:
@@ -277,20 +248,7 @@ def is_enabled() -> bool:
     return autostart_path().exists()
 
 
-def is_admin():
-    """True/False for the current entry's privilege level, or None if disabled."""
-    if not is_enabled():
-        return None
-    if IS_WIN:
-        return _win_is_admin()
-    if IS_MAC:
-        return _mac_is_admin()
-    return _linux_is_admin()
-
-
 def status() -> dict:
-    """{'enabled': bool, 'path': str, 'admin': bool|None} — for UI state."""
+    """{'enabled': bool, 'path': str} — for UI state."""
     p = autostart_path()
-    enabled = p.exists()
-    return {"enabled": enabled, "path": str(p),
-            "admin": is_admin() if enabled else None}
+    return {"enabled": p.exists(), "path": str(p)}
