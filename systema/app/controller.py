@@ -34,58 +34,48 @@ log = _make_logger("Controller") if _verbose else _NoOpLogger()
 from systema import APP_ROOT as _APP_ROOT
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Detached relauncher used by restart_app(). Waits for the OLD pid to actually
-# EXIT — which is exactly the moment the single-instance lock/mutex is released, a
-# deterministic condition (bounded so it can never hang), NOT a fixed-time guess —
-# then relaunches via the canonical venv launch script (run.bat / run.sh) from
-# APP_ROOT, cd-proof. Falls back to the same interpreter + argv if that script is
-# missing. Runs detached so it outlives the dying parent.
-_RELAUNCH_SRC = '''import os, sys, time, subprocess
-PID, ROOT, SCRIPT, EXE, ARGV = {pid}, {root}, {script}, {exe}, {argv}
-
-def _alive(pid):
-    if sys.platform == "win32":
-        import ctypes
-        h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
-        if not h:
-            return False
-        code = ctypes.c_ulong()
-        ctypes.windll.kernel32.GetExitCodeProcess(h, ctypes.byref(code))
-        ctypes.windll.kernel32.CloseHandle(h)
-        return code.value == 259  # STILL_ACTIVE
+# ── Unified restart relauncher ───────────────────────────────────────────────
+# The SINGLE relaunch path shared by every restart caller (update apply, Manage
+# apply, the floating-window menu). Spawns a DETACHED SHELL that INHERITS this
+# process's privileges — so an elevated app restarts elevated and a normal one
+# restarts normal, no user switching — which:
+#   1. polls until the OLD pid is gone (the moment the single-instance lock is
+#      released; bounded so it can never hang, NOT a fixed-time guess), then
+#   2. cd's to APP_ROOT and execs the canonical venv launch script (run.sh /
+#      run.bat), falling back to this same interpreter + main.py if it's missing.
+# POSIX uses an inline `sh -c` (kill -0 to watch the pid); Windows uses PowerShell
+# `Wait-Process` (a direct wait on the pid — no console-tool output parsing, which
+# is unreliable in a windowless process).
+def _spawn_relauncher(pid: int, root) -> bool:
+    import sys, os, subprocess
+    from pathlib import Path
+    root = Path(root)
     try:
-        os.kill(pid, 0); return True
-    except OSError:
+        if sys.platform == "win32":
+            script = root / "run.bat"
+            # Windows paths never contain a single quote, so single-quoting is safe.
+            launch = (f"& cmd /c '{script}'" if script.exists()
+                      else f"& '{sys.executable}' '{root / 'main.py'}'")
+            ps = (f"Wait-Process -Id {pid} -Timeout 30 -ErrorAction SilentlyContinue; "
+                  f"Start-Sleep -Milliseconds 500; "
+                  f"Set-Location -LiteralPath '{root}'; {launch}")
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            subprocess.Popen(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
+                cwd=str(root), close_fds=True, creationflags=flags)
+        else:
+            script = root / "run.sh"
+            launch = (f'exec sh "{script}"' if script.exists()
+                      else f'exec "{sys.executable}" "{root / "main.py"}"')
+            # Wait (bounded ~30s) for our pid to vanish, tiny grace, then relaunch.
+            sh = (f'i=0; while kill -0 {pid} 2>/dev/null && [ "$i" -lt 300 ]; do '
+                  f'sleep 0.1; i=$((i+1)); done; sleep 0.5; cd "{root}" || exit 1; {launch}')
+            subprocess.Popen(["sh", "-c", sh], cwd=str(root),
+                             close_fds=True, start_new_session=True)
+        return True
+    except Exception as e:
+        log.error(f"[_spawn_relauncher] failed to spawn relauncher: {e}")
         return False
-
-# Wait for the old instance to exit (release the lock), bounded so we never hang.
-for _ in range(300):            # up to ~30s
-    if not _alive(PID):
-        break
-    time.sleep(0.1)
-time.sleep(0.6)                 # small grace for the OS to drop the mutex/handle
-
-try:
-    os.chdir(ROOT)
-except Exception:
-    pass
-
-use_script = bool(SCRIPT) and os.path.exists(SCRIPT)
-try:
-    if sys.platform == "win32":
-        flags = 0x00000008 | 0x08000000   # DETACHED_PROCESS | CREATE_NO_WINDOW
-        cmd = ["cmd", "/c", "call", SCRIPT] if use_script else [EXE] + ARGV
-        subprocess.Popen(cmd, cwd=ROOT, creationflags=flags, close_fds=True)
-    else:
-        cmd = ["sh", SCRIPT] if use_script else [EXE] + ARGV
-        subprocess.Popen(cmd, cwd=ROOT, start_new_session=True, close_fds=True)
-except Exception as e:
-    try:
-        with open(os.path.join(ROOT, "data", "logs", "_relaunch_error.log"), "a") as _f:
-            _f.write(repr(e) + " | ")
-    except Exception:
-        pass
-'''
 
 
 class AssistantController(QObject):
@@ -399,46 +389,44 @@ class AssistantController(QObject):
     # ── Software updates ───────────────────────────────────────────────────────
 
     def restart_app(self):
-        """Relaunch Systema Auxilium and quit this instance.
+        """Relaunch Systema Auxilium and quit this instance — the ONE restart path
+        used by every caller (update apply, Manage apply, the floating-window menu).
 
-        The app is single-instance, so the new process must not start until this
-        one has EXITED and released the lock. We spawn a detached relauncher that
-        polls until our PID is gone (the exact moment the lock is freed, bounded so
-        it can't hang — no fixed-time guess), then relaunches via the canonical
-        venv launch script (run.bat / run.sh) from APP_ROOT, cd-proof. Falls back to
-        the same interpreter + argv if that script is missing. Quits immediately.
+        The app is single-instance, so the new process must not start until this one
+        has EXITED and released the lock. We spawn the detached shell relauncher
+        (``_spawn_relauncher`` — waits for our pid to die, then execs run.sh/run.bat
+        from APP_ROOT with our SAME privileges), then shut down cleanly (save
+        settings, close child windows, stop the tray) so nothing lingers holding the
+        lock. A hard-exit fallback guarantees the pid actually dies even if some
+        thread would otherwise keep the interpreter alive, so the waiting relauncher
+        can always proceed.
         """
-        import sys, os, subprocess
+        import os, threading
         from pathlib import Path
-        from PyQt6.QtWidgets import QApplication
         from systema import APP_ROOT
 
-        try:
-            app_root = Path(APP_ROOT)
-            script = app_root / ("run.bat" if sys.platform == "win32" else "run.sh")
-            relaunch = app_root / "data" / "_relaunch.py"
-            relaunch.parent.mkdir(parents=True, exist_ok=True)
-            relaunch.write_text(_RELAUNCH_SRC.format(
-                pid=os.getpid(),
-                root=repr(str(app_root)),
-                script=repr(str(script) if script.exists() else ""),
-                exe=repr(sys.executable),
-                argv=repr(list(sys.argv)),
-            ), encoding="utf-8")
-            if sys.platform == "win32":
-                flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | \
-                        getattr(subprocess, "DETACHED_PROCESS", 0)
-                subprocess.Popen([sys.executable, str(relaunch)], cwd=str(app_root),
-                                 close_fds=True, creationflags=flags)
-            else:
-                subprocess.Popen([sys.executable, str(relaunch)], cwd=str(app_root),
-                                 close_fds=True, start_new_session=True)
-            log.info(f"[AssistantController.restart_app] relauncher spawned "
-                     f"(waits for pid {os.getpid()} to exit → {script.name if script.exists() else 'interpreter'}); quitting")
-        except Exception as e:
-            log.error(f"[AssistantController.restart_app] failed to spawn relauncher: {e}")
+        if not _spawn_relauncher(os.getpid(), Path(APP_ROOT)):
             return False
-        QApplication.quit()
+        log.info(f"[AssistantController.restart_app] relauncher spawned "
+                 f"(waits for pid {os.getpid()} to exit); shutting down")
+        # Belt-and-suspenders: if a lingering non-daemon thread or the tray keeps us
+        # alive past the graceful quit, force-exit so the relauncher isn't left
+        # waiting on a pid that never dies (which would block the single-instance
+        # relaunch). Daemon timer: it never keeps us up itself and is killed with us
+        # on a clean exit, so it only fires if the graceful path actually hung.
+        _t = threading.Timer(3.0, lambda: os._exit(0))
+        _t.daemon = True
+        _t.start()
+        # Graceful shutdown (settings save + child-window + tray teardown + quit).
+        try:
+            if getattr(self, "ui", None) is not None:
+                self.ui.shutdown_app()
+            else:
+                from PyQt6.QtWidgets import QApplication
+                QApplication.quit()
+        except Exception:
+            from PyQt6.QtWidgets import QApplication
+            QApplication.quit()
         return True
 
     def agent_activity(self):

@@ -46,6 +46,22 @@ pip install -r requirements.txt
 python main.py
 ```
 
+## Known limitations
+
+- **Start-at-login on Linux is unreliable (known issue).** On the developer's Kali
+  Linux the autostart entry does **not** fire at login, despite the app installing
+  it for the invoking login user, honouring `$XDG_CONFIG_HOME`, using a launcher
+  that waits for the graphical session, and offering a systemd `--user` fallback.
+  The root cause is not yet identified, and autostart is **untested on other Debian
+  systems and desktop environments** — treat login autostart on Linux as best‑effort
+  for now. Workaround: launch the app manually with `run.sh` or from the desktop
+  shortcut. If you want to help diagnose it, use **Settings → General → Start at
+  Login → Diagnose / View log** after a login to see whether the entry fired and
+  where it stopped.
+- **macOS is untested.** The macOS code paths (LaunchAgent autostart, the
+  `.command` launchers, the admin/elevated variants) exist but have not been run on
+  a real Mac.
+
 ## First run: configure a provider
 
 Before you can chat you must configure at least one LLM provider. Providers are

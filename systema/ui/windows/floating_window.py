@@ -499,6 +499,7 @@ class FloatingWindow(QWidget):
         menu.addAction(QAction("Reset Python", self, triggered=self.reset_python))
         menu.addAction(QAction("Put in Tray", self, triggered=self.put_to_tray))
         menu.addSeparator()
+        menu.addAction(QAction("Restart", self, triggered=self.restart_app))
         menu.addAction(QAction("Shutdown", self, triggered=self.shutdown_app))
         menu.exec(QCursor.pos())
 
@@ -753,6 +754,16 @@ class FloatingWindow(QWidget):
     def show_from_tray(self, icon=None, item=None):
         """Legacy — prefer _tray_show_floating for tray callbacks."""
         QTimer.singleShot(0, self._do_show_from_tray)
+
+    def restart_app(self):
+        """Relaunch Systema Auxilium via the unified controller restart (which spawns
+        the detached relauncher, then runs the same clean shutdown as Shutdown)."""
+        try:
+            self.controller.restart_app()
+        except Exception:
+            # If the relauncher couldn't spawn, fall back to a plain shutdown so the
+            # menu action never leaves the app in a half-torn-down state.
+            self.shutdown_app()
 
     def shutdown_app(self):
         """Properly shutdown the application — close all child windows first."""
