@@ -73,6 +73,10 @@ OPTIONAL_GROUPS = [
     {"key": "tts",   "label": "Offline text-to-speech",
      "desc": "Local speech synthesis when edge-tts is unavailable (pyttsx3)",
      "default": False, "pkgs": ["pyttsx3"]},
+    {"key": "kokoro", "label": "Kokoro local TTS (high-quality neural voice)",
+     "desc": "Local TTS server for the premade Kokoro provider (kokoro, soundfile, flask "
+             "— heavy: installs torch; the voice model downloads on first use)",
+     "default": False, "pkgs": ["kokoro", "soundfile", "flask"]},
     {"key": "vosk",  "label": "Offline speech-to-text (Vosk)",
      "desc": "Fully offline voice recognition (vosk — downloads a model separately)",
      "default": False, "pkgs": ["vosk"]},

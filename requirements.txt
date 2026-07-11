@@ -51,6 +51,12 @@ pandas
 #     Local speech synthesis when edge-tts is unavailable (pyttsx3)
 # pyttsx3
 
+# --- Kokoro local TTS (high-quality neural voice) ---
+#     Local TTS server for the premade Kokoro provider (kokoro, soundfile, flask — heavy: installs torch; the voice model downloads on first use)
+# kokoro
+# soundfile
+# flask
+
 # --- Offline speech-to-text (Vosk) ---
 #     Fully offline voice recognition (vosk — downloads a model separately)
 # vosk
