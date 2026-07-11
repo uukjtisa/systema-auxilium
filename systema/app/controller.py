@@ -83,6 +83,9 @@ class AssistantController(QObject):
 
     log_signal = pyqtSignal(str, str)
     voice_message_signal = pyqtSignal(str)
+    # Voice state changes originate on VoiceHandler worker threads — marshal
+    # them to the GUI thread before touching any widget.
+    voice_state_signal = pyqtSignal(str)
 
     # Manual provider — fires on the main thread to show the response popup
     # Only carries display data; result_holder + done_event live on self
@@ -301,6 +304,7 @@ class AssistantController(QObject):
 
         # Connect voice message signal to handler (main thread safe)
         self.voice_message_signal.connect(self._handle_voice_message_on_main_thread)
+        self.voice_state_signal.connect(self._handle_voice_state_on_main_thread)
         log.debug("[AssistantController.__init__] voice_message_signal connected to main thread handler")
 
         # Connect
@@ -447,6 +451,72 @@ class AssistantController(QObject):
         if getattr(self, "is_processing", False):
             reasons.append("a response from the API is still pending")
         return bool(reasons), "; ".join(reasons)
+
+    def exit_busy_reason(self):
+        """Reason string if a restart/shutdown would cut off live activity, else None.
+
+        Wraps agent_activity() and additionally counts pending voice output as
+        activity (a restart mid-speech would cut the audio off abruptly)."""
+        busy, reason = self.agent_activity()
+        if busy:
+            return reason
+        try:
+            vh = getattr(self, 'voice_handler', None)
+            if vh is not None and (getattr(vh, 'speech_busy', False)
+                                   or getattr(vh, 'is_speaking', False)):
+                return "voice output is still playing"
+        except Exception:
+            pass
+        return None
+
+    def graceful_stop_for_exit(self):
+        """Drain all in-flight activity cleanly before a restart/shutdown.
+
+        Reuses the existing interrupt mechanics: stop the work-mode timer,
+        invalidate/terminate any in-flight worker, raise KeyboardInterrupt in
+        actively running code (partial output preserved, work_code_active(False)
+        fires so the live console is torn down), stop voice output, clear the
+        processing/work-mode flags, and save the session.
+        """
+        log.info("[AssistantController.graceful_stop_for_exit] Draining activity before exit")
+        try:
+            self.work_mode_timer.stop()
+        except Exception:
+            pass
+        self._request_generation += 1  # discard any late worker response
+        try:
+            if getattr(self, 'current_worker', None) and self.current_worker.isRunning():
+                log.warning("[AssistantController.graceful_stop_for_exit] Terminating in-flight worker")
+                self.current_worker.terminate()
+                self.current_worker.wait(1000)
+        except Exception:
+            pass
+        try:
+            tm = self.ai.tool_manager
+            if getattr(tm, 'work_code_running', False):
+                log.warning("[AssistantController.graceful_stop_for_exit] Interrupting running code")
+                tm.interrupt_running_code(
+                    "Interrupted: the user is restarting or shutting down the app.")
+            tm.in_work_mode = False
+            tm.work_code_running = False
+            tm.last_work_output = None
+        except Exception:
+            pass
+        self.is_processing = False
+        try:
+            vh = getattr(self, 'voice_handler', None)
+            if vh is not None:
+                if hasattr(vh, 'stop_all'):
+                    vh.stop_all()
+                else:
+                    vh.interrupt_speech()
+        except Exception:
+            pass
+        try:
+            self._auto_save_session()
+        except Exception:
+            pass
+        log.info("[AssistantController.graceful_stop_for_exit] ✓ Activity drained")
 
     def _on_update_available(self, has_update: bool, branch: str, commits: list = None):
         """Startup probe result — offer to open the updater if something is new.
@@ -613,6 +683,8 @@ class AssistantController(QObject):
             'ai_provider': None,
             'voice_input_device': None,
             'voice_output_device': None,
+            'voice_setup_prompt_enabled': True,
+            'voice_fillers_enabled': True,
             'voice_tts_provider': default_tts,
             'voice_tts_voice': 'en-US-GuyNeural',
             'tts_provider': default_tts,
@@ -691,21 +763,16 @@ class AssistantController(QObject):
                 silero_threshold
             )
 
-            # Get device names for display
-            input_name = "Default"
-            output_name = "Default"
+            # Apply the saved interrupt mode — previously only pushed on a
+            # Settings save, so a fresh session silently ran 'manual' and
+            # auto-interrupt never fired until the user re-saved settings.
+            self.voice_handler.set_interrupt_mode(
+                self.settings.get('voice_interrupt_mode', 'manual'))
 
-            if input_device is not None:
-                for dev in input_devices:
-                    if dev['id'] == input_device:
-                        input_name = dev['name']
-                        break
-
-            if output_device is not None:
-                for dev in output_devices:
-                    if dev['id'] == output_device:
-                        output_name = dev['name']
-                        break
+            # Device name for display. voice_input_device is stored as a device
+            # NAME (stable across sessions, unlike PortAudio ids); output is
+            # always the system default now.
+            input_name = input_device if input_device else "Default"
 
             # Apply TTS provider settings
             tts_provider = self.settings.get('tts_provider', 'edge-tts')
@@ -728,18 +795,24 @@ class AssistantController(QObject):
             if self.voice_handler.start_listening():
                 self.voice_mode_active = True
 
+                # Filler interjections (bridge chunk gaps in the same voice):
+                # apply the toggle and warm the per-voice cache in the background.
+                self.voice_handler.fillers_enabled = self.settings.get(
+                    'voice_fillers_enabled', True)
+                if self.voice_handler.fillers_enabled:
+                    self.voice_handler.ensure_fillers_async()
+
                 # Update AI engine with voice settings
                 self.ai.update_voice_settings(True)
 
                 message = (
-                    f"**Input Device:** {input_name}\n"
-                    f"**Output Device:** {output_name}\n\n"
+                    f"**Microphone:** {input_name}\n\n"
                     "Start speaking! I'll listen and respond naturally."
                 )
 
                 self.log("Voice mode enabled", "SUCCESS")
                 log.info(f"[AssistantController.enable_voice_mode] ✓ Voice mode active | "
-                         f"input='{input_name}' | output='{output_name}'")
+                         f"input='{input_name}'")
                 return True, message
             else:
                 log.error("[AssistantController.enable_voice_mode] ✗ start_listening() returned False")
@@ -760,9 +833,9 @@ class AssistantController(QObject):
             log.debug("[AssistantController.disable_voice_mode] Stopping listener...")
             self.voice_handler.stop_listening()
 
-            # Then interrupt any ongoing speech
-            log.debug("[AssistantController.disable_voice_mode] Interrupting speech...")
-            self.voice_handler.interrupt_speech()
+            # Then clear the speech queue and interrupt any ongoing speech
+            log.debug("[AssistantController.disable_voice_mode] Stopping speech queue...")
+            self.voice_handler.stop_all()
 
             # Update state
             self.voice_mode_active = False
@@ -856,7 +929,12 @@ class AssistantController(QObject):
         self.voice_message_signal.emit(text)
 
     def _handle_voice_message_on_main_thread(self, text):
-        """Handle voice message on main Qt thread (slot for signal)"""
+        """Handle voice message on main Qt thread (slot for signal).
+
+        Supports BARGE-IN: if a request is still in flight (LLM generating),
+        speaking again cancels it and resends the previous prompt plus a newline
+        plus the new transcript as ONE message — the existing user bubble grows
+        a line instead of a duplicate bubble appearing."""
         log.debug(f"[AssistantController._handle_voice_message_on_main_thread] text='{text[:80]}'")
         # FIXED: Ensure chat window exists (create it if needed)
         if not hasattr(self.ui, 'chat_window') or self.ui.chat_window is None:
@@ -866,6 +944,45 @@ class AssistantController(QObject):
                       "Chat window created for voice message buffering")
             self.log("Chat window created for voice message buffering")
 
+        # Flush any AI reply still buffered "until playback starts" — the
+        # auto-interrupt that preceded this transcription may have killed its
+        # playback during synthesis (idempotent; no-op when nothing waits).
+        try:
+            self._chat._handle_voice_playback_on_main_thread()
+        except Exception:
+            pass
+
+        # A new voice message always halts current speech, in BOTH interrupt
+        # modes — the user is addressing the bot; the old reply's audio must not
+        # keep talking over the new exchange. (Auto mode additionally halts at
+        # speech ONSET via the handler's auto-interrupt.)
+        try:
+            if self.voice_handler.speech_busy:
+                log.info("[AssistantController._handle_voice_message_on_main_thread] "
+                         "New voice message — stopping current speech")
+                self.voice_handler.stop_all()
+        except Exception:
+            pass
+
+        # ── Barge-in: cancel the in-flight request and merge prompts ─────────
+        if (self.is_processing and not self.ai.tool_manager.in_work_mode
+                and getattr(self, '_last_sent_user_text', None)):
+            prev = self._last_sent_user_text
+            log.info("[AssistantController._handle_voice_message_on_main_thread] "
+                     "Barge-in — interrupting in-flight request and merging prompts")
+            self.log("Voice barge-in: canceling current request and appending new speech")
+            self.interrupt_request()  # kills worker, pops last user msg from history, stops TTS
+            combined = prev + "\n" + text
+            appended = False
+            try:
+                appended = self._chat.append_to_last_user_message(text)
+            except Exception:
+                pass
+            if not appended:
+                self._chat.add_user_message(combined)
+            self.send_message(combined)  # re-records _last_sent_user_text = combined
+            return
+
         # Always add to chat window (even if hidden)
         self._chat.add_user_message(text)
 
@@ -874,11 +991,14 @@ class AssistantController(QObject):
         self.send_message(text)
 
     def handle_voice_state_change(self, state):
-        """Handle voice state changes"""
+        """VoiceHandler on_state_change callback — fires on voice worker threads,
+        so marshal to the GUI thread via signal before touching widgets."""
         log.debug(f"[AssistantController.handle_voice_state_change] state='{state}'")
-        self.log(f"Voice state: {state}")
+        self.voice_state_signal.emit(state)
 
-        # Update UI
+    def _handle_voice_state_on_main_thread(self, state):
+        """Apply a voice state change on the GUI thread."""
+        self.log(f"Voice state: {state}")
         if self._chat:
             self._chat.update_voice_status(state)
 
@@ -1119,21 +1239,24 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         return base_prompt + skill_path_rule_block + skills_section + task_section
 
     def speak_text(self, text):
-        """Speak text using TTS (only if voice mode is active and not in tool mode)"""
+        """Enqueue text on the serialized speech queue (voice mode only).
+
+        Non-blocking; utterances play strictly one at a time. Work-mode
+        commentary is narrated too — callers must only ever pass the AI's
+        message text here, never raw tool output or code."""
         log.debug(f"[AssistantController.speak_text] voice_mode_active={self.voice_mode_active} | "
-                  f"in_work_mode={self.ai.tool_manager.in_work_mode} | "
                   f"text_preview='{text[:50]}'")
         if not self.voice_mode_active:
             return
+        self.log(f"Queueing speech: {text[:50]}...")
+        self.voice_handler.speak(text)
 
-        if self.ai.tool_manager.in_work_mode:
-            log.debug("[AssistantController.speak_text] Skipping TTS — in work mode")
-            self.log("Skipping TTS - in tool mode")
-            return
-
-        log.debug("[AssistantController.speak_text] Speaking...")
-        self.log(f"Speaking: {text[:50]}...")
-        self.voice_handler.speak_text_sync(text)
+    def voice_busy(self):
+        """True while any speech is pending (synthesizing, playing, or queued)."""
+        try:
+            return bool(self.voice_mode_active and self.voice_handler.speech_busy)
+        except Exception:
+            return False
 
     def get_voice_interrupt_mode(self):
         """Get voice interrupt mode"""
@@ -1195,6 +1318,15 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
     def get_voice_devices(self):
         """Get available audio devices"""
         return self.voice_handler.list_audio_devices()
+
+    def rescan_audio_devices(self):
+        """Re-initialize PortAudio so hotplugged devices (e.g. Bluetooth earbuds)
+        appear. Callers must stop any mic meter stream first. True on success."""
+        return self.voice_handler.rescan_devices()
+
+    def audio_hotplug_signature(self):
+        """Live device-population probe (None where unsupported)."""
+        return self.voice_handler.hotplug_signature()
 
     def set_voice_input_device(self, device_id):
         """Set voice input device"""
@@ -1324,6 +1456,9 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             return
 
         self.is_processing = True
+        # Remembered for voice barge-in: speaking while this request is in
+        # flight cancels it and resends "<this text>\n<new speech>" as one.
+        self._last_sent_user_text = user_message
         log.debug(f"[AssistantController.send_message] is_processing=True | "
                   f"provider='{self.ai.ai_provider}'")
 
@@ -1681,6 +1816,14 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             self.work_mode_timer.stop()
             return
 
+        # Voice gating: never advance the chain (and thus never execute the next
+        # step) while narration is pending. Returning WITHOUT stopping the timer
+        # keeps it polling every second — the chain resumes the moment speech
+        # finishes, or instantly when the user skips it (stop_all clears the queue).
+        if self.voice_busy():
+            log.debug("[AssistantController.auto_continue_work_mode] Speech pending — deferring continuation")
+            return
+
         # Stop timer first to prevent duplicate calls
         self.work_mode_timer.stop()
 
@@ -1737,6 +1880,12 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             self.ai.tool_manager.last_work_output = None
             self.is_processing = False
 
+            # Cancel any pending narration along with the work it described
+            try:
+                self.voice_handler.stop_all()
+            except Exception:
+                pass
+
             # Notify UI
             if self._chat:
                 try:
@@ -1782,6 +1931,13 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             self.is_processing = False
             interrupted = True
             log.debug("[AssistantController.interrupt_request] is_processing cleared")
+
+        # Cancel any pending narration along with the interrupted request
+        if interrupted:
+            try:
+                self.voice_handler.stop_all()
+            except Exception:
+                pass
 
         # Remove the last user message from conversation history
         if interrupted:

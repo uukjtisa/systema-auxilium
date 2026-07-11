@@ -1952,18 +1952,30 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
             self.enable_voice()
 
     def enable_voice(self):
-        """Enable voice mode"""
+        """Enable voice mode. When settings['voice_setup_prompt_enabled'] is on
+        (default), show the microphone setup popup first — Cancel aborts and
+        leaves voice OFF; Save persists the chosen mic and proceeds."""
+        if self.controller.settings.get('voice_setup_prompt_enabled', True):
+            from systema.ui.dialogs.voice_setup_dialog import VoiceSetupDialog
+            dlg = VoiceSetupDialog(self.controller, parent=self)
+            if not dlg.exec():
+                # Cancelled — do not enable voice; revert the toggle button.
+                self.voice_enabled = False
+                self.voice_btn_inline.setChecked(False)
+                self._sync_voice_to_phone()
+                return
+
         success, message = self.controller.enable_voice_mode()
 
         if success:
             self.voice_enabled = True
             self.voice_btn_inline.setChecked(True)
-            self.add_system_message(f"🎤 **Voice Mode Enabled**\n\n{message}")
+            self.add_system_message(f"**Voice Mode Enabled**\n\n{message}")
             self.update_voice_status("Ready")
         else:
             self.voice_enabled = False
             self.voice_btn_inline.setChecked(False)
-            self.add_system_message(f"❌ **Voice Mode Failed**\n\n{message}")
+            self.add_system_message(f"**Voice Mode Failed**\n\n{message}")
         self._sync_voice_to_phone()
 
     def disable_voice(self):
@@ -1972,7 +1984,7 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         self.voice_enabled = False
         self.voice_btn_inline.setChecked(False)
         self.update_voice_status("")
-        self.add_system_message("🔇 **Voice Mode Disabled**")
+        self.add_system_message("**Voice Mode Disabled**")
         self._sync_voice_to_phone()
 
     def _sync_voice_to_phone(self):
@@ -2013,13 +2025,14 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         self._refresh_hero_labels()
 
     def update_voice_status(self, status):
-        """Update voice status indicator"""
+        """Update voice status indicator + drive voice-derived UI gating"""
         status_styles = {
-            'listening': ('🔴 Listening...', 'color: #EA4335; font-weight: bold;'),
-            'processing': ('🟡 Processing...', 'color: #FBBC04; font-weight: bold;'),
-            'speaking': ('🟢 Speaking...', 'color: #34A853; font-weight: bold;'),
+            'listening': ('• Listening...', 'color: #EA4335; font-weight: bold;'),
+            'processing': ('• Processing...', 'color: #FBBC04; font-weight: bold;'),
+            'synthesizing': ('• Synthesizing...', 'color: #FBBC04; font-weight: bold;'),
+            'speaking': ('• Speaking...', 'color: #34A853; font-weight: bold;'),
             'inactive': ('', ''),
-            'Ready': ('🎤 Ready', 'color: #9AA0A6;')
+            'Ready': ('Voice ready', 'color: #9AA0A6;')
         }
 
         text, style = status_styles.get(status, ('', ''))
@@ -2030,11 +2043,36 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         if _ab and _ab.isVisible():
             _ab.update_voice_status(status)
 
-        # Show interrupt button during speaking (manual mode only)
-        if status == 'speaking' and self.controller.get_voice_interrupt_mode() == 'manual':
+        # Show the skip/stop button while speech is pending — synthesis AND
+        # playback (manual interrupt mode only)
+        if status in ('synthesizing', 'speaking') \
+                and self.controller.get_voice_interrupt_mode() == 'manual':
             self.voice_interrupt_btn.show()
         else:
             self.voice_interrupt_btn.hide()
+
+        # ── Voice gating: synthesizing/speaking block input + session switching
+        # (like work mode does). Release only when nothing else is busy.
+        if status in ('synthesizing', 'speaking'):
+            self.set_input_enabled(False)
+            self.set_input_placeholder("Voice output in progress... please wait")
+            try:
+                self.set_session_list_locked(True)
+            except Exception:
+                pass
+        elif status in ('listening', 'inactive'):
+            try:
+                still_busy = (self.controller.is_processing
+                              or self.controller.ai.tool_manager.in_work_mode
+                              or self.controller.voice_busy())
+            except Exception:
+                still_busy = False
+            if not still_busy:
+                self.set_input_enabled(True)
+                try:
+                    self.set_session_list_locked(False)
+                except Exception:
+                    pass
 
     def closeEvent(self, event):
         """Handle window close - just hide, don't close app"""
@@ -3215,6 +3253,27 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         self._animate_message_in(message_widget,
                                  on_settled=lambda: self.scroll_to_widget(message_widget))
 
+    def append_to_last_user_message(self, text):
+        """Grow the most recent user bubble by one line (voice barge-in) —
+        updates its stored content and re-renders its label in place. Returns
+        False when no user bubble exists (caller falls back to a new bubble)."""
+        for md in reversed(self.message_widgets):
+            if md.get('role') != 'user':
+                continue
+            md['content'] = (md.get('content') or '') + "\n" + text
+            lbl = md.get('text_label')
+            if lbl is not None:
+                try:
+                    lbl.setText(self.render_markdown(md['content']))
+                except Exception:
+                    lbl.setText(md['content'])
+            try:
+                self.scroll_to_widget(md.get('widget'))
+            except Exception:
+                pass
+            return True
+        return False
+
     def add_ai_message(self, message):
         """Add AI message with markdown rendering, code blocks, and three-dot menu"""
         if self.voice_enabled:
@@ -3403,10 +3462,17 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
                                  on_settled=lambda: self.scroll_to_widget(message_widget))
 
     def _clean_emotion_brackets(self, text):
-        """Remove ElevenLabs emotion brackets from text for display"""
+        """Remove ElevenLabs emotion brackets from text for display.
+
+        Only tidies the horizontal gaps the removed brackets leave — newlines are
+        preserved (collapsing '\\s+' here flattened every voice-mode message into
+        one jumbled line)."""
         import re
         cleaned = re.sub(r'\[([^\]]+)\]', '', text)
-        cleaned = re.sub(r'\s+', ' ', cleaned)
+        if cleaned == text:
+            return text
+        cleaned = re.sub(r'[ \t]{2,}', ' ', cleaned)
+        cleaned = re.sub(r'[ \t]+\n', '\n', cleaned)
         return cleaned.strip()
 
     def add_system_message(self, message):
@@ -3419,6 +3485,10 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
             if hasattr(self, '_work_banner'):
                 self._work_banner.setText(f"⚙ Working: {clean}")
                 self._work_banner.show()
+            # Narrate the step annotation — this is the AI's own commentary on
+            # what it is doing (never raw output), queued serially with the rest
+            if self.voice_enabled and clean:
+                self.speak_ai_response(clean)
         # ─────────────────────────────────────────────────────────────────────
         message_widget = QFrame()
         message_widget.setStyleSheet("""
@@ -4917,6 +4987,10 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
             self.speak_ai_response(message)
         else:
             self.add_ai_message(message)
+            # Work mode: display immediately AND narrate the AI's commentary
+            # (the TTS filter strips code fences; raw output is never passed here)
+            if self.voice_enabled:
+                self.speak_ai_response(message)
 
     def log(self, msg):
         """Helper for logging"""
@@ -4946,18 +5020,15 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
             self.log("[Voice] No pending message to display")
 
     def speak_ai_response(self, text):
-        """Speak AI response using TTS (in background thread)"""
-
-        def _speak():
-            self.controller.speak_text(text)
-
-        thread = threading.Thread(target=_speak, daemon=True)
-        thread.start()
+        """Queue AI response for TTS (serialized speech queue — non-blocking,
+        utterances never overlap)."""
+        self.controller.speak_text(text)
 
     def handle_ai_response(self, result):
-        """Handle AI response"""
+        """Handle AI response (work-mode updates route here) — go through
+        show_ai_message so voice narration/buffering applies uniformly."""
         if not result['thinking'] and result.get('response'):
-            self.add_ai_message(result['response'])
+            self.show_ai_message(result['response'])
 
     def add_work_execution_widget(self, code: str, output: str):
         """Add a collapsible code+output block to the chat for work environment execution."""
@@ -5625,8 +5696,9 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         self.interrupt_response()
 
     def interrupt_voice(self):
-        """Interrupt TTS playback"""
-        self.controller.voice_handler.interrupt_speech()
+        """Skip/stop ALL pending speech — clears the queue and interrupts the
+        current utterance (whether still synthesizing or already playing)."""
+        self.controller.voice_handler.stop_all()
         self.voice_interrupt_btn.hide()
 
     def show_thinking(self):

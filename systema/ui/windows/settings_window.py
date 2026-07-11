@@ -25,6 +25,7 @@ class _SegmentedTabs(QWidget):
         super().__init__(parent)
         self._surface, self._elev, self._text, self._muted = surface, elev, text, muted
         self._buttons = []
+        self.on_change = None  # optional callback(index) fired on tab switch
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -61,6 +62,11 @@ class _SegmentedTabs(QWidget):
             self._stack.setCurrentIndex(i)
             for j, b in enumerate(self._buttons):
                 b.setChecked(j == i)
+            if self.on_change:
+                try:
+                    self.on_change(i)
+                except Exception:
+                    pass
 
     def currentIndex(self):
         return self._stack.currentIndex()
@@ -505,6 +511,7 @@ class SettingsWindow(BaseWindow):
         # arrows, and the strip shares the content surface — no dark empty band.
         tabs = _SegmentedTabs(_SURFACE, _ELEV, _TEXT, _MUTED)
         self._tabs = tabs
+        tabs.on_change = self._on_settings_tab_changed
 
         # ════════════════════════════════════════════════════════════════════
         # TAB 1 — AI
@@ -972,21 +979,25 @@ class SettingsWindow(BaseWindow):
         voice_scroll, voice_lay = _make_scroll_tab()
 
         # Devices
+        from systema.ui.widgets.mic_level_meter import MicLevelMeter
         dev_group = QGroupBox("Audio Devices")
         dev_group.setStyleSheet(_GROUP)
         dv_lay = QVBoxLayout(dev_group)
         dv_lay.addWidget(_label("Microphone:", bold=True))
         self.input_device_combo = QComboBox()
         self.input_device_combo.setStyleSheet(_COMBO)
+        self.input_device_combo.currentIndexChanged.connect(self._on_mic_combo_changed)
         dv_lay.addWidget(self.input_device_combo)
-        dv_lay.addWidget(_label("Speaker:", bold=True, top_margin=8))
-        self.output_device_combo = QComboBox()
-        self.output_device_combo.setStyleSheet(_COMBO)
-        dv_lay.addWidget(self.output_device_combo)
-        refresh_btn = QPushButton("⟳ Refresh Devices")
-        refresh_btn.setStyleSheet(_BTN)
-        refresh_btn.clicked.connect(self.refresh_audio_devices)
-        dv_lay.addWidget(refresh_btn)
+        # Live input level meter — confirms the selected mic is actually heard.
+        # Starts/stops with the Voice tab's visibility (see _on_settings_tab_changed).
+        self.mic_meter = MicLevelMeter(self.controller)
+        dv_lay.addWidget(self.mic_meter)
+        # The list auto-refreshes (no manual button); poll every 2s while the
+        # Voice tab is showing, rebuilding only when the device set changes.
+        self.voice_setup_prompt_checkbox = QCheckBox(
+            "Show microphone setup when enabling voice mode")
+        self.voice_setup_prompt_checkbox.setStyleSheet(_CHECK)
+        dv_lay.addWidget(self.voice_setup_prompt_checkbox)
         voice_lay.addWidget(dev_group)
 
         # Interrupt mode
@@ -1075,6 +1086,17 @@ class SettingsWindow(BaseWindow):
         )
         tts_lay.addWidget(self.elevenlabs_tags_checkbox)
         # ─────────────────────────────────────────────────────────────────────
+
+        # ── Filler interjections toggle ──────────────────────────────────────
+        self.voice_fillers_checkbox = QCheckBox("Natural filler sounds while the voice thinks")
+        self.voice_fillers_checkbox.setStyleSheet(_CHECK)
+        self.voice_fillers_checkbox.setToolTip(
+            "When the next part of a long reply isn't ready yet, plays a short\n"
+            "interjection (\"Hmm...\", \"And...\") rendered in the same voice so the\n"
+            "speech never goes dead-silent. Clips are cached per voice in\n"
+            "data/voice_fillers and reused."
+        )
+        tts_lay.addWidget(self.voice_fillers_checkbox)
 
         voice_lay.addWidget(tts_group)
 
@@ -1844,36 +1866,105 @@ class SettingsWindow(BaseWindow):
         self.on_tts_provider_changed(self.tts_provider_combo.currentIndex())
 
     def refresh_audio_devices(self):
-        """Refresh audio device lists"""
+        """Rebuild the microphone dropdown from the de-duplicated device list.
+
+        Stores each item's DATA as the device NAME (stable across sessions,
+        unlike PortAudio ids) — None = system default. Preserves the current
+        selection across rebuilds."""
         try:
-            input_devices, output_devices = self.controller.get_voice_devices()
+            input_devices, _outputs = self.controller.get_voice_devices()
 
-            # Clear combos
+            prev = self.input_device_combo.currentData() if self.input_device_combo.count() else None
+            self.input_device_combo.blockSignals(True)
             self.input_device_combo.clear()
-            self.output_device_combo.clear()
-
-            # Add default option
-            self.input_device_combo.addItem("Default Input Device", None)
-            self.output_device_combo.addItem("Default Output Device", None)
-
-            # Add input devices
+            self.input_device_combo.addItem("Default Microphone", None)
             for device in input_devices:
-                self.input_device_combo.addItem(
-                    f"{device['name']} ({device['channels']} ch)",
-                    device['id']
-                )
-
-            # Add output devices
-            for device in output_devices:
-                self.output_device_combo.addItem(
-                    f"{device['name']} ({device['channels']} ch)",
-                    device['id']
-                )
-
-            self.show_status_message("✓ Audio devices refreshed!")
-
+                label = device['name'] + ("  - Default" if device.get('is_default') else "")
+                self.input_device_combo.addItem(label, device['name'])
+            idx = self.input_device_combo.findData(prev)
+            self.input_device_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            self.input_device_combo.blockSignals(False)
         except Exception as e:
-            self.show_status_message(f"✗ Error refreshing devices: {e}")
+            self.show_status_message(f"Error refreshing devices: {e}")
+
+    # ── Live mic meter + auto-refresh (Voice tab) ─────────────────────────────
+
+    def _resolve_selected_mic_id(self):
+        """Live PortAudio id for the mic currently picked in the combo (None =
+        system default), via VoiceHandler's name→id resolver."""
+        name = self.input_device_combo.currentData()
+        try:
+            return self.controller.voice_handler._resolve_input_id(name)
+        except Exception:
+            return None
+
+    def _start_mic_meter(self):
+        if hasattr(self, 'mic_meter'):
+            self.mic_meter.start(self._resolve_selected_mic_id())
+
+    def _stop_mic_meter(self):
+        if hasattr(self, 'mic_meter'):
+            self.mic_meter.stop()
+
+    def _on_mic_combo_changed(self, _index):
+        # Only restart the live meter if the Voice tab is actually showing.
+        if hasattr(self, '_tabs') and self._tabs.currentIndex() == 2:
+            self._start_mic_meter()
+
+    def _on_settings_tab_changed(self, index):
+        """Voice tab (index 2): start the live meter + device auto-refresh poll.
+        Any other tab: stop the meter and the poll to release the mic."""
+        if index == 2:
+            # Rescan first so devices hotplugged while the tab was closed appear
+            # (PortAudio's list is frozen until re-init; meter isn't running yet).
+            try:
+                self.controller.rescan_audio_devices()
+            except Exception:
+                pass
+            self._hotplug_signature = None  # re-baseline the hotplug probe
+            self.refresh_audio_devices()
+            self._start_mic_meter()
+            self._ensure_device_poll_timer()
+            self._device_poll_timer.start()
+        else:
+            self._stop_mic_meter()
+            if hasattr(self, '_device_poll_timer'):
+                self._device_poll_timer.stop()
+
+    def _ensure_device_poll_timer(self):
+        if not hasattr(self, '_device_poll_timer'):
+            from PyQt6.QtCore import QTimer
+            self._device_poll_timer = QTimer(self)
+            self._device_poll_timer.setInterval(2000)
+            self._device_poll_timer.timeout.connect(self._on_device_poll)
+
+    def _on_device_poll(self):
+        """Detect device hotplug and refresh the list. PortAudio freezes its
+        device snapshot at init, so plain re-querying never sees new devices —
+        we probe the LIVE population (winmm counts on Windows) and, on change,
+        re-initialize PortAudio (meter stopped first — its stream must not
+        survive the re-init), then rebuild the combo and restart the meter.
+        Where no live probe exists (POSIX), rescan every 5th tick instead."""
+        try:
+            sig = self.controller.audio_hotplug_signature()
+            if sig is not None:
+                if sig == getattr(self, '_hotplug_signature', None):
+                    return
+                changed = getattr(self, '_hotplug_signature', None) is not None
+                self._hotplug_signature = sig
+                if not changed:
+                    return  # first tick: just record the baseline
+            else:
+                # No live probe on this platform — periodic rescan.
+                self._poll_tick = getattr(self, '_poll_tick', 0) + 1
+                if self._poll_tick % 5:
+                    return
+            self._stop_mic_meter()
+            self.controller.rescan_audio_devices()
+            self.refresh_audio_devices()
+            self._start_mic_meter()
+        except Exception:
+            pass
 
     # ── Desktop shortcut (cross-OS) ─────────────────────────────────────────
     def _update_priv_labels(self):
@@ -2164,13 +2255,22 @@ class SettingsWindow(BaseWindow):
         # Load voice devices
         self.refresh_audio_devices()
 
-        # Load voice settings
+        # Load voice settings (voice_input_device is stored as a device NAME)
         input_device = self.controller.settings.get('voice_input_device')
-        output_device = self.controller.settings.get('voice_output_device')
+
+        # Load the "show setup popup on enable" toggle (default ON)
+        self.voice_setup_prompt_checkbox.setChecked(
+            self.controller.settings.get('voice_setup_prompt_enabled', True)
+        )
 
         # Load ElevenLabs speech tag toggle
         self.elevenlabs_tags_checkbox.setChecked(
             self.controller.settings.get('elevenlabs_enabled', False)
+        )
+
+        # Load filler interjections toggle (default ON)
+        self.voice_fillers_checkbox.setChecked(
+            self.controller.settings.get('voice_fillers_enabled', True)
         )
 
         # Load TTS provider/script
@@ -2258,11 +2358,6 @@ class SettingsWindow(BaseWindow):
             index = self.input_device_combo.findData(input_device)
             if index >= 0:
                 self.input_device_combo.setCurrentIndex(index)
-
-        if output_device is not None:
-            index = self.output_device_combo.findData(output_device)
-            if index >= 0:
-                self.output_device_combo.setCurrentIndex(index)
 
         # CRITICAL FIX: Load VAD and TTS voice properly
         vad_level = self.controller.settings.get('vad_aggressiveness', 3)
@@ -2593,12 +2688,13 @@ class SettingsWindow(BaseWindow):
         # Save custom system prompt
         self.controller.settings['custom_system_prompt'] = self.system_prompt_hijack_input.toPlainText()
 
-        # Save voice devices
+        # Save voice devices (input only; output uses the system default now)
         input_device = self.input_device_combo.currentData()
         self.controller.set_voice_input_device(input_device)
 
-        output_device = self.output_device_combo.currentData()
-        self.controller.set_voice_output_device(output_device)
+        # Save the "show setup popup on enable" toggle
+        self.controller.settings['voice_setup_prompt_enabled'] = \
+            self.voice_setup_prompt_checkbox.isChecked()
 
         # Save TTS provider / script
         tts_data = self.tts_provider_combo.currentData() or 'edge-tts'
@@ -2613,6 +2709,16 @@ class SettingsWindow(BaseWindow):
         elevenlabs_enabled = self.elevenlabs_tags_checkbox.isChecked()
         self.controller.settings['elevenlabs_enabled'] = elevenlabs_enabled
         self.controller.ai.update_voice_settings(self.controller.ai.voice_mode, elevenlabs_enabled)
+
+        # Save filler interjections toggle (push live to the running handler)
+        fillers_enabled = self.voice_fillers_checkbox.isChecked()
+        self.controller.settings['voice_fillers_enabled'] = fillers_enabled
+        try:
+            self.controller.voice_handler.fillers_enabled = fillers_enabled
+            if fillers_enabled and self.controller.voice_mode_active:
+                self.controller.voice_handler.ensure_fillers_async()
+        except Exception:
+            pass
 
         # Save TTS voice (edge-tts only)
         tts_voice = self.tts_voice_combo.currentData()
@@ -2778,6 +2884,20 @@ class SettingsWindow(BaseWindow):
             """)
         except Exception:
             pass
+
+    def hideEvent(self, event):
+        """Release the mic meter + stop the device poll whenever the window is
+        hidden/closed, so voice mode isn't blocked by a lingering input stream."""
+        try:
+            self._stop_mic_meter()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, '_device_poll_timer'):
+                self._device_poll_timer.stop()
+        except Exception:
+            pass
+        super().hideEvent(event)
 
     def apply_theme(self, theme_key=None):
         """Live-retint the settings window. Rebuilds the tabbed UI in place from

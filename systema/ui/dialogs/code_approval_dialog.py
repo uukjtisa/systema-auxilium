@@ -118,6 +118,10 @@ class CodeApprovalDialog(QDialog):
         self._build()
         self._refresh_security()
 
+        # Center on the chat window / primary screen (never the floating widget)
+        from systema.ui.dialogs.dialog_utils import center_on_primary
+        QTimer.singleShot(0, lambda: center_on_primary(self))
+
     # ── layout ──────────────────────────────────────────────────────────────
     def _build(self):
         p = self.p

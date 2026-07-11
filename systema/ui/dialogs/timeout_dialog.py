@@ -166,15 +166,9 @@ class TimeoutDialog(QDialog):
 
         inner.addLayout(btn_row)
 
-        # Center on parent
-        QTimer.singleShot(0, self._center_on_parent)
-
-    def _center_on_parent(self):
-        parent = self.parent()
-        if parent:
-            px = parent.x() + (parent.width() - self.width()) // 2
-            py = parent.y() + (parent.height() - self.height()) // 2
-            self.move(px, py)
+        # Center on the chat window / primary screen (never the floating widget)
+        from systema.ui.dialogs.dialog_utils import center_on_primary
+        QTimer.singleShot(0, lambda: center_on_primary(self))
 
     def _done(self, result):
         self._result = result
@@ -313,15 +307,9 @@ class WorkmodeInterruptDialog(QDialog):
 
         inner.addLayout(btn_row)
 
-        # Center on parent
-        QTimer.singleShot(0, self._center_on_parent)
-
-    def _center_on_parent(self):
-        parent = self.parent()
-        if parent:
-            px = parent.x() + (parent.width() - self.width()) // 2
-            py = parent.y() + (parent.height() - self.height()) // 2
-            self.move(px, py)
+        # Center on the chat window / primary screen (never the floating widget)
+        from systema.ui.dialogs.dialog_utils import center_on_primary
+        QTimer.singleShot(0, lambda: center_on_primary(self))
 
     def _confirm(self):
         self._reason = self._reason_input.toPlainText().strip()

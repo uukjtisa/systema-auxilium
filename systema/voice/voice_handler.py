@@ -17,6 +17,12 @@ import pygame
 import tempfile
 import os
 import re
+import sys
+import time
+import random
+import shutil
+import hashlib
+from pathlib import Path
 from systema.common.logger import _make_logger, _NoOpLogger
 
 # Vosk import (offline, free alternative)
@@ -68,6 +74,11 @@ class VoiceHandler:
         self.is_listening = False
         self.is_speaking = False
         self.is_processing = False
+        # True only while audio is AUDIBLY playing (pygame play() → end/stop).
+        # Auto-interrupt keys on this, not is_speaking: during the silent
+        # synthesis phase a stray speech frame must not invisibly kill the
+        # upcoming audio (the barge-in transcription path handles real speech).
+        self.playback_active = False
         log.debug("[VoiceHandler.__init__] State flags: is_listening=False | is_speaking=False | "
                   "is_processing=False")
 
@@ -123,6 +134,23 @@ class VoiceHandler:
         self.audio_queue = queue.Queue()
         self.speech_buffer = deque(maxlen=50)
         self.silence_frames = 0
+
+        # Serialized speech pipeline — a SYNTH worker renders text chunks to
+        # audio files while a PLAYBACK worker plays them strictly one at a time
+        # (prefetch: chunk N+1 renders while chunk N plays, so chunk boundaries
+        # are seamless). audio_ready is bounded → natural prefetch depth.
+        self.speech_queue = queue.Queue()               # text chunks in
+        self.audio_ready = queue.Queue(maxsize=2)       # (path, generation) out
+        self._speech_worker = None                      # synth thread
+        self._playback_worker = None                    # playback thread
+        self._speech_worker_lock = threading.Lock()
+        self._speech_generation = 0                     # stop_all bumps → stale results discarded
+        self._synth_in_flight = False
+        self._custom_tts_module = None                  # cached (path, module)
+        # Filler interjections ("Hmm...", "And...") in the SAME voice, played
+        # when playback drains before the next chunk's audio is ready.
+        self.fillers_enabled = True
+        self._last_filler = None
         log.debug("[VoiceHandler.__init__] Buffers initialized: audio_queue | speech_buffer(maxlen=50) | "
                   "silence_frames=0")
 
@@ -447,59 +475,218 @@ class VoiceHandler:
             log.error(f"[VoiceHandler.set_vad_aggressiveness] ✗ Error: {type(e).__name__}: {e}")
             self._emit_log_callback(f"Error setting VAD: {e}", "ERROR")
 
-    def list_audio_devices(self):
-        """List all available audio devices"""
-        log.info("[VoiceHandler.list_audio_devices] Querying available audio devices...")
+    # Preferred host-API name (substring, case-insensitive) per platform. The
+    # SAME physical mic is listed once per host API on Windows (MME, WASAPI,
+    # DirectSound, WDM-KS) — and MME truncates names to 31 chars, so name-based
+    # merging across APIs is impossible. Instead we keep ONLY the one modern
+    # platform API and drop the rest outright.
+    _HOSTAPI_PREFERENCE = {
+        'win32':  ['wasapi'],
+        'linux':  ['pipewire', 'pulse', 'alsa'],
+        'darwin': ['core audio', 'coreaudio'],
+    }
+
+    # Junk/pseudo devices that aren't real selectable mics (case-insensitive
+    # substrings). Windows mappers + loopback capture, and Linux ALSA plugins.
+    _DEVICE_NAME_JUNK = (
+        'primary sound capture driver', 'sound mapper', 'microsoft sound mapper',
+        '@system32', 'stereo mix', 'what u hear', 'wave out mix', 'loopback',
+        'sysdefault', 'dmix', 'dsnoop', 'spdif', 'iec958', 'surround',
+    )
+
+    def _pick_hostapi(self, hostapis):
+        """Index of the ONE host API to enumerate. Preference list first; else
+        the API owning the default input device; else the sole/first API."""
+        pref = self._HOSTAPI_PREFERENCE.get(sys.platform, [])
+        for token in pref:
+            for idx, api in enumerate(hostapis):
+                if token in (api.get('name') or '').lower():
+                    return idx
+        # No preferred API present (e.g. Linux exposes only "ALSA") — use the
+        # API that owns the system default input device.
+        try:
+            default_in = sd.default.device[0]
+            if default_in is not None and default_in >= 0:
+                return sd.query_devices(default_in)['hostapi']
+        except Exception:
+            pass
+        return 0 if hostapis else None
+
+    def _is_junk(self, name):
+        low = name.lower()
+        return not name or any(j in low for j in self._DEVICE_NAME_JUNK)
+
+    def _enumerate_devices(self, hostapi_index):
+        """Enumerate (inputs, outputs) restricted to hostapi_index (None = all
+        APIs). Name-based safety net: first occurrence of a name wins. Entries:
+        {id, name, channels, is_default, hostapi}."""
         devices = sd.query_devices()
+        hostapis = sd.query_hostapis()
 
-        input_devices = []
-        output_devices = []
+        def default_idx(kind_pos):
+            # Prefer the chosen host API's own default; fall back to the global.
+            if hostapi_index is not None:
+                try:
+                    key = 'default_input_device' if kind_pos == 0 else 'default_output_device'
+                    d = hostapis[hostapi_index].get(key, -1)
+                    if d is not None and d >= 0:
+                        return d
+                except Exception:
+                    pass
+            try:
+                d = sd.default.device[kind_pos]
+                return d if d is not None and d >= 0 else None
+            except Exception:
+                return None
 
-        for i, device in enumerate(devices):
-            if device['max_input_channels'] > 0:
-                input_devices.append({
-                    'id': i,
-                    'name': device['name'],
-                    'channels': device['max_input_channels']
-                })
-            if device['max_output_channels'] > 0:
-                output_devices.append({
-                    'id': i,
-                    'name': device['name'],
-                    'channels': device['max_output_channels']
-                })
+        default_in, default_out = default_idx(0), default_idx(1)
 
-        log.info(f"[VoiceHandler.list_audio_devices] ✓ Found {len(input_devices)} input device(s) | "
-                 f"{len(output_devices)} output device(s)")
+        input_devices, output_devices = [], []
+        seen_input_names, seen_output_names = set(), set()
+        for i, dev in enumerate(devices):
+            if hostapi_index is not None and dev.get('hostapi') != hostapi_index:
+                continue
+            name = (dev.get('name') or '').strip()
+            if self._is_junk(name):
+                continue
+            api_name = ''
+            try:
+                api_name = hostapis[dev['hostapi']]['name']
+            except Exception:
+                pass
+            if dev.get('max_input_channels', 0) > 0 and name.lower() not in seen_input_names:
+                seen_input_names.add(name.lower())
+                input_devices.append({'id': i, 'name': name,
+                                      'channels': dev['max_input_channels'],
+                                      'is_default': (i == default_in),
+                                      'hostapi': api_name})
+            if dev.get('max_output_channels', 0) > 0 and name.lower() not in seen_output_names:
+                seen_output_names.add(name.lower())
+                output_devices.append({'id': i, 'name': name,
+                                       'channels': dev['max_output_channels'],
+                                       'is_default': (i == default_out),
+                                       'hostapi': api_name})
+        return input_devices, output_devices
+
+    @staticmethod
+    def _merge_truncated_names(devices):
+        """Unfiltered-fallback helper: MME truncates names to 31 chars, so a name
+        that is a >=31-char prefix of another device's name is the same physical
+        device — keep the longer-named one."""
+        full = sorted(devices, key=lambda d: -len(d['name']))
+        kept = []
+        for dev in full:
+            if any(len(dev['name']) >= 31 and k['name'].startswith(dev['name'])
+                   for k in kept):
+                continue
+            kept.append(dev)
+        return kept
+
+    def list_audio_devices(self):
+        """List selectable audio devices from the ONE platform-appropriate host
+        API (WASAPI on Windows), name-deduped, junk filtered, default marked.
+        Falls back to unfiltered enumeration if the filtered list is empty.
+        Returns (inputs, outputs)."""
+        log.info("[VoiceHandler.list_audio_devices] Querying available audio devices...")
+        input_devices, output_devices = [], []
+        try:
+            hostapis = sd.query_hostapis()
+            api_idx = self._pick_hostapi(hostapis)
+            input_devices, output_devices = self._enumerate_devices(api_idx)
+            api_name = hostapis[api_idx]['name'] if api_idx is not None else 'ALL'
+            if not input_devices:
+                # Unusual setup — better a crowded list than an empty dropdown.
+                log.warning(f"[VoiceHandler.list_audio_devices] No inputs under host API "
+                            f"'{api_name}' — falling back to unfiltered enumeration")
+                input_devices, output_devices = self._enumerate_devices(None)
+                input_devices = self._merge_truncated_names(input_devices)
+                output_devices = self._merge_truncated_names(output_devices)
+        except Exception as e:
+            log.error(f"[VoiceHandler.list_audio_devices] enumeration failed: "
+                      f"{type(e).__name__}: {e}")
+            try:
+                input_devices, output_devices = self._enumerate_devices(None)
+            except Exception as e2:
+                log.error(f"[VoiceHandler.list_audio_devices] unfiltered fallback also failed: {e2}")
+
+        input_devices.sort(key=lambda d: (not d['is_default'], d['name'].lower()))
+        output_devices.sort(key=lambda d: (not d['is_default'], d['name'].lower()))
+
+        log.info(f"[VoiceHandler.list_audio_devices] ✓ {len(input_devices)} input | "
+                 f"{len(output_devices)} output")
         log.debug(f"[VoiceHandler.list_audio_devices] Input devices: "
                   f"{[d['name'] for d in input_devices]}")
-        log.debug(f"[VoiceHandler.list_audio_devices] Output devices: "
-                  f"{[d['name'] for d in output_devices]}")
 
         return input_devices, output_devices
 
-    def set_devices(self, input_device_id=None, output_device_id=None):
-        """Set audio input/output devices"""
-        log.info(f"[VoiceHandler.set_devices] input_device_id={input_device_id} | "
-                 f"output_device_id={output_device_id}")
-        self.input_device = input_device_id
-        self.output_device = output_device_id
+    # ── Hotplug support ──────────────────────────────────────────────────────
 
-        if input_device_id is not None:
-            devices = sd.query_devices()
-            device_name = devices[input_device_id]['name']
-            log.info(f"[VoiceHandler.set_devices] ✓ Input device set: [{input_device_id}] '{device_name}'")
-            self._emit_log_callback(f"Input device: {device_name}")
+    def hotplug_signature(self):
+        """Cheap LIVE probe of the system device population, bypassing PortAudio's
+        frozen snapshot (PortAudio only refreshes its device list on init). On
+        Windows use winmm's live counts; elsewhere return None so callers fall
+        back to a slow periodic rescan."""
+        if sys.platform == 'win32':
+            try:
+                import ctypes
+                winmm = getattr(ctypes, 'windll', None)
+                if winmm is not None:
+                    return (ctypes.windll.winmm.waveInGetNumDevs(),
+                            ctypes.windll.winmm.waveOutGetNumDevs())
+            except Exception:
+                pass
+        return None
+
+    def rescan_devices(self):
+        """Re-initialize PortAudio so newly connected/disconnected devices appear
+        in query_devices(). MUST NOT run while any stream is open — callers stop
+        meters first, and we refuse under active voice capture. True on success."""
+        if self.is_listening:
+            log.debug("[VoiceHandler.rescan_devices] Skipped — voice capture is active")
+            return False
+        try:
+            sd._terminate()
+            sd._initialize()
+            log.info("[VoiceHandler.rescan_devices] ✓ PortAudio re-initialized (device list refreshed)")
+            return True
+        except Exception as e:
+            log.warning(f"[VoiceHandler.rescan_devices] re-init failed: {type(e).__name__}: {e}")
+            return False
+
+    def _resolve_input_id(self, value):
+        """Map a stored input-device value (name str, id int, or None) to a live
+        PortAudio device id for opening a stream. None stays None (system
+        default). An unresolved name is passed through (PortAudio accepts a name
+        substring), else None."""
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return value
+        try:
+            inputs, _ = self.list_audio_devices()
+            for dev in inputs:
+                if dev['name'] == value:
+                    return dev['id']
+        except Exception:
+            pass
+        return value  # PortAudio can match a name string directly
+
+    def set_devices(self, input_device=None, output_device=None):
+        """Set audio input/output devices. Accepts a device NAME (str), a live
+        PortAudio id (int), or None (system default). Names are resolved to the
+        current preferred-host-API id so the capture stream opens the same
+        physical device the user picked, even though ids shift across sessions."""
+        log.info(f"[VoiceHandler.set_devices] input_device={input_device!r} | "
+                 f"output_device={output_device!r}")
+        self.input_device = self._resolve_input_id(input_device)
+        self.output_device = output_device  # output is system-default only now
+
+        if input_device is not None:
+            log.info(f"[VoiceHandler.set_devices] ✓ Input device set: {input_device!r} "
+                     f"→ id {self.input_device!r}")
+            self._emit_log_callback(f"Input device: {input_device}")
         else:
             log.debug("[VoiceHandler.set_devices] Input device: using system default")
-
-        if output_device_id is not None:
-            devices = sd.query_devices()
-            device_name = devices[output_device_id]['name']
-            log.info(f"[VoiceHandler.set_devices] ✓ Output device set: [{output_device_id}] '{device_name}'")
-            self._emit_log_callback(f"Output device: {device_name}")
-        else:
-            log.debug("[VoiceHandler.set_devices] Output device: using system default")
 
     def start_listening(self):
         """Start listening for voice input"""
@@ -620,6 +807,7 @@ class VoiceHandler:
 
         self._emit_log_callback("Interrupting speech...")
         self.is_speaking = False
+        self.playback_active = False
         log.debug("[VoiceHandler.interrupt_speech] is_speaking=False")
 
         try:
@@ -661,11 +849,17 @@ class VoiceHandler:
                     audio_buffer.append(audio_bytes)
                     self.silence_frames = 0
 
-                    if self.interrupt_mode == 'auto' and self.is_speaking:
+                    if self.interrupt_mode == 'auto' and self.playback_active:
+                        # Fire ONLY while audio is audibly playing. During the
+                        # silent synthesis phase a speech frame must not kill the
+                        # upcoming audio invisibly — real speech there becomes a
+                        # transcription and the barge-in path supersedes cleanly.
+                        # stop_all, not interrupt_speech: the FIFO worker would
+                        # otherwise pop the NEXT queued utterance and keep talking.
                         log.info("[VoiceHandler._processing_loop] Auto-interrupt triggered — "
-                                 "calling interrupt_speech()")
+                                 "calling stop_all()")
                         self._emit_log_callback("Auto-interrupting TTS due to voice detection")
-                        self.interrupt_speech()
+                        self.stop_all()
 
                 else:
                     if currently_speaking:
@@ -761,6 +955,22 @@ class VoiceHandler:
             self._notify_state_change('listening')
             log.debug("[VoiceHandler._process_audio_segment] is_processing=False | state → 'listening'")
 
+    def _flush_display_buffer(self):
+        """Release any chat message buffered "until playback starts".
+
+        INVARIANT: every way a TTS utterance can end WITHOUT playback ever
+        starting (synthesis interrupted/discarded, provider error, no speakable
+        text, unknown provider) must still fire this, or the buffered reply
+        stays hidden and voice-mode gating stays stuck until voice is toggled
+        off. Thread-safe (the hook just emits a Qt signal) and a no-op when
+        nothing is waiting or playback already fired it."""
+        if self.on_playback_started:
+            try:
+                self.on_playback_started()
+            except Exception as e:
+                log.warning(f"[VoiceHandler._flush_display_buffer] flush callback error: "
+                            f"{type(e).__name__}: {e}")
+
     async def speak_text(self, text):
         """Convert text to speech and play it"""
         log.info(f"[VoiceHandler.speak_text] ── TTS requested | text_len={len(text)} ──────────")
@@ -768,6 +978,7 @@ class VoiceHandler:
 
         if not text or not text.strip():
             log.warning("[VoiceHandler.speak_text] Empty text — aborting TTS")
+            self._flush_display_buffer()
             return
 
         filtered_text = self._filter_text_for_tts(text)
@@ -777,11 +988,16 @@ class VoiceHandler:
         if not filtered_text or not filtered_text.strip():
             log.warning("[VoiceHandler.speak_text] No speakable text after filtering — aborting TTS")
             self._emit_log_callback("[TTS] No speakable text after filtering")
+            self._flush_display_buffer()
             return
 
+        # is_speaking covers the WHOLE TTS cycle (synthesis + playback) so it can
+        # be interrupted at any point; the notified STATE distinguishes the silent
+        # synthesis phase from actual audio playback ('speaking' is emitted by
+        # each provider at pygame play() time, next to on_playback_started).
         self.is_speaking = True
-        self._notify_state_change('speaking')
-        log.debug("[VoiceHandler.speak_text] is_speaking=True | state → 'speaking'")
+        self._notify_state_change('synthesizing')
+        log.debug("[VoiceHandler.speak_text] is_speaking=True | state → 'synthesizing'")
 
         try:
             log.info(f"[VoiceHandler.speak_text] Routing to provider='{self.tts_provider}'")
@@ -814,6 +1030,11 @@ class VoiceHandler:
 
         finally:
             self.is_speaking = False
+            self.playback_active = False
+            # Safety net: if playback never started (interrupted mid-synthesis,
+            # provider error, unknown provider), release the buffered chat
+            # message now — no-op when playback already fired it.
+            self._flush_display_buffer()
             new_state = 'listening' if self.is_listening else 'inactive'
             self._notify_state_change(new_state)
             log.info(f"[VoiceHandler.speak_text] ✓ TTS complete | is_speaking=False | "
@@ -851,8 +1072,13 @@ class VoiceHandler:
                     log.error(f"[VoiceHandler._speak_pyttsx3:thread] ✗ Error: {type(e).__name__}: {e}")
                     self._emit_log_callback(f"pyttsx3 error: {e}", "ERROR")
 
+            if not self.is_speaking:
+                log.debug("[VoiceHandler._speak_pyttsx3] Interrupted before playback — aborting")
+                return
             thread = threading.Thread(target=speak_thread, daemon=True, name="pyttsx3Speak")
             thread.start()
+            self.playback_active = True
+            self._notify_state_change('speaking')
             log.debug(f"[VoiceHandler._speak_pyttsx3] Speak thread started | tid={thread.ident}")
 
             if self.on_playback_started:
@@ -904,8 +1130,17 @@ class VoiceHandler:
 
             log.debug(f"[VoiceHandler._speak_puter_tts] ✓ Audio generated | url='{audio_url}' | "
                       f"loading into pygame...")
+            if not self.is_speaking:
+                # Interrupted while synthesizing — discard the audio, never play
+                try:
+                    os.unlink(temp_path)
+                except Exception:
+                    pass
+                return
             pygame.mixer.music.load(temp_path)
             pygame.mixer.music.play()
+            self.playback_active = True
+            self._notify_state_change('speaking')
             log.info("[VoiceHandler._speak_puter_tts] ✓ Pygame playback started")
 
             if self.on_playback_started:
@@ -979,8 +1214,17 @@ class VoiceHandler:
 
             log.debug(f"[VoiceHandler._speak_puter_elevenlabs] ✓ Audio generated | url='{audio_url}' "
                       f"| loading into pygame...")
+            if not self.is_speaking:
+                # Interrupted while synthesizing — discard the audio, never play
+                try:
+                    os.unlink(temp_path)
+                except Exception:
+                    pass
+                return
             pygame.mixer.music.load(temp_path)
             pygame.mixer.music.play()
+            self.playback_active = True
+            self._notify_state_change('speaking')
             log.info("[VoiceHandler._speak_puter_elevenlabs] ✓ Pygame playback started")
 
             if self.on_playback_started:
@@ -1039,8 +1283,17 @@ class VoiceHandler:
             await communicate.save(temp_path)
             log.debug(f"[VoiceHandler._speak_edge_tts] ✓ Audio saved to '{temp_path}'")
 
+            if not self.is_speaking:
+                # Interrupted while synthesizing — discard the audio, never play
+                try:
+                    os.unlink(temp_path)
+                except Exception:
+                    pass
+                return
             pygame.mixer.music.load(temp_path)
             pygame.mixer.music.play()
+            self.playback_active = True
+            self._notify_state_change('speaking')
             log.info("[VoiceHandler._speak_edge_tts] ✓ Pygame playback started")
 
             if self.on_playback_started:
@@ -1113,8 +1366,17 @@ class VoiceHandler:
                 self._emit_log_callback("Custom TTS speak() returned False", "ERROR")
                 return
 
+            if not self.is_speaking:
+                # Interrupted while synthesizing — discard the audio, never play
+                try:
+                    os.unlink(temp_path)
+                except Exception:
+                    pass
+                return
             pygame.mixer.music.load(temp_path)
             pygame.mixer.music.play()
+            self.playback_active = True
+            self._notify_state_change('speaking')
             log.info("[VoiceHandler._speak_custom_script_tts] ✓ Pygame playback started")
 
             if self.on_playback_started:
@@ -1147,8 +1409,7 @@ class VoiceHandler:
 
     def _filter_text_for_tts(self, text):
         """
-        Filter text for TTS - remove code blocks ONLY, keep everything else.
-        Preserves: emojis, brackets, symbols, expressive text.
+        Filter text for TTS - remove code blocks, emojis, keep everything else.
         """
         log.debug(f"[VoiceHandler._filter_text_for_tts] Filtering {len(text)} chars...")
         original_text = text
@@ -1174,6 +1435,27 @@ class VoiceHandler:
         text = re.sub(r'^\s*[-*+]\s+', '', text, flags=re.MULTILINE)
         text = re.sub(r'^\s*\d+\.\s+', '', text, flags=re.MULTILINE)
 
+        # Remove emojis (they get read aloud and sound silly)
+        # Covers most emoji ranges including modifiers, flags, and ZWJ sequences
+        emoji_pattern = re.compile(
+            "["
+            "\U0001F600-\U0001F64F"  # Emoticons
+            "\U0001F300-\U0001F5FF"  # Misc symbols & pictographs
+            "\U0001F680-\U0001F6FF"  # Transport & map symbols
+            "\U0001F1E0-\U0001F1FF"  # Flags
+            "\U0001F900-\U0001F9FF"  # Supplemental symbols
+            "\U0001FA00-\U0001FA6F"  # Chess symbols
+            "\U0001FA70-\U0001FAFF"  # Symbols extended-A
+            "\U00002702-\U000027B0"  # Dingbats
+            "\U000024C2-\U0001F251"  # Enclosed chars
+            "\U0000FE00-\U0000FE0F"  # Variation selectors
+            "\U0000200D"              # Zero-width joiner
+            "\U00002600-\U000026FF"  # Misc symbols
+            "]",
+            flags=re.UNICODE
+        )
+        text = emoji_pattern.sub('', text)
+
         # Clean up whitespace
         text = re.sub(r'\s+', ' ', text)
         text = text.strip()
@@ -1197,7 +1479,10 @@ class VoiceHandler:
         log.debug(f"[VoiceHandler._remove_emotion_brackets] Stripping emotion brackets from "
                   f"{len(text)} chars...")
         cleaned = re.sub(r'\[([^\]]+)\]', '', text)
-        cleaned = re.sub(r'\s+', ' ', cleaned)
+        # Tidy the gaps the removed brackets leave WITHOUT touching newlines —
+        # collapsing '\s+' here destroyed the message's paragraph structure.
+        cleaned = re.sub(r'[ \t]{2,}', ' ', cleaned)
+        cleaned = re.sub(r'[ \t]+\n', '\n', cleaned)
         cleaned = cleaned.strip()
 
         if cleaned != text:
@@ -1208,6 +1493,382 @@ class VoiceHandler:
             log.debug("[VoiceHandler._remove_emotion_brackets] No brackets to remove")
 
         return cleaned
+
+    # ── Serialized speech queue (public API: speak / stop_all / speech_busy) ──
+
+    @staticmethod
+    def _split_for_tts(text, max_len=350):
+        """Split long text into sentence-group chunks of ~max_len chars each.
+
+        A multi-kilobyte reply synthesized as ONE request means minutes of dead
+        air and blows through provider timeouts (a Kokoro POST for an 11 KB
+        story exceeded its 120 s client timeout). Chunks keep every synthesis
+        short: audio starts after chunk 1 while the rest render behind it. A
+        single overlong sentence falls back to comma/space splits; no chunk
+        exceeds ~2*max_len."""
+        text = (text or '').strip()
+        if len(text) <= max_len:
+            return [text] if text else []
+
+        parts = re.split(r'(?<=[.!?…])\s+|\n{2,}', text)
+        chunks = []
+        cur = ''
+
+        def flush_cur():
+            nonlocal cur
+            if cur.strip():
+                chunks.append(cur.strip())
+            cur = ''
+
+        for part in parts:
+            part = (part or '').strip()
+            if not part:
+                continue
+            # Hard-split a single run-on sentence that dwarfs the budget.
+            while len(part) > 2 * max_len:
+                cut = part.rfind(', ', 0, 2 * max_len)
+                if cut < max_len // 2:
+                    cut = part.rfind(' ', 0, 2 * max_len)
+                if cut < max_len // 2:
+                    cut = 2 * max_len
+                piece, part = part[:cut].strip(), part[cut:].lstrip(', ').strip()
+                flush_cur()  # keep earlier buffered sentences ahead of the piece
+                if piece:
+                    chunks.append(piece)
+            if cur and len(cur) + 1 + len(part) > max_len:
+                flush_cur()
+            cur = (cur + ' ' + part).strip() if cur else part
+        flush_cur()
+        return chunks
+
+    def speak(self, text):
+        """Enqueue text for TTS. Long text is split into sentence-group chunks,
+        each a separate utterance — playback starts after the first chunk while
+        the rest synthesize behind it. Utterances play strictly one at a time in
+        FIFO order on a single persistent worker thread — never overlapping.
+        Returns immediately (non-blocking)."""
+        if not text or not text.strip():
+            log.debug("[VoiceHandler.speak] Empty text — not enqueued")
+            self._flush_display_buffer()  # never strand a buffered reply
+            return
+        # Filter BEFORE splitting so code blocks/markdown don't inflate chunks
+        # and sentence boundaries reflect the actual speakable text (the
+        # per-chunk filter inside speak_text is then an idempotent second pass).
+        filtered = self._filter_text_for_tts(text)
+        if not filtered or not filtered.strip():
+            log.debug("[VoiceHandler.speak] No speakable text after filtering — not enqueued")
+            self._flush_display_buffer()
+            return
+        chunks = self._split_for_tts(filtered)
+        for chunk in chunks:
+            self.speech_queue.put(chunk)
+        log.info(f"[VoiceHandler.speak] Enqueued {len(chunks)} chunk(s) | "
+                 f"text_len={len(filtered)} | queue_size≈{self.speech_queue.qsize()}")
+        # Open the speech session: is_speaking spans the WHOLE pipeline run
+        # (interrupt/gating key on it); the playback worker closes it.
+        self.is_speaking = True
+        if not self.playback_active:
+            self._notify_state_change('synthesizing')
+        self._ensure_speech_worker()
+
+    def _ensure_speech_worker(self):
+        """Start the synth + playback worker threads if they aren't running."""
+        with self._speech_worker_lock:
+            if self._speech_worker is None or not self._speech_worker.is_alive():
+                self._speech_worker = threading.Thread(
+                    target=self._speech_worker_loop, daemon=True, name="VoiceSynth")
+                self._speech_worker.start()
+                log.debug(f"[VoiceHandler._ensure_speech_worker] Synth worker started | "
+                          f"tid={self._speech_worker.ident}")
+            if self._playback_worker is None or not self._playback_worker.is_alive():
+                self._playback_worker = threading.Thread(
+                    target=self._playback_worker_loop, daemon=True, name="VoicePlayback")
+                self._playback_worker.start()
+                log.debug(f"[VoiceHandler._ensure_speech_worker] Playback worker started | "
+                          f"tid={self._playback_worker.ident}")
+
+    # ── Synthesis (producer) ────────────────────────────────────────────────
+
+    def _load_custom_tts_module(self):
+        """Import (and cache) the custom TTS provider script."""
+        path = self.tts_script_path
+        if not path or not os.path.isfile(path):
+            raise RuntimeError("custom TTS script not found — check settings")
+        cached = self._custom_tts_module
+        if cached and cached[0] == path:
+            return cached[1]
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("custom_tts_provider", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        if not hasattr(module, 'speak') or not callable(module.speak):
+            raise RuntimeError("custom TTS script must define speak(text, save_to) -> bool")
+        self._custom_tts_module = (path, module)
+        return module
+
+    def _synthesize_chunk(self, text):
+        """Render text to a temp audio file via the current provider.
+
+        Pure synthesis — no pygame, no state changes. Returns the file path, or
+        None on failure. (pyttsx3 has no file stage and never routes here.)"""
+        temp = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+        path = temp.name
+        temp.close()
+        try:
+            if self.tts_provider == 'edge-tts':
+                communicate = edge_tts.Communicate(
+                    text, self.tts_voice, rate=self.tts_rate, volume=self.tts_volume)
+                loop = asyncio.new_event_loop()
+                try:
+                    loop.run_until_complete(communicate.save(path))
+                finally:
+                    loop.close()
+            elif self.tts_provider == 'custom_script':
+                module = self._load_custom_tts_module()
+                if not module.speak(text, path):
+                    raise RuntimeError("speak() returned False")
+            else:
+                raise RuntimeError(f"provider '{self.tts_provider}' has no file synthesis")
+            if os.path.getsize(path) < 200:
+                raise RuntimeError("synthesis produced empty audio")
+            return path
+        except Exception as e:
+            log.error(f"[VoiceHandler._synthesize_chunk] ✗ {type(e).__name__}: {e}")
+            self._emit_log_callback(f"[TTS] Synthesis error: {e}", "ERROR")
+            self._discard(path)
+            return None
+
+    def _speech_worker_loop(self):
+        """SYNTH worker: render queued text chunks to audio files, feeding the
+        bounded audio_ready buffer (prefetch). Exits when the text queue stays
+        empty; a later speak() respawns it."""
+        log.debug("[VoiceHandler._speech_worker_loop] ── Synth worker started ──")
+        while True:
+            try:
+                text = self.speech_queue.get(timeout=1.0)
+            except queue.Empty:
+                break
+            gen = self._speech_generation
+            self._synth_in_flight = True
+            try:
+                if self.tts_provider == 'pyttsx3':
+                    # No file stage — legacy direct path, serial (no prefetch).
+                    self.speak_text_sync(text)
+                    continue
+                if not self.playback_active:
+                    self._notify_state_change('synthesizing')
+                path = self._synthesize_chunk(text)
+                if path is None:
+                    continue
+                if gen != self._speech_generation:
+                    self._discard(path)
+                    continue
+                # Bounded put — blocks while playback is 2+ chunks behind;
+                # re-check staleness so a stop_all during the wait discards.
+                while True:
+                    try:
+                        self.audio_ready.put((path, gen), timeout=0.5)
+                        break
+                    except queue.Full:
+                        if gen != self._speech_generation:
+                            self._discard(path)
+                            break
+            except Exception as e:
+                log.error(f"[VoiceHandler._speech_worker_loop] ✗ Chunk failed: "
+                          f"{type(e).__name__}: {e}")
+            finally:
+                self._synth_in_flight = False
+                self.speech_queue.task_done()
+        log.debug("[VoiceHandler._speech_worker_loop] ── Synth worker idle — exiting ──")
+
+    # ── Playback (consumer) ─────────────────────────────────────────────────
+
+    def _synth_pending(self):
+        """More audio is still on its way (text queued or synth in flight)."""
+        return self._synth_in_flight or not self.speech_queue.empty()
+
+    def _play_file(self, path, delete_after=True):
+        """Play one rendered audio file; blocks until it ends or is interrupted.
+        The shared playback half of every file-based provider."""
+        started = False
+        try:
+            if not self.is_speaking:
+                return False
+            self._ensure_pygame_mixer()
+            pygame.mixer.music.load(path)
+            pygame.mixer.music.play()
+            started = True
+            self.playback_active = True
+            self._notify_state_change('speaking')
+            if self.on_playback_started:
+                try:
+                    self.on_playback_started()
+                except Exception as e:
+                    log.warning(f"[VoiceHandler._play_file] on_playback_started error: "
+                                f"{type(e).__name__}: {e}")
+            while pygame.mixer.music.get_busy():
+                if not self.is_speaking:
+                    pygame.mixer.music.stop()
+                    break
+                time.sleep(0.05)
+            return True
+        except Exception as e:
+            log.error(f"[VoiceHandler._play_file] ✗ {type(e).__name__}: {e}")
+            return False
+        finally:
+            self.playback_active = False
+            if started:
+                try:
+                    pygame.mixer.music.unload()  # release the file handle (Windows)
+                except Exception:
+                    pass
+            if delete_after:
+                self._discard(path)
+
+    def _playback_worker_loop(self):
+        """PLAYBACK worker: play ready audio in order; when the buffer runs dry
+        while more speech is still coming, bridge the gap with ONE same-voice
+        filler interjection. Handles session teardown (state + display flush)."""
+        log.debug("[VoiceHandler._playback_worker_loop] ── Playback worker started ──")
+        filler_played_this_gap = False
+        played_real_chunk = False
+        while True:
+            try:
+                path, gen = self.audio_ready.get(timeout=0.3)
+            except queue.Empty:
+                if self._synth_pending() and self.is_speaking:
+                    # Gap: next chunk isn't ready. Bridge it once, then wait.
+                    # Only BETWEEN chunks — never as the session opener (the
+                    # silence before the first chunk is normal synthesis lead-in,
+                    # and a "Hmm..." before anything was said sounds absurd).
+                    if (self.fillers_enabled and played_real_chunk
+                            and not filler_played_this_gap):
+                        filler = self._pick_filler()
+                        if filler is not None:
+                            log.info(f"[VoiceHandler._playback_worker_loop] Gap — playing "
+                                     f"filler '{os.path.basename(filler)}'")
+                            self._play_file(filler, delete_after=False)
+                            filler_played_this_gap = True
+                    continue
+                if self._synth_pending():
+                    continue  # not is_speaking (interrupted) — let synth drain
+                break  # session over
+            filler_played_this_gap = False
+            try:
+                if gen != self._speech_generation:
+                    self._discard(path)
+                    continue
+                if self._play_file(path):
+                    played_real_chunk = True
+            finally:
+                self.audio_ready.task_done()
+        # ── Session teardown (skipped if new work raced in after the break —
+        # the next speak() call respawns a fresh worker for it) ───────────────
+        if not self._synth_pending() and self.audio_ready.empty():
+            self.is_speaking = False
+            # Never strand a reply buffered "until playback starts" — if every
+            # chunk failed or was interrupted pre-playback, release it now
+            # (no-op normally).
+            self._flush_display_buffer()
+            self._notify_state_change('listening' if self.is_listening else 'inactive')
+        log.debug("[VoiceHandler._playback_worker_loop] ── Playback worker idle — exiting ──")
+
+    @staticmethod
+    def _discard(path):
+        try:
+            if path and os.path.exists(path):
+                os.unlink(path)
+        except Exception:
+            pass
+
+    # ── Filler interjections ────────────────────────────────────────────────
+
+    # Short natural continuers, rendered once per provider+voice and reused.
+    _FILLER_TEXTS = ["Hmm...", "So...", "And...", "Let me see...", "Mmm."]
+
+    def _filler_cache_dir(self):
+        from systema import APP_ROOT
+        key = f"{self.tts_provider}|{self.tts_voice}|{self.tts_script_path}"
+        h = hashlib.sha1(key.encode('utf-8')).hexdigest()[:12]
+        d = Path(APP_ROOT) / 'data' / 'voice_fillers' / h
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _pick_filler(self):
+        """A random cached filler path (never the same one twice in a row), or
+        None when the cache hasn't been rendered yet."""
+        try:
+            files = sorted(str(p) for p in self._filler_cache_dir().glob('filler_*.mp3'))
+        except Exception:
+            return None
+        if not files:
+            return None
+        choices = [f for f in files if f != self._last_filler] or files
+        choice = random.choice(choices)
+        self._last_filler = choice
+        return choice
+
+    def ensure_fillers_async(self):
+        """Render any missing filler clips in the background (same provider +
+        voice as normal speech). Safe to call on every voice-mode enable; does
+        nothing once the cache is warm. Skipped for pyttsx3 (no file stage)."""
+        if self.tts_provider == 'pyttsx3':
+            return
+
+        def _work():
+            try:
+                cache = self._filler_cache_dir()
+                for i, filler_text in enumerate(self._FILLER_TEXTS):
+                    target = cache / f'filler_{i}.mp3'
+                    if target.exists():
+                        continue
+                    path = self._synthesize_chunk(filler_text)
+                    if path:
+                        shutil.move(path, target)
+                        log.info(f"[VoiceHandler.ensure_fillers_async] ✓ Rendered filler "
+                                 f"'{filler_text}' → {target.name}")
+            except Exception as e:
+                log.warning(f"[VoiceHandler.ensure_fillers_async] {type(e).__name__}: {e}")
+
+        threading.Thread(target=_work, daemon=True, name="VoiceFillers").start()
+
+    # ── Stop / status ───────────────────────────────────────────────────────
+
+    def stop_all(self):
+        """Clear ALL pending speech — queued text, prefetched audio, and the
+        current playback/synthesis — in one shot."""
+        self._speech_generation += 1  # in-flight synth results become stale
+        drained = 0
+        while True:
+            try:
+                self.speech_queue.get_nowait()
+                self.speech_queue.task_done()
+                drained += 1
+            except queue.Empty:
+                break
+        while True:
+            try:
+                path, _gen = self.audio_ready.get_nowait()
+                self.audio_ready.task_done()
+                self._discard(path)
+                drained += 1
+            except queue.Empty:
+                break
+        log.info(f"[VoiceHandler.stop_all] Cleared {drained} pending item(s); "
+                 f"interrupting current playback")
+        self.interrupt_speech()
+        self.is_speaking = False  # force even if interrupt_speech no-op'd
+        # Release any chat message buffered "until playback starts" — if we
+        # killed the pipeline during synthesis, on_playback_started never fired
+        # and the reply would be silently lost from view.
+        self._flush_display_buffer()
+
+    @property
+    def speech_busy(self):
+        """True while any speech is pending: queued, synthesizing, prefetched,
+        or playing."""
+        return (self.is_speaking or self._synth_in_flight or self.playback_active
+                or not self.speech_queue.empty() or not self.audio_ready.empty())
 
     def speak_text_sync(self, text):
         """Synchronous wrapper for speak_text"""
@@ -1259,8 +1920,8 @@ class VoiceHandler:
         log.debug("[VoiceHandler.cleanup] Stopping listening...")
         self.stop_listening()
 
-        log.debug("[VoiceHandler.cleanup] Interrupting any ongoing speech...")
-        self.interrupt_speech()
+        log.debug("[VoiceHandler.cleanup] Stopping speech queue + any ongoing speech...")
+        self.stop_all()
 
         log.debug("[VoiceHandler.cleanup] Clearing all callbacks...")
         self.on_transcription = None

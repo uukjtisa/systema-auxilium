@@ -755,9 +755,34 @@ class FloatingWindow(QWidget):
         """Legacy — prefer _tray_show_floating for tray callbacks."""
         QTimer.singleShot(0, self._do_show_from_tray)
 
+    def _confirm_exit_if_busy(self, action):
+        """Return True to proceed with Restart/Shutdown.
+
+        If a response is generating, work mode is running, or voice output is
+        pending, show a Cancel/Confirm modal first; Confirm gracefully stops all
+        activity (controller.graceful_stop_for_exit) before proceeding."""
+        try:
+            reason = self.controller.exit_busy_reason()
+        except Exception:
+            reason = None
+        if not reason:
+            return True
+        from systema.ui.dialogs.exit_confirm_dialog import ExitConfirmDialog
+        dlg = ExitConfirmDialog(action, reason, parent=self)
+        if not dlg.exec():
+            return False
+        try:
+            self.controller.graceful_stop_for_exit()
+        except Exception:
+            pass
+        return True
+
     def restart_app(self):
         """Relaunch Systema Auxilium via the unified controller restart (which spawns
         the detached relauncher, then runs the same clean shutdown as Shutdown)."""
+        if not self._confirm_exit_if_busy("Restart"):
+            return
+        self._exit_confirmed = True
         try:
             self.controller.restart_app()
         except Exception:
@@ -767,6 +792,10 @@ class FloatingWindow(QWidget):
 
     def shutdown_app(self):
         """Properly shutdown the application — close all child windows first."""
+        if not getattr(self, '_exit_confirmed', False) \
+                and not self._confirm_exit_if_busy("Shutdown"):
+            return
+        self._exit_confirmed = True
         self.save_settings()
         # Forcibly destroy child windows that use event.ignore() in closeEvent
         for attr in ('chat_window', 'settings_window', 'debug_window', 'appearance_window'):
