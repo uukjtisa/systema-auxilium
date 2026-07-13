@@ -47,7 +47,6 @@ This skill writes three JSON/Python shapes. Each has one authoritative reference
   "daily_schedule":             { "whole_day": true, "start": "00:00", "end": "23:59" },
   "permissions": {
     "allow_workmode":            true,
-    "allow_execute_code":        false,
     "inject_image_tools":        false,
     "inject_controller_ref":     false,
     "inject_notify_tool":        false
@@ -115,7 +114,6 @@ Thread sleeps outside the window and wakes at `start` automatically.
 | Field | When to enable |
 |---|---|
 | `allow_workmode` | Task needs multi-step tool use (email, code execution, etc.). |
-| `allow_execute_code` | Task AI must run Python directly inside the session. |
 | `inject_image_tools` | Task needs `take_screenshot` / `attach_image_to_context`. |
 | `inject_controller_ref` | Task needs live access to the app controller (advanced). |
 | `inject_notify_tool` | Task needs the `notify` shortcut. |
@@ -212,7 +210,7 @@ task = {
     "script_poll_ms": 1000,
     "daily_schedule": { "whole_day": False, "start": "08:00", "end": "08:15" },
     "permissions": {
-        "allow_workmode": True, "allow_execute_code": False,
+        "allow_workmode": True,
         "inject_image_tools": False, "inject_controller_ref": False, "inject_notify_tool": False
     },
     "max_work_iterations": 10,
@@ -251,7 +249,7 @@ if result.returncode != 0:
 - `id` and `created_at` are injected by the script. Never include them in the task dict.
 - To use a new function in a task's `{{...}}` block, register it with `add_function.py` first, then reference it by name in the instruction.
 - For script-trigger tasks, YOU must also create the script file and place it in `{app_root}/data/tasks/interval-scripts/`. Remind the user to verify the path after creation.
-- A task AI pushes messages to the main chat window by calling the `send_message_main("...")` function, which is available in its Python namespace — it just calls it from inside `work_environment` (or `execute_code`). This works in both Compatibility and Native tool-calling modes and delivers immediately. (Read-only tasks with no code execution instead emit `{"tool": "send_message_main", "input": "..."}` on its own line, since they can't run a function.)
+- A task AI pushes messages to the main chat window by calling the `send_message_main("...")` function, which is available in its Python namespace — it just calls it from inside `work_environment`. This works in both Compatibility and Native tool-calling modes and delivers immediately. (Read-only tasks with no code execution instead emit `{"tool": "send_message_main", "input": "..."}` on its own line, since they can't run a function.)
 
 ---
 
@@ -352,7 +350,6 @@ task = {
     ),
     "permissions": {
         "allow_workmode":     True,
-        "allow_execute_code": True,   # enable if the AI needs to run reply code itself
         # ... other permissions as needed
     },
     "limit_session_messages": { "enabled": True, "max_messages": 4 },
@@ -360,7 +357,7 @@ task = {
 }
 ```
 
-For the reply, the AI either uses a loaded skill (`loaded_skills`) or generates and executes the reply code inline via `execute_code` — no separate skill file is required if the platform's Python library is simple enough to use in one block.
+For the reply, the AI either uses a loaded skill (`loaded_skills`) or generates and executes the reply code inline via `work_environment` — no separate skill file is required if the platform's Python library is simple enough to use in one block.
 
 ---
 

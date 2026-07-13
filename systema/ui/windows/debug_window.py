@@ -362,7 +362,7 @@ class DebugWindow(BaseWindow):
         Modules marked '⚠ restart' are listed but disabled — too risky to live-reload.
         """
         return [
-            ("global_instructions.py", "systema.engine.prompts.global_instructions",      "_post_global_instructions"),
+            ("prompts package",        "systema.engine.prompts.global_instructions",      "_post_global_instructions"),
             ("chat_window.py",         "systema.ui.chat_window",                 "_post_chat_window"),
             ("settings_window.py",     "systema.ui.windows.settings_window",             "_post_settings_window"),
             ("debug_window.py",        "systema.ui.windows.debug_window",                "_post_debug_window"),
@@ -382,15 +382,30 @@ class DebugWindow(BaseWindow):
 
     def _post_global_instructions(self, controller):
         """
-        Patch ai_engine's module-level names with the freshly reloaded versions,
-        then rebuild the live system prompt via the existing controller path.
+        The prompts live in a package now (tool_registry -> shared -> compat ->
+        native -> the global_instructions facade). Reload the submodules in
+        dependency order FIRST (the facade's re-exports bind at its import), then
+        patch ai_engine's captured names and rebuild the live system prompt.
         """
         try:
+            import importlib
+            import systema.execution.tool_registry as tr
+            import systema.engine.prompts.shared as ps
+            import systema.engine.prompts.compat as pc
+            import systema.engine.prompts.native as pn
+            importlib.reload(tr)
+            importlib.reload(ps)
+            importlib.reload(pc)
+            importlib.reload(pn)
             import systema.engine.prompts.global_instructions as gi
+            gi = importlib.reload(gi)
             import systema.engine.ai_engine as ae
-            # Patch the names that ai_engine captured with `from X import Y`
-            ae.get_system_prompt          = gi.get_system_prompt
-            ae.get_gemini_system_prompt   = gi.get_gemini_system_prompt
+            # Patch exactly the names ai_engine captured with `from X import Y`.
+            ae.get_system_prompt = gi.get_system_prompt
+            for _name in ("EMPTY_EXIT_SUMMARY_PROMPT", "PREFILLING",
+                          "PREFILLING_NATIVE", "WORK_MODE_OUTPUT_ONLY_PROMPT"):
+                if hasattr(ae, _name):
+                    setattr(ae, _name, getattr(gi, _name))
 
             # Rebuild the live prompt
             controller._update_system_prompt()

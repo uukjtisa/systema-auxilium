@@ -144,7 +144,8 @@ class TaskAIEngine:
             self._engine.provider_retry_backoff = 3.0
             perms = self._task.get('permissions', {})
             self._engine.tool_manager.allow_workmode = perms.get('allow_workmode', False)
-            self._engine.tool_manager.allow_execute_code = perms.get('allow_execute_code', False)
+            # (allow_execute_code was retired with the execute_code tool; old
+            # task dicts may still carry the key — it is simply ignored.)
             self._apply_supervision(perms)
             self._inject_task_namespace()
             log.info("[TaskAIEngine._init_engine] ✓ Dedicated AIEngine instance created")
@@ -231,7 +232,7 @@ class TaskAIEngine:
         # user's main chat. A plain namespace function so it works in BOTH tool
         # modes (the old "{"tool":"send_message_main",...}" JSON-in-text approach
         # breaks under native, where the model is told never to write tool calls as
-        # text). Delivers immediately when called from work_environment/execute_code.
+        # text). Delivers immediately when called from work_environment.
         def _send_message_main(message):
             try:
                 cb = _task_ai_ref._send_main_callback
@@ -274,7 +275,7 @@ class TaskAIEngine:
         """
         Run a full ping using the same pipeline as the main session:
         generate_response + continue_work_mode loop.
-        Supports work_environment, execute_code, memorize, load_skill, etc.
+        Supports work_environment, memorize, load_skill, etc.
 
         Returns:
             (response_text: str | None, send_main_calls: list[str], updated_history: list)

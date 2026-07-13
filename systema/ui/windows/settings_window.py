@@ -594,7 +594,7 @@ class SettingsWindow(BaseWindow):
         # Source radios
         from PyQt6.QtWidgets import QRadioButton, QButtonGroup
         self.pf_source_group = QButtonGroup(self)
-        self.pf_radio_premade = QRadioButton("Use premade script  (PREFILLING in global_instructions.py)")
+        self.pf_radio_premade = QRadioButton("Use premade script  (PREFILLING in engine/prompts/compat.py, native.py)")
         self.pf_radio_session = QRadioButton("Use a saved session as prefilling history")
         for rb in (self.pf_radio_premade, self.pf_radio_session):
             rb.setStyleSheet(f"color:{_TEXT}; font-size:10pt; margin-left:16px;")
@@ -633,9 +633,9 @@ class SettingsWindow(BaseWindow):
                 checked and self.pf_radio_session.isChecked()))
 
         pf_lay.addWidget(_label(
-            "Premade: edit PREFILLING in global_instructions.py.  "
-            "Session: the full chat history of the chosen session is injected "
-            "before every request — the AI \"remembers\" doing things that way.",
+            "Premade: edit PREFILLING in engine/prompts/compat.py (or PREFILLING_NATIVE "
+            "in native.py).  Session: the full chat history of the chosen session is "
+            "injected before every request — the AI \"remembers\" doing things that way.",
             muted=True))
         ai_lay.addWidget(pf_group)
         # ────────────────────────────────────────────────────────────────────
@@ -1010,7 +1010,17 @@ class SettingsWindow(BaseWindow):
         self.interrupt_mode_combo.setStyleSheet(_COMBO)
         int_lay.addWidget(self.interrupt_mode_combo)
         int_lay.addWidget(_label(
-            "Manual: click mute in chat  ·  Automatic: TTS stops when you speak", muted=True))
+            "Manual: click mute in chat  ·  Automatic: TTS ducks when you speak "
+            "and stops once real words are heard", muted=True))
+        int_lay.addWidget(_label("Barge-in sensitivity (Automatic mode):"))
+        self.bargein_sensitivity_combo = QComboBox()
+        self.bargein_sensitivity_combo.addItem("Relaxed - fewest false interrupts", "relaxed")
+        self.bargein_sensitivity_combo.addItem("Balanced (default)", "balanced")
+        self.bargein_sensitivity_combo.addItem("Eager - fastest reaction", "eager")
+        self.bargein_sensitivity_combo.setStyleSheet(_COMBO)
+        int_lay.addWidget(self.bargein_sensitivity_combo)
+        self.interrupt_mode_combo.currentIndexChanged.connect(
+            self._update_bargein_combo_enabled)
         voice_lay.addWidget(int_group)
 
         # TTS
@@ -1524,6 +1534,81 @@ class SettingsWindow(BaseWindow):
         pol_lay.addLayout(_audit_row)
         sec_lay.addWidget(pol_group)
 
+        # ── Voice mode approval ─────────────────────────────────────────────
+        va_group = QGroupBox("Voice Mode Approval")
+        va_group.setStyleSheet(_GROUP)
+        va_lay = QVBoxLayout(va_group)
+        self.voice_approval_checkbox = QCheckBox(
+            "Answer code approval prompts by voice")
+        self.voice_approval_checkbox.setStyleSheet(_CHECK)
+        va_lay.addWidget(self.voice_approval_checkbox)
+        va_lay.addWidget(_info_box(
+            "While voice mode is on and an approval window is open, spoken command "
+            "words act on it: deny words reject instantly; approve words must be the "
+            "whole utterance. Approving code with danger findings asks you to say "
+            "\"confirm\" first."))
+        self.voice_approval_mode_combo = QComboBox()
+        self.voice_approval_mode_combo.addItem(
+            "Basic - command words only", "basic")
+        self.voice_approval_mode_combo.addItem(
+            "Advanced - other speech goes to the Code Reviewer", "advanced")
+        self.voice_approval_mode_combo.setStyleSheet(_COMBO)
+        va_lay.addWidget(_label("Mode:"))
+        va_lay.addWidget(self.voice_approval_mode_combo)
+        self.voice_approval_confirm_checkbox = QCheckBox(
+            "Require a spoken \"confirm\" before executing code with danger findings")
+        self.voice_approval_confirm_checkbox.setStyleSheet(_CHECK)
+        va_lay.addWidget(self.voice_approval_confirm_checkbox)
+        self.voice_approval_announce_checkbox = QCheckBox(
+            "Announce the approval window by voice when it opens")
+        self.voice_approval_announce_checkbox.setStyleSheet(_CHECK)
+        va_lay.addWidget(self.voice_approval_announce_checkbox)
+        self.approval_mini_checkbox = QCheckBox(
+            "Compact approval notification when the chat window is closed")
+        self.approval_mini_checkbox.setStyleSheet(_CHECK)
+        va_lay.addWidget(self.approval_mini_checkbox)
+        va_lay.addWidget(_info_box(
+            "When the chat window is closed or minimized, approvals appear as a small "
+            "corner card showing the risk findings (not the code) with Expand / Deny / "
+            "Approve. Code with danger findings always requires expanding to review. "
+            "Opening the chat window expands to the full approval automatically."))
+
+        va_lay.addWidget(_label("Custom command words:"))
+        from PyQt6.QtWidgets import QListWidget
+        self.voice_approval_words_list = QListWidget()
+        self.voice_approval_words_list.setStyleSheet(
+            f"QListWidget {{ background:{_ELEV}; border:1px solid {_BORDER};"
+            f" border-radius:6px; padding:4px; font-family:Consolas,monospace;"
+            f" font-size:10px; color:{_TEXT}; outline:none; }}"
+            f"QListWidget::item {{ padding:2px 4px; }}")
+        self.voice_approval_words_list.setMaximumHeight(96)
+        va_lay.addWidget(self.voice_approval_words_list)
+        _va_row = QHBoxLayout()
+        self.voice_approval_word_input = QLineEdit()
+        self.voice_approval_word_input.setPlaceholderText("Word or phrase")
+        self.voice_approval_word_input.setStyleSheet(_INPUT)
+        _va_row.addWidget(self.voice_approval_word_input, stretch=1)
+        self.voice_approval_word_action = QComboBox()
+        self.voice_approval_word_action.addItem("Approve", "approve")
+        self.voice_approval_word_action.addItem("Deny", "deny")
+        self.voice_approval_word_action.setStyleSheet(_COMBO)
+        _va_row.addWidget(self.voice_approval_word_action)
+        _va_add = QPushButton("Add")
+        _va_add.setStyleSheet(_BTN)
+        _va_add.clicked.connect(self._add_voice_approval_word)
+        _va_row.addWidget(_va_add)
+        _va_remove = QPushButton("Remove selected")
+        _va_remove.setStyleSheet(_BTN)
+        _va_remove.clicked.connect(self._remove_voice_approval_word)
+        _va_row.addWidget(_va_remove)
+        va_lay.addLayout(_va_row)
+        self.voice_approval_checkbox.toggled.connect(
+            self._update_voice_approval_enabled)
+        # 'Expand' is only meaningful while the compact card can appear.
+        self.approval_mini_checkbox.toggled.connect(
+            self._update_voice_approval_expand_action)
+        sec_lay.addWidget(va_group)
+
         dbg_group = QGroupBox("Debug")
         dbg_group.setStyleSheet(_GROUP)
         dg_lay = QVBoxLayout(dbg_group)
@@ -1864,6 +1949,64 @@ class SettingsWindow(BaseWindow):
             self.tts_provider_combo.setCurrentIndex(0)
         self.tts_provider_combo.blockSignals(False)
         self.on_tts_provider_changed(self.tts_provider_combo.currentIndex())
+
+    def _update_bargein_combo_enabled(self):
+        """Barge-in sensitivity only applies to automatic interruption."""
+        self.bargein_sensitivity_combo.setEnabled(
+            self.interrupt_mode_combo.currentData() == 'auto')
+
+    # ── Voice mode approval helpers ──────────────────────────────────────────
+    def _update_voice_approval_enabled(self):
+        on = self.voice_approval_checkbox.isChecked()
+        for w in (self.voice_approval_mode_combo,
+                  self.voice_approval_confirm_checkbox,
+                  self.voice_approval_announce_checkbox,
+                  self.voice_approval_words_list,
+                  self.voice_approval_word_input,
+                  self.voice_approval_word_action):
+            w.setEnabled(on)
+
+    def _update_voice_approval_expand_action(self):
+        """The 'Expand' custom-word action only exists while the compact
+        approval card is enabled (there is nothing to expand otherwise)."""
+        combo = self.voice_approval_word_action
+        idx = combo.findData('expand')
+        if self.approval_mini_checkbox.isChecked():
+            if idx < 0:
+                combo.addItem("Expand", "expand")
+        elif idx >= 0:
+            if combo.currentIndex() == idx:
+                combo.setCurrentIndex(0)
+            combo.removeItem(idx)
+
+    def _voice_approval_words_dict(self):
+        """Parse the list rows ('word  ->  action') back into a dict."""
+        out = {}
+        for i in range(self.voice_approval_words_list.count()):
+            row = self.voice_approval_words_list.item(i).text()
+            if '->' in row:
+                word, _, action = row.partition('->')
+                word, action = word.strip(), action.strip()
+                if word and action in ('approve', 'deny', 'expand'):
+                    out[word] = action
+        return out
+
+    def _add_voice_approval_word(self):
+        word = self.voice_approval_word_input.text().strip()
+        if not word:
+            return
+        action = self.voice_approval_word_action.currentData()
+        words = self._voice_approval_words_dict()
+        words[word] = action
+        self.voice_approval_words_list.clear()
+        for w, a in words.items():
+            self.voice_approval_words_list.addItem(f"{w}  ->  {a}")
+        self.voice_approval_word_input.clear()
+
+    def _remove_voice_approval_word(self):
+        for item in self.voice_approval_words_list.selectedItems():
+            self.voice_approval_words_list.takeItem(
+                self.voice_approval_words_list.row(item))
 
     def refresh_audio_devices(self):
         """Rebuild the microphone dropdown from the de-duplicated device list.
@@ -2227,6 +2370,29 @@ class SettingsWindow(BaseWindow):
         except Exception:
             pass
 
+        # Load voice mode approval
+        try:
+            s = self.controller.settings
+            self.voice_approval_checkbox.setChecked(
+                s.get('voice_approval_enabled', True))
+            _i = self.voice_approval_mode_combo.findData(
+                s.get('voice_approval_mode', 'basic'))
+            if _i >= 0:
+                self.voice_approval_mode_combo.setCurrentIndex(_i)
+            self.voice_approval_confirm_checkbox.setChecked(
+                s.get('voice_approval_confirm_risky', True))
+            self.voice_approval_announce_checkbox.setChecked(
+                s.get('voice_approval_announce', False))
+            self.voice_approval_words_list.clear()
+            for _w, _a in (s.get('voice_approval_custom_words') or {}).items():
+                self.voice_approval_words_list.addItem(f"{_w}  ->  {_a}")
+            self.approval_mini_checkbox.setChecked(
+                s.get('approval_mini_enabled', True))
+            self._update_voice_approval_enabled()
+            self._update_voice_approval_expand_action()
+        except Exception:
+            pass
+
         # Load Tool lockout switch
         tool_exec_locked = self.controller.settings.get('tool_execution_lockout', False)
         self.tool_exec_lockout_checkbox.setChecked(tool_exec_locked)
@@ -2251,6 +2417,13 @@ class SettingsWindow(BaseWindow):
         index = self.interrupt_mode_combo.findData(interrupt_mode)
         if index >= 0:
             self.interrupt_mode_combo.setCurrentIndex(index)
+
+        # Load barge-in sensitivity (only meaningful in automatic mode)
+        bargein = self.controller.settings.get('voice_bargein_sensitivity', 'balanced')
+        index = self.bargein_sensitivity_combo.findData(bargein)
+        if index >= 0:
+            self.bargein_sensitivity_combo.setCurrentIndex(index)
+        self._update_bargein_combo_enabled()
 
         # Load voice devices
         self.refresh_audio_devices()
@@ -2673,6 +2846,23 @@ class SettingsWindow(BaseWindow):
         except Exception:
             pass
 
+        # Save voice mode approval
+        try:
+            self.controller.settings['voice_approval_enabled'] = \
+                self.voice_approval_checkbox.isChecked()
+            self.controller.settings['voice_approval_mode'] = \
+                self.voice_approval_mode_combo.currentData()
+            self.controller.settings['voice_approval_confirm_risky'] = \
+                self.voice_approval_confirm_checkbox.isChecked()
+            self.controller.settings['voice_approval_announce'] = \
+                self.voice_approval_announce_checkbox.isChecked()
+            self.controller.settings['voice_approval_custom_words'] = \
+                self._voice_approval_words_dict()
+            self.controller.settings['approval_mini_enabled'] = \
+                self.approval_mini_checkbox.isChecked()
+        except Exception:
+            pass
+
         # Save system prompt hijacking and Tool lockout switch
         self.controller.set_tool_execution_lockout(self.tool_exec_lockout_checkbox.isChecked())
         self.controller.set_system_prompt_hijack(
@@ -2731,6 +2921,10 @@ class SettingsWindow(BaseWindow):
         # Save interrupt mode
         interrupt_mode = self.interrupt_mode_combo.currentData()
         self.controller.set_voice_interrupt_mode(interrupt_mode)
+
+        # Save barge-in sensitivity
+        self.controller.set_voice_bargein_sensitivity(
+            self.bargein_sensitivity_combo.currentData())
 
         # Save memory engine settings
         self.controller.settings['prefilling_enabled'] = self.prefilling_checkbox.isChecked()

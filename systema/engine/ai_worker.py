@@ -1,7 +1,7 @@
 """
 core/ai_worker.py
 AI Worker - Runs AI operations in background thread
-UPDATED: Updated to match new work_environment and execute_code naming
+UPDATED: work_environment is the single execution tool
 """
 
 from systema.common.logger import _make_logger, _NoOpLogger

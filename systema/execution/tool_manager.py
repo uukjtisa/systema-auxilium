@@ -1,31 +1,98 @@
 """
-core/tool_manager.py
-Tool Manager - Simplified work environment and code execution system
-FIXED: Code approval dialog now runs on main thread using Qt signals
-UPDATED: GUI execution now uses subprocess with .generated folder
-UPDATED: Captures and returns traceback for execute_code failures
-UPDATED: Unified tool format  {"tool": "tool_name", "input": "..."}
-         Legacy format {"work_environment": true, "input": "..."} still supported
-UPDATED: Single-exec policy enforced — only one code tool per AI turn allowed
-UPDATED: self.exec_violations counter tracks policy violations
-UPDATED: parse_set_session_name uses aggressive multi-strategy extraction —
-         works anywhere in text, any format, even partially malformed JSON
+systema/execution/tool_manager.py
+Tool Manager — the work-environment execution system and compat fence parser.
+
+work_environment is the ONLY code-execution tool (execute_code was retired in
+2026-07; see systema.execution.tool_registry.LEGACY_STRIP_KEYS). The code
+approval dialog runs on the main thread via Qt signals; a single-exec policy
+allows one code tool per AI turn (set_session_name exempt).
 """
 
 import json
+import keyword
 import re
 import threading
-import subprocess
 import os
-from datetime import datetime
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer
 from systema.execution.python_interpreter import PythonInterpreter
+from systema.execution import tool_registry
 from systema.common.logger import _make_logger, _NoOpLogger
 
 
 # ─────────────────────────── Colored Logger Setup ────────────────────────────
 _verbose = True
 log = _make_logger("ToolManager") if _verbose else _NoOpLogger()
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# ──────────────── Malformed-opener tolerance helpers (weak models) ───────────
+# Word starting a line that means "this is code, not an annotation".
+_CODE_KEYWORDS = frozenset(k.lower() for k in keyword.kwlist) | {'print', 'self'}
+# Any of these characters in a line means it is code-shaped, never an annotation.
+_ANNOT_FORBIDDEN = set('=(){}<>[]`"\'')
+
+
+def _edit_distance_le1(a, b):
+    """True when a and b are at most one insert/delete/substitute apart."""
+    if a == b:
+        return True
+    if abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) > len(b):
+        a, b = b, a
+    i = j = 0
+    used_edit = False
+    while i < len(a) and j < len(b):
+        if a[i] == b[j]:
+            i += 1
+            j += 1
+            continue
+        if used_edit:
+            return False
+        used_edit = True
+        if len(a) == len(b):
+            i += 1  # substitution
+        j += 1      # else: insertion into the longer string
+    return True     # any trailing char fits the remaining <=1 budget
+
+
+def _is_prose_annotation(line):
+    """Heuristic: is this line a human-readable label rather than Python code?
+    Used to decide whether junk after the tool name (or a stray first fence
+    line) is a bracketless annotation the model meant to write."""
+    line = line.strip()
+    if not line or len(line) > 100 or line[0] in '#@':
+        return False
+    if any(ch in _ANNOT_FORBIDDEN for ch in line):
+        return False
+    tokens = line.replace(':', ' ').split()
+    if len(tokens) < 2:
+        return False
+    return tokens[0].lower() not in _CODE_KEYWORDS
+
+
+def _clean_annotation(raw):
+    """Strip annotation decorations: leading colon/dash, wrapping [] () quotes."""
+    s = raw.strip().lstrip(':-—– ').strip()
+    for opener, closer in (('[', ']'), ('(', ')'), ('"', '"'), ("'", "'")):
+        if len(s) >= 2 and s.startswith(opener) and s.endswith(closer):
+            s = s[1:-1].strip()
+    return s
+
+
+def _lift_leading_annotation(content):
+    """If the first line INSIDE a work fence is an annotation the model misplaced
+    ('[Fetch news]' or bare prose), lift it out so it doesn't poison the code.
+    Returns (annotation, content, lifted)."""
+    parts = content.split('\n', 1)
+    if len(parts) < 2:
+        return '', content, False
+    first, rest = parts[0].strip(), parts[1].strip()
+    if not rest:
+        return '', content, False
+    if (first.startswith('[') and first.endswith(']')) or _is_prose_annotation(first):
+        return _clean_annotation(first), rest, True
+    return '', content, False
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -39,24 +106,15 @@ class ApprovalSignal(QObject):
 
 
 class ToolManager:
-    """Manages work environment and code execution with unified tool system.
+    """Manages the work environment and compat fence parsing.
 
-    TOOL FORMAT (new, preferred):
-        {"tool": "work_environment", "input": "python code here"}
-        {"tool": "execute_code",     "input": "python code here"}
-        {"tool": "set_session_name", "input": "My Session Title"}
-
-    LEGACY FORMAT (still accepted for backward compatibility):
-        {"work_environment": true,   "input": "python code here"}
-        {"execute_code":     true,   "input": "python code here"}
-        {"set_session_name": "My Session Title"}
-
-    Adding a new tool:
-        1. Add its canonical name to self._tool_keys list.
-        2. Add a parse_<tool>() method (mirrors parse_work_environment).
-        3. Add execution logic if needed.
-        That's it — format detection, fuzzy matching, removal and stripping
-        all work automatically.
+    ADDING A TOOL is a 3-touch change (see tool_registry.py):
+        1. Add its entry to systema/execution/tool_registry.py — the native
+           schema AND the compat prompt docs render from it automatically.
+        2. Add a parse_<tool>() method here (mirrors parse_work_environment).
+        3. Add one dispatch branch in AIEngine._process_ai_response.
+    Format detection, fuzzy matching, stripping and unclosed-fence recovery
+    all work automatically off the registry keys.
     """
 
     def __init__(self, settings_callback=None, ai_engine=None):
@@ -86,6 +144,14 @@ class ToolManager:
         self._pending_interrupt_notice = None  # appended to output when user interrupts running code
         log.debug("[ToolManager.__init__] Work mode state: in_work_mode=False | last_work_output=None")
 
+        # ── Malformed-call auto-correction (weak-model guard rails) ──────────
+        # _parse_fence(record=True) appends one short description per auto-fix;
+        # _flush_parse_corrections() turns them into a chat NOTICE + a format
+        # reminder that run_work_environment prefixes to the next observation
+        # so the model learns the correct syntax mid-session.
+        self._parse_corrections = []
+        self._pending_format_reminder = None
+
         # ── Violation tracking ────────────────────────────────────────────────
         # Incremented each time the AI emits more than one code-execution tool
         # call in a single response (set_session_name is exempt).
@@ -111,10 +177,9 @@ class ToolManager:
         # thread before the approval callback fires (happens-before the worker
         # read via the approval Event).
         self._last_reject_reason = ""
-        # Capability gates — enforced by run_work_environment/run_execute_code,
-        # not just narrated in the system prompt. Set by TaskAIEngine from task dict.
+        # Capability gate — enforced by run_work_environment, not just narrated
+        # in the system prompt. Set by TaskAIEngine from the task dict.
         self.allow_workmode = True
-        self.allow_execute_code = True
 
         # Approval signal for main thread communication
         log.debug("[ToolManager.__init__] Creating ApprovalSignal and connecting to main thread handler")
@@ -127,23 +192,18 @@ class ToolManager:
         self._get_android_bridge = None
         log.debug("[ToolManager.__init__] ApprovalSignal connected")
 
-        # Setup .generated folder (relative to working directory)
-        self.generated_dir = os.path.join(os.getcwd(), '.generated')
-        log.debug(f"[ToolManager.__init__] .generated dir path: '{self.generated_dir}'")
-        self._ensure_generated_dir()
-
-        # ── Tool registry ─────────────────────────────────────────────────────
-        # Canonical tool names.  To add a new tool, append its name here and
-        # implement the corresponding parse_/run_ methods.
-        self._tool_keys = ['work_environment', 'execute_code', 'set_session_name', 'load_skill', 'unload_skill']
+        # ── Tool registry (single source of truth: tool_registry.py) ─────────
+        self._tool_keys = list(tool_registry.CANONICAL_TOOLS)
         # Maps normalised (no-underscore, lowercase) form → canonical name
         self._tool_keys_norm = {k.replace('_', '').lower(): k for k in self._tool_keys}
+        # Retired tools: strip-only (old sessions render clean), never dispatchable.
+        self._legacy_keys_norm = {k.replace('_', '').lower(): k
+                                  for k in tool_registry.LEGACY_STRIP_KEYS}
         log.debug(f"[ToolManager.__init__] Registered tool keys: {self._tool_keys}")
-        log.debug(f"[ToolManager.__init__] Normalised tool key map: {self._tool_keys_norm}")
 
         # ── Code-execution tools (subject to single-call policy) ──────────────
-        # set_session_name is NOT in this list — it may coexist with a code tool.
-        self._exec_tool_keys = {'work_environment', 'execute_code'}
+        # set_session_name is NOT in this set — it may coexist with a code tool.
+        self._exec_tool_keys = set(tool_registry.EXEC_TOOL_KEYS)
         log.debug(f"[ToolManager.__init__] Exec tool keys (policy-restricted): {self._exec_tool_keys}")
 
         # ── Chat window bridge ────────────────────────────────────────────────
@@ -195,6 +255,21 @@ class ToolManager:
             if hasattr(chat, '_work_banner'):
                 chat._work_banner.setText(f"⚙ Working: {clean}")
                 chat._work_banner.show()
+            # Narrate the annotation, then a short beat. The commentary text is
+            # enqueued later (show_ai_message), so FIFO order gives
+            # annotation -> pause -> commentary; annotation-only steps still
+            # get spoken.
+            if clean and getattr(chat, 'voice_enabled', False):
+                try:
+                    chat.speak_ai_response(clean)
+                    vh = getattr(getattr(chat, 'controller', None),
+                                 'voice_handler', None)
+                    if vh is not None:
+                        vh.speak_pause()
+                except Exception as e:
+                    log.warning(f"[ToolManager._deliver_system_message] "
+                                f"annotation narration failed: "
+                                f"{type(e).__name__}: {e}")
 
         # Mirror to Android bridge
         try:
@@ -209,121 +284,11 @@ class ToolManager:
             pass
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Directory helpers
+    # Canonical tool registry — the data now lives in
+    # systema/execution/tool_registry.py (single source of truth for schemas
+    # AND compat prompt docs). This alias keeps existing references working.
     # ─────────────────────────────────────────────────────────────────────────
-
-    def _ensure_generated_dir(self):
-        """Create .generated directory if it doesn't exist"""
-        log.debug(f"[ToolManager._ensure_generated_dir] Checking: '{self.generated_dir}'")
-        try:
-            if not os.path.exists(self.generated_dir):
-                os.makedirs(self.generated_dir)
-                log.info(f"[ToolManager._ensure_generated_dir] ✓ Created .generated directory: "
-                         f"'{self.generated_dir}'")
-            else:
-                log.debug(f"[ToolManager._ensure_generated_dir] Directory already exists — no action")
-        except Exception as e:
-            log.error(f"[ToolManager._ensure_generated_dir] ✗ Could not create directory: "
-                      f"{type(e).__name__}: {e}")
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # Canonical tool registry  (single source of truth for tool schemas)
-    #
-    # Every tool takes ONE string input (the fence content in compat mode, or a
-    # single named argument in native mode). This registry maps each tool to a
-    # description + that one parameter, so native_adapters can render it into the
-    # OpenAI / Anthropic / Gemini function-calling formats. The compat fence docs
-    # in global_instructions remain the prompt-side rendering of the same tools.
-    # ─────────────────────────────────────────────────────────────────────────
-    _CANONICAL_TOOLS = {
-        'work_environment': {
-            'description': (
-                "Run Python in a persistent workspace and SEE its output (stdout + the last "
-                "expression's value). Use for multi-step tasks where you must observe results "
-                "before continuing. The namespace persists across calls within a work session."
-            ),
-            'param': ('code', 'The Python code to execute. You receive its stdout and return value.'),
-            'extra_params': [
-                ('annotation',
-                 "A short 3-6 word label describing what this code does (e.g. 'Reading config "
-                 "file', 'Counting desktop files'). ALWAYS include it — it is shown to the user "
-                 "as this step's title.",
-                 False),
-                ('message_to_user',
-                 "Optional fallback. Normally just write your reply as normal text alongside this "
-                 "call — it is shown to the user. Only put words here if you won't emit any text "
-                 "this turn.",
-                 False),
-            ],
-        },
-        'execute_code': {
-            'description': (
-                "Run Python fire-and-forget — you will NOT see the output. Use only for side "
-                "effects (launch a process, write a file, send a notification)."
-            ),
-            'param': ('code', 'The Python code to execute. Output is not returned to you.'),
-            'extra_params': [
-                ('message_to_user',
-                 "Optional fallback. Normally just write your reply as normal text alongside this "
-                 "call — it is shown to the user. Only put words here if you won't emit any text "
-                 "this turn.",
-                 False),
-            ],
-        },
-        'set_session_name': {
-            'description': "Set a short, descriptive title for the current conversation.",
-            'param': ('name', 'A short title — just a few words.'),
-            'extra_params': [
-                ('message_to_user',
-                 "Optional fallback. Just write your reply as normal text this turn — naming the "
-                 "session runs quietly in the background. Only put words here if you won't emit any "
-                 "text this turn.",
-                 False),
-                ('then_tool',
-                 "Optional. Chain ONE code-execution tool to run in this SAME turn: either "
-                 "'work_environment' or 'execute_code'. Use it when you want to name the session "
-                 "AND act in one response — a native set_session_name call would otherwise end "
-                 "your turn before you could act.",
-                 False, ('work_environment', 'execute_code')),
-                ('then_code',
-                 "The Python code for the tool named in then_tool. Required when then_tool is set.",
-                 False),
-                ('then_annotation',
-                 "For then_tool='work_environment' only: a short 3-6 word label of what the "
-                 "chained code does (shown to the user as that step's title).",
-                 False),
-            ],
-        },
-        'load_skill': {
-            'description': (
-                "Load a skill's full instructions into your context. Use when the task matches an "
-                "available skill that is not already loaded."
-            ),
-            'param': ('skill_name', 'The exact name of the skill to load.'),
-            'extra_params': [
-                ('message_to_user',
-                 "Optional fallback. Normally just write your reply as normal text alongside this "
-                 "call — it is shown to the user. Only put words here if you won't emit any text "
-                 "this turn.",
-                 False),
-                ('then_tool',
-                 "Optional. Chain ONE code-execution tool to run in this SAME turn, right after "
-                 "the skill loads: either 'work_environment' or 'execute_code'.",
-                 False, ('work_environment', 'execute_code')),
-                ('then_code',
-                 "The Python code for the tool named in then_tool. Required when then_tool is set.",
-                 False),
-                ('then_annotation',
-                 "For then_tool='work_environment' only: a short 3-6 word label of what the "
-                 "chained code does (shown to the user as that step's title).",
-                 False),
-            ],
-        },
-        'unload_skill': {
-            'description': "Remove a previously loaded skill from your context to free space.",
-            'param': ('skill_name', 'The exact name of the skill to unload.'),
-        },
-    }
+    _CANONICAL_TOOLS = tool_registry.CANONICAL_TOOLS
 
     def get_canonical_tools(self, include_session_naming: bool = True,
                             include_skills: bool = True) -> list:
@@ -333,8 +298,6 @@ class ToolManager:
         active = []
         if self.allow_workmode:
             active.append('work_environment')
-        if self.allow_execute_code:
-            active.append('execute_code')
         if include_session_naming:
             active.append('set_session_name')
         if include_skills:
@@ -392,6 +355,17 @@ class ToolManager:
             name = call.get('name')
             spec = self._CANONICAL_TOOLS.get(name)
             if not spec:
+                if self._legacy_keys_norm.get(self._norm_key(str(name or ''))):
+                    # A hallucinated call to a RETIRED tool: reconstruct its
+                    # fence anyway so the engine's retired-tool handling fires
+                    # (strip + corrective prompt) instead of the call silently
+                    # vanishing.
+                    _body = (call.get('arguments') or {}).get('code', '') or ''
+                    parts.append(f"```{self._legacy_keys_norm[self._norm_key(str(name))]}\n{_body}\n```")
+                    log.warning(f"[ToolManager.tool_calls_to_fences] RETIRED tool "
+                                f"'{name}' called natively — reconstructed for "
+                                f"the engine's retired-tool handling")
+                    continue
                 log.warning(f"[ToolManager.tool_calls_to_fences] Unknown tool '{name}' — skipped")
                 continue
             pname = spec['param'][0]
@@ -411,12 +385,12 @@ class ToolManager:
                 if name == 'work_environment' else f"```{name}\n{body}\n```"
             parts.append(prefix + primary)
 
-            # ── Sub-tool chaining ────────────────────────────────────────────
-            # A native session-name / load-skill call ends the turn after that
-            # single tool, so it can't ALSO run a code tool the way a compat
-            # two-fence response can. set_session_name / load_skill therefore
-            # accept ONE chained code tool (then_tool + then_code); expand it into
-            # its own fence so the standard pipeline executes it in the same turn.
+            # ── Sub-tool chaining (FALLBACK path) ────────────────────────────
+            # Parallel tool calls are the primary way to name-and-act in one
+            # native turn (this method serializes every call in the list). For
+            # single-call dialects, set_session_name / load_skill also accept
+            # ONE chained code tool (then_tool + then_code); expand it into its
+            # own fence so the standard pipeline executes it in the same turn.
             if name in ('set_session_name', 'load_skill'):
                 then_raw = args.get('then_tool', '')
                 then_name = self._tool_keys_norm.get(self._norm_key(str(then_raw))) if then_raw else None
@@ -439,42 +413,83 @@ class ToolManager:
     # Public parse methods - Fence-based parsing (new format)
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _parse_fence(self, text, tool_name):
+    def _parse_fence(self, text, tool_name, record=False):
         """
         Extract content from a code fence whose language identifier matches tool_name.
-        Fuzzy-matches the identifier (strips underscores, lowercases) so
-        work_environment / workEnvironment / workenvironment all resolve correctly.
         Returns (content, remaining_text) or None.
-        For work_environment, also supports ```work_environment: [annotation] format
-        and returns (content, remaining_text, annotation).
+        For work_environment, returns (content, remaining_text, annotation).
+
+        Tolerant opener parsing (weak-model guard rails, 2026-07):
+          - tag near-misses resolve via _resolve_tool_tag (work_enviroment,
+            work-environment, workEnvironment, 4+ backtick fences)
+          - the work_environment annotation is accepted bracketless in any of
+            `tool: text` / bare prose / "quoted" / (parens) / - dash form, and a
+            misplaced prose/[bracketed] FIRST LINE inside the fence is lifted
+            out so it can't poison the code with a SyntaxError
+        When record=True (live parses only — never strip/render paths) each
+        auto-fix appends a short description to self._parse_corrections; the
+        parse_* wrappers flush them into a NOTICE + model format reminder.
         """
         norm_target = self._norm_key(tool_name)
 
-        # ── Special handling for work_environment with inline annotation ──
+        # ── work_environment: tolerant opener with optional annotation ──────
         if norm_target == "workenvironment":
-            # Format: ```work_environment: [annotation]\n<code>\n```
-            # Colon is optional: ```work_environment [annotation]\n<code>\n``` also works
-            pattern_we = r'```[ \t]*work_environment[ \t]*:?[ \t]*\[(.*?)\][ \t]*(?:\n|\r\n)(.*?)[ \t]*```'
-            match = re.search(pattern_we, text, re.DOTALL)
-            if match:
-                annotation = match.group(1).strip()
-                content = match.group(2).strip()
+            # ```work_environment[:] [annotation-any-decoration]\n<code>\n```
+            pattern_we = r'(`{3,})[ \t]*([A-Za-z][\w-]*)[ \t]*(:?)[ \t]*([^\n]*?)[ \t]*\r?\n(.*?)[ \t]*`{3,}'
+            for match in re.finditer(pattern_we, text, re.DOTALL):
+                canonical, exact = self._resolve_tool_tag(match.group(2), include_legacy=True)
+                if canonical is None or self._norm_key(canonical) != norm_target:
+                    continue
+                fixes = []
+                if not exact:
+                    fixes.append(f"tool name '{match.group(2)}'")
+                raw = match.group(4).strip()
+                had_colon = bool(match.group(3))
+                content = match.group(5).strip()
+                annotation = ''
+                if raw:
+                    bracketed = raw.startswith('[') and raw.endswith(']')
+                    if bracketed or had_colon or raw[0] in '-—("\'':
+                        annotation = _clean_annotation(raw)
+                        if not bracketed:
+                            fixes.append("annotation without [brackets]")
+                    elif _is_prose_annotation(raw):
+                        annotation = _clean_annotation(raw)
+                        fixes.append("annotation without [brackets]")
+                    else:
+                        # Code crammed onto the opener line — keep it as code.
+                        content = (raw + '\n' + content).strip()
+                        fixes.append("code on the opener line")
+                if not annotation and content:
+                    annotation, content, lifted = _lift_leading_annotation(content)
+                    if lifted:
+                        fixes.append("annotation inside the fence body")
+                if record and fixes:
+                    self._parse_corrections.extend(fixes)
                 remaining = (text[:match.start()] + text[match.end():]).strip()
                 log.debug(
                     f"[ToolManager._parse_fence] ✓ Matched 'work_environment' "
                     f"annotation='{annotation}' | content_len={len(content)}"
+                    + (f" | auto-fixed: {fixes}" if fixes else "")
                 )
                 return content, remaining, annotation
-            # If annotated format not found, fall through to general parser
+            return None
 
-        # ── General case for all tools (including plain work_environment) ──
-        pattern = r'```[ \t]*(\w+)(?:[ \t]*\n|[ \t]+)(.*?)[ \t]*```'
+        # ── General case for all other tools ─────────────────────────────────
+        pattern = r'`{3,}[ \t]*([A-Za-z][\w-]*)(?:[ \t]*\r?\n|[ \t]+)(.*?)[ \t]*`{3,}'
         for match in re.finditer(pattern, text, re.DOTALL):
-            if self._norm_key(match.group(1)) == norm_target:
-                content = match.group(2).strip()
-                remaining = (text[:match.start()] + text[match.end():]).strip()
-                log.debug(f"[ToolManager._parse_fence] ✓ Matched '{tool_name}' | content_len={len(content)}")
-                return content, remaining
+            norm_tag = self._norm_key(match.group(1))
+            if norm_tag != norm_target:
+                canonical, _exact = self._resolve_tool_tag(match.group(1), include_legacy=True)
+                if canonical is None or self._norm_key(canonical) != norm_target:
+                    continue
+                if record:
+                    self._parse_corrections.append(
+                        f"tool name '{match.group(1)}' corrected to {tool_name}")
+            content = match.group(2).strip()
+            remaining = (text[:match.start()] + text[match.end():]).strip()
+            log.debug(f"[ToolManager._parse_fence] ✓ Matched '{tool_name}' | content_len={len(content)}")
+            return content, remaining
         return None
 
     def recover_unclosed_tool_fence(self, text):
@@ -504,7 +519,10 @@ class ToolManager:
         m = re.match(r'```[ \t]*([\w-]+)', text[last:])
         if not m:
             return text, None  # bare ``` with no tag — leave as prose
-        canonical = self._tool_keys_norm.get(self._norm_key(m.group(1)))
+        # Legacy (retired) tools are auto-closed too, so the engine's
+        # retired-tool handling can catch them instead of the raw block leaking.
+        # Near-miss tags (work_enviroment) resolve as well — same leak otherwise.
+        canonical, _exact = self._resolve_tool_tag(m.group(1), include_legacy=True)
         if not canonical:
             return text, None  # unclosed non-tool fence (e.g. ```python) — legit prose
 
@@ -542,11 +560,29 @@ class ToolManager:
                      f"block(s): {list(blocks.keys())}")
         return stripped, blocks
 
+    def _flush_parse_corrections(self, tool_name):
+        """Turn recorded parse auto-fixes into: a log warning, a user-visible
+        NOTICE, and (for work_environment) a one-line format reminder that
+        run_work_environment prefixes to the next observation so the model
+        learns the correct syntax mid-session."""
+        if not self._parse_corrections:
+            return
+        details = '; '.join(dict.fromkeys(self._parse_corrections))
+        self._parse_corrections = []
+        log.warning(f"[ToolManager._flush_parse_corrections] Auto-corrected malformed "
+                    f"'{tool_name}' call: {details}")
+        self.approval_signal.system_message.emit(
+            f"**NOTICE:** Auto-corrected a malformed `{tool_name}` call ({details}). "
+            f"The call was run; the model has been reminded of the correct format.")
+        if tool_name == 'work_environment':
+            from systema.engine.prompts.global_instructions import FORMAT_AUTOFIX_REMINDER
+            self._pending_format_reminder = FORMAT_AUTOFIX_REMINDER.format(details=details)
+
     def parse_work_environment(self, text):
         """Parse work_environment fence from AI output. Returns (code, remaining_text) or None."""
         log.debug(f"[ToolManager.parse_work_environment] Parsing {len(text)} chars")
 
-        result = self._parse_fence(text, 'work_environment')
+        result = self._parse_fence(text, 'work_environment', record=True)
 
         if result:
             if len(result) == 3:
@@ -565,29 +601,20 @@ class ToolManager:
                 self.last_work_annotation = None
                 log.info(f"[ToolManager.parse_work_environment] ✓ Found (no annotation) | code_len={len(code)}")
 
+            self._flush_parse_corrections('work_environment')
             return code, remaining
 
         log.debug("[ToolManager.parse_work_environment] Not found")
         return None
 
-    def parse_execute_code(self, text):
-            """Parse execute_code fence from AI output. Returns (code, remaining_text) or None."""
-            log.debug(f"[ToolManager.parse_execute_code] Parsing {len(text)} chars")
-            result = self._parse_fence(text, 'execute_code')
-            if result:
-                code, remaining = result
-                log.info(f"[ToolManager.parse_execute_code] ✓ Found | code_len={len(code)}")
-                return code, remaining
-            log.debug("[ToolManager.parse_execute_code] Not found")
-            return None
-
     def parse_set_session_name(self, text):
             """Parse set_session_name fence from AI output. Returns (name, remaining_text) or None."""
             log.debug(f"[ToolManager.parse_set_session_name] Parsing {len(text)} chars")
-            result = self._parse_fence(text, 'set_session_name')
+            result = self._parse_fence(text, 'set_session_name', record=True)
             if result:
                 name, remaining = result
                 log.info(f"[ToolManager.parse_set_session_name] ✓ Found | name='{name}'")
+                self._flush_parse_corrections('set_session_name')
                 return name, remaining
             log.debug("[ToolManager.parse_set_session_name] Not found")
             return None
@@ -595,10 +622,11 @@ class ToolManager:
     def parse_load_skill(self, text):
             """Parse load_skill fence from AI output. Returns (skill_name, remaining_text) or None."""
             log.debug(f"[ToolManager.parse_load_skill] Parsing {len(text)} chars")
-            result = self._parse_fence(text, 'load_skill')
+            result = self._parse_fence(text, 'load_skill', record=True)
             if result:
                 skill_name, remaining = result
                 log.info(f"[ToolManager.parse_load_skill] ✓ Found | skill='{skill_name}'")
+                self._flush_parse_corrections('load_skill')
                 return skill_name, remaining
             log.debug("[ToolManager.parse_load_skill] Not found")
             return None
@@ -606,10 +634,11 @@ class ToolManager:
     def parse_unload_skill(self, text):
             """Parse unload_skill fence from AI output. Returns (skill_name, remaining_text) or None."""
             log.debug(f"[ToolManager.parse_unload_skill] Parsing {len(text)} chars")
-            result = self._parse_fence(text, 'unload_skill')
+            result = self._parse_fence(text, 'unload_skill', record=True)
             if result:
                 skill_name, remaining = result
                 log.info(f"[ToolManager.parse_unload_skill] ✓ Found | skill='{skill_name}'")
+                self._flush_parse_corrections('unload_skill')
                 return skill_name, remaining
             log.debug("[ToolManager.parse_unload_skill] Not found")
             return None
@@ -621,18 +650,18 @@ class ToolManager:
 
     def enforce_single_exec_policy(self, text):
         """
-        Scan text for code-execution tool fences (work_environment / execute_code).
-        If more than one is found, keep only the first and drop the rest.
+        Scan text for code-execution tool fences (work_environment). If more
+        than one is found, keep only the first and drop the rest.
         set_session_name is intentionally EXEMPT from this policy.
 
         Returns:
             tuple: (cleaned_text, violation_bool, violation_msg)
         """
         log.info(f"[ToolManager.enforce_single_exec_policy] Scanning {len(text)} chars for policy violations")
-        pattern = r'```[ \t]*(\w+)[^\n]*\n.*?```'
+        pattern = r'`{3,}[ \t]*([\w-]+)[^\n]*\n.*?`{3,}'
         matches = []
         for match in re.finditer(pattern, text, re.DOTALL):
-            canonical = self._tool_keys_norm.get(self._norm_key(match.group(1)))
+            canonical, _exact = self._resolve_tool_tag(match.group(1))
             if canonical and canonical in self._exec_tool_keys:
                 matches.append((match, canonical))
 
@@ -655,12 +684,11 @@ class ToolManager:
 
         # Notify the user via chat window (signal is thread-safe)
         self.approval_signal.system_message.emit(
-            f"⚠️ **NOTICE:** LLM failed to follow instructions — it used {len(extras)} more "
-            f"work environment and/or execute code blocks in one response ({', '.join(dropped_names)}). Only the "
-            f"first call was kept and executed. "
-            "To reduce how often this happens, consider using a "
-            "more capable model."
-            f"\nTotal violations this session: {_v}"
+            f"**NOTICE:** The model emitted {len(extras)} extra code-execution "
+            f"call(s) in one response ({', '.join(dropped_names)}). Only the first "
+            f"call was kept and executed. To reduce how often this happens, "
+            f"consider a more capable model.\n"
+            f"Total violations this session: {_v}"
         )
 
         for match, _ in reversed(extras):
@@ -680,7 +708,7 @@ class ToolManager:
 
         Args:
             code: Code to execute
-            execution_type: 'execute_code' or 'work_environment'
+            execution_type: audit label (normally 'work_environment')
 
         Returns:
             tuple: (approved: bool, modified_code: str)
@@ -882,7 +910,7 @@ class ToolManager:
 
         Args:
             code: Code to execute
-            execution_type: 'execute_code' or 'work_environment'
+            execution_type: audit label (normally 'work_environment')
             callback: Function to call with (approved, modified_code)
         """
         log.info(f"[ToolManager._show_approval_dialog_on_main_thread] execution_type='{execution_type}' | "
@@ -914,10 +942,61 @@ class ToolManager:
             dialog = CodeApprovalDialog(code, execution_type, self.ai_engine)
             self._active_approval_dialog = dialog
             dialog.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
-            dialog.show()
-            dialog.raise_()
-            dialog.activateWindow()
-            dialog.exec()
+            ctrl = getattr(self.ai_engine, 'controller', None)
+            # Spoken heads-up so the user can answer by voice without looking
+            # (setting: voice_approval_announce, default off).
+            try:
+                if (ctrl is not None and getattr(ctrl, 'voice_mode_active', False)
+                        and (ctrl.settings or {}).get('voice_approval_announce', False)
+                        and (ctrl.settings or {}).get('voice_approval_enabled', True)):
+                    dialog.announce_for_voice()
+            except Exception:
+                pass
+
+            # ── Compact notification card when the chat window is closed or
+            # minimized (setting: approval_mini_enabled, default on). Voice
+            # commands still work — they act on the full dialog, which the card
+            # polls. Expand / chat-opening swaps back to the full dialog.
+            use_mini = False
+            try:
+                chat = self._chat
+                chat_visible = (chat is not None and chat.isVisible()
+                                and not chat.isMinimized())
+                use_mini = (ctrl is not None
+                            and (ctrl.settings or {}).get('approval_mini_enabled', True)
+                            and not chat_visible)
+            except Exception:
+                use_mini = False
+
+            if use_mini:
+                from PyQt6.QtCore import QEventLoop
+                from systema.ui.dialogs.approval_notif import ApprovalNotifCard
+                card = ApprovalNotifCard(dialog, ctrl,
+                                         chat_getter=lambda: self._chat)
+                card.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
+                dialog._mini_card = card
+                log.info("[ToolManager._show_approval_dialog_on_main_thread] "
+                         "Chat window hidden — showing compact approval card")
+                # NON-modal + local loop (exec() would be application-modal and
+                # block opening the chat window, killing the auto-expand path).
+                loop = QEventLoop()
+                card.finished.connect(loop.quit)
+                card.show()
+                card.raise_()
+                loop.exec()
+                dialog._mini_card = None
+                if card.outcome == 'accept' and dialog.result is None:
+                    dialog.on_accept()
+                elif card.outcome == 'reject' and dialog.result is None:
+                    dialog.on_reject()
+
+            if dialog.result is None:
+                # Full review: first show, or the card asked to expand.
+                dialog._expand_requested = False
+                dialog.show()
+                dialog.raise_()
+                dialog.activateWindow()
+                dialog.exec()
             self._active_approval_dialog = None
 
             # ── Dismiss Android dialog (sync close regardless of who decided) ─
@@ -1069,10 +1148,16 @@ class ToolManager:
         log.info(f"[ToolManager.run_work_environment] ── Executing code | "
                  f"code_len={len(code)} | preview='{code_preview}' ──")
 
+        # Format reminder queued by _flush_parse_corrections when this call's
+        # fence was auto-corrected — prefixed to the observation so the model
+        # sees the correct syntax alongside its result.
+        _format_reminder = self._pending_format_reminder
+        self._pending_format_reminder = None
+
         # NOTE: the explicit `exit` sentinel was removed — work mode now ends when
-        # the AI replies with no work_environment/execute_code call (auto-exit,
-        # handled in AIEngine). A bare `exit`/empty work-call is folded into that
-        # finish path BEFORE this method is called, so it never reaches execution.
+        # the AI replies with no work_environment call (auto-exit, handled in
+        # AIEngine). A bare `exit`/empty work-call is folded into that finish
+        # path BEFORE this method is called, so it never reaches execution.
 
         # Capability gate — real enforcement, not just prompt text
         if not self.allow_workmode:
@@ -1159,6 +1244,8 @@ class ToolManager:
             log.debug("[ToolManager.run_work_environment] No output produced — sending recommendation")
 
         combined = "\n\n".join(output_parts)
+        if _format_reminder:
+            combined = _format_reminder + "\n\n" + combined
         log.info(f"[ToolManager.run_work_environment] ✓ Work environment output ready | "
                  f"parts={len(output_parts)} | total_len={len(combined)}")
 
@@ -1172,124 +1259,6 @@ class ToolManager:
         # ─────────────────────────────────────────────────────────────────
 
         return combined
-
-    def run_execute_code(self, code, log_callback=None):
-        """
-        Execute code directly without returning output to AI.
-        Used for quick actions like opening apps, showing UI.
-
-        Returns:
-            dict: {
-                'success': bool,
-                'message': str,  # Message to show user
-                'error': str or None,  # Full traceback if failed
-                'stdout': str,  # stdout output
-                'stderr': str   # stderr output
-            }
-        """
-        code_preview = code.strip()[:80].replace('\n', '↵')
-        log.info(f"[ToolManager.run_execute_code] ── Executing code (no AI output) | "
-                 f"code_len={len(code)} | preview='{code_preview}' ──")
-        try:
-            # Capability gate — real enforcement, not just prompt text
-            if not self.allow_execute_code:
-                log.warning("[ToolManager.run_execute_code] Blocked — allow_execute_code is False for this session")
-                return {
-                    'success': False,
-                    'message': "Code execution is disabled for this session",
-                    'error': None,
-                    'stdout': '',
-                    'stderr': ''
-                }
-
-            # Check supervised execution (now properly on main thread)
-            log.debug("[ToolManager.run_execute_code] Checking supervised execution...")
-            approved, modified_code = self._check_supervised_execution(code, 'execute_code')
-
-            if not approved:
-                log.warning("[ToolManager.run_execute_code] ✗ Code execution rejected by user")
-                if log_callback:
-                    log_callback("❌ Code execution rejected by user", "WARNING")
-                reason = getattr(self, '_last_reject_reason', '') or ''
-                message = "Code execution was rejected"
-                if reason:
-                    message += f"\nREASON: {reason}"
-                return {
-                    'success': False,
-                    'message': message,
-                    'error': None,
-                    'stdout': '',
-                    'stderr': ''
-                }
-
-            # Use modified code if user edited it
-            if modified_code != code:
-                log.info("[ToolManager.run_execute_code] Code was modified by user in approval dialog")
-            code = modified_code
-
-            if log_callback:
-                log_callback(f"Executing: {code[:100]}...", "INFO")
-
-            # Check if it's a GUI app that needs subprocess
-            log.debug("[ToolManager.run_execute_code] → _execute_with_gui_support()")
-            result = self._execute_with_gui_support(code)
-            log.debug(f"[ToolManager.run_execute_code] Execution result: "
-                      f"success={result.get('success')} | "
-                      f"gui_launched={result.get('gui_launched', False)} | "
-                      f"has_error={bool(result.get('error'))}")
-
-            # GUI app launched in subprocess
-            if result.get('gui_launched'):
-                log.info(f"[ToolManager.run_execute_code] ✓ GUI app launched | "
-                         f"pid={result.get('pid')} | script='{result.get('script_path')}'")
-                if log_callback:
-                    log_callback("✓ GUI application launched", "SUCCESS")
-                return {
-                    'success': True,
-                    'message': "GUI launched. Did it appear on your screen?",
-                    'error': None,
-                    'stdout': result.get('stdout', ''),
-                    'stderr': result.get('stderr', '')
-                }
-
-            # Normal execution completed
-            if result['success']:
-                log.info("[ToolManager.run_execute_code] ✓ Code executed successfully")
-                if log_callback:
-                    log_callback("✓ Code executed successfully", "SUCCESS")
-                return {
-                    'success': True,
-                    'message': "Code executed. Did it work as expected?",
-                    'error': None,
-                    'stdout': result.get('stdout', ''),
-                    'stderr': result.get('stderr', '')
-                }
-
-            # Execution failed - include full error
-            error_msg = result.get('error', 'Unknown error')
-            log.error(f"[ToolManager.run_execute_code] ✗ Execution failed: {error_msg[:200]}")
-            if log_callback:
-                log_callback(f"✗ Execution failed: {error_msg}", "ERROR")
-            return {
-                'success': False,
-                'message': f"Execution failed: {error_msg}",
-                'error': error_msg,  # Full traceback
-                'stdout': result.get('stdout', ''),
-                'stderr': result.get('stderr', '')
-            }
-
-        except Exception as e:
-            error_trace = f"Exception: {str(e)}"
-            log.error(f"[ToolManager.run_execute_code] ✗ Outer exception: {type(e).__name__}: {e}")
-            if log_callback:
-                log_callback(f"Error: {e}", "ERROR")
-            return {
-                'success': False,
-                'message': f"Error: {str(e)}",
-                'error': error_trace,
-                'stdout': '',
-                'stderr': ''
-            }
 
     # ─────────────────────────────────────────────────────────────────────────
     # Prompt helpers
@@ -1330,7 +1299,9 @@ class ToolManager:
             log.debug("[ToolManager.strip_tool_calls] Empty text — returning as-is")
             return text
         log.debug(f"[ToolManager.strip_tool_calls] Stripping tool fences from {len(text)} char text")
-        for key in self._tool_keys:
+        # Legacy keys included: OLD sessions containing retired-tool fences
+        # (e.g. execute_code) must still render clean.
+        for key in self._tool_keys + list(tool_registry.LEGACY_STRIP_KEYS):
             result = self._parse_fence(text, key)
             while result is not None:
                 # _parse_fence returns 3-tuple for annotated work_environment,
@@ -1352,6 +1323,28 @@ class ToolManager:
         spaces, then lowercase. So work_environment / work-environment /
         'work environment' / WorkEnvironment all resolve to the same canonical key."""
         return key.replace('_', '').replace('-', '').replace(' ', '').lower()
+
+    def _resolve_tool_tag(self, tag, include_legacy=False):
+        """Resolve a fence tag to a canonical tool key.
+
+        Exact normalised lookup first; failing that, a UNIQUE edit-distance-1
+        near-miss (weak models emit e.g. work_enviroment / load_skills). Short
+        tags (<6 chars, e.g. 'python', 'bash') never fuzzy-match, so prose code
+        fences can't be mistaken for tools.
+
+        Returns (canonical_name, exact_bool); (None, False) when not a tool."""
+        norm = self._norm_key(tag)
+        pool = dict(self._tool_keys_norm)
+        if include_legacy:
+            pool.update(self._legacy_keys_norm)
+        hit = pool.get(norm)
+        if hit:
+            return hit, True
+        if len(norm) >= 6:
+            cands = {c for n, c in pool.items() if _edit_distance_le1(norm, n)}
+            if len(cands) == 1:
+                return cands.pop(), False
+        return None, False
 
     def _find_canonical_tool_key(self, data):
         """
@@ -1431,255 +1424,5 @@ class ToolManager:
                 return v
         log.debug(f"[ToolManager._get_tool_value] Field '{field_key}' not found in data keys {list(data.keys())}")
         return None
-
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # GUI execution helpers
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def _detect_gui_code(self, code):
-        """Detect if code is likely a GUI application"""
-
-        gui_keywords = [
-
-            # tkinter
-            'tkinter',
-            'tk.Tk(',
-            'Tk(',
-            'mainloop(',
-            '.mainloop(',
-            'tk.Frame',
-            'tk.Button',
-            'tk.Label',
-            'tk.Canvas',
-            'ttk.',
-            'tkinter.ttk',
-
-            # PyQt5 / PyQt6
-            'PyQt5',
-            'PyQt6',
-            'QApplication',
-            'QMainWindow',
-            'QWidget',
-            'QDialog',
-            'exec()',
-            'exec_()',
-            '.show()',
-            'QtWidgets',
-            'QtCore',
-            'QtGui',
-
-            # PySide2 / PySide6
-            'PySide2',
-            'PySide6',
-
-            # wxPython
-            'wx',
-            'wx.App',
-            'wx.Frame',
-            'wx.Panel',
-            'wxPython',
-            'MainLoop()',
-
-            # pygame
-            'pygame',
-            'pygame.init',
-            'pygame.display',
-            'pygame.event',
-            'pygame.Surface',
-            'pygame.screen',
-
-            # Kivy
-            'kivy',
-            'App(',
-            'build(',
-            'run()',
-            'kivy.app',
-            'kivy.uix',
-
-            # CustomTkinter
-            'customtkinter',
-            'CTk(',
-            'CTkButton',
-            'CTkLabel',
-            'CTkFrame',
-
-            # Dear PyGui
-            'dearpygui',
-            'dpg.create_context',
-            'dpg.create_viewport',
-            'dpg.start_dearpygui',
-
-            # PySimpleGUI
-            'PySimpleGUI',
-            'sg.Window',
-            'sg.theme',
-            'window.read',
-
-            # Flet
-            'flet',
-            'ft.app',
-            'ft.Page',
-
-            # Gooey
-            'Gooey',
-            '@Gooey',
-
-            # PyForms
-            'pyforms',
-
-            # Toga
-            'toga.App',
-
-            # Qt generic
-            '.exec(',
-            '.exec_(',
-
-            # Matplotlib interactive GUI
-            'plt.show(',
-            'matplotlib.use',
-
-            # OpenCV GUI
-            'cv2.imshow',
-            'cv2.waitKey',
-            'cv2.namedWindow',
-
-            # Arcade
-            'arcade.Window',
-
-            # Panda3D
-            'ShowBase',
-
-            # PyGame Zero
-            'pgzrun.go',
-
-            # Generic window creation hints
-            'create_window',
-            'set_window_title',
-            'window =',
-            'root =',
-            'app = QApplication',
-            'app.mainloop',
-
-            # Event loop patterns
-            'event_loop',
-            'processEvents',
-            'bind(',
-
-            # Modern GUI frameworks
-            'nicegui',
-            'textual.app',
-            'textual.App',
-            'textual.run',
-            'textual.widgets',
-
-            # PyWebView
-            'webview.create_window',
-            'pywebview',
-
-        ]
-
-        code_lower = code.lower()
-
-        return any(keyword.lower() in code_lower for keyword in gui_keywords)
-
-    def _save_code_to_file(self, code):
-        """
-        Save code to a temporary file in .generated folder
-
-        Returns:
-            str: Path to the saved file
-        """
-        log.debug(f"[ToolManager._save_code_to_file] Saving {len(code)} chars to .generated/")
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        filename = f"gui_exec_{timestamp}.py"
-        filepath = os.path.join(self.generated_dir, filename)
-
-        with open(filepath, 'w', encoding='utf-8') as f:
-            f.write(code)
-
-        log.info(f"[ToolManager._save_code_to_file] ✓ Saved to '{filepath}'")
-        return filepath
-
-    def _execute_with_gui_support(self, code):
-        """
-        Execute code with GUI app detection and subprocess support
-
-        Returns:
-            dict: Execution result with optional 'gui_launched' flag
-        """
-        log.debug(f"[ToolManager._execute_with_gui_support] code_len={len(code)} — detecting GUI usage")
-        # Detect if it's GUI code
-        is_gui = self._detect_gui_code(code)
-        log.info(f"[ToolManager._execute_with_gui_support] GUI detection result: is_gui={is_gui}")
-
-        if is_gui:
-            # Use subprocess for GUI applications
-            try:
-                # Save code to file
-                script_path = self._save_code_to_file(code)
-                log.debug(f"[ToolManager._execute_with_gui_support] GUI script saved: '{script_path}'")
-
-                # Launch in subprocess (non-blocking)
-                import sys
-                log.debug(f"[ToolManager._execute_with_gui_support] Launching subprocess: "
-                          f"'{sys.executable}' '{script_path}'")
-                process = subprocess.Popen(
-                    [sys.executable, script_path],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True
-                )
-
-                # Don't wait - let it run in background
-                log.info(f"[ToolManager._execute_with_gui_support] ✓ GUI process launched | "
-                         f"pid={process.pid} | script='{script_path}'")
-
-                # ── GUI subprocess timeout warning ────────────────────────────
-                gui_timeout = None
-                if self.settings_callback:
-                    gui_timeout = self.settings_callback().get('tool_execution_timeout_seconds', None)
-                if gui_timeout:
-                    def _warn_gui_timeout(pid=process.pid, path=script_path, t=gui_timeout):
-                        log.warning(f"[ToolManager._execute_with_gui_support] GUI app (PID {pid}) "
-                                    f"still running after {t}s — script='{path}'")
-                        self.approval_signal.system_message.emit(
-                            f"⚠️ **GUI App Still Running**\n"
-                            f"The GUI application launched from `.generated/{os.path.basename(path)}` "
-                            f"(PID {pid}) is still running after {t} seconds.\n"
-                            f"Press **Stop** if you need to kill it, or leave it to run naturally."
-                        )
-                    threading.Timer(gui_timeout, _warn_gui_timeout, daemon=True).start()
-                    log.debug(f"[ToolManager._execute_with_gui_support] GUI timeout warning "
-                              f"set for {gui_timeout}s")
-                # ─────────────────────────────────────────────────────────────
-
-                return {
-                    'success': True,
-                    'gui_launched': True,
-                    'script_path': script_path,
-                    'pid': process.pid,
-                    'stdout': '',
-                    'stderr': ''
-                }
-
-            except Exception as e:
-                import traceback
-                error_trace = traceback.format_exc()
-                log.error(f"[ToolManager._execute_with_gui_support] ✗ GUI launch failed: "
-                          f"{type(e).__name__}: {e}")
-                return {
-                    'success': False,
-                    'error': error_trace,
-                    'stdout': '',
-                    'stderr': ''
-                }
-        else:
-            # Execute normally for non-GUI code
-            log.debug("[ToolManager._execute_with_gui_support] Non-GUI code — using PythonInterpreter")
-            result = self.tools['python'].execute(code)
-            log.debug(f"[ToolManager._execute_with_gui_support] PythonInterpreter result: "
-                      f"success={result['success']}")
-            return result
 
 

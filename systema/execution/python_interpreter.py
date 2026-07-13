@@ -25,7 +25,7 @@ log = _make_logger("PythonInterpreter") if _verbose else _NoOpLogger()
 def _wm_write_file(path, content, mode=None, encoding="utf-8"):
     """Write literal data to a file, creating parent directories as needed.
 
-    Always available inside work_environment / execute_code as write_file().
+    Always available inside work_environment as write_file().
     Designed to pair with #@FILE … #@ENDFILE literal blocks: the block content
     is bound to a variable WITHOUT passing through Python's parser, so source
     text containing backslashes, quotes or triple-quotes survives intact.

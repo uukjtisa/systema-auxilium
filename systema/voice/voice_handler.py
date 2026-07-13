@@ -58,9 +58,40 @@ _verbose = False
 log = _make_logger("VoiceHandler") if _verbose else _NoOpLogger()
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Sentinel tag for a silent pause enqueued between utterances. A pause travels
+# the normal FIFO pipeline as ((_PAUSE_TAG, seconds), gen, '') so ordering,
+# generation staleness and stop_all draining all apply to it like real audio.
+_PAUSE_TAG = '__pause__'
+
 
 class VoiceHandler:
     """Handles all voice input/output operations"""
+
+    # ── Auto barge-in (duck-then-confirm) tuning ─────────────────────────────
+    # Auto mode never hard-stops playback on VAD alone. A qualified speech
+    # candidate only DUCKS the volume; the stop is committed solely once STT
+    # transcribes real non-echo words. Per preset:
+    #   window_frames     30 ms frames in the candidate window
+    #   min_speech_ratio  fraction of the window that must be VAD-speech
+    #   margin_db         dB the speech frames' mean RMS must clear the
+    #                     ambient noise floor by
+    #   confirm_timeout   restore full volume when no STT segment is open by
+    #                     then (seconds since duck)
+    #   hard_cap          unconditional restore even mid-segment — continuous
+    #                     noise can hold an STT segment open indefinitely
+    _BARGEIN_PRESETS = {
+        'relaxed':  {'window_frames': 15, 'min_speech_ratio': 0.85, 'margin_db': 12.0,
+                     'confirm_timeout': 3.5, 'hard_cap': 9.0},
+        'balanced': {'window_frames': 10, 'min_speech_ratio': 0.75, 'margin_db': 9.0,
+                     'confirm_timeout': 2.5, 'hard_cap': 8.0},
+        'eager':    {'window_frames': 7,  'min_speech_ratio': 0.70, 'margin_db': 6.0,
+                     'confirm_timeout': 2.0, 'hard_cap': 6.0},
+    }
+    _DUCK_VOLUME = 0.2             # playback volume while a candidate is pending
+    _ECHO_OVERLAP_THRESHOLD = 0.6  # transcript/TTS word-overlap ratio => echo
+    _NOISE_FLOOR_ALPHA = 0.05      # EMA weight per idle frame
+    _NOISE_FLOOR_MIN = 30.0        # int16 RMS clamp (keeps margins meaningful)
+    _SPEECH_GRACE_S = 0.4          # recent-speech window that defers timeout restore
 
     def __init__(self, log_callback=None):
         log.info("[VoiceHandler.__init__] ── Initializing VoiceHandler ──────────────────────")
@@ -97,6 +128,17 @@ class VoiceHandler:
         # Interrupt mode
         self.interrupt_mode = 'manual'  # 'auto' or 'manual'
         log.debug(f"[VoiceHandler.__init__] interrupt_mode='{self.interrupt_mode}'")
+
+        # Auto barge-in (duck-then-confirm) state — see _update_bargein_frame.
+        self.bargein_preset = 'balanced'
+        self._bargein_cfg = dict(self._BARGEIN_PRESETS['balanced'])
+        self._bargein_window = deque(maxlen=self._bargein_cfg['window_frames'])  # (is_speech, rms)
+        self._noise_floor = None       # EMA of ambient int16 RMS, learned while idle
+        self._ducked = False
+        self._duck_started = 0.0
+        self._last_speech_ts = 0.0
+        self._duck_lock = threading.Lock()
+        self._recent_tts_texts = deque(maxlen=3)  # played chunk texts (echo check)
 
         # Playback callback
         self.on_playback_started = None
@@ -140,7 +182,7 @@ class VoiceHandler:
         # (prefetch: chunk N+1 renders while chunk N plays, so chunk boundaries
         # are seamless). audio_ready is bounded → natural prefetch depth.
         self.speech_queue = queue.Queue()               # text chunks in
-        self.audio_ready = queue.Queue(maxsize=2)       # (path, generation) out
+        self.audio_ready = queue.Queue(maxsize=2)       # (path, generation, text) out
         self._speech_worker = None                      # synth thread
         self._playback_worker = None                    # playback thread
         self._speech_worker_lock = threading.Lock()
@@ -428,6 +470,19 @@ class VoiceHandler:
         self.interrupt_mode = mode
         self._emit_log_callback(f"Interrupt mode set to {mode}")
         log.debug("[VoiceHandler.set_interrupt_mode] ✓ Interrupt mode updated")
+
+    def set_bargein_sensitivity(self, preset):
+        """Set auto barge-in sensitivity ('relaxed' | 'balanced' | 'eager')."""
+        if preset not in self._BARGEIN_PRESETS:
+            log.warning(f"[VoiceHandler.set_bargein_sensitivity] Unknown preset "
+                        f"'{preset}' — falling back to 'balanced'")
+            preset = 'balanced'
+        with self.config_lock:
+            self.bargein_preset = preset
+            self._bargein_cfg = dict(self._BARGEIN_PRESETS[preset])
+            self._bargein_window = deque(maxlen=self._bargein_cfg['window_frames'])
+        self._emit_log_callback(f"Barge-in sensitivity set to {preset}")
+        log.info(f"[VoiceHandler.set_bargein_sensitivity] ✓ preset='{preset}'")
 
     def set_puter_server(self, puter_server):
         """Set Puter server reference for TTS"""
@@ -822,22 +877,145 @@ class VoiceHandler:
                         f"{type(e).__name__}: {e}")
             self._emit_log_callback(f"Error stopping playback: {e}", "WARNING")
 
+        self._restore_playback('interrupt')
+
         new_state = 'listening' if self.is_listening else 'inactive'
         self._emit_log_callback("Speech interrupted")
         self._notify_state_change(new_state)
         log.info(f"[VoiceHandler.interrupt_speech] ✓ Speech interrupted | new_state='{new_state}'")
+
+    # ── Auto barge-in: duck / restore ────────────────────────────────────────
+    # Ducking is inherently a no-op for the pyttsx3 provider (no pygame stage —
+    # interrupt_speech cannot stop it either; pre-existing limitation).
+
+    def _apply_playback_volume(self):
+        """Set the music volume for the current duck state. Called before every
+        play(): pygame music volume persists across load(), so each chunk and
+        filler must start at a deterministic level."""
+        try:
+            if pygame.mixer.get_init():
+                pygame.mixer.music.set_volume(
+                    self._DUCK_VOLUME if self._ducked else 1.0)
+        except Exception as e:
+            log.warning(f"[VoiceHandler._apply_playback_volume] "
+                        f"{type(e).__name__}: {e}")
+
+    def _duck_playback(self):
+        """Enter ducked state: playback continues at low volume while STT
+        decides whether real words were spoken (processing thread)."""
+        with self._duck_lock:
+            if self._ducked:
+                return
+            self._ducked = True
+            self._duck_started = time.monotonic()
+        try:
+            if pygame.mixer.get_init():
+                pygame.mixer.music.set_volume(self._DUCK_VOLUME)
+        except Exception as e:
+            log.warning(f"[VoiceHandler._duck_playback] {type(e).__name__}: {e}")
+        self._emit_log_callback("Barge-in: ducked playback to 20%")
+        log.info("[VoiceHandler._duck_playback] Ducked playback (candidate speech)")
+
+    def _restore_playback(self, reason):
+        """Leave ducked state and restore full volume. Safe from any thread and
+        a no-op when not ducked."""
+        with self._duck_lock:
+            if not self._ducked:
+                return
+            self._ducked = False
+        self._bargein_window.clear()
+        try:
+            if pygame.mixer.get_init():
+                pygame.mixer.music.set_volume(1.0)
+        except Exception as e:
+            log.warning(f"[VoiceHandler._restore_playback] {type(e).__name__}: {e}")
+        self._emit_log_callback(f"Barge-in: restored playback ({reason})")
+        log.info(f"[VoiceHandler._restore_playback] Restored playback ({reason})")
+
+    def _update_bargein_frame(self, audio_bytes, is_speech, segment_open):
+        """Per-frame duck-then-confirm bookkeeping (processing thread only).
+
+        Auto mode never hard-stops playback on VAD alone: a qualified speech
+        candidate (mostly-speech window whose RMS clears the ambient noise
+        floor) only DUCKS the volume; the stop is committed solely by the
+        transcript path once STT hears real non-echo words
+        (_bargein_on_segment_result). Noise, coughs and TTS echo at worst
+        cause a brief volume dip that restores on timeout."""
+        now = time.monotonic()
+        try:
+            samples = np.frombuffer(audio_bytes, dtype=np.int16)
+            if samples.size == 0:
+                return
+            rms = float(np.sqrt(np.mean(np.square(samples.astype(np.float64)))))
+        except Exception:
+            return
+
+        # Ambient noise floor — learned only while idle (no TTS, no speech).
+        if not self.playback_active and not is_speech:
+            if self._noise_floor is None:
+                self._noise_floor = max(rms, self._NOISE_FLOOR_MIN)
+            else:
+                a = self._NOISE_FLOOR_ALPHA
+                self._noise_floor = max((1 - a) * self._noise_floor + a * rms,
+                                        self._NOISE_FLOOR_MIN)
+
+        if is_speech:
+            self._last_speech_ts = now
+
+        if self.interrupt_mode != 'auto':
+            return
+
+        if self._ducked:
+            cfg = self._bargein_cfg
+            if now - self._duck_started > cfg['hard_cap']:
+                self._restore_playback('hard cap')
+            elif (not segment_open
+                    and now - self._duck_started > cfg['confirm_timeout']
+                    and now - self._last_speech_ts > self._SPEECH_GRACE_S):
+                self._restore_playback('confirm timeout')
+            return
+
+        if not self.playback_active:
+            self._bargein_window.clear()
+            return
+        if self._noise_floor is None:
+            return
+
+        self._bargein_window.append((is_speech, rms))
+        if len(self._bargein_window) < self._bargein_window.maxlen:
+            return
+        cfg = self._bargein_cfg
+        speech_rms = [r for s, r in self._bargein_window if s]
+        ratio = len(speech_rms) / len(self._bargein_window)
+        if ratio < cfg['min_speech_ratio']:
+            return
+        threshold = self._noise_floor * (10 ** (cfg['margin_db'] / 20.0))
+        mean_rms = sum(speech_rms) / len(speech_rms)
+        if mean_rms < threshold:
+            return
+        self._emit_log_callback(
+            f"Barge-in candidate: ratio={ratio:.2f} rms={mean_rms:.0f} "
+            f"floor={self._noise_floor:.0f} margin_db={cfg['margin_db']}")
+        log.info(f"[VoiceHandler._update_bargein_frame] Candidate open: "
+                 f"ratio={ratio:.2f} rms={mean_rms:.0f} floor={self._noise_floor:.0f}")
+        self._duck_playback()
 
     def _processing_loop(self):
         """Process audio queue and detect speech segments"""
         log.info("[VoiceHandler._processing_loop] ── Processing thread started ────────────")
         audio_buffer = []
         currently_speaking = False
+        segment_during_playback = False
         frames_processed = 0
 
         while self.is_listening:
             try:
                 audio_bytes, is_speech = self.audio_queue.get(timeout=0.1)
                 frames_processed += 1
+                # Duck-then-confirm barge-in bookkeeping — never stops playback
+                # itself; a committed transcript (via on_transcription) is the
+                # sole stopper in auto mode.
+                self._update_bargein_frame(audio_bytes, is_speech, currently_speaking)
 
                 if is_speech:
                     if not currently_speaking:
@@ -845,21 +1023,12 @@ class VoiceHandler:
                         self._emit_log_callback("Speech started")
                         currently_speaking = True
                         audio_buffer = []
+                        segment_during_playback = self.playback_active or self._ducked
 
                     audio_buffer.append(audio_bytes)
+                    segment_during_playback = (segment_during_playback
+                                               or self.playback_active or self._ducked)
                     self.silence_frames = 0
-
-                    if self.interrupt_mode == 'auto' and self.playback_active:
-                        # Fire ONLY while audio is audibly playing. During the
-                        # silent synthesis phase a speech frame must not kill the
-                        # upcoming audio invisibly — real speech there becomes a
-                        # transcription and the barge-in path supersedes cleanly.
-                        # stop_all, not interrupt_speech: the FIFO worker would
-                        # otherwise pop the NEXT queued utterance and keep talking.
-                        log.info("[VoiceHandler._processing_loop] Auto-interrupt triggered — "
-                                 "calling stop_all()")
-                        self._emit_log_callback("Auto-interrupting TTS due to voice detection")
-                        self.stop_all()
 
                 else:
                     if currently_speaking:
@@ -878,10 +1047,12 @@ class VoiceHandler:
                             self._emit_log_callback(
                                 f"Silence detected ({silence_duration:.1f}s), processing speech"
                             )
-                            self._process_audio_segment(audio_buffer)
+                            self._process_audio_segment(
+                                audio_buffer, during_playback=segment_during_playback)
 
                             audio_buffer = []
                             currently_speaking = False
+                            segment_during_playback = False
                             self.silence_frames = 0
                             log.debug("[VoiceHandler._processing_loop] Segment dispatched — "
                                       "reset to idle state")
@@ -897,7 +1068,7 @@ class VoiceHandler:
         log.info(f"[VoiceHandler._processing_loop] ── Processing thread exiting | "
                  f"total_frames_processed={frames_processed} ────────")
 
-    def _process_audio_segment(self, audio_buffer):
+    def _process_audio_segment(self, audio_buffer, during_playback=False):
         """Process captured audio segment with STT"""
         log.info(f"[VoiceHandler._process_audio_segment] ── Processing audio segment | "
                  f"frames={len(audio_buffer)} ──────────")
@@ -928,6 +1099,9 @@ class VoiceHandler:
                 log.info(f"[VoiceHandler._process_audio_segment] ✓ Transcription: '{text}'")
                 self._emit_log_callback(f"Transcribed: {text}")
 
+                if not self._bargein_on_segment_result(text, during_playback):
+                    return
+
                 if self.on_transcription and text and text.strip():
                     log.debug("[VoiceHandler._process_audio_segment] Calling on_transcription callback...")
                     self.on_transcription(text)
@@ -941,19 +1115,64 @@ class VoiceHandler:
                 log.warning("[VoiceHandler._process_audio_segment] ✗ Could not understand audio "
                             "(UnknownValueError)")
                 self._emit_log_callback("Could not understand audio", "WARNING")
+                self._bargein_on_segment_result(None, during_playback)
             except self.sr.RequestError as e:
                 log.error(f"[VoiceHandler._process_audio_segment] ✗ STT request error: "
                           f"{type(e).__name__}: {e}")
                 self._emit_log_callback(f"Speech recognition error: {e}", "ERROR")
+                self._bargein_on_segment_result(None, during_playback)
 
         except Exception as e:
             log.error(f"[VoiceHandler._process_audio_segment] ✗ STT error: {type(e).__name__}: {e}")
             self._emit_log_callback(f"STT error: {e}", "ERROR")
+            self._bargein_on_segment_result(None, during_playback)
 
         finally:
             self.is_processing = False
             self._notify_state_change('listening')
             log.debug("[VoiceHandler._process_audio_segment] is_processing=False | state → 'listening'")
+
+    def _bargein_on_segment_result(self, text, during_playback):
+        """Commit-or-restore decision for a speech segment that overlapped TTS
+        playback (the confirm half of duck-then-confirm).
+
+        Returns True when the transcript should be dispatched to
+        on_transcription — the controller's transcript path then stops playback
+        (the SOLE stopper in auto mode; its stop_all resets the duck). Manual
+        mode and idle-time segments pass through unchanged."""
+        if self.interrupt_mode != 'auto' or not during_playback:
+            return True
+        if not text or not text.strip():
+            self._restore_playback('no words')
+            return False
+        is_echo, overlap = self._is_probable_echo(text)
+        if is_echo:
+            self._restore_playback(f'echo (overlap={overlap:.2f})')
+            return False
+        self._emit_log_callback("Barge-in: commit — transcript accepted, "
+                                "controller will stop playback")
+        log.info(f"[VoiceHandler._bargein_on_segment_result] Commit: '{text}'")
+        return True
+
+    @staticmethod
+    def _normalize_words(text):
+        return set(re.sub(r'[^a-z0-9 ]', ' ', text.lower()).split())
+
+    def _is_probable_echo(self, text):
+        """(is_echo, overlap_ratio) — normalized word-set overlap between the
+        transcript and recently played TTS chunk texts (plus fillers). Ducked
+        TTS can still be transcribed by STT; without this gate the app would
+        barge in on its own voice AND send it to the AI as a user message."""
+        words = self._normalize_words(text)
+        if not words:
+            return True, 1.0
+        tts_words = set()
+        for t in list(self._recent_tts_texts) + list(self._FILLER_TEXTS):
+            tts_words |= self._normalize_words(t)
+        if not tts_words:
+            return False, 0.0
+        overlap = len(words & tts_words) / len(words)
+        return overlap >= self._ECHO_OVERLAP_THRESHOLD, overlap
 
     def _flush_display_buffer(self):
         """Release any chat message buffered "until playback starts".
@@ -1571,6 +1790,12 @@ class VoiceHandler:
             self._notify_state_change('synthesizing')
         self._ensure_speech_worker()
 
+    def speak_pause(self, seconds=0.6):
+        """Enqueue a short silent pause between utterances (FIFO-ordered like
+        any chunk). No-op audio-wise if nothing is speaking when it's reached."""
+        self.speech_queue.put((_PAUSE_TAG, float(seconds)))
+        self._ensure_speech_worker()
+
     def _ensure_speech_worker(self):
         """Start the synth + playback worker threads if they aren't running."""
         with self._speech_worker_lock:
@@ -1651,6 +1876,17 @@ class VoiceHandler:
             gen = self._speech_generation
             self._synth_in_flight = True
             try:
+                if isinstance(text, tuple) and text and text[0] == _PAUSE_TAG:
+                    # Pause marker — no synthesis; forward through the bounded
+                    # buffer so it keeps its FIFO slot and staleness semantics.
+                    while True:
+                        try:
+                            self.audio_ready.put((text, gen, ''), timeout=0.5)
+                            break
+                        except queue.Full:
+                            if gen != self._speech_generation:
+                                break
+                    continue
                 if self.tts_provider == 'pyttsx3':
                     # No file stage — legacy direct path, serial (no prefetch).
                     self.speak_text_sync(text)
@@ -1667,7 +1903,7 @@ class VoiceHandler:
                 # re-check staleness so a stop_all during the wait discards.
                 while True:
                     try:
-                        self.audio_ready.put((path, gen), timeout=0.5)
+                        self.audio_ready.put((path, gen, text), timeout=0.5)
                         break
                     except queue.Full:
                         if gen != self._speech_generation:
@@ -1696,6 +1932,7 @@ class VoiceHandler:
                 return False
             self._ensure_pygame_mixer()
             pygame.mixer.music.load(path)
+            self._apply_playback_volume()
             pygame.mixer.music.play()
             started = True
             self.playback_active = True
@@ -1734,7 +1971,7 @@ class VoiceHandler:
         played_real_chunk = False
         while True:
             try:
-                path, gen = self.audio_ready.get(timeout=0.3)
+                path, gen, text = self.audio_ready.get(timeout=0.3)
             except queue.Empty:
                 if self._synth_pending() and self.is_speaking:
                     # Gap: next chunk isn't ready. Bridge it once, then wait.
@@ -1758,6 +1995,15 @@ class VoiceHandler:
                 if gen != self._speech_generation:
                     self._discard(path)
                     continue
+                if isinstance(path, tuple) and path and path[0] == _PAUSE_TAG:
+                    # Silent beat between utterances — interruptible, never a
+                    # "real chunk" (fillers/session bookkeeping unaffected).
+                    deadline = time.monotonic() + max(0.0, path[1])
+                    while (time.monotonic() < deadline and self.is_speaking
+                            and gen == self._speech_generation):
+                        time.sleep(0.05)
+                    continue
+                self._recent_tts_texts.append(text)  # echo-gate reference
                 if self._play_file(path):
                     played_real_chunk = True
             finally:
@@ -1766,6 +2012,9 @@ class VoiceHandler:
         # the next speak() call respawns a fresh worker for it) ───────────────
         if not self._synth_pending() and self.audio_ready.empty():
             self.is_speaking = False
+            # A candidate that opened during the final chunk and never resolved
+            # must not leave the NEXT session ducked.
+            self._restore_playback('session ended')
             # Never strand a reply buffered "until playback starts" — if every
             # chunk failed or was interrupted pre-playback, release it now
             # (no-op normally).
@@ -1776,7 +2025,8 @@ class VoiceHandler:
     @staticmethod
     def _discard(path):
         try:
-            if path and os.path.exists(path):
+            # Pause markers travel the audio queue as tuples — nothing to unlink.
+            if isinstance(path, str) and path and os.path.exists(path):
                 os.unlink(path)
         except Exception:
             pass
@@ -1848,7 +2098,7 @@ class VoiceHandler:
                 break
         while True:
             try:
-                path, _gen = self.audio_ready.get_nowait()
+                path, _gen, _text = self.audio_ready.get_nowait()
                 self.audio_ready.task_done()
                 self._discard(path)
                 drained += 1
@@ -1858,6 +2108,7 @@ class VoiceHandler:
                  f"interrupting current playback")
         self.interrupt_speech()
         self.is_speaking = False  # force even if interrupt_speech no-op'd
+        self._restore_playback('stop_all')  # no-op if interrupt already restored
         # Release any chat message buffered "until playback starts" — if we
         # killed the pipeline during synthesis, on_playback_started never fired
         # and the reply would be silently lost from view.

@@ -7,6 +7,8 @@ UNIFIED: Single _build_messages() for all providers. Each _http_* helper
          Puter uses raw HTTP to the local puter_server.
 """
 
+import re
+
 from systema.common.logger import _make_logger, _NoOpLogger
 from systema.execution.tool_manager import ToolManager
 from systema.engine import native_adapters as na
@@ -26,8 +28,8 @@ log = _make_logger("AIEngine") if _verbose else _NoOpLogger()
 
 # Priming acknowledgement prepended to every conversation as an assistant turn
 _ASSISTANT_PRIMING = (
-    "I understand. I will use My Work Environment when I need to complete "
-    "complex tasks or need information, and Execute Single commands for quick actions."
+    "I understand. I will use my Work Environment whenever a task needs code — "
+    "chaining executions until it is complete, then finishing with a full report."
 )
 
 
@@ -131,7 +133,7 @@ class AIEngine:
     # ── ephemeral image context (mirrors TaskAIEngine) ──────────────────────
     def queue_context_image(self, path: str):
         """Queue an image path to feed to the provider once on the next work
-        step. Thread-safe (callable from a work_environment/execute_code thread)."""
+        step. Thread-safe (callable from a work_environment thread)."""
         with self._images_lock:
             self._pending_context_images.append(path)
 
@@ -520,18 +522,28 @@ class AIEngine:
             role = m.get('role')
             calls = m.get('_tool_calls') if role == 'assistant' else None
             if calls:
-                # Gather up to len(calls) following system entries as this turn's
-                # results (a real user/assistant turn is never a tool result).
+                # Gather following system entries as this turn's results (a real
+                # user/assistant turn is never a tool result). Pairing is
+                # NAME-AWARE: set_session_name runs silently and produces no
+                # output entry, so it never consumes one — with parallel
+                # [set_session_name, work_environment] calls the work output
+                # stays attached to the work call, not the naming call.
+                consumers = [c for c in calls if c.get('name') != 'set_session_name']
                 results = []
                 j = i + 1
-                while j < n and len(results) < len(calls) and entries[j].get('role') == 'system':
+                while (j < n and len(results) < len(consumers)
+                        and entries[j].get('role') == 'system'):
                     results.append(entries[j].get('content') or '')
                     j += 1
-                tool_results = [
-                    {'id': c['id'], 'name': c['name'],
-                     'content': results[k] if k < len(results) else '(no output)'}
-                    for k, c in enumerate(calls)
-                ]
+                _it = iter(results)
+                tool_results = []
+                for c in calls:
+                    if c.get('name') == 'set_session_name':
+                        content = '(session named)'
+                    else:
+                        content = next(_it, '(no output)')
+                    tool_results.append({'id': c['id'], 'name': c['name'],
+                                         'content': content})
                 neutral.append({
                     'role': 'assistant',
                     'content': (m.get('_assistant_text') or '').strip() or None,
@@ -998,7 +1010,7 @@ class AIEngine:
 
     def _process_ai_response(self, ai_text):
         """
-        Process AI response and handle work_environment, execute_code, or set_session_name calls.
+        Process AI response and handle work_environment / set_session_name / skill calls.
 
         Returns:
             dict: Response data with execution status
@@ -1088,8 +1100,7 @@ class AIEngine:
                 # duplicate the chained fence in history).
                 # Detect via the side-effect-free _parse_fence (parse_work_environment
                 # emits the "Working:" banner — the recursion will fire it for real).
-                if (self.tool_manager._parse_fence(remaining_text, 'work_environment')
-                        or self.tool_manager._parse_fence(remaining_text, 'execute_code')):
+                if self.tool_manager._parse_fence(remaining_text, 'work_environment'):
                     log.info("[AIEngine._process_ai_response] load_skill chained a code tool — "
                              "running it in-turn instead of a blind follow-up")
                     self.conversation_history.append({
@@ -1187,6 +1198,7 @@ class AIEngine:
             log.debug("[AIEngine._process_ai_response] → Calling tool_manager.run_work_environment()")
             # Set BEFORE run_work_environment so interrupt_response() can detect active work
             self.tool_manager.in_work_mode = True
+            self._malformed_step_retries = 0  # fresh work session — reset the guard-rail budget
             work_output = self.tool_manager.run_work_environment(code)
 
             log.debug(f"[AIEngine._process_ai_response] Storing work output | "
@@ -1205,37 +1217,35 @@ class AIEngine:
                 'session_name': session_name
             }
 
-        # Check for execute_code call
-        log.debug("[AIEngine._process_ai_response] Checking for execute_code call...")
-        execute_call = self.tool_manager.parse_execute_code(_display_text)
-
-        if execute_call:
-            code, visible_text = execute_call
-            log.info(f"[AIEngine._process_ai_response] execute_code detected | "
-                     f"code_len={len(code)} | visible_text_len={len(visible_text)}")
-            self.log(f"Execute code call detected")
-
-            log.debug("[AIEngine._process_ai_response] → Calling tool_manager.run_execute_code()")
-            result = self.tool_manager.run_execute_code(code, self.log_callback)
-            log.info(f"[AIEngine._process_ai_response] execute_code result: success={result['success']} | "
-                     f"has_error={bool(result.get('error'))}")
-
+        # ── Legacy execute_code emission — the tool is RETIRED ────────────────
+        # workmode is the only code path now. The call is NOT run: strip it,
+        # notify the user, teach the model, and follow up once so the user is
+        # not left with a half reply.
+        if self.tool_manager._parse_fence(_display_text, 'execute_code'):
+            log.warning("[AIEngine._process_ai_response] Retired execute_code "
+                        "emission — call NOT run; injecting corrective prompt")
+            self.tool_manager.approval_signal.system_message.emit(
+                "**NOTICE:** The model attempted the retired `execute_code` tool; "
+                "the call was NOT run. It has been told to use work_environment.")
+            from systema.engine.prompts.global_instructions import (
+                EXECUTE_CODE_RETIRED_PROMPT, EXECUTE_CODE_RETIRED_PROMPT_NATIVE)
+            _retired = (EXECUTE_CODE_RETIRED_PROMPT_NATIVE
+                        if self._tool_mode() == 'native'
+                        else EXECUTE_CODE_RETIRED_PROMPT)
             self._append_assistant(ai_text)
-
-            response_text = visible_text
-            if not result['success'] and result.get('error'):
-                error_block = f"\n\n```Error\n{result['error']}\n```"
-                response_text = response_text + error_block
-                log.warning(f"[AIEngine._process_ai_response] Execution failed — error appended to response")
-
+            self.conversation_history.append({'role': 'system', 'content': _retired})
+            _followup = self._call_provider()
+            if _followup:
+                _r = self._process_ai_response(_followup)
+                if session_name and not _r.get('session_name'):
+                    _r['session_name'] = session_name
+                return _r
             return {
-                'response': response_text,
+                'response': self.tool_manager.strip_tool_calls(ai_text),
                 'has_work_call': False,
                 'in_work_mode': False,
                 'thinking': False,
-                'executed': True,
-                'execution_success': result['success'],
-                'session_name': session_name
+                'session_name': session_name,
             }
 
         # No execution calls - normal response
@@ -1267,6 +1277,36 @@ class AIEngine:
             'session_name': session_name,
             'memory_context': _mc,
         }
+
+    # Fence tags that mean "this is executable-looking code, not a tool call".
+    _SUSPECT_CODE_TAGS = frozenset(
+        {'', 'python', 'py', 'python3', 'bash', 'sh', 'shell', 'powershell', 'cmd'})
+
+    def _suspect_malformed_work_step(self, text):
+        """Heuristic: is this mid-work-mode reply almost certainly a FAILED tool
+        call rather than a finish report? True for a code fence with (near-)no
+        prose around it, or a bare reply that compiles as multi-line Python.
+        Real reports (prose around snippets) are never flagged. Never executes
+        anything — the caller injects a corrective prompt instead."""
+        if not text or not text.strip():
+            return False
+        fences = list(re.finditer(r'```[ \t]*([A-Za-z0-9_+-]*)[^\n]*\n(.*?)```',
+                                  text, re.DOTALL))
+        if fences:
+            if not any(f.group(1).strip().lower() in self._SUSPECT_CODE_TAGS
+                       for f in fences):
+                return False
+            prose = re.sub(r'```.*?```', '', text, flags=re.DOTALL).strip()
+            return len(prose) < 200
+        # No fences: bare code dump? Prose virtually never compiles as Python.
+        lines = [ln for ln in text.strip().splitlines() if ln.strip()]
+        if len(lines) < 2:
+            return False
+        try:
+            compile(text.strip(), '<reply>', 'exec')
+        except (SyntaxError, ValueError):
+            return False
+        return any(marker in text for marker in ('import ', 'def ', '=', '('))
 
     def _process_work_mode_response(self, ai_text):
         """Process AI response while in work mode."""
@@ -1473,6 +1513,7 @@ class AIEngine:
             log.debug(f"[AIEngine._process_work_mode_response] Work output received | "
                       f"output_len={len(work_output)} chars | storing for next iteration")
             self.tool_manager.last_work_output = work_output
+            self._malformed_step_retries = 0  # valid step — reset the guard-rail budget
 
             self._append_assistant(ai_text)
             log.debug("[AIEngine._process_work_mode_response] ai_text (with JSON) appended to history")
@@ -1486,40 +1527,63 @@ class AIEngine:
             }
 
         else:
-            # No work_environment call — but the model commonly fires an
-            # execute_code call as a final fire-and-forget action (launch an app,
-            # play media) right as it leaves work mode. Run it here; otherwise the
-            # reconstructed fence just renders and NEVER executes.
-            execute_call = self.tool_manager.parse_execute_code(ai_text)
-            if execute_call:
-                code, visible_text = execute_call
-                log.info(f"[AIEngine._process_work_mode_response] execute_code on work-mode exit | "
-                         f"code_len={len(code)}")
-                self.tool_manager.in_work_mode = False
-                # Slim the last work-mode ping (same as the other exit paths).
-                for entry in reversed(self.conversation_history):
-                    if entry.get('role') == 'system' and entry.get('_is_work_prompt'):
-                        prev_output = entry.get('_work_output', '')
-                        entry['content'] = WORK_MODE_OUTPUT_ONLY_PROMPT.format(work_output=prev_output)
-                        del entry['_is_work_prompt']
-                        break
-                result = self.tool_manager.run_execute_code(code, self.log_callback)
-                log.info(f"[AIEngine._process_work_mode_response] execute_code result: "
-                         f"success={result['success']}")
+            # ── Legacy execute_code on exit — the tool is RETIRED ─────────────
+            # The call is NOT run. Keep the work loop alive with a corrective
+            # prompt so the model re-issues the action via work_environment.
+            if self.tool_manager._parse_fence(ai_text, 'execute_code'):
+                log.warning("[AIEngine._process_work_mode_response] Retired "
+                            "execute_code emission in work mode — call NOT run")
+                self.tool_manager.approval_signal.system_message.emit(
+                    "**NOTICE:** The model attempted the retired `execute_code` tool; "
+                    "the call was NOT run. It has been told to use work_environment.")
+                from systema.engine.prompts.global_instructions import (
+                    EXECUTE_CODE_RETIRED_PROMPT, EXECUTE_CODE_RETIRED_PROMPT_NATIVE)
+                _retired = (EXECUTE_CODE_RETIRED_PROMPT_NATIVE
+                            if self._tool_mode() == 'native'
+                            else EXECUTE_CODE_RETIRED_PROMPT)
                 self._append_assistant(ai_text)
-                response_text = visible_text
-                if not result['success'] and result.get('error'):
-                    response_text = response_text + f"\n\n```Error\n{result['error']}\n```"
+                self.conversation_history.append({'role': 'system', 'content': _retired})
                 return {
-                    'response': response_text,
-                    'has_work_call': False,
-                    'in_work_mode': False,
-                    'thinking': False,
-                    'executed': True,
-                    'execution_success': result['success'],
+                    'response': self.tool_manager.strip_tool_calls(ai_text),
+                    'has_work_call': True,
+                    'in_work_mode': True,
+                    'thinking': True,
                     'session_name': session_name,
-                    'exited_work_mode': True,
                 }
+
+            # ── Suspected malformed code step — self-retry guard rail ─────────
+            # A mid-work reply that is essentially just code (a ```python fence
+            # with no surrounding prose, or a bare compiling Python body) is a
+            # failed tool call, not a report. NEVER guess-execute it: keep the
+            # loop alive with a corrective prompt so the model re-issues the
+            # step via work_environment (or truly finishes with a prose report).
+            if self._suspect_malformed_work_step(ai_text):
+                retries = getattr(self, '_malformed_step_retries', 0)
+                if retries < 2:
+                    self._malformed_step_retries = retries + 1
+                    log.warning(f"[AIEngine._process_work_mode_response] Suspected malformed "
+                                f"work step (code-shaped reply, no valid tool call) — "
+                                f"corrective retry {retries + 1}/2, nothing was run")
+                    self.tool_manager.approval_signal.system_message.emit(
+                        "**NOTICE:** The model replied with code that is not a valid "
+                        "tool call; nothing was run. It has been asked to re-issue "
+                        "the step as a work_environment call.")
+                    from systema.engine.prompts.global_instructions import (
+                        MALFORMED_WORK_STEP_PROMPT, MALFORMED_WORK_STEP_PROMPT_NATIVE)
+                    _malformed = (MALFORMED_WORK_STEP_PROMPT_NATIVE
+                                  if self._tool_mode() == 'native'
+                                  else MALFORMED_WORK_STEP_PROMPT)
+                    self._append_assistant(ai_text)
+                    self.conversation_history.append({'role': 'system', 'content': _malformed})
+                    return {
+                        'response': "Working...",
+                        'has_work_call': True,
+                        'in_work_mode': True,
+                        'thinking': True,
+                        'session_name': session_name,
+                    }
+                log.warning("[AIEngine._process_work_mode_response] Still code-shaped after "
+                            "2 corrective retries — letting it through as the report")
 
             log.info("[AIEngine._process_work_mode_response] No more work_environment calls — "
                      "AI is done, clearing in_work_mode (skills persist)")

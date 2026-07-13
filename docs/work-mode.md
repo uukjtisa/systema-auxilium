@@ -1,16 +1,12 @@
 # Work Mode & Code Execution
 
 Systema Auxilium accomplishes tasks by writing and running Python on your machine.
-There are two execution tools, plus a persistent interpreter that ties a task
-together.
+There is one execution tool — `work_environment` — plus a persistent interpreter
+that ties a task together. Quick one-shot actions (open an app, show a popup) run
+through the same tool; the assistant launches blocking programs detached so the
+step returns immediately.
 
-Both tools pass through the [security gate](security.md) before anything runs.
-
-## `execute_code` — one-shot actions
-
-A single block of Python for a quick, self-contained action (open an app, show a
-popup, do a calculation). It runs once; output is not fed back into a reasoning
-loop.
+All code passes through the [security gate](security.md) before anything runs.
 
 ## `work_environment` — the agentic loop
 
@@ -25,7 +21,7 @@ step, and repeats — an observe/act loop over the same live interpreter.
 
 ### Finishing work mode
 
-Work mode ends the moment the assistant replies **without** a work/execute tool
+Work mode ends the moment the assistant replies **without** a work_environment
 call. That final plain reply **is** the report shown to you. There is no special
 "exit" keyword — a normal reply with no tool call is the signal that the task is
 complete.

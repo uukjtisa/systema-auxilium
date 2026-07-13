@@ -27,18 +27,20 @@ tool_manager and the Android bridge drive the dialog through them.
 
 from __future__ import annotations
 
-import difflib
+from difflib import SequenceMatcher
 
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                              QTextEdit, QListWidget, QListWidgetItem, QSplitter,
-                             QWidget, QCheckBox, QFrame, QLineEdit)
+                             QWidget, QCheckBox, QFrame, QLineEdit, QStackedWidget,
+                             QScrollArea)
 
 from systema.agents.code_agent import CodeAgent
 from systema.security.code_guard import (scan_code, refine_file_ops, summarize_findings,
                                          redact_secrets, SEV_DANGER, SEV_CAUTION, SEV_INFO)
 from systema.ui import theme
+from systema.updater.hunks import build_segments, assemble
 
 
 def _esc(s: str) -> str:
@@ -55,6 +57,23 @@ def _md(text: str) -> str:
         return _esc(text or "").replace("\n", "<br>")
 
 
+def _tag_two_way(old: str, new: str) -> list[tuple[str, str]]:
+    """Tag a 2-way old/new diff in the shape systema.updater.hunks expects
+    (update_del = current code, update_add = the proposal), so the proven
+    ReviewSession/segment model drives the inline proposal review."""
+    a = old.splitlines(keepends=True)
+    b = new.splitlines(keepends=True)
+    sm = SequenceMatcher(a=a, b=b, autojunk=False)
+    tagged: list[tuple[str, str]] = []
+    for op, a0, a1, b0, b1 in sm.get_opcodes():
+        if op == "equal":
+            tagged.extend(("same", ln) for ln in a[a0:a1])
+        else:
+            tagged.extend(("update_del", ln) for ln in a[a0:a1])
+            tagged.extend(("update_add", ln) for ln in b[b0:b1])
+    return tagged
+
+
 class _CodeAgentWorker(QThread):
     """Runs one Code Reviewer instruction off the GUI thread."""
     message = pyqtSignal(str, str)      # (role, text)
@@ -63,18 +82,22 @@ class _CodeAgentWorker(QThread):
     finished_ok = pyqtSignal(str)
     failed = pyqtSignal(str)
 
-    def __init__(self, code, execution_type, ai_engine, task, meter):
+    def __init__(self, code, execution_type, ai_engine, task, meter,
+                 history=None, voice=False):
         super().__init__()
         self._code = code
         self._etype = execution_type
         self._ai = ai_engine
         self._task = task
         self._meter = meter
+        self._history = list(history or [])
+        self.voice = voice   # request came in by voice -> replies are narrated
 
     def run(self):
         try:
             agent = CodeAgent(
                 self._code, self._etype, ai_engine=self._ai, meter=self._meter,
+                history=self._history,
                 on_message=lambda role, text: self.message.emit(role, text),
                 on_proposal=lambda code, why: self.proposal.emit(code, why or ""))
             summary = agent.run(self._task)
@@ -82,6 +105,195 @@ class _CodeAgentWorker(QThread):
             self.finished_ok.emit(summary or "")
         except Exception as e:
             self.failed.emit(f"{type(e).__name__}: {e}")
+
+
+class _HunkWidget(QFrame):
+    """One reviewable change block: current code (red) vs proposal (green),
+    with Keep mine / Take edit / Edit controls (Manage-dialog verbs)."""
+
+    def __init__(self, hunk, palette, btn_style, parent=None):
+        super().__init__(parent)
+        self.hunk = hunk
+        self.p = palette
+        p = palette
+        self.setStyleSheet(
+            f"QFrame {{ background: {p['surface']}; border: 1px solid {p['border']};"
+            " border-radius: 8px; }}")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 6, 8, 8)
+        lay.setSpacing(4)
+
+        head = QHBoxLayout(); head.setSpacing(6)
+        title = QLabel(f"Change {hunk.index + 1}   "
+                       f"-{len(hunk.local_lines)}/+{len(hunk.update_lines)}")
+        title.setStyleSheet(f"color: {p['muted']}; font-size: 10px; font-weight: 600;"
+                            " background: transparent; border: none;")
+        head.addWidget(title)
+        head.addStretch()
+        self.keep_btn = QPushButton("Keep mine")
+        self.take_btn = QPushButton("Take edit")
+        self.edit_btn = QPushButton("Edit")
+        for b in (self.keep_btn, self.take_btn, self.edit_btn):
+            b.setStyleSheet(btn_style())
+            b.setFixedHeight(22)
+            head.addWidget(b)
+        self.keep_btn.clicked.connect(lambda: self._decide("local"))
+        self.take_btn.clicked.connect(lambda: self._decide("update"))
+        self.edit_btn.clicked.connect(self._toggle_editor)
+        lay.addLayout(head)
+
+        mono = "font-family: Consolas, monospace; font-size: 10px;"
+        self.old_lbl = QLabel()
+        self.old_lbl.setTextFormat(Qt.TextFormat.PlainText)
+        self.old_lbl.setText("".join(hunk.local_lines) or " ")
+        self.old_lbl.setWordWrap(False)
+        self.new_lbl = QLabel()
+        self.new_lbl.setTextFormat(Qt.TextFormat.PlainText)
+        self.new_lbl.setText("".join(hunk.update_lines) or " ")
+        self.new_lbl.setWordWrap(False)
+        lay.addWidget(self.old_lbl)
+        lay.addWidget(self.new_lbl)
+        self._mono = mono
+
+        self.editor = QTextEdit()
+        self.editor.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.editor.setStyleSheet(
+            f"QTextEdit {{ background: {p['bg']}; border: 1px solid {p['accent']};"
+            f" border-radius: 6px; padding: 4px; {mono} color: {p['text']}; }}")
+        self.editor.setMaximumHeight(120)
+        self.editor.hide()
+        self.editor.textChanged.connect(self._edited)
+        lay.addWidget(self.editor)
+
+        self._restyle()
+
+    def _decide(self, decision):
+        self.hunk.decision = decision
+        self.editor.hide()
+        self._restyle()
+
+    def _toggle_editor(self):
+        if self.editor.isVisible():
+            self.editor.hide()
+            self._restyle()
+            return
+        self.editor.blockSignals(True)
+        self.editor.setPlainText(self.hunk.resolved_text())
+        self.editor.blockSignals(False)
+        self.editor.show()
+
+    def _edited(self):
+        self.hunk.decision = "edited"
+        self.hunk.edited_text = self.editor.toPlainText()
+        self._restyle()
+
+    def _restyle(self):
+        p = self.p
+        d = self.hunk.decision
+        # The chosen side is vivid; the other dims. Edited dims both (the
+        # editor's text is what will be applied).
+        old_on = d == "local"
+        new_on = d == "update"
+        self.old_lbl.setStyleSheet(
+            f"background: rgba(230,90,90,{0.16 if old_on else 0.05});"
+            f" color: {'#f2b8b5' if old_on else p['muted']};"
+            f" border: none; border-radius: 4px; padding: 3px 6px; {self._mono}")
+        self.new_lbl.setStyleSheet(
+            f"background: rgba(80,200,120,{0.16 if new_on else 0.05});"
+            f" color: {'#c6ecc6' if new_on else p['muted']};"
+            f" border: none; border-radius: 4px; padding: 3px 6px; {self._mono}")
+
+
+class _ProposalReviewView(QWidget):
+    """Page 1 of the code stack: the whole snippet rendered inline — dimmed
+    context plus per-hunk review widgets — over the hunks.py segment model.
+    Apply resolved composes every hunk's decision back into the code editor."""
+
+    def __init__(self, dialog):
+        super().__init__()
+        self._dlg = dialog
+        self.segments = []
+        p = dialog.p
+        self.setStyleSheet("background: transparent;")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+
+        self.why_lbl = QLabel("")
+        self.why_lbl.setWordWrap(True)
+        self.why_lbl.setStyleSheet(
+            f"color: {p['accent']}; font-size: 11px; font-weight: 600;"
+            " background: transparent;")
+        lay.addWidget(self.why_lbl)
+
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setStyleSheet(
+            f"QScrollArea {{ background: {p['surface']}; border: 1px solid {p['border']};"
+            " border-radius: 8px; }}")
+        self._inner = QWidget()
+        self._inner.setStyleSheet("background: transparent;")
+        self._col = QVBoxLayout(self._inner)
+        self._col.setContentsMargins(8, 8, 8, 8)
+        self._col.setSpacing(6)
+        self.scroll.setWidget(self._inner)
+        lay.addWidget(self.scroll, stretch=1)
+
+        row = QHBoxLayout(); row.setSpacing(6)
+        hint = QLabel("Resolve each change, then apply.")
+        hint.setStyleSheet(f"color: {p['muted']}; font-size: 10px; background: transparent;")
+        row.addWidget(hint)
+        row.addStretch()
+        dismiss = QPushButton("Dismiss")
+        dismiss.setStyleSheet(dialog._btn())
+        dismiss.clicked.connect(lambda: dialog._finish_review(apply=False))
+        row.addWidget(dismiss)
+        apply_btn = QPushButton("Apply resolved")
+        apply_btn.setStyleSheet(dialog._btn(primary=True))
+        apply_btn.clicked.connect(lambda: dialog._finish_review(apply=True))
+        row.addWidget(apply_btn)
+        lay.addLayout(row)
+
+    def load(self, segments, why):
+        self.segments = segments
+        self.why_lbl.setText("Proposed edit" + (f": {why}" if why else ""))
+        while self._col.count():
+            item = self._col.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        p = self._dlg.p
+        mono = "font-family: Consolas, monospace; font-size: 10px;"
+        for seg in segments:
+            if seg.kind == "context":
+                lbl = QLabel()
+                lbl.setTextFormat(Qt.TextFormat.PlainText)
+                lbl.setText(self._trim_context(seg.text))
+                lbl.setWordWrap(False)
+                lbl.setStyleSheet(f"color: {p['muted']}; background: transparent;"
+                                  f" border: none; padding: 0 6px; {mono}")
+                self._col.addWidget(lbl)
+            elif seg.hunk is not None:
+                self._col.addWidget(_HunkWidget(seg.hunk, p, self._dlg._btn))
+        self._col.addStretch()
+
+    @staticmethod
+    def _trim_context(text, keep=3):
+        lines = text.splitlines()
+        if len(lines) <= keep * 2 + 1:
+            return text.rstrip("\n")
+        omitted = len(lines) - keep * 2
+        return "\n".join(lines[:keep] + [f"... {omitted} unchanged lines ..."]
+                         + lines[-keep:])
+
+    def take_all_remaining(self):
+        """Voice 'apply' / one-shot apply: every unedited hunk takes the proposal."""
+        for seg in self.segments:
+            if seg.kind == "hunk" and seg.hunk is not None and seg.hunk.decision != "edited":
+                seg.hunk.decision = "update"
+
+    def assembled(self):
+        return assemble(self.segments)
 
 
 class CodeApprovalDialog(QDialog):
@@ -102,7 +314,12 @@ class CodeApprovalDialog(QDialog):
         self._worker = None
         self._typing_timer = None
         self._typing_dots = 0
-        self._pending_proposal = None      # (code, why) awaiting Apply/Dismiss
+        self._agent_history = []           # prior reviewer turns (context for follow-ups)
+        self._awaiting_voice_confirm = False
+        self._review_why = ""
+        self._closed = False
+        self._mini_card = None             # ApprovalNotifCard while the compact toast is up
+        self._expand_requested = False     # set by voice 'expand' / advanced speech; the card polls it
 
         # Live theme palette (falls back to the default theme if no controller).
         controller = getattr(ai_engine, "controller", None)
@@ -214,38 +431,15 @@ class CodeApprovalDialog(QDialog):
         font = QFont("Consolas", 10); font.setStyleHint(QFont.StyleHint.Monospace)
         self.code_edit.setFont(font)
         self.code_edit.textChanged.connect(self._on_code_changed)
-        lay.addWidget(self.code_edit, stretch=1)
 
-        # Proposed-edit panel (hidden until the agent proposes something).
-        self.proposal_box = QFrame()
-        self.proposal_box.setStyleSheet(
-            f"QFrame {{ background: {p['surface']}; border: 1px solid {p['accent']};"
-            " border-radius: 8px; }}")
-        pbl = QVBoxLayout(self.proposal_box)
-        pbl.setContentsMargins(10, 8, 10, 10); pbl.setSpacing(6)
-        self.proposal_why = QLabel("")
-        self.proposal_why.setWordWrap(True)
-        self.proposal_why.setStyleSheet(
-            f"color: {p['accent']}; font-size: 11px; font-weight: 600; background: transparent;")
-        pbl.addWidget(self.proposal_why)
-        self.proposal_diff = QTextEdit()
-        self.proposal_diff.setReadOnly(True)
-        self.proposal_diff.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
-        self.proposal_diff.setStyleSheet(self._edit_style(mono=True))
-        self.proposal_diff.setMaximumHeight(190)
-        pbl.addWidget(self.proposal_diff)
-        prow = QHBoxLayout(); prow.setSpacing(6); prow.addStretch()
-        dismiss_btn = QPushButton("Dismiss")
-        dismiss_btn.setStyleSheet(self._btn())
-        dismiss_btn.clicked.connect(self._dismiss_proposal)
-        prow.addWidget(dismiss_btn)
-        apply_btn = QPushButton("Apply edit")
-        apply_btn.setStyleSheet(self._btn(primary=True))
-        apply_btn.clicked.connect(self._apply_proposal)
-        prow.addWidget(apply_btn)
-        pbl.addLayout(prow)
-        self.proposal_box.hide()
-        lay.addWidget(self.proposal_box)
+        # One stacked area: page 0 = the editable code, page 1 = the inline
+        # per-hunk proposal review (replaces the old bottom diff panel).
+        self.code_stack = QStackedWidget()
+        self.code_stack.setStyleSheet("background: transparent;")
+        self.code_stack.addWidget(self.code_edit)
+        self.review_view = _ProposalReviewView(self)
+        self.code_stack.addWidget(self.review_view)
+        lay.addWidget(self.code_stack, stretch=1)
         return w
 
     def _build_side_panel(self) -> QWidget:
@@ -371,7 +565,7 @@ class CodeApprovalDialog(QDialog):
         self.typing_lbl.setText(f"  {frame}   Code Reviewer is responding, please wait"
                                 + "." * self._typing_dots + "   ")
 
-    def _run_agent(self, task):
+    def _run_agent(self, task, voice=False):
         if self._worker is not None and self._worker.isRunning():
             self._append_chat("system", "Please wait — the Code Reviewer is still "
                                         "responding to your last message.")
@@ -381,14 +575,31 @@ class CodeApprovalDialog(QDialog):
             return
         self._ai_busy(True)
         w = _CodeAgentWorker(self.code_edit.toPlainText(), self.execution_type,
-                             self.ai_engine, task, self._meter)
-        w.message.connect(self._append_chat)
+                             self.ai_engine, task, self._meter,
+                             history=list(self._agent_history), voice=voice)
+        w.message.connect(lambda role, text, v=voice: self._on_agent_message(role, text, v))
         w.proposal.connect(self._on_proposal)
         w.tokens.connect(lambda s: self.token_lbl.setText(s or self.token_lbl.text()))
         w.finished_ok.connect(self._on_agent_done)
         w.failed.connect(self._on_agent_failed)
+        w.finished.connect(w.deleteLater)
         self._worker = w
+        self._push_history("user", task)
         w.start()
+
+    def _push_history(self, role, content):
+        """Keep a capped rolling context so follow-up questions aren't
+        context-free (the agent itself is single-shot)."""
+        if content and content.strip():
+            self._agent_history.append({"role": role, "content": content})
+            self._agent_history = self._agent_history[-16:]
+
+    def _on_agent_message(self, role, text, voice=False):
+        self._append_chat(role, text)
+        if role == "agent":
+            self._push_history("assistant", text)
+            if voice:
+                self._speak(text)
 
     def _on_agent_done(self, _summary):
         self._ai_busy(False)
@@ -396,6 +607,10 @@ class CodeApprovalDialog(QDialog):
     def _on_agent_failed(self, msg):
         self._ai_busy(False)
         self._append_chat("system", f"Error: {msg}")
+        try:
+            self.token_lbl.setText(self._meter.summary() or self.token_lbl.text())
+        except Exception:
+            pass
 
     def _ai_explain(self):
         self._append_chat("you", "Explain this code and assess its safety.")
@@ -421,8 +636,10 @@ class CodeApprovalDialog(QDialog):
 
     def _append_chat(self, role, text):
         p = self.p
-        who = {"you": p["accent"], "agent": p["text"], "system": p["muted"]}.get(role, p["text"])
-        label = {"you": "You", "agent": "Code Reviewer", "system": "System"}.get(role, role)
+        who = {"you": p["accent"], "you-voice": p["accent"], "agent": p["text"],
+               "system": p["muted"]}.get(role, p["text"])
+        label = {"you": "You", "you-voice": "You (voice)", "agent": "Code Reviewer",
+                 "system": "System"}.get(role, role)
         self.chat.append(
             f'<div style="margin:6px 0"><span style="color:{who};font-weight:600">'
             f'{label}:</span><div style="color:{p["text"]}">{_md(text)}</div></div>')
@@ -430,48 +647,165 @@ class CodeApprovalDialog(QDialog):
         cur.movePosition(cur.MoveOperation.End)
         self.chat.setTextCursor(cur)
 
-    # ── proposed edit -> diff + one-click apply ──────────────────────────────
+    # ── proposed edit -> inline per-hunk review ──────────────────────────────
+    def _review_active(self):
+        return self.code_stack.currentWidget() is self.review_view
+
     def _on_proposal(self, new_code, why):
-        self._pending_proposal = (new_code, why)
-        self.proposal_why.setText("Proposed edit" + (f": {why}" if why else ""))
-        self.proposal_diff.setHtml(self._render_diff(self.code_edit.toPlainText(), new_code))
-        self.proposal_box.show()
-
-    def _render_diff(self, old, new):
-        p = self.p
-        rows = []
-        diff = difflib.unified_diff(old.splitlines(), new.splitlines(),
-                                    lineterm="", n=2)
-        for ln in diff:
-            if ln.startswith("+++") or ln.startswith("---"):
-                continue
-            if ln.startswith("@@"):
-                fg, bg = p["muted"], "transparent"
-            elif ln.startswith("+"):
-                fg, bg = "#c6ecc6", "rgba(80,200,120,0.14)"
-            elif ln.startswith("-"):
-                fg, bg = "#f2b8b5", "rgba(230,90,90,0.14)"
-            else:
-                fg, bg = p["text"], "transparent"
-            rows.append(f'<div style="background:{bg};color:{fg};white-space:pre;'
-                        f'font-family:Consolas,monospace;padding:0 6px">'
-                        f'{_esc(ln) or "&nbsp;"}</div>')
-        if not rows:
-            rows.append(f'<div style="color:{p["muted"]}">No textual difference.</div>')
-        return "".join(rows)
-
-    def _apply_proposal(self):
-        if not self._pending_proposal:
+        if not isinstance(new_code, str) or not new_code.strip():
             return
-        new_code = self._pending_proposal[0]
-        self.code_edit.setPlainText(new_code)      # triggers _refresh_security
-        self._dismiss_proposal()
-        self._append_chat("system", "Applied the proposed edit. Re-scanned; review "
-                                    "before approving.")
+        old = self.code_edit.toPlainText()
+        tagged = _tag_two_way(old, new_code)
+        segments = build_segments(tagged)
+        if not any(s.kind == "hunk" for s in segments):
+            self._append_chat("system", "The proposal is identical to the current code.")
+            return
+        if self._review_active():
+            self._append_chat("system", "A new proposal replaced the one under review.")
+        self._review_why = why or ""
+        self._push_history("assistant",
+                           f"(proposed an edit{': ' + why if why else ''})")
+        self.review_view.load(segments, why)
+        self.code_stack.setCurrentWidget(self.review_view)
+        # Approving mid-review would execute the PRE-proposal code — force a
+        # resolve/dismiss first. Reject stays available.
+        self.accept_btn.setEnabled(False)
+        self.accept_btn.setToolTip("Resolve or dismiss the proposed edit first.")
+
+    def _finish_review(self, apply):
+        if self._review_active():
+            if apply:
+                self.code_edit.setPlainText(self.review_view.assembled())
+                self._append_chat("system", "Applied the resolved edit. Re-scanned; "
+                                            "review before approving.")
+            else:
+                self._append_chat("system", "Proposal dismissed.")
+        self.code_stack.setCurrentWidget(self.code_edit)
+        self.accept_btn.setEnabled(True)
+        self.accept_btn.setToolTip("")
+        self._review_why = ""
+
+    # Thin wrappers kept for callers and the voice commands: 'apply' takes every
+    # remaining hunk, 'dismiss' discards the review.
+    def _apply_proposal(self):
+        if not self._review_active():
+            return
+        self.review_view.take_all_remaining()
+        self._finish_review(apply=True)
 
     def _dismiss_proposal(self):
-        self._pending_proposal = None
-        self.proposal_box.hide()
+        if not self._review_active():
+            return
+        self._finish_review(apply=False)
+
+    # ── voice approval ───────────────────────────────────────────────────────
+    def _speak(self, text):
+        """Narrate via the app's voice pipeline (no-op when voice mode is off)."""
+        try:
+            if self._controller is not None:
+                self._controller.speak_text(text)
+        except Exception:
+            pass
+
+    def announce_for_voice(self):
+        """Spoken heads-up when the dialog opens (setting: voice_approval_announce)."""
+        findings = self._last_findings or []
+        risky = sum(1 for f in findings if f.severity in (SEV_DANGER, SEV_CAUTION))
+        self._speak(f"Approval required. {len(findings)} finding"
+                    f"{'s' if len(findings) != 1 else ''}, {risky} risky.")
+
+    def handle_voice_transcript(self, text):
+        """Route a voice transcript that arrived while this dialog is open.
+
+        Command words act directly (deny instantly; approve only as an exact
+        whole utterance, with a spoken confirm gate over danger findings). In
+        advanced mode, anything else becomes a Code Reviewer request whose
+        reply is narrated back.
+        """
+        if self._closed:
+            return
+        settings = getattr(self._controller, "settings", None) or {}
+        if not settings.get("voice_approval_enabled", True):
+            return
+        from systema.voice.approval_commands import match_command
+        cmd = match_command(text, settings.get("voice_approval_custom_words") or {})
+
+        if cmd == "deny":
+            if self._awaiting_voice_confirm:
+                self._awaiting_voice_confirm = False
+                self._append_chat("system", "Voice: approval cancelled.")
+                self._speak("Cancelled.")
+                return
+            self._append_chat("system", "Voice: rejected.")
+            self.on_reject()
+            return
+
+        if cmd == "confirm":
+            if self._awaiting_voice_confirm:
+                self._awaiting_voice_confirm = False
+                self._append_chat("system", "Voice: confirmed — executing.")
+                self.on_accept()
+            else:
+                self._append_chat("system", "Voice: nothing is awaiting confirmation.")
+            return
+
+        if cmd == "approve":
+            danger = [f for f in (self._last_findings or [])
+                      if f.severity == SEV_DANGER]
+            if danger and settings.get("voice_approval_confirm_risky", True):
+                self._awaiting_voice_confirm = True
+                msg = (f"This code has {len(danger)} danger finding"
+                       f"{'s' if len(danger) != 1 else ''}. Say confirm to execute, "
+                       "or a deny word to cancel.")
+                self._append_chat("system", "Voice: " + msg)
+                self._speak(msg)
+            else:
+                self._append_chat("system", "Voice: approved — executing.")
+                self.on_accept()
+            return
+
+        if cmd == "apply":
+            if self._review_active():
+                self._append_chat("system", "Voice: applying the proposed edit.")
+                self._apply_proposal()
+            else:
+                self._append_chat("system", "Voice: no proposal to apply.")
+            return
+
+        if cmd == "dismiss":
+            if self._review_active():
+                self._append_chat("system", "Voice: proposal dismissed.")
+                self._dismiss_proposal()
+            else:
+                self._append_chat("system", "Voice: no proposal to dismiss.")
+            return
+
+        if cmd == "expand":
+            if self._mini_visible():
+                self._append_chat("system", "Voice: expanding to the full review.")
+                self._expand_requested = True
+            # Already expanded: nothing to do.
+            return
+
+        # Not a command word.
+        if settings.get("voice_approval_mode", "basic") == "advanced":
+            # With the compact toast up you'd want to SEE the reviewer exchange
+            # (and any proposal), so expand alongside routing the request.
+            if self._mini_visible():
+                self._expand_requested = True
+            self._append_chat("you-voice", text)
+            self._run_agent(text, voice=True)
+        else:
+            self._append_chat("system", 'Voice: not a recognized command. Say '
+                                        '"approve" or "deny".')
+
+    def _mini_visible(self):
+        """True while the compact approval toast is showing instead of us."""
+        card = self._mini_card
+        try:
+            return card is not None and card.isVisible()
+        except Exception:
+            return False
 
     # ── accept / reject ──────────────────────────────────────────────────────
     def _risky_categories(self):
@@ -557,13 +891,17 @@ class CodeApprovalDialog(QDialog):
         self.activateWindow()
 
     def _stop_worker(self):
+        self._closed = True   # late signals must never touch a dead dialog
         w = self._worker
         if w is not None and w.isRunning():
             try:
                 w.message.disconnect(); w.proposal.disconnect()
                 w.finished_ok.disconnect(); w.failed.disconnect()
+                w.tokens.disconnect()
             except Exception:
                 pass
+            # The blocking provider call can't be killed (same as the main
+            # engine); deleteLater fires when it eventually finishes.
         if self._typing_timer is not None:
             self._typing_timer.stop()
 

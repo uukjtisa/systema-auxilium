@@ -85,7 +85,7 @@ class CodeAgent:
                  provider_fn: Callable[[list], str] | None = None,
                  on_message: Callable[[str, str], None] | None = None,
                  on_proposal: Callable[[str, str], None] | None = None,
-                 meter=None):
+                 meter=None, history: list | None = None):
         self.code = code
         self.execution_type = execution_type
         self.ai = ai_engine
@@ -94,6 +94,11 @@ class CodeAgent:
         self.on_message = on_message or (lambda role, text: None)
         self.on_proposal = on_proposal or (lambda code, why: None)
         self.meter = meter
+        # Prior dialog turns ({'role': 'user'|'assistant', 'content': str}) so
+        # follow-up questions keep their context across single-shot runs.
+        self.history = [m for m in (history or [])
+                        if isinstance(m, dict) and m.get("role") in ("user", "assistant")
+                        and (m.get("content") or "").strip()]
         self.findings = scan_code(code)
         self.last_proposal: str | None = None
 
@@ -159,7 +164,7 @@ class CodeAgent:
         return self._run_native(mod, user0) if mod is not None else self._run_compat(user0)
 
     def _run_native(self, mod, user0: str) -> str:
-        convo = [{"role": "user", "content": user0}]
+        convo = list(self.history) + [{"role": "user", "content": user0}]
         try:
             res = mod.chat_tools(SUB_SYSTEM_PROMPT_NATIVE, convo, self._tool_schemas())
         except Exception as e:
@@ -200,10 +205,9 @@ class CodeAgent:
         return text
 
     def _run_compat(self, user0: str) -> str:
-        convo = [
-            {"role": "system", "content": SUB_SYSTEM_PROMPT},
-            {"role": "user", "content": user0},
-        ]
+        convo = ([{"role": "system", "content": SUB_SYSTEM_PROMPT}]
+                 + list(self.history)
+                 + [{"role": "user", "content": user0}])
         reply = self._ask(convo)
         if not reply:
             return ""

@@ -1068,7 +1068,6 @@ class ManageTasksWindow(BaseWindow):
             'name': self._f_name.text().strip() or 'New Task (Preview)',
             'permissions': {
                 'allow_workmode':          self._f_perm_workmode.isChecked(),
-                'allow_execute_code':      self._f_perm_exec_code.isChecked(),
                 'allow_skill_load_unload': False,
                 'inject_image_tools':      self._f_perm_image_tools.isChecked(),
                 'inject_controller_ref':   self._f_perm_controller_ref.isChecked(),
@@ -1680,7 +1679,6 @@ class ManageTasksWindow(BaseWindow):
         perm_hint.setStyleSheet(f"color: {_MUTED}; font-size: 10px;")
 
         self._f_perm_workmode = QCheckBox("Allow Work Mode  (can use work_environment to run code & see output)")
-        self._f_perm_exec_code = QCheckBox("Allow Execute Code  (can run fire-and-forget Python)")
         self._f_perm_image_tools = QCheckBox("Inject Image Tools on the system prompt")
         self._f_perm_controller_ref = QCheckBox("Inject Controller Reference on the system prompt")
         self._f_perm_notify_tool = QCheckBox("Inject Notify Tool on the system prompt")
@@ -1730,12 +1728,6 @@ class ManageTasksWindow(BaseWindow):
             "⚠  Bypasses the 'Supervised Execution' setting.\n"
             "Code runs automatically in the background — no approval prompt."
         )
-        self._f_perm_exec_code.setToolTip(
-            "Lets the agent call execute_code to fire-and-forget Python snippets\n"
-            "(e.g. launch a process, write a file, send a notification).\n\n"
-            "⚠  Bypasses the 'Supervised Execution' setting.\n"
-            "Code runs automatically in the background — no approval prompt."
-        )
         self._f_perm_image_tools.setToolTip(
             "Injects the image tool instructions into this task session's system prompt.\n"
             "Only affects this task — does not change the main AI engine or other tasks."
@@ -1758,7 +1750,7 @@ class ManageTasksWindow(BaseWindow):
             "already off globally, code auto-runs regardless."
         )
 
-        for cb in (self._f_perm_workmode, self._f_perm_exec_code,
+        for cb in (self._f_perm_workmode,
                    self._f_perm_image_tools,
                    self._f_perm_controller_ref, self._f_perm_notify_tool,
                    self._f_perm_bypass):
@@ -1766,7 +1758,6 @@ class ManageTasksWindow(BaseWindow):
 
         fl.addWidget(_card(perm_hint,
                            self._f_perm_workmode, _iter_row,
-                           self._f_perm_exec_code,
                            self._f_perm_image_tools,
                            self._f_perm_controller_ref, self._f_perm_notify_tool,
                            self._f_perm_bypass, _bypass_sub,
@@ -2586,7 +2577,6 @@ class ManageTasksWindow(BaseWindow):
         self._f_start.setTime(QTime(0, 0))
         self._f_end.setTime(QTime(21, 0))
         self._f_perm_workmode.setChecked(False)
-        self._f_perm_exec_code.setChecked(False)
         self._f_perm_image_tools.setChecked(False)
         self._f_perm_controller_ref.setChecked(False)
         self._f_perm_notify_tool.setChecked(False)
@@ -2648,7 +2638,6 @@ class ManageTasksWindow(BaseWindow):
 
         perms = task.get('permissions', {})
         self._f_perm_workmode.setChecked(perms.get('allow_workmode', False))
-        self._f_perm_exec_code.setChecked(perms.get('allow_execute_code', False))
         self._f_perm_image_tools.setChecked(perms.get('inject_image_tools', False))
         self._f_perm_controller_ref.setChecked(perms.get('inject_controller_ref', False))
         self._f_perm_notify_tool.setChecked(perms.get('inject_notify_tool', False))
@@ -3248,7 +3237,6 @@ class ManageTasksWindow(BaseWindow):
             },
             "permissions": {
                 "allow_workmode": self._f_perm_workmode.isChecked(),
-                "allow_execute_code": self._f_perm_exec_code.isChecked(),
                 "inject_image_tools": self._f_perm_image_tools.isChecked(),
                 "inject_controller_ref": self._f_perm_controller_ref.isChecked(),
                 "inject_notify_tool": self._f_perm_notify_tool.isChecked(),

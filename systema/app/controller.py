@@ -2,7 +2,7 @@
 core/controller.py
 Main Controller - Orchestrates the AI assistant with Voice Support
 MAIN INITIATOR FOR ALL UI AND CORE MODULES
-UPDATED: work_environment and execute_code integration, voice mode, device management, TTS control
+UPDATED: work_environment integration, voice mode, device management, TTS control
 """
 
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer
@@ -691,6 +691,13 @@ class AssistantController(QObject):
             'tts_script_path': '',
             'voice_vad_aggressiveness': 3,
             'voice_interrupt_mode': 'manual',
+            'voice_bargein_sensitivity': 'balanced',
+            'voice_approval_enabled': True,
+            'voice_approval_mode': 'basic',
+            'voice_approval_announce': False,
+            'voice_approval_confirm_risky': True,
+            'voice_approval_custom_words': {},
+            'approval_mini_enabled': True,
             'user_name': 'USER',
             'custom_instructions': '',
             'vad_webrtc_enabled': True,
@@ -768,6 +775,8 @@ class AssistantController(QObject):
             # auto-interrupt never fired until the user re-saved settings.
             self.voice_handler.set_interrupt_mode(
                 self.settings.get('voice_interrupt_mode', 'manual'))
+            self.voice_handler.set_bargein_sensitivity(
+                self.settings.get('voice_bargein_sensitivity', 'balanced'))
 
             # Device name for display. voice_input_device is stored as a device
             # NAME (stable across sessions, unlike PortAudio ids); output is
@@ -943,6 +952,21 @@ class AssistantController(QObject):
             log.debug("[AssistantController._handle_voice_message_on_main_thread] "
                       "Chat window created for voice message buffering")
             self.log("Chat window created for voice message buffering")
+
+        # ── Voice mode approval: an open code-approval dialog captures the
+        # transcript (command words act; advanced mode chats with the reviewer).
+        # dialog.exec() runs a nested event loop on this thread, so this slot
+        # still fires mid-approval.
+        try:
+            dlg = getattr(self.ai.tool_manager, '_active_approval_dialog', None)
+            if dlg is not None and dlg.isVisible():
+                log.info("[AssistantController._handle_voice_message_on_main_thread] "
+                         "Approval dialog open — routing transcript to it")
+                dlg.handle_voice_transcript(text)
+                return
+        except Exception as e:
+            log.warning(f"[AssistantController._handle_voice_message_on_main_thread] "
+                        f"approval-dialog routing failed: {type(e).__name__}: {e}")
 
         # Flush any AI reply still buffered "until playback starts" — the
         # auto-interrupt that preceded this transcription may have killed its
@@ -1132,8 +1156,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             system_info = ""
 
         _allow_workmode  = perms.get('allow_workmode',      False)
-        _allow_exec_code = perms.get('allow_execute_code',  False)
-        _any_code        = _allow_workmode or _allow_exec_code
+        _any_code        = _allow_workmode
 
         # Match the active Tool Calling Mode. Tasks run through their own AIEngine
         # whose _call_provider already dispatches natively when the setting is
@@ -1150,10 +1173,9 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             skills                     = None,    # task skills injected separately below
             include_session_naming     = False,   # tasks don't name sessions
             include_memory             = True,    # memorize is always useful for tasks
-            include_execution_tools    = _any_code,     # "CORE EXECUTION TOOLS" section
+            include_execution_tools    = _any_code,     # work-environment section
             include_fence_syntax       = _any_code,     # fence syntax guide
             include_work_mode_rules    = _allow_workmode,
-            include_execute_code_rules = _allow_exec_code,
             include_must_remember      = _any_code,     # reminder block references tools
             include_image_tools        = perms.get('inject_image_tools',    False),
             include_controller_ref     = perms.get('inject_controller_ref', False),
@@ -1165,8 +1187,6 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         perm_lines = []
         if perms.get('allow_workmode'):
             perm_lines.append("- You MAY use the work_environment tool to perform agentic tasks.")
-        if perms.get('allow_execute_code'):
-            perm_lines.append("- You MAY use execute_code to run Python code.")
         if perms.get('allow_skill_load_unload'):
             perm_lines.append("- You MAY use load_skill and unload_skill.")
         if not perm_lines:
@@ -1182,8 +1202,8 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         if _any_code:
             send_main_block = (
                 f"Sending a message to the main chat session:\n"
-                f"  Call the send_message_main(message) function from inside work_environment "
-                f"(or execute_code). It is available in your Python namespace. Example:\n"
+                f"  Call the send_message_main(message) function from inside work_environment. "
+                f"It is available in your Python namespace. Example:\n"
                 f"    send_message_main(\"Your Discord friend just messaged you.\")\n"
                 f"  Delivers immediately. Do NOT write it as a code fence or JSON in your reply "
                 f"text — just call the function in your executed code.\n\n"
@@ -1269,6 +1289,18 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         self.voice_handler.set_interrupt_mode(mode)
         self.save_settings()
         self.log(f"Voice interrupt mode set to {mode}", "SUCCESS")
+
+    def get_voice_bargein_sensitivity(self):
+        """Get auto barge-in sensitivity preset"""
+        return self.settings.get('voice_bargein_sensitivity', 'balanced')
+
+    def set_voice_bargein_sensitivity(self, preset):
+        """Set auto barge-in sensitivity ('relaxed' | 'balanced' | 'eager')"""
+        log.info(f"[AssistantController.set_voice_bargein_sensitivity] preset='{preset}'")
+        self.settings['voice_bargein_sensitivity'] = preset
+        self.voice_handler.set_bargein_sensitivity(preset)
+        self.save_settings()
+        self.log(f"Barge-in sensitivity set to {preset}", "SUCCESS")
 
     def get_tts_provider(self):
         return self.settings.get('tts_provider', 'edge-tts')
@@ -1624,17 +1656,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             if raw_response:
                 self.ui.show_debug_message("ai", f"••• RAW AI RESPONSE •••\n{raw_response}")
 
-                if result.get('executed'):
-                    self.ui.show_debug_message("system",
-                                               f"••• EXECUTE_CODE DETECTED •••\n"
-                                               f"Success: {result.get('execution_success', False)}\n\n"
-                                               f"━━━ CODE ━━━\n"
-                                               f"{result.get('code', 'N/A')}\n"
-                                               f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                                               f"Visible Text to User:\n{result.get('response', '(none)')}\n\n"
-                                               f"⚡ Code executed immediately (no output to AI)")
-
-                elif result.get('has_work_call'):
+                if result.get('has_work_call'):
                     self.ui.show_debug_message("system",
                                                f"••• WORK_ENVIRONMENT CALL DETECTED •••\n"
                                                f"In Work Mode: {result.get('in_work_mode', False)}\n\n"
@@ -1643,17 +1665,6 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
                                                f"━━━━━━━━━━━━━━━━━\n\n"
                                                f"Visible Text to User:\n{result.get('response', '(none)')}\n\n"
                                                f"🐛 AI will see output and can chain more executions")
-
-        # Handle execute_code in voice mode specially
-        if result.get('executed') and self.voice_mode_active:
-            log.debug("[AssistantController.handle_ai_response] execute_code in voice mode")
-            self.log("EXECUTE_CODE in voice mode - will wait for voice then execute")
-
-            if result.get('response') and result['response'].strip():
-                self.ui.show_ai_message(result['response'])
-
-            self.log("Execute_code completed")
-            return
 
         # Show memory context card BEFORE the AI message so it appears above it
         if result.get('memory_context') and self._chat:

@@ -1919,11 +1919,6 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         tool_action.triggered.connect(lambda: self.set_force_mode('work_environment'))
         menu.addAction(tool_action)
 
-        # Command mode
-        command_action = QAction("⚡ Execute a Code", self)
-        command_action.triggered.connect(lambda: self.set_force_mode('execute_code'))
-        menu.addAction(command_action)
-
         # Show menu below button
         button_pos = self.mode_dropdown.mapToGlobal(QPoint(0, 0))
         menu.exec(QPoint(button_pos.x(), button_pos.y() - menu.sizeHint().height()))
@@ -1935,12 +1930,9 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         if mode == 'work_environment':
             self.mode_dropdown.setText("🔧")
             self.add_system_message("🔧 **Work Environment** - AI will enter its work environment to do some complex task.")
-        elif mode == 'execute_code':
-            self.mode_dropdown.setText("⚡")
-            self.add_system_message("⚡ **Single Execution** - AI will execute a single request.")
         else:
             self.mode_dropdown.setText("💬")
-            self.add_system_message("💬 **Normal Mode** - AI decides when to use Work environment or Single Execution")
+            self.add_system_message("💬 **Normal Mode** - AI decides when to use its Work Environment")
 
     def toggle_voice(self):
         """Toggle voice mode on/off"""
@@ -4536,8 +4528,6 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
 
         if self.force_mode == 'work_environment':
             message = "[VERY CRITICAL THE USER HAS ENFORCED: work_environment ONLY and FULFILL THIS TASK EFFICIENTLY (ignore if the message of the user doesn't request of anything)] " + message
-        elif self.force_mode == 'execute_code':
-            message = "[VERY CRITICAL THE USER HAS ENFORCED: execute_code ONLY and RUN a SINGLE PYTHON CODE TO DO THIS REQUEST(ignore if the message of the user doesn't request of anything)] " + message
 
         display_message = self.input_field.toPlainText().strip()
         self.last_sent_message = display_message
