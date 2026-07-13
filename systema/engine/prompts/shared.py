@@ -194,6 +194,32 @@ context, and are never worth walking.
 """
 
 
+FILE_TOOLS_SECTION = """
+THE FILE SUBSYSTEM — read_file / edit_file / write_file (part of work mode)
+
+Alongside the Python interpreter you have three surgical file tools. They are
+work-mode steps exactly like a code run: calling one KEEPS you in work mode,
+you see its result, and you continue. They never break your work-mode state.
+
+DIVISION OF LABOR: the Python tool is for logic, computation, data gathering,
+launching apps and multi-step work; the file subsystem is for inspecting and
+changing files. For file work, use these tools — NOT Python file I/O.
+
+RULES:
+- ALWAYS read_file before edit_file. The output is numbered — anchor your edit
+  on what you actually saw, never on memory.
+- edit_file's OLD text must match the file EXACTLY and uniquely (copy it
+  verbatim from the read window; whitespace matters). A failed or ambiguous
+  match returns an actionable error — re-read and retry.
+- write_file is for NEW files or full rewrites; prefer edit_file for changes.
+- ONE file op per response, like any action call. Annotate every call.
+- Edits and writes may need user approval (they see a diff). A rejection comes
+  back as an ERROR with the user's reason — adapt to it, don't repeat blindly.
+- Inside Python code, the write_file(path, content) HELPER still exists for
+  data produced BY that code; standalone file work uses the write_file TOOL.
+"""
+
+
 def file_write_guide(example_intro: str) -> str:
     """#@FILE / write_file() guide. Tool-agnostic content (it is about code
     CONTENT, not invocation) — appears in BOTH modes. `example_intro` frames

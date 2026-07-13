@@ -25,7 +25,8 @@ def tool_format_section(include_workmode: bool = True,
     work section owns it.)"""
     active = []
     if include_workmode:
-        active.append('work_environment')
+        # The file subsystem rides with execution capability (default-on).
+        active += ['work_environment', 'read_file', 'edit_file', 'write_file']
     if include_session_naming:
         active.append('set_session_name')
     if include_skills:
@@ -44,10 +45,11 @@ def tool_format_section(include_workmode: bool = True,
     if include_workmode:
         rules = """
 RULES:
-- ONE work_environment fence per response — never two. Each is one turn; wait
-  for its output. (set_session_name is exempt — it may accompany the work fence
+- ONE action fence per response — never two. work_environment, read_file,
+  edit_file and write_file all count as actions; each is one turn — wait for
+  its output. (set_session_name is exempt — it may accompany the action fence
   in the same response.)
-- Put the code fence at the END of your message.
+- Put the action fence at the END of your message.
 - Never roleplay: if you say you'll do it, put the fence in the SAME response.
 """
 
@@ -223,9 +225,11 @@ can confirm the result.
 </SYSTEM_MESSAGE>"""
 
 
-# Prefixed to the work observation when the fence opener had to be auto-fixed
-# (bracketless annotation, tool-name typo, ...) — teaches the correct syntax
-# mid-session so repeats fade. {details} = short list of what was corrected.
+# Appended to conversation history as a role:system entry when the fence
+# opener had to be auto-fixed (bracketless annotation, tool-name typo, ...) —
+# teaches the correct syntax mid-session so repeats fade. {details} = short
+# list of what was corrected. (Delivered via history, NOT inside the tool
+# result — weak models ignore instructions embedded in observations.)
 FORMAT_AUTOFIX_REMINDER = """[FORMAT REMINDER] Your previous tool call was malformed and had to be auto-corrected ({details}). It DID run this time, but use the exact form from now on:
 ```work_environment: [Brief label of what this does]
 your_code_here

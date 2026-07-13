@@ -142,10 +142,16 @@ class CodeAgent:
         return True
 
     def _native_module(self):
-        """The provider module if native tool calling is active, else None."""
+        """The provider module if native tool calling is active, else None.
+
+        Obeys the app-wide `tool_calling_mode` setting first: in 'compat' mode
+        the sub-agent must use the fence path even when the provider could do
+        native calls — same mode selection as the main engine."""
         if self.ai is None or not self._using_default:
             return None
         try:
+            if getattr(self.ai, "_tool_mode", lambda: "compat")() != "native":
+                return None
             mod = self.ai._load_provider_module()
             if mod is not None and self.ai._native_provider_supported(mod):
                 return mod

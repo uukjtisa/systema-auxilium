@@ -2421,6 +2421,9 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
                             )
                     elif msg.get("_type") == "skills_card":
                         self.add_loaded_skills_card(save_to_history=False)
+                    elif msg.get("_type") == "file_op":
+                        self.add_file_op_card(msg.get("_file_op") or {},
+                                              save_to_history=False)
                     else:
                         self.add_code_execution_note(
                             msg.get("_code", ""),
@@ -5380,6 +5383,138 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
                     '_code': code,
                     '_output': output,
                     '_annotation': annotation,
+                })
+            except Exception:
+                pass
+
+    def add_file_op_card(self, info: dict, save_to_history: bool = True):
+        """Compact file-operation card (read_file / edit_file / write_file):
+
+            ± ~parent/file.py   +29  −89   net −60      edit_file   [▶ Diff]
+
+        Green added / red removed counts, net colored by sign; reads show the
+        line range instead. Expands to the unified diff (or the read window).
+        Persisted as a ui_event (_type 'file_op') so it survives reloads."""
+        from PyQt6.QtWidgets import QFrame, QHBoxLayout, QVBoxLayout, QPushButton, QLabel, QTextEdit
+
+        _tc = self._t()
+        tool = info.get('tool', 'edit_file')
+        display = info.get('display') or info.get('path', '')
+        added = info.get('added')
+        removed = info.get('removed')
+        detail = info.get('detail', '')
+        created = bool(info.get('created'))
+        read_range = info.get('read_range', '')
+
+        GREEN, RED = "#3FB950", "#F85149"
+        icon_map = {'read_file': '›', 'edit_file': '±', 'write_file': '+'}
+
+        message_widget = QFrame()
+        message_widget.setStyleSheet("QFrame { background-color: transparent; padding: 4px 16px; }")
+        outer_lay = QVBoxLayout(message_widget)
+        outer_lay.setContentsMargins(0, 0, 0, 0)
+        outer_lay.setSpacing(0)
+
+        header = QFrame()
+        header.setStyleSheet(f"""
+                    QFrame {{
+                        background-color: {_tc['elevated']};
+                        border: 1px solid {_tc['border']};
+                        border-radius: 8px;
+                    }}""")
+        header_lay = QHBoxLayout(header)
+        header_lay.setContentsMargins(12, 6, 10, 6)
+        header_lay.setSpacing(8)
+
+        icon_lbl = QLabel(icon_map.get(tool, '±'))
+        icon_lbl.setStyleSheet(
+            f"color: {_tc['accent']}; font-size: 12px; font-weight: 700;"
+            " background: transparent; border: none;")
+        icon_lbl.setFixedWidth(14)
+        header_lay.addWidget(icon_lbl)
+
+        if tool == 'read_file':
+            stats_html = (f"<span style='color:#8B949E;font-size:10px;'>{read_range}</span>"
+                          if read_range else "")
+        else:
+            net = (added or 0) - (removed or 0)
+            net_color = GREEN if net >= 0 else RED
+            net_txt = f"+{net}" if net >= 0 else str(net)
+            bits = []
+            if added is not None:
+                bits.append(f"<span style='color:{GREEN};font-weight:600;'>+{added}</span>")
+            if removed is not None:
+                bits.append(f"<span style='color:{RED};font-weight:600;'>−{removed}</span>")
+            bits.append(f"<span style='color:#5F6368;'>·</span>"
+                        f"<span style='color:{net_color};'> net {net_txt}</span>")
+            if created:
+                bits.append(f"<span style='color:{GREEN};font-size:10px;'>&nbsp;new file</span>")
+            stats_html = "&nbsp;&nbsp;".join(bits)
+
+        summary_lbl = QLabel(
+            f"<span style='font-family:monospace;font-size:11px;"
+            f"font-weight:600;'>{display}</span>"
+            f"&nbsp;&nbsp;{stats_html}"
+            f"&nbsp;&nbsp;<span style='color:#5F6368;font-size:10px;'>{tool}</span>")
+        summary_lbl.setTextFormat(Qt.TextFormat.RichText)
+        summary_lbl.setToolTip(info.get('path', ''))
+        summary_lbl.setStyleSheet("background: transparent; border: none;")
+        header_lay.addWidget(summary_lbl, stretch=1)
+
+        toggle_btn = QPushButton("▶ Diff" if tool != 'read_file' else "▶ Show")
+        toggle_btn.setFixedSize(58, 20)
+        toggle_btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: transparent; border: 1px solid {_tc['border']};
+                        border-radius: 4px; font-size: 10px; color: #8B949E; padding: 0 6px;
+                    }}
+                    QPushButton:hover {{ color: {_tc['accent']}; border-color: {_tc['accent']}; }}""")
+        header_lay.addWidget(toggle_btn)
+        outer_lay.addWidget(header)
+
+        body = QTextEdit()
+        body.setReadOnly(True)
+        body.setPlainText(detail or "(no detail)")
+        body.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        body.setMaximumHeight(240)
+        body.setStyleSheet(f"""
+                    QTextEdit {{
+                        background: {_tc['elevated']}; border: 1px solid {_tc['border']};
+                        border-radius: 8px; margin-top: 2px; padding: 6px;
+                        font-family: Consolas, monospace; font-size: 10px; color: #C9D1D9;
+                    }}""")
+        body.hide()
+        outer_lay.addWidget(body)
+
+        def _toggle():
+            showing = body.isVisible()
+            body.setVisible(not showing)
+            base = "Diff" if tool != 'read_file' else "Show"
+            toggle_btn.setText(("▶ " + base) if showing else "▼ Hide")
+        toggle_btn.clicked.connect(_toggle)
+
+        if getattr(self, "_thinking_bubble_widget", None) is not None:
+            idx = self.chat_layout.indexOf(self._thinking_bubble_widget)
+            self.chat_layout.insertWidget(idx, message_widget)
+        else:
+            self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
+        self._animate_message_in(message_widget,
+                                 on_settled=lambda: self.scroll_to_widget(message_widget))
+        self.message_widgets.append({
+            'widget': message_widget,
+            'role': 'file_op',
+            'content_wrapper': header,
+        })
+
+        if save_to_history:
+            try:
+                slim = dict(info)
+                slim['detail'] = (detail or "")[:20000]
+                self.controller.ai.conversation_history.append({
+                    'role': 'ui_event',
+                    'content': f"± {tool} {display}",
+                    '_type': 'file_op',
+                    '_file_op': slim,
                 })
             except Exception:
                 pass

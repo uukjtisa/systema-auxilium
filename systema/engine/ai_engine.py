@@ -1206,6 +1206,7 @@ class AIEngine:
             self.tool_manager.last_work_output = work_output
 
             self._append_assistant(ai_text)
+            self._inject_pending_format_reminder()
             log.debug("[AIEngine._process_ai_response] Full ai_text (with JSON) appended to history")
 
             return {
@@ -1216,6 +1217,13 @@ class AIEngine:
                 'code': code,
                 'session_name': session_name
             }
+
+        # ── File-subsystem call (read_file / edit_file / write_file) ─────────
+        # A file op is a work-mode step: it enters work mode and the loop
+        # continues off its observation.
+        _ft = self._dispatch_file_tool(ai_text, session_name)
+        if _ft is not None:
+            return _ft
 
         # ── Legacy execute_code emission — the tool is RETIRED ────────────────
         # workmode is the only code path now. The call is NOT run: strip it,
@@ -1277,6 +1285,58 @@ class AIEngine:
             'session_name': session_name,
             'memory_context': _mc,
         }
+
+    def _dispatch_file_tool(self, ai_text, session_name):
+        """Detect and run a file-subsystem call (read_file / edit_file /
+        write_file). These are work-mode steps exactly like work_environment:
+        the observation feeds the next ping and the loop stays alive.
+        Returns the work-step result dict, or None when no file call."""
+        tm = self.tool_manager
+        for tool, parse, run in (
+                ('read_file', tm.parse_read_file, tm.run_read_file),
+                ('edit_file', tm.parse_edit_file, tm.run_edit_file),
+                ('write_file', tm.parse_write_file, tm.run_write_file)):
+            parsed = parse(ai_text)
+            if not parsed:
+                continue
+            spec, remaining = parsed
+            log.info(f"[AIEngine._dispatch_file_tool] {tool} call | "
+                     f"path='{spec.get('path', '')}'")
+            # Set BEFORE the run so interrupts see active work (same contract
+            # as work_environment).
+            tm.in_work_mode = True
+            observation = run(spec)
+            tm.last_work_output = observation
+            self._malformed_step_retries = 0
+            entry = self._append_assistant(ai_text)
+            jid = getattr(tm, 'last_file_op_journal_id', None)
+            if tool != 'read_file':
+                # Session-persisted record: the AI can see what it edited on
+                # reload, and the restore UI maps sessions to journal entries.
+                entry['_file_op'] = {'tool': tool, 'path': spec.get('path', ''),
+                                     'journal_id': jid}
+                tm.last_file_op_journal_id = None
+            self._inject_pending_format_reminder()
+            visible = tm.strip_tool_calls(remaining).strip() if remaining else ""
+            return {
+                'response': visible if visible else "Working...",
+                'has_work_call': True,
+                'in_work_mode': True,
+                'thinking': True,
+                'session_name': session_name,
+            }
+        return None
+
+    def _inject_pending_format_reminder(self):
+        """A parse auto-fix queued a format reminder — deliver it to the model
+        as a role:system HISTORY entry. (It used to be prefixed inside the tool
+        result, where weak models ignored it.)"""
+        reminder = getattr(self.tool_manager, '_pending_format_reminder', None)
+        if reminder:
+            self.tool_manager._pending_format_reminder = None
+            self.conversation_history.append({'role': 'system', 'content': reminder})
+            log.debug("[AIEngine._inject_pending_format_reminder] Format reminder "
+                      "appended to history as a system entry")
 
     # Fence tags that mean "this is executable-looking code, not a tool call".
     _SUSPECT_CODE_TAGS = frozenset(
@@ -1516,6 +1576,7 @@ class AIEngine:
             self._malformed_step_retries = 0  # valid step — reset the guard-rail budget
 
             self._append_assistant(ai_text)
+            self._inject_pending_format_reminder()
             log.debug("[AIEngine._process_work_mode_response] ai_text (with JSON) appended to history")
 
             return {
@@ -1527,6 +1588,13 @@ class AIEngine:
             }
 
         else:
+            # ── File-subsystem call (read_file / edit_file / write_file) ─────
+            # A file op continues work mode exactly like a work_environment
+            # step — it must never be mistaken for the exit reply.
+            _ft = self._dispatch_file_tool(ai_text, session_name)
+            if _ft is not None:
+                return _ft
+
             # ── Legacy execute_code on exit — the tool is RETIRED ─────────────
             # The call is NOT run. Keep the work loop alive with a corrective
             # prompt so the model re-issues the action via work_environment.
@@ -1564,10 +1632,11 @@ class AIEngine:
                     log.warning(f"[AIEngine._process_work_mode_response] Suspected malformed "
                                 f"work step (code-shaped reply, no valid tool call) — "
                                 f"corrective retry {retries + 1}/2, nothing was run")
-                    self.tool_manager.approval_signal.system_message.emit(
-                        "**NOTICE:** The model replied with code that is not a valid "
-                        "tool call; nothing was run. It has been asked to re-issue "
-                        "the step as a work_environment call.")
+                    if retries == 0:   # NOTICE once per work session; retry 2 logs only
+                        self.tool_manager.approval_signal.system_message.emit(
+                            "**NOTICE:** The model replied with code that is not a valid "
+                            "tool call; nothing was run. It has been asked to re-issue "
+                            "the step as a work_environment call.")
                     from systema.engine.prompts.global_instructions import (
                         MALFORMED_WORK_STEP_PROMPT, MALFORMED_WORK_STEP_PROMPT_NATIVE)
                     _malformed = (MALFORMED_WORK_STEP_PROMPT_NATIVE

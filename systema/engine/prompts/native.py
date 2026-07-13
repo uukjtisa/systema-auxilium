@@ -20,9 +20,13 @@ def native_header(include_session_naming: bool = True,
                   include_skills: bool = True) -> str:
     lines = [
         "  - work_environment(code, annotation)   run Python and SEE its output — your",
-        "                                         ONLY execution tool. annotation = a",
+        "                                         code-execution tool. annotation = a",
         "                                         short 3-6 word label of what the code",
         "                                         does (ALWAYS provide it).",
+        "  - read_file(path, start_line, ...)     read a file as NUMBERED lines (windowed).",
+        "  - edit_file(path, old_text, new_text)  surgical anchor edit — old_text must",
+        "                                         match the file exactly and uniquely.",
+        "  - write_file(path, content)            create or fully rewrite a file.",
     ]
     if include_session_naming:
         lines.append(
@@ -56,8 +60,8 @@ response — do exactly that whenever you need to name the session AND act. Only
 if your provider limits you to a single tool call per response, use the fallback
 chaining arguments on set_session_name / load_skill instead: set
 then_tool='work_environment', put the Python in then_code, and pass
-then_annotation (the short step label). Never emit two work_environment calls in
-one response.
+then_annotation (the short step label). Never emit two ACTION calls
+(work_environment / read_file / edit_file / write_file) in one response.
 
 Invoke every tool through your native function-calling mechanism. Everything
 below — WHEN and WHY to use each tool, staying in work mode, directory safety,

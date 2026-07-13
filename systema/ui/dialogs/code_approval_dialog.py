@@ -109,12 +109,15 @@ class _CodeAgentWorker(QThread):
 
 class _HunkWidget(QFrame):
     """One reviewable change block: current code (red) vs proposal (green),
-    with Keep mine / Take edit / Edit controls (Manage-dialog verbs)."""
+    with Keep mine / Take edit / Edit controls (Manage-dialog verbs). The
+    ACTIVE decision renders as a filled accent button with a check glyph, so
+    every click gives visible feedback (hunks arrive pre-set to Take edit)."""
 
-    def __init__(self, hunk, palette, btn_style, parent=None):
+    def __init__(self, hunk, palette, parent=None, on_change=None):
         super().__init__(parent)
         self.hunk = hunk
         self.p = palette
+        self._on_change = on_change or (lambda: None)
         p = palette
         self.setStyleSheet(
             f"QFrame {{ background: {p['surface']}; border: 1px solid {p['border']};"
@@ -134,7 +137,6 @@ class _HunkWidget(QFrame):
         self.take_btn = QPushButton("Take edit")
         self.edit_btn = QPushButton("Edit")
         for b in (self.keep_btn, self.take_btn, self.edit_btn):
-            b.setStyleSheet(btn_style())
             b.setFixedHeight(22)
             head.addWidget(b)
         self.keep_btn.clicked.connect(lambda: self._decide("local"))
@@ -171,6 +173,7 @@ class _HunkWidget(QFrame):
         self.hunk.decision = decision
         self.editor.hide()
         self._restyle()
+        self._on_change()
 
     def _toggle_editor(self):
         if self.editor.isVisible():
@@ -181,11 +184,25 @@ class _HunkWidget(QFrame):
         self.editor.setPlainText(self.hunk.resolved_text())
         self.editor.blockSignals(False)
         self.editor.show()
+        self._restyle()
 
     def _edited(self):
         self.hunk.decision = "edited"
         self.hunk.edited_text = self.editor.toPlainText()
         self._restyle()
+        self._on_change()
+
+    def _verb_css(self, active):
+        p = self.p
+        if active:
+            return (f"QPushButton {{ background: {p['accent']}; color: #05070a;"
+                    f" border: 1px solid {p['accent']}; border-radius: 6px;"
+                    " padding: 2px 10px; font-size: 10px; font-weight: 700; }}")
+        return (f"QPushButton {{ background: {p['surface2']}; color: {p['muted']};"
+                f" border: 1px solid {p['border']}; border-radius: 6px;"
+                " padding: 2px 10px; font-size: 10px; }}"
+                f"QPushButton:hover {{ border: 1px solid {p['accent']};"
+                f" color: {p['text']}; }}")
 
     def _restyle(self):
         p = self.p
@@ -194,6 +211,7 @@ class _HunkWidget(QFrame):
         # editor's text is what will be applied).
         old_on = d == "local"
         new_on = d == "update"
+        edited = d == "edited"
         self.old_lbl.setStyleSheet(
             f"background: rgba(230,90,90,{0.16 if old_on else 0.05});"
             f" color: {'#f2b8b5' if old_on else p['muted']};"
@@ -202,6 +220,13 @@ class _HunkWidget(QFrame):
             f"background: rgba(80,200,120,{0.16 if new_on else 0.05});"
             f" color: {'#c6ecc6' if new_on else p['muted']};"
             f" border: none; border-radius: 4px; padding: 3px 6px; {self._mono}")
+        # The active verb is filled + checked; the others are outlined.
+        self.keep_btn.setText(("✓ " if old_on else "") + "Keep mine")
+        self.take_btn.setText(("✓ " if new_on else "") + "Take edit")
+        self.edit_btn.setText(("✓ " if edited else "") + ("Edited" if edited else "Edit"))
+        self.keep_btn.setStyleSheet(self._verb_css(old_on))
+        self.take_btn.setStyleSheet(self._verb_css(new_on))
+        self.edit_btn.setStyleSheet(self._verb_css(edited))
 
 
 class _ProposalReviewView(QWidget):
@@ -240,18 +265,21 @@ class _ProposalReviewView(QWidget):
         lay.addWidget(self.scroll, stretch=1)
 
         row = QHBoxLayout(); row.setSpacing(6)
-        hint = QLabel("Resolve each change, then apply.")
-        hint.setStyleSheet(f"color: {p['muted']}; font-size: 10px; background: transparent;")
-        row.addWidget(hint)
+        self.hint_lbl = QLabel("All changes are taken by default — adjust any, then apply.")
+        self.hint_lbl.setStyleSheet(
+            f"color: {p['muted']}; font-size: 10px; background: transparent;")
+        row.addWidget(self.hint_lbl)
         row.addStretch()
         dismiss = QPushButton("Dismiss")
         dismiss.setStyleSheet(dialog._btn())
+        dismiss.setToolTip("Discard the proposal and go back to the code.")
         dismiss.clicked.connect(lambda: dialog._finish_review(apply=False))
         row.addWidget(dismiss)
-        apply_btn = QPushButton("Apply resolved")
-        apply_btn.setStyleSheet(dialog._btn(primary=True))
-        apply_btn.clicked.connect(lambda: dialog._finish_review(apply=True))
-        row.addWidget(apply_btn)
+        self.apply_btn = QPushButton("Apply edit")
+        self.apply_btn.setStyleSheet(dialog._btn(primary=True))
+        self.apply_btn.setToolTip("Write the resolved changes into the code editor.")
+        self.apply_btn.clicked.connect(lambda: dialog._finish_review(apply=True))
+        row.addWidget(self.apply_btn)
         lay.addLayout(row)
 
     def load(self, segments, why):
@@ -274,8 +302,37 @@ class _ProposalReviewView(QWidget):
                                   f" border: none; padding: 0 6px; {mono}")
                 self._col.addWidget(lbl)
             elif seg.hunk is not None:
-                self._col.addWidget(_HunkWidget(seg.hunk, p, self._dlg._btn))
+                self._col.addWidget(_HunkWidget(seg.hunk, p,
+                                                on_change=self.refresh_footer))
         self._col.addStretch()
+        self.refresh_footer()
+
+    def refresh_footer(self):
+        """Live Apply label: what pressing it will actually do."""
+        taken = kept = edited = 0
+        for seg in self.segments:
+            if seg.kind != "hunk" or seg.hunk is None:
+                continue
+            d = seg.hunk.decision
+            if d == "update":
+                taken += 1
+            elif d == "edited":
+                edited += 1
+            else:
+                kept += 1
+        total = taken + kept + edited
+        if total and taken == total:
+            label = f"Apply edit (all {total} taken)" if total > 1 else "Apply edit"
+        else:
+            parts = []
+            if taken:
+                parts.append(f"{taken} taken")
+            if edited:
+                parts.append(f"{edited} edited")
+            if kept:
+                parts.append(f"{kept} kept")
+            label = "Apply edit (" + " · ".join(parts) + ")" if parts else "Apply edit"
+        self.apply_btn.setText(label)
 
     @staticmethod
     def _trim_context(text, keep=3):
@@ -301,7 +358,8 @@ class CodeApprovalDialog(QDialog):
 
     _SEV_COLOR_KEY = {SEV_DANGER: "red", SEV_CAUTION: "yellow", SEV_INFO: "muted"}
 
-    def __init__(self, code, execution_type, ai_engine, parent=None):
+    def __init__(self, code, execution_type, ai_engine, parent=None,
+                 file_edit=None):
         super().__init__(parent)
         self.code = code
         self.execution_type = execution_type
@@ -310,6 +368,11 @@ class CodeApprovalDialog(QDialog):
         self.modified_code = code
         self.reject_reason = ""            # optional text captured on Reject
         self._last_findings = []           # latest static-scan findings
+        # File-edit mode: reviewing a PROPOSED FILE CHANGE (read/edit/write
+        # subsystem) instead of code to execute. `code` holds the proposed NEW
+        # content; the review page opens immediately on the old->new diff and
+        # Approve auto-applies any unresolved hunks.
+        self._file_edit = file_edit if isinstance(file_edit, dict) else None
 
         self._worker = None
         self._typing_timer = None
@@ -334,6 +397,16 @@ class CodeApprovalDialog(QDialog):
 
         self._build()
         self._refresh_security()
+
+        # File-edit mode: the editor holds the CURRENT file content and the
+        # proposed new content opens immediately as a per-hunk review. Read the
+        # NEW content from the payload — setPlainText(old) fires textChanged,
+        # which rewrites self.code to the old text before we can use it.
+        if self._file_edit is not None:
+            proposed_new = self._file_edit.get('new') or self.code
+            self.code_edit.setPlainText(self._file_edit.get('old') or '')
+            self._on_proposal(proposed_new,
+                              f"proposed change to {self._file_edit.get('path', '')}")
 
         # Center on the chat window / primary screen (never the floating widget)
         from systema.ui.dialogs.dialog_utils import center_on_primary
@@ -362,10 +435,16 @@ class CodeApprovalDialog(QDialog):
                             " background: transparent;")
         root.addWidget(title)
 
-        where = ("work environment" if self.execution_type == "work_environment"
-                 else "direct execution")
-        desc = QLabel(f"The AI wants to run the code below ({where}). Review, edit if "
-                      "needed, and approve. You can turn this prompt off in Settings.")
+        if self._file_edit is not None:
+            desc_text = (f"The AI wants to change {self._file_edit.get('path', 'a file')} "
+                         f"({self.execution_type}). Review the diff, adjust any block, "
+                         "and approve to write the file.")
+        else:
+            where = ("work environment" if self.execution_type == "work_environment"
+                     else "direct execution")
+            desc_text = (f"The AI wants to run the code below ({where}). Review, edit if "
+                         "needed, and approve. You can turn this prompt off in Settings.")
+        desc = QLabel(desc_text)
         desc.setWordWrap(True)
         desc.setStyleSheet(f"color: {p['muted']}; font-size: 11px; background: transparent;")
         root.addWidget(desc)
@@ -411,7 +490,9 @@ class CodeApprovalDialog(QDialog):
         reject_btn.clicked.connect(self.on_reject)
         foot.addWidget(reject_btn)
 
-        self.accept_btn = QPushButton("Accept and execute")
+        self.accept_btn = QPushButton(
+            "Approve file change" if self._file_edit is not None
+            else "Accept and execute")
         self.accept_btn.setStyleSheet(self._btn(primary=True))
         self.accept_btn.clicked.connect(self.on_accept)
         self.accept_btn.setDefault(True)
@@ -439,8 +520,27 @@ class CodeApprovalDialog(QDialog):
         self.code_stack.addWidget(self.code_edit)
         self.review_view = _ProposalReviewView(self)
         self.code_stack.addWidget(self.review_view)
+        # Structural invariant: Approve is disabled EXACTLY while the review
+        # page is showing (approving mid-review would run the pre-proposal
+        # code). Keyed off the page change itself so no code path can leave
+        # the button stuck disabled.
+        self.code_stack.currentChanged.connect(self._on_code_page_changed)
         lay.addWidget(self.code_stack, stretch=1)
         return w
+
+    def _on_code_page_changed(self, _idx):
+        reviewing = self.code_stack.currentWidget() is self.review_view
+        if self._file_edit is not None:
+            # File-edit mode: approving FROM the review is the normal flow —
+            # on_accept composes the resolved hunks itself.
+            self.accept_btn.setEnabled(True)
+            self.accept_btn.setToolTip(
+                "Approve writes the resolved changes to the file."
+                if reviewing else "")
+            return
+        self.accept_btn.setEnabled(not reviewing)
+        self.accept_btn.setToolTip(
+            "Resolve or dismiss the proposed edit first." if reviewing else "")
 
     def _build_side_panel(self) -> QWidget:
         p = self.p
@@ -565,8 +665,28 @@ class CodeApprovalDialog(QDialog):
         self.typing_lbl.setText(f"  {frame}   Code Reviewer is responding, please wait"
                                 + "." * self._typing_dots + "   ")
 
+    def _worker_running(self):
+        """True only while a live worker thread is running. A finished worker is
+        deleteLater'd — touching its methods afterwards raises RuntimeError, so
+        this is the ONLY place allowed to poke at self._worker's state."""
+        w = self._worker
+        if w is None:
+            return False
+        try:
+            return w.isRunning()
+        except RuntimeError:            # wrapped C++ object already deleted
+            self._worker = None
+            return False
+
+    def _on_worker_finished(self, w):
+        """Drop our reference BEFORE the QThread object is destroyed, so no
+        later click can touch a dead wrapper (the 'Approve looks disabled' bug)."""
+        if self._worker is w:
+            self._worker = None
+        w.deleteLater()
+
     def _run_agent(self, task, voice=False):
-        if self._worker is not None and self._worker.isRunning():
+        if self._worker_running():
             self._append_chat("system", "Please wait — the Code Reviewer is still "
                                         "responding to your last message.")
             return
@@ -582,7 +702,7 @@ class CodeApprovalDialog(QDialog):
         w.tokens.connect(lambda s: self.token_lbl.setText(s or self.token_lbl.text()))
         w.finished_ok.connect(self._on_agent_done)
         w.failed.connect(self._on_agent_failed)
-        w.finished.connect(w.deleteLater)
+        w.finished.connect(lambda w=w: self._on_worker_finished(w))
         self._worker = w
         self._push_history("user", task)
         w.start()
@@ -666,24 +786,29 @@ class CodeApprovalDialog(QDialog):
         self._push_history("assistant",
                            f"(proposed an edit{': ' + why if why else ''})")
         self.review_view.load(segments, why)
-        self.code_stack.setCurrentWidget(self.review_view)
-        # Approving mid-review would execute the PRE-proposal code — force a
-        # resolve/dismiss first. Reject stays available.
-        self.accept_btn.setEnabled(False)
-        self.accept_btn.setToolTip("Resolve or dismiss the proposed edit first.")
+        self.code_stack.setCurrentWidget(self.review_view)   # disables Approve
+                                                             # via _on_code_page_changed
 
     def _finish_review(self, apply):
-        if self._review_active():
-            if apply:
-                self.code_edit.setPlainText(self.review_view.assembled())
-                self._append_chat("system", "Applied the resolved edit. Re-scanned; "
-                                            "review before approving.")
-            else:
-                self._append_chat("system", "Proposal dismissed.")
-        self.code_stack.setCurrentWidget(self.code_edit)
-        self.accept_btn.setEnabled(True)
-        self.accept_btn.setToolTip("")
+        applied = False
+        if self._review_active() and apply:
+            self.code_edit.setPlainText(self.review_view.assembled())
+            self._append_chat("system", "Applied the resolved edit. Re-scanned; "
+                                        "review before approving.")
+            applied = True
+        elif self._review_active():
+            self._append_chat("system", "Proposal dismissed.")
+        self.code_stack.setCurrentWidget(self.code_edit)     # re-enables Approve
         self._review_why = ""
+        if applied:
+            self._flash_code_edit()
+
+    def _flash_code_edit(self):
+        """Brief accent pulse on the editor so an applied edit is unmissable."""
+        base = self._edit_style(mono=True)
+        self.code_edit.setStyleSheet(
+            base + f"QTextEdit {{ border: 2px solid {self.p['accent']}; }}")
+        QTimer.singleShot(700, lambda: self.code_edit.setStyleSheet(base))
 
     # Thin wrappers kept for callers and the voice commands: 'apply' takes every
     # remaining hunk, 'dismiss' discards the review.
@@ -829,6 +954,10 @@ class CodeApprovalDialog(QDialog):
 
     def on_accept(self):
         self._stop_worker()
+        # File-edit mode: approving straight from the review composes the
+        # resolved hunks into the editor first (that text becomes the file).
+        if self._file_edit is not None and self._review_active():
+            self._finish_review(apply=True)
         self.result = 'accept'
         self.modified_code = self.code_edit.toPlainText().strip()
         cats = self._risky_categories()
@@ -891,17 +1020,22 @@ class CodeApprovalDialog(QDialog):
         self.activateWindow()
 
     def _stop_worker(self):
+        """Accept/Reject/close MUST never be blocked by agent state — every
+        worker access is guarded, all failures swallowed."""
         self._closed = True   # late signals must never touch a dead dialog
-        w = self._worker
-        if w is not None and w.isRunning():
-            try:
-                w.message.disconnect(); w.proposal.disconnect()
-                w.finished_ok.disconnect(); w.failed.disconnect()
-                w.tokens.disconnect()
-            except Exception:
-                pass
-            # The blocking provider call can't be killed (same as the main
-            # engine); deleteLater fires when it eventually finishes.
+        try:
+            if self._worker_running():
+                w = self._worker
+                try:
+                    w.message.disconnect(); w.proposal.disconnect()
+                    w.finished_ok.disconnect(); w.failed.disconnect()
+                    w.tokens.disconnect()
+                except Exception:
+                    pass
+                # The blocking provider call can't be killed (same as the main
+                # engine); deleteLater fires when it eventually finishes.
+        except Exception:
+            pass
         if self._typing_timer is not None:
             self._typing_timer.stop()
 

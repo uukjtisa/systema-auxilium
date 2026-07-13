@@ -1676,6 +1676,50 @@ class SettingsWindow(BaseWindow):
         sp_extras_lay.addWidget(self.include_notify_tool_checkbox)
         sys_lay.addWidget(sp_extras_group)
 
+        # ── File tools & history (read_file / edit_file / write_file) ────────
+        fh_group = QGroupBox("File Tools — history and undo")
+        fh_group.setStyleSheet(_GROUP)
+        fh_lay = QVBoxLayout(fh_group)
+        fh_lay.addWidget(_info_box(
+            "The AI's surgical file tools (read_file / edit_file / write_file) are a "
+            "core part of work mode and are always available. Every edit or write "
+            "records the file's previous state here so you can undo it."))
+        self.file_history_checkbox = QCheckBox("Keep file history (undo journal)")
+        self.file_history_checkbox.setStyleSheet(_CHECK)
+        self.file_history_checkbox.setToolTip(
+            "Before every tool edit/write, save the file's previous content to "
+            "data/file_history so the change can be reverted.")
+        fh_lay.addWidget(self.file_history_checkbox)
+        self.file_history_git_checkbox = QCheckBox("Deep history via git (when installed)")
+        self.file_history_git_checkbox.setStyleSheet(_CHECK)
+        self.file_history_git_checkbox.setToolTip(
+            "Additionally commit every change to a local shadow git repository in "
+            "data/file_history/shadow — full change history beyond the last undo point.")
+        fh_lay.addWidget(self.file_history_git_checkbox)
+        prune_row = QHBoxLayout()
+        prune_lbl = QLabel("Prune undo history after")
+        prune_lbl.setStyleSheet(_LABEL)
+        prune_row.addWidget(prune_lbl)
+        self.file_history_days_combo = QComboBox()
+        for d in (7, 14, 30, 90):
+            self.file_history_days_combo.addItem(f"{d} days", d)
+        self.file_history_days_combo.setStyleSheet(_COMBO)
+        prune_row.addWidget(self.file_history_days_combo)
+        prune_row.addStretch()
+        self.view_file_history_btn = QPushButton("View file changes…")
+        self.view_file_history_btn.setStyleSheet(_BUTTON)
+        self.view_file_history_btn.clicked.connect(self._open_file_history)
+        prune_row.addWidget(self.view_file_history_btn)
+        fh_lay.addLayout(prune_row)
+
+        def _update_fh_enabled():
+            on = self.file_history_checkbox.isChecked()
+            self.file_history_git_checkbox.setEnabled(on)
+            self.file_history_days_combo.setEnabled(on)
+        self.file_history_checkbox.stateChanged.connect(lambda _s: _update_fh_enabled())
+        self._update_fh_enabled = _update_fh_enabled
+        sys_lay.addWidget(fh_group)
+
         # ── Tool Calling Mode ───────────────────────────────────────────────
         tc_group = QGroupBox("Tool Calling Mode")
         tc_group.setStyleSheet(_GROUP)
@@ -1956,6 +2000,15 @@ class SettingsWindow(BaseWindow):
             self.interrupt_mode_combo.currentData() == 'auto')
 
     # ── Voice mode approval helpers ──────────────────────────────────────────
+    def _open_file_history(self):
+        """Open the file-tools undo-journal browser (File changes)."""
+        try:
+            from systema.ui.dialogs.file_history_dialog import FileHistoryDialog
+            dlg = FileHistoryDialog(controller=self.controller, parent=self)
+            dlg.exec()
+        except Exception as e:
+            log.error(f"[SettingsWindow._open_file_history] {e}")
+
     def _update_voice_approval_enabled(self):
         on = self.voice_approval_checkbox.isChecked()
         for w in (self.voice_approval_mode_combo,
@@ -2406,6 +2459,16 @@ class SettingsWindow(BaseWindow):
             self.controller.settings.get('include_controller_ref', False))
         self.include_notify_tool_checkbox.setChecked(
             self.controller.settings.get('include_notify_tool', False))
+
+        # Load file-tools history options
+        self.file_history_checkbox.setChecked(
+            self.controller.settings.get('file_history_enabled', True))
+        self.file_history_git_checkbox.setChecked(
+            self.controller.settings.get('file_history_git', False))
+        _days_idx = self.file_history_days_combo.findData(
+            self.controller.settings.get('file_history_keep_days', 14))
+        self.file_history_days_combo.setCurrentIndex(max(0, _days_idx))
+        self._update_fh_enabled()
 
         # Load system prompt
         self.system_prompt_hijack_input.setPlainText(
@@ -2877,6 +2940,14 @@ class SettingsWindow(BaseWindow):
 
         # Save custom system prompt
         self.controller.settings['custom_system_prompt'] = self.system_prompt_hijack_input.toPlainText()
+
+        # Save file-tools history options
+        self.controller.settings['file_history_enabled'] = \
+            self.file_history_checkbox.isChecked()
+        self.controller.settings['file_history_git'] = \
+            self.file_history_git_checkbox.isChecked()
+        self.controller.settings['file_history_keep_days'] = \
+            self.file_history_days_combo.currentData() or 14
 
         # Save voice devices (input only; output uses the system default now)
         input_device = self.input_device_combo.currentData()

@@ -116,6 +116,7 @@ def get_system_prompt(
         body.append(shared.memory_section(hint))
     if include_execution_tools and include_work_mode_rules:
         body.append(shared.WORK_ENVIRONMENT_SECTION)
+        body.append(shared.FILE_TOOLS_SECTION)
     # The #@FILE / write_file() guide is tool-agnostic (about code CONTENT, not
     # invocation) — it appears in BOTH modes when execution is available.
     if include_file_write and include_work_mode_rules:

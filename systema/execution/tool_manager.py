@@ -16,6 +16,7 @@ import os
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer
 from systema.execution.python_interpreter import PythonInterpreter
 from systema.execution import tool_registry
+from systema.execution import file_journal
 from systema.common.logger import _make_logger, _NoOpLogger
 
 
@@ -23,6 +24,12 @@ from systema.common.logger import _make_logger, _NoOpLogger
 _verbose = True
 log = _make_logger("ToolManager") if _verbose else _NoOpLogger()
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+# Tools whose fence opener carries a ": [annotation]" label (parsed by the
+# tolerant annotated branch of _parse_fence, returning a 3-tuple).
+_ANNOTATED_TOOL_NORMS = frozenset(
+    {'workenvironment', 'readfile', 'editfile', 'writefile'})
 
 
 # ──────────────── Malformed-opener tolerance helpers (weak models) ───────────
@@ -80,6 +87,17 @@ def _clean_annotation(raw):
     return s
 
 
+def _looks_like_path(s):
+    """Heuristic: is this short single-line string a file path? Used to recover
+    a path the model misplaced onto the fence opener line."""
+    s = (s or '').strip().strip('"').strip("'")
+    if not s or '\n' in s or len(s) > 400:
+        return False
+    if '/' in s or '\\' in s:
+        return True
+    return bool(re.match(r'^[\w.\- ]+\.\w{1,8}$', s))
+
+
 def _lift_leading_annotation(content):
     """If the first line INSIDE a work fence is an annotation the model misplaced
     ('[Fetch news]' or bare prose), lift it out so it doesn't poison the code.
@@ -100,6 +118,7 @@ class ApprovalSignal(QObject):
     """Signal object for requesting code approval on main thread"""
     request_approval = pyqtSignal(str, str, object)  # code, execution_type, callback
     system_message   = pyqtSignal(str)               # text → chat window, main thread only
+    file_op          = pyqtSignal(dict)              # structured file-op card → chat window
     close_approval_dialog = pyqtSignal(bool, str)  # approved, modified_code — closes active dialog
     timeout_signal   = pyqtSignal(int, object, object, object)  # elapsed, done_event, result_holder, user_event — timeout prompt
     work_code_active = pyqtSignal(bool)                          # True when code execution starts, False when it finishes
@@ -146,11 +165,29 @@ class ToolManager:
 
         # ── Malformed-call auto-correction (weak-model guard rails) ──────────
         # _parse_fence(record=True) appends one short description per auto-fix;
-        # _flush_parse_corrections() turns them into a chat NOTICE + a format
-        # reminder that run_work_environment prefixes to the next observation
-        # so the model learns the correct syntax mid-session.
+        # _flush_parse_corrections() logs them, shows ONE chat NOTICE per
+        # session (further fixes are silent — no NOTICE spam), and queues a
+        # format reminder that the ENGINE delivers as a role:system history
+        # entry (weak models ignore text placed inside tool results).
         self._parse_corrections = []
         self._pending_format_reminder = None
+        self._autofix_notice_shown = False
+
+        # ── File-editing subsystem state ──────────────────────────────────────
+        # _pending_file_edit: payload popped by the approval-dialog builder so
+        # the dialog opens in file-edit (per-hunk diff) mode for this one run.
+        self._pending_file_edit = None
+        self.last_file_op_journal_id = None
+        # Prune the undo journal once per app start (off the GUI thread).
+        try:
+            _s = settings_callback() if settings_callback else {}
+            if _s.get('file_history_enabled', True):
+                threading.Thread(
+                    target=file_journal.prune,
+                    args=(int(_s.get('file_history_keep_days', 14)),),
+                    daemon=True).start()
+        except Exception:
+            pass
 
         # ── Violation tracking ────────────────────────────────────────────────
         # Incremented each time the AI emits more than one code-execution tool
@@ -186,6 +223,7 @@ class ToolManager:
         self.approval_signal = ApprovalSignal()
         self.approval_signal.request_approval.connect(self._show_approval_dialog_on_main_thread)
         self.approval_signal.system_message.connect(self._deliver_system_message)
+        self.approval_signal.file_op.connect(self._deliver_file_op)
         self.approval_signal.close_approval_dialog.connect(self._close_active_approval_dialog)
         self.approval_signal.timeout_signal.connect(self._show_timeout_dialog_on_main_thread)
         self._active_approval_dialog = None
@@ -234,6 +272,15 @@ class ToolManager:
             log.debug(f"[ToolManager._chat] | [chat_window.py] ACTIVE={is_active} | {chat}")
 
         return chat
+
+    def _deliver_file_op(self, info: dict):
+        """Slot — main thread. Renders a file-op card in the chat window."""
+        chat = self._chat
+        if chat is not None and hasattr(chat, 'add_file_op_card'):
+            try:
+                chat.add_file_op_card(info)
+            except Exception as e:
+                log.error(f"[ToolManager._deliver_file_op] card failed: {e}")
 
     def _deliver_system_message(self, text: str):
         """
@@ -331,13 +378,15 @@ class ToolManager:
         return out
 
     def _code_fence(self, tool_name: str, code, annotation: str = "") -> str:
-        """Render one tool fence. work_environment folds its annotation into the
-        ```work_environment: [label] form; everything else is a plain fence."""
+        """Render one tool fence. Annotated tools (work_environment + the file
+        subsystem) fold their annotation into the ```tool: [label] form;
+        everything else is a plain fence."""
         if not isinstance(code, str):
             code = str(code)
         code = code.strip()
-        if tool_name == 'work_environment' and isinstance(annotation, str) and annotation.strip():
-            return f"```work_environment: [{annotation.strip()}]\n{code}\n```"
+        if (self._norm_key(tool_name) in _ANNOTATED_TOOL_NORMS
+                and isinstance(annotation, str) and annotation.strip()):
+            return f"```{tool_name}: [{annotation.strip()}]\n{code}\n```"
         return f"```{tool_name}\n{code}\n```"
 
     def tool_calls_to_fences(self, tool_calls: list, include_messages: bool = True) -> str:
@@ -370,7 +419,13 @@ class ToolManager:
                 continue
             pname = spec['param'][0]
             args = call.get('arguments', {}) or {}
-            body = args.get(pname, '')
+            # Multi-arg tools (the file subsystem) recompose their compat body
+            # via the registry's to_fence builder; single-param tools take the
+            # main argument directly.
+            if callable(spec.get('to_fence')):
+                body = spec['to_fence'](args)
+            else:
+                body = args.get(pname, '')
             if not isinstance(body, str):
                 body = str(body)
             # Optional user-facing message, emitted as plain text BEFORE the fence
@@ -379,10 +434,9 @@ class ToolManager:
             # include_messages is False so we don't render the reply twice.
             msg = args.get('message_to_user', '') if include_messages else ''
             prefix = (msg.strip() + "\n\n") if isinstance(msg, str) and msg.strip() else ""
-            # work_environment carries an optional annotation, folded into the
+            # Annotated tools carry an optional annotation, folded into the
             # annotated fence form so the UI step title isn't a generic default.
-            primary = self._code_fence(name, body, args.get('annotation', '')) \
-                if name == 'work_environment' else f"```{name}\n{body}\n```"
+            primary = self._code_fence(name, body, args.get('annotation', ''))
             parts.append(prefix + primary)
 
             # ── Sub-tool chaining (FALLBACK path) ────────────────────────────
@@ -432,9 +486,11 @@ class ToolManager:
         """
         norm_target = self._norm_key(tool_name)
 
-        # ── work_environment: tolerant opener with optional annotation ──────
-        if norm_target == "workenvironment":
-            # ```work_environment[:] [annotation-any-decoration]\n<code>\n```
+        # ── Annotated tools: tolerant opener with optional annotation ────────
+        # work_environment + the file subsystem all take ": [label]" openers.
+        if norm_target in _ANNOTATED_TOOL_NORMS:
+            is_we = norm_target == "workenvironment"
+            # ```tool[:] [annotation-any-decoration]\n<body>\n```
             pattern_we = r'(`{3,})[ \t]*([A-Za-z][\w-]*)[ \t]*(:?)[ \t]*([^\n]*?)[ \t]*\r?\n(.*?)[ \t]*`{3,}'
             for match in re.finditer(pattern_we, text, re.DOTALL):
                 canonical, exact = self._resolve_tool_tag(match.group(2), include_legacy=True)
@@ -445,7 +501,9 @@ class ToolManager:
                     fixes.append(f"tool name '{match.group(2)}'")
                 raw = match.group(4).strip()
                 had_colon = bool(match.group(3))
-                content = match.group(5).strip()
+                content = match.group(5) if not is_we else match.group(5).strip()
+                if not is_we:
+                    content = content.strip('\n')
                 annotation = ''
                 if raw:
                     bracketed = raw.startswith('[') and raw.endswith(']')
@@ -453,14 +511,16 @@ class ToolManager:
                         annotation = _clean_annotation(raw)
                         if not bracketed:
                             fixes.append("annotation without [brackets]")
-                    elif _is_prose_annotation(raw):
+                    elif not is_we or _is_prose_annotation(raw):
                         annotation = _clean_annotation(raw)
                         fixes.append("annotation without [brackets]")
                     else:
                         # Code crammed onto the opener line — keep it as code.
                         content = (raw + '\n' + content).strip()
                         fixes.append("code on the opener line")
-                if not annotation and content:
+                # Only python bodies get the misplaced-annotation lift — a file
+                # tool's body starts with a PATH that must never be consumed.
+                if is_we and not annotation and content:
                     annotation, content, lifted = _lift_leading_annotation(content)
                     if lifted:
                         fixes.append("annotation inside the fence body")
@@ -468,7 +528,7 @@ class ToolManager:
                     self._parse_corrections.extend(fixes)
                 remaining = (text[:match.start()] + text[match.end():]).strip()
                 log.debug(
-                    f"[ToolManager._parse_fence] ✓ Matched 'work_environment' "
+                    f"[ToolManager._parse_fence] ✓ Matched '{tool_name}' "
                     f"annotation='{annotation}' | content_len={len(content)}"
                     + (f" | auto-fixed: {fixes}" if fixes else "")
                 )
@@ -561,19 +621,22 @@ class ToolManager:
         return stripped, blocks
 
     def _flush_parse_corrections(self, tool_name):
-        """Turn recorded parse auto-fixes into: a log warning, a user-visible
-        NOTICE, and (for work_environment) a one-line format reminder that
-        run_work_environment prefixes to the next observation so the model
-        learns the correct syntax mid-session."""
+        """Turn recorded parse auto-fixes into: a log warning, ONE chat NOTICE
+        per session (weak models auto-fix often — no NOTICE bombing), and (for
+        work_environment) a format reminder the engine appends to conversation
+        history as a role:system entry so the model actually learns from it."""
         if not self._parse_corrections:
             return
         details = '; '.join(dict.fromkeys(self._parse_corrections))
         self._parse_corrections = []
         log.warning(f"[ToolManager._flush_parse_corrections] Auto-corrected malformed "
                     f"'{tool_name}' call: {details}")
-        self.approval_signal.system_message.emit(
-            f"**NOTICE:** Auto-corrected a malformed `{tool_name}` call ({details}). "
-            f"The call was run; the model has been reminded of the correct format.")
+        if not self._autofix_notice_shown:
+            self._autofix_notice_shown = True
+            self.approval_signal.system_message.emit(
+                f"**NOTICE:** Auto-corrected a malformed `{tool_name}` call ({details}). "
+                f"The call was run and the model is being reminded of the correct "
+                f"format. Further auto-fixes this session will be silent (logged only).")
         if tool_name == 'work_environment':
             from systema.engine.prompts.global_instructions import FORMAT_AUTOFIX_REMINDER
             self._pending_format_reminder = FORMAT_AUTOFIX_REMINDER.format(details=details)
@@ -643,6 +706,303 @@ class ToolManager:
             log.debug("[ToolManager.parse_unload_skill] Not found")
             return None
 
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # File-editing subsystem: read_file / edit_file / write_file
+    # ─────────────────────────────────────────────────────────────────────────
+
+    _EDIT_MARKER_RE = re.compile(
+        r'<{4,}[ \t]*(?:OLD|SEARCH)[^\n]*\r?\n(.*?)\r?\n={4,}[ \t]*\r?\n(.*?)'
+        r'(?:\r?\n>{4,}[ \t]*(?:NEW|REPLACE)[^\n]*|\Z)',
+        re.DOTALL)
+    _OPT_LINE_RE = re.compile(r'^[ \t]*(flags|lines)[ \t]*:[ \t]*(\S[^\n]*?)[ \t]*$',
+                              re.IGNORECASE)
+
+    def _split_file_body(self, content, annotation, consume_options=True):
+        """Common body head parsing for the file tools: line 1 = path, then
+        optional 'flags:'/'lines:' option lines, then the payload. A path the
+        model misplaced onto the OPENER line (instead of an annotation) is
+        recovered."""
+        lines = content.split('\n')
+        # drop leading blank lines
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        path = lines.pop(0).strip() if lines else ''
+        if not _looks_like_path(path) and _looks_like_path(annotation):
+            # ```read_file: D:\proj\file.py  — opener carried the PATH
+            if path:
+                lines.insert(0, path)
+            path = annotation.strip()
+            annotation = ''
+        opts = {}
+        while consume_options and lines:
+            m = self._OPT_LINE_RE.match(lines[0])
+            if not m:
+                break
+            opts[m.group(1).lower()] = m.group(2).strip()
+            lines.pop(0)
+        return path, annotation, opts, '\n'.join(lines)
+
+    @staticmethod
+    def _parse_line_range(raw):
+        """'40-160' / '40:160' / '40' -> (40, 160) or (40, None)."""
+        m = re.match(r'^(\d+)[ \t]*[-:][ \t]*(\d+)$', str(raw or '').strip())
+        if m:
+            return int(m.group(1)), int(m.group(2))
+        m = re.match(r'^(\d+)$', str(raw or '').strip())
+        if m:
+            return int(m.group(1)), None
+        return None, None
+
+    def parse_read_file(self, text):
+        """Returns ({'path','start','count','annotation'}, remaining) or None."""
+        result = self._parse_fence(text, 'read_file', record=True)
+        if not result:
+            return None
+        content, remaining, annotation = result
+        path, annotation, opts, _rest = self._split_file_body(content, annotation)
+        start, end = self._parse_line_range(opts.get('lines'))
+        spec = {'path': path, 'annotation': annotation,
+                'start': start or 1,
+                'count': (end - (start or 1) + 1) if (start and end) else 200}
+        self.last_work_annotation = annotation or None
+        self._flush_parse_corrections('read_file')
+        log.info(f"[ToolManager.parse_read_file] ✓ path='{path}' | lines={opts.get('lines')}")
+        return spec, remaining
+
+    def parse_edit_file(self, text):
+        """Returns ({'path','old','new','replace_all','start','end','annotation',
+        'error'}, remaining) or None."""
+        result = self._parse_fence(text, 'edit_file', record=True)
+        if not result:
+            return None
+        content, remaining, annotation = result
+        path, annotation, opts, payload = self._split_file_body(content, annotation)
+        spec = {'path': path, 'annotation': annotation, 'old': None, 'new': None,
+                'replace_all': 'all' in (opts.get('flags', '').lower()),
+                'start': None, 'end': None, 'error': None}
+        m = self._EDIT_MARKER_RE.search(payload)
+        if m:
+            spec['old'], spec['new'] = m.group(1), m.group(2)
+        elif opts.get('lines'):
+            spec['start'], spec['end'] = self._parse_line_range(opts['lines'])
+            if spec['end'] is None:
+                spec['end'] = spec['start']
+            spec['new'] = payload
+        else:
+            spec['error'] = ("edit_file needs an OLD/NEW marker block "
+                             "(<<<<<<< OLD / ======= / >>>>>>> NEW) or a "
+                             "'lines: A-B' range plus the new text")
+        self.last_work_annotation = annotation or None
+        self._flush_parse_corrections('edit_file')
+        log.info(f"[ToolManager.parse_edit_file] ✓ path='{path}' | "
+                 f"mode={'range' if spec['start'] else 'anchor'} | err={spec['error']}")
+        return spec, remaining
+
+    def parse_write_file(self, text):
+        """Returns ({'path','content','annotation'}, remaining) or None.
+        EVERYTHING after the path line is content, verbatim."""
+        result = self._parse_fence(text, 'write_file', record=True)
+        if not result:
+            return None
+        content, remaining, annotation = result
+        path, annotation, _opts, payload = self._split_file_body(
+            content, annotation, consume_options=False)
+        spec = {'path': path, 'annotation': annotation, 'content': payload}
+        self.last_work_annotation = annotation or None
+        self._flush_parse_corrections('write_file')
+        log.info(f"[ToolManager.parse_write_file] ✓ path='{path}' | "
+                 f"content_len={len(payload)}")
+        return spec, remaining
+
+    def _emit_file_op_card(self, tool, path, added=None, removed=None,
+                           detail="", created=False, read_range=""):
+        """Structured file-op UI event -> chat card (thread-safe signal)."""
+        try:
+            from systema.execution import file_tools as ft
+            self.approval_signal.file_op.emit({
+                'tool': tool,
+                'path': str(path),
+                'display': ft.short_display(path),
+                'added': added, 'removed': removed,
+                'created': created, 'read_range': read_range,
+                'detail': detail,
+            })
+        except Exception as e:
+            log.debug(f"[ToolManager._emit_file_op_card] skipped: {e}")
+
+    def _session_id(self):
+        try:
+            eng = self.ai_engine
+            return getattr(eng, 'current_session_id', '') or ''
+        except Exception:
+            return ''
+
+    def _journal_settings(self):
+        try:
+            s = self.settings_callback() if self.settings_callback else {}
+        except Exception:
+            s = {}
+        return (s.get('file_history_enabled', True),
+                s.get('file_history_git', False))
+
+    def run_read_file(self, spec):
+        """Read-only — never gated. Returns the observation for the model."""
+        from systema.execution import file_tools as ft
+        if not spec.get('path'):
+            return "ERROR:\nread_file needs a file path on the first fence line."
+        obs = ft.read_file(spec['path'], spec.get('start', 1), spec.get('count', 200))
+        if not obs.startswith("ERROR"):
+            shown = obs.splitlines()[0].split('|')[1].strip() if '|' in obs.splitlines()[0] else ''
+            self._emit_file_op_card('read_file', ft.resolve_path(spec['path']),
+                                    read_range=shown, detail=obs)
+        return obs
+
+    def run_edit_file(self, spec):
+        """Anchor / range edit with approval gate + journal. Returns observation."""
+        from systema.execution import file_tools as ft
+        if spec.get('error'):
+            return "ERROR:\n" + spec['error']
+        if not spec.get('path'):
+            return "ERROR:\nedit_file needs a file path on the first fence line."
+        if spec.get('old') is not None:
+            new_content, err, stats = ft.prepare_edit(
+                spec['path'], spec['old'], spec['new'] or '',
+                replace_all=spec.get('replace_all', False))
+        else:
+            new_content, err, stats = ft.prepare_edit_lines(
+                spec['path'], spec['start'], spec['end'], spec['new'] or '')
+        if err:
+            return "ERROR:\n" + err
+        path = ft.resolve_path(spec['path'])
+        old_content = ft.read_current(path)
+        approved, final_content, reason = self._check_file_op_approval(
+            path, old_content, new_content, 'edit_file')
+        if not approved:
+            msg = "File edit rejected by user" if not reason else reason
+            return "ERROR:\n" + msg
+        journal_on, git_on = self._journal_settings()
+        jid = file_journal.record(path, 'edit_file', self._session_id()) if journal_on else None
+        ok, _existed, werr = ft.apply_write(path, final_content)
+        if not ok:
+            return f"ERROR:\ncould not write {path}: {werr}"
+        if git_on:
+            file_journal.shadow_commit(path, 'edit_file')
+        added, removed = ft.diff_stats(old_content, final_content)
+        self._emit_file_op_card('edit_file', path, added=added, removed=removed,
+                                detail=self._op_diff_text(old_content, final_content))
+        self.last_file_op_journal_id = jid
+        return (f"EDITED {path} | +{added} -{removed} lines"
+                f" | verify with read_file if the change was delicate")
+
+    def run_write_file(self, spec):
+        """Create/overwrite with approval gate + journal. Returns observation."""
+        from systema.execution import file_tools as ft
+        if not spec.get('path'):
+            return "ERROR:\nwrite_file needs a file path on the first fence line."
+        path = ft.resolve_path(spec['path'])
+        old_content = ft.read_current(path)
+        new_content = spec.get('content', '')
+        approved, final_content, reason = self._check_file_op_approval(
+            path, old_content, new_content, 'write_file')
+        if not approved:
+            msg = "File write rejected by user" if not reason else reason
+            return "ERROR:\n" + msg
+        journal_on, git_on = self._journal_settings()
+        jid = file_journal.record(path, 'write_file', self._session_id()) if journal_on else None
+        ok, existed, werr = ft.apply_write(path, final_content)
+        if not ok:
+            return f"ERROR:\ncould not write {path}: {werr}"
+        if git_on:
+            file_journal.shadow_commit(path, 'write_file')
+        added, removed = ft.diff_stats(old_content, final_content)
+        self._emit_file_op_card('write_file', path, added=added, removed=removed,
+                                created=not existed,
+                                detail=self._op_diff_text(old_content, final_content))
+        self.last_file_op_journal_id = jid
+        verb = "CREATED" if not existed else "OVERWROTE"
+        return f"{verb} {path} | +{added} -{removed} lines"
+
+    @staticmethod
+    def _op_diff_text(old, new, limit=400):
+        """Unified diff for the card's expandable body (capped)."""
+        import difflib
+        lines = list(difflib.unified_diff(old.splitlines(), new.splitlines(),
+                                          lineterm='', n=2))[2:]
+        if len(lines) > limit:
+            lines = lines[:limit] + [f"... ({len(lines) - limit} more diff lines)"]
+        return "\n".join(lines)
+
+    def _check_file_op_approval(self, path, old_text, new_text, tool):
+        """The supervised-execution ladder for a FILE op (same order as
+        _check_supervised_execution, with a synthesized file_create/file_edit
+        finding and the per-hunk diff approval dialog).
+
+        Returns (approved, final_new_text, reject_reason)."""
+        if self.bypass_security:
+            self._audit_decision(f"{tool}: {path}", tool, 'auto', 'task-bypass')
+            return True, new_text, ''
+        try:
+            settings = self.settings_callback() if self.settings_callback else {}
+        except Exception:
+            settings = {}
+        supervised = (self.supervised_execution
+                      if self.supervised_execution is not None
+                      else settings.get('supervised_execution', True))
+        if not supervised:
+            self._audit_decision(f"{tool}: {path}", tool, 'auto', 'unsupervised')
+            return True, new_text, ''
+        try:
+            from systema.security import code_guard as guard
+            category = guard.CAT_FILE_EDIT if old_text else guard.CAT_FILE_CREATE
+            finding = guard.Finding(category=category, severity=guard.SEV_CAUTION,
+                                    line=0, snippet=str(path),
+                                    note=f"{tool} via the file subsystem")
+            engine = guard.PolicyEngine(settings)
+            decision, cats = engine.decide([finding])
+            if decision == guard.POLICY_DENY:
+                self._audit_decision(f"{tool}: {path}", tool, 'denied', 'policy')
+                self.approval_signal.system_message.emit(
+                    f"Blocked by your security policy ({category}). "
+                    "Adjust it in Settings > Security to allow this.")
+                return False, new_text, f"blocked by security policy ({category})"
+            _sess = getattr(self, 'session_allowed_categories', None) or set()
+            if category in _sess or decision == guard.POLICY_ALLOW:
+                self._audit_decision(f"{tool}: {path}", tool, 'auto',
+                                     'session-allow' if category in _sess else 'policy')
+                return True, new_text, ''
+            self._pending_scan_findings = [finding]
+        except Exception as e:
+            log.error(f"[ToolManager._check_file_op_approval] security layer error "
+                      f"(falling back to prompt): {type(e).__name__}: {e}")
+
+        # Prompt: the approval dialog opens in file-edit mode (per-hunk diff).
+        self._last_reject_reason = ""
+        try:
+            approval_event = threading.Event()
+            result = {'approved': False, 'modified': new_text}
+
+            def callback(approved, modified_code):
+                result['approved'] = approved
+                result['modified'] = modified_code
+                approval_event.set()
+
+            self._pending_file_edit = {'path': str(path), 'old': old_text,
+                                       'new': new_text, 'tool': tool}
+            self.approval_signal.request_approval.emit(new_text, tool, callback)
+            if not approval_event.wait(timeout=300):
+                self._audit_decision(f"{tool}: {path}", tool, 'rejected', 'timeout')
+                return False, new_text, 'approval timed out'
+            self._audit_decision(f"{tool}: {path}", tool,
+                                 'approved' if result['approved'] else 'rejected',
+                                 'user')
+            reason = '' if result['approved'] else (self._last_reject_reason or '')
+            if reason:
+                reason = "File change rejected by user\nREASON: " + reason
+            return result['approved'], result['modified'], reason
+        except Exception as e:
+            log.error(f"[ToolManager._check_file_op_approval] dialog error: {e}")
+            return True, new_text, ''
 
     # ─────────────────────────────────────────────────────────────────────────
     # Single-exec policy enforcement
@@ -938,8 +1298,13 @@ class ToolManager:
                     "execution_type": execution_type
                 })
 
-            # Show dialog manually so we keep a ref for Android to close it
-            dialog = CodeApprovalDialog(code, execution_type, self.ai_engine)
+            # Show dialog manually so we keep a ref for Android to close it.
+            # A pending file-edit payload flips the dialog into file-edit mode
+            # (per-hunk diff of the proposed change instead of raw code).
+            _file_edit = self._pending_file_edit
+            self._pending_file_edit = None
+            dialog = CodeApprovalDialog(code, execution_type, self.ai_engine,
+                                        file_edit=_file_edit)
             self._active_approval_dialog = dialog
             dialog.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
             ctrl = getattr(self.ai_engine, 'controller', None)
@@ -1148,12 +1513,6 @@ class ToolManager:
         log.info(f"[ToolManager.run_work_environment] ── Executing code | "
                  f"code_len={len(code)} | preview='{code_preview}' ──")
 
-        # Format reminder queued by _flush_parse_corrections when this call's
-        # fence was auto-corrected — prefixed to the observation so the model
-        # sees the correct syntax alongside its result.
-        _format_reminder = self._pending_format_reminder
-        self._pending_format_reminder = None
-
         # NOTE: the explicit `exit` sentinel was removed — work mode now ends when
         # the AI replies with no work_environment call (auto-exit, handled in
         # AIEngine). A bare `exit`/empty work-call is folded into that finish
@@ -1244,8 +1603,6 @@ class ToolManager:
             log.debug("[ToolManager.run_work_environment] No output produced — sending recommendation")
 
         combined = "\n\n".join(output_parts)
-        if _format_reminder:
-            combined = _format_reminder + "\n\n" + combined
         log.info(f"[ToolManager.run_work_environment] ✓ Work environment output ready | "
                  f"parts={len(output_parts)} | total_len={len(combined)}")
 
