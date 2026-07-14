@@ -15,7 +15,7 @@ read whichever areas you use.
 | [Getting Started](getting-started.md) | Install, first run, configure a provider, run the app. |
 | [Providers](providers.md) | The modular provider system: the `chat` / `chat_image` / `chat_tools` / `speak` contracts, included scripts, and how to add your own (or have an AI write one). |
 | [Tool Calling](tool-calling.md) | Native vs Compatibility modes, the native contract, and `native_adapters` (openai / anthropic / gemini dialects). |
-| [Work Mode & Code Execution](work-mode.md) | How the assistant writes and runs Python: work mode, direct execution, the persistent interpreter, `#@FILE` literal blocks, and finishing. |
+| [The Python Interpreter & Code Execution](python-interpreter.md) | How the assistant writes and runs Python: interpreter mode, direct execution, the persistent interpreter, `#@FILE` literal blocks, and finishing. |
 | [Security & Guarded Execution](security.md) | Supervised Execution, the per-category policy engine, presets, the code-approval dialog (session / persistent allow, reason box), and the audit log. |
 | [Scheduled Tasks & Triggers](tasks.md) | Background task agents, the `fire_ping()` script trigger, hooking the assistant to any interface or online signal, permissions, and messaging the main chat. |
 | [Software Updates](updates.md) | In-app self-update from GitHub: diff review, 3-way merge, dependency diff, backup and revert. |
@@ -28,7 +28,7 @@ read whichever areas you use.
 ```
 You  ─▶  Chat / Voice / Android  ─▶  AI Engine  ─▶  LLM provider (your script)
                                           │
-                                          ├─ Tools: work mode, execute code,
+                                          ├─ Tools: the Python interpreter,
                                           │         load/unload skill, name session
                                           │
                                           ▼

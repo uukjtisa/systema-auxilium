@@ -113,8 +113,8 @@ class ApprovalNotifCard(QDialog):
                             " background: transparent;")
         lay.addWidget(title)
 
-        where = ("work environment" if getattr(self._dlg, "execution_type", "")
-                 == "work_environment" else "direct execution")
+        where = ("python interpreter" if getattr(self._dlg, "execution_type", "")
+                 == "python_interpreter" else "direct execution")
         sub = QLabel(f"The AI wants to run code ({where}). "
                      "Expand to review the code itself.")
         sub.setWordWrap(True)

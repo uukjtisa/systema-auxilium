@@ -1414,6 +1414,20 @@ class SettingsWindow(BaseWindow):
         # ════════════════════════════════════════════════════════════════════
         sec_scroll, sec_lay = _make_scroll_tab()
 
+        # ── Master override: bypass ALL security (auto-approve everything) ───
+        self.bypass_security_checkbox = QCheckBox(
+            "Bypass all security — auto-approve every operation (DANGEROUS)")
+        self.bypass_security_checkbox.setStyleSheet(_CHECK)
+        self.bypass_security_checkbox.setToolTip(
+            "Overrides the entire policy below: code runs and files are written, "
+            "edited, or deleted with NO prompts and NO per-category rules.\n"
+            "Only enable if you fully trust the AI. Everything below is disabled "
+            "while this is on.")
+        sec_lay.addWidget(self.bypass_security_checkbox)
+        sec_lay.addWidget(_info_box(
+            "While this is ON, Supervised Execution and every per-category rule "
+            "below are ignored — turn it off to restore your policy."))
+
         sec_group = QGroupBox("Code Execution Safety")
         sec_group.setStyleSheet(_GROUP)
         sg_lay = QVBoxLayout(sec_group)
@@ -1452,21 +1466,21 @@ class SettingsWindow(BaseWindow):
         self._preset_combo = QComboBox()
         self._preset_combo.setStyleSheet(_COMBO)
         _preset_row.addWidget(self._preset_combo, 1)
-        _preset_apply = QPushButton("Apply")
-        _preset_apply.setStyleSheet(_BTN)
-        _preset_apply.setToolTip("Load the selected preset into the rows below.")
-        _preset_apply.clicked.connect(self._apply_policy_preset)
-        _preset_row.addWidget(_preset_apply)
-        _preset_save = QPushButton("Save as…")
-        _preset_save.setStyleSheet(_BTN)
-        _preset_save.setToolTip("Save the current rows as a new named preset.")
-        _preset_save.clicked.connect(self._save_policy_preset)
-        _preset_row.addWidget(_preset_save)
-        _preset_del = QPushButton("Delete")
-        _preset_del.setStyleSheet(_BTN)
-        _preset_del.setToolTip("Delete the selected custom preset (built-ins can't be removed).")
-        _preset_del.clicked.connect(self._delete_policy_preset)
-        _preset_row.addWidget(_preset_del)
+        self._preset_apply = QPushButton("Apply")
+        self._preset_apply.setStyleSheet(_BTN)
+        self._preset_apply.setToolTip("Load the selected preset into the rows below.")
+        self._preset_apply.clicked.connect(self._apply_policy_preset)
+        _preset_row.addWidget(self._preset_apply)
+        self._preset_save = QPushButton("Save as…")
+        self._preset_save.setStyleSheet(_BTN)
+        self._preset_save.setToolTip("Save the current rows as a new named preset.")
+        self._preset_save.clicked.connect(self._save_policy_preset)
+        _preset_row.addWidget(self._preset_save)
+        self._preset_del = QPushButton("Delete")
+        self._preset_del.setStyleSheet(_BTN)
+        self._preset_del.setToolTip("Delete the selected custom preset (built-ins can't be removed).")
+        self._preset_del.clicked.connect(self._delete_policy_preset)
+        _preset_row.addWidget(self._preset_del)
         pol_lay.addLayout(_preset_row)
 
         # ── Per-category rules, grouped so the finer list stays readable ─────
@@ -1502,6 +1516,18 @@ class SettingsWindow(BaseWindow):
             "reviewed.\nTick this to be prompted for EVERY code execution, no matter "
             "how trivial.")
         pol_lay.addWidget(self.review_safe_code_checkbox)
+
+        # Bypass lockout: while "Bypass all security" is on, the whole policy is
+        # overridden, so disable every control the user would otherwise tune.
+        def _update_bypass_lockout():
+            locked = self.bypass_security_checkbox.isChecked()
+            for _w in (self.supervised_checkbox, self.review_safe_code_checkbox,
+                       self._preset_combo, self._preset_apply, self._preset_save,
+                       self._preset_del, *self._policy_combos.values()):
+                _w.setEnabled(not locked)
+        self.bypass_security_checkbox.stateChanged.connect(
+            lambda _s: _update_bypass_lockout())
+        self._update_bypass_lockout = _update_bypass_lockout
 
         _forget_btn = QPushButton("Clear this session's allow-list")
         _forget_btn.setStyleSheet(_BTN)
@@ -1697,9 +1723,7 @@ class SettingsWindow(BaseWindow):
             "data/file_history/shadow — full change history beyond the last undo point.")
         fh_lay.addWidget(self.file_history_git_checkbox)
         prune_row = QHBoxLayout()
-        prune_lbl = QLabel("Prune undo history after")
-        prune_lbl.setStyleSheet(_LABEL)
-        prune_row.addWidget(prune_lbl)
+        prune_row.addWidget(_label("Prune undo history after"))
         self.file_history_days_combo = QComboBox()
         for d in (7, 14, 30, 90):
             self.file_history_days_combo.addItem(f"{d} days", d)
@@ -1707,7 +1731,7 @@ class SettingsWindow(BaseWindow):
         prune_row.addWidget(self.file_history_days_combo)
         prune_row.addStretch()
         self.view_file_history_btn = QPushButton("View file changes…")
-        self.view_file_history_btn.setStyleSheet(_BUTTON)
+        self.view_file_history_btn.setStyleSheet(_BTN)
         self.view_file_history_btn.clicked.connect(self._open_file_history)
         prune_row.addWidget(self.view_file_history_btn)
         fh_lay.addLayout(prune_row)
@@ -2408,6 +2432,8 @@ class SettingsWindow(BaseWindow):
         # Load supervised execution mode
         supervised_mode = self.controller.settings.get('supervised_execution', True)  # Default ON
         self.supervised_checkbox.setChecked(supervised_mode)
+        self.bypass_security_checkbox.setChecked(
+            self.controller.settings.get('security_bypass_all', False))
 
         # Load execution policy + audit view
         try:
@@ -2420,6 +2446,11 @@ class SettingsWindow(BaseWindow):
                 self.controller.settings.get('security_review_safe_code', False))
             self._refresh_preset_combo()
             self._refresh_audit_view()
+        except Exception:
+            pass
+        # Apply the bypass lockout to reflect the loaded state.
+        try:
+            self._update_bypass_lockout()
         except Exception:
             pass
 
@@ -2898,6 +2929,8 @@ class SettingsWindow(BaseWindow):
         # Save supervised execution mode
         supervised_mode = self.supervised_checkbox.isChecked()
         self.controller.settings['supervised_execution'] = supervised_mode
+        self.controller.settings['security_bypass_all'] = \
+            self.bypass_security_checkbox.isChecked()
 
         # Save execution policy
         try:

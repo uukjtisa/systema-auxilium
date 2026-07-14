@@ -1,18 +1,24 @@
 ---
 name: pynavigator
-description: >
-  Context-efficient Python code navigation and editing for agentic coding tasks.
+description: map and analyze a Python codebase's structure, symbols, imports, and call graph
 ---
 
 # PyNavigator
 
-A surgical code navigation, editing, and intelligence toolkit for Python.
-Gives You precise line-referenced views into code without loading whole
-files, safe in-place editing with automatic backups, and a persistent project
-index that understands the full symbol graph and import topology.
+A code-intelligence toolkit for Python. Its job is the **navigation map**: the
+project's symbol graph, import topology, call hierarchy, and structural outline —
+the questions plain file reading can't answer cheaply.
 
-**The golden rule:** Never read an entire Python file when
-`pynav.py` can give you exactly the slice you need.
+> **Reading, editing, writing, and text search are NOT this skill's job.** YOU
+> already have first-class tools for those — use them directly:
+> - **`read_file`** — read a file (or a line window) as numbered lines.
+> - **`edit_file`** — surgical anchor / line-range edits.
+> - **`write_file`** — create or fully rewrite a file.
+> - **`grep`** — ripgrep-style regex search across the tree.
+>
+> Reach for PyNavigator when you need to understand *structure and impact*
+> (what exists, what imports what, who calls what), then use the native tools to
+> actually read and change the code.
 
 ---
 
@@ -28,182 +34,88 @@ scripts/
 
 All commands run through:
 
-```bash
-python /path/to/scripts/pynav.py <command> [args...]
-python /path/to/scripts/pynav.py help      # full command list
+```python
+import subprocess, sys
+script = rf"{skills_path}\pynavigator\scripts\pynav.py"
+result = subprocess.run([sys.executable, script, "<command>", "<args...>"],
+                        capture_output=True, text=True, encoding="utf-8")
+print(result.stdout)
+if result.returncode != 0:
+    print("SKILL ERROR:", result.stderr)
 ```
+
+`python pynav.py help` lists every command.
 
 ---
 
 ## Recommended Workflow
 
-### First time on any new codebase (mandatory)
-
+### First time on a codebase
 ```bash
-python pynav.py index <root>         # ← the "git init" moment — do this first
-python pynav.py symbol_map <root>    # ← understand the whole project instantly
-python pynav.py list_imports <root>  # ← see all dependencies classified
+python pynav.py index <root>         # build the index — do this first
+python pynav.py symbol_map <root>    # whole project structure in one shot
+python pynav.py list_imports <root>  # every dependency, classified
 ```
 
-### Every coding session after that
-
-1. **Orient** — `symbol_map` or `outline <file>` to see structure
-2. **Understand imports** — `list_imports` or `get_dependencies` for dep awareness
-3. **Locate** — `goto_declaration`, `find_function`, `find_class`
-4. **Read surgically** — `read_function`, `read_method`, `get_signature`
-5. **Understand impact** — `who_imports`, `dependency_tree`, `call_hierarchy`
-6. **Preview before editing** — `diff_preview` for any non-trivial change
-7. **Edit** — `edit_lines`, `insert_after`, `insert_before`, `delete_block`
-8. **Verify** — `validate <file>` after every edit
-9. **Check for cleanup** — `dead_code` when refactoring
-10. **Audit deps** — `audit_deps` when touching requirements.txt
+### Then, to work on a change
+1. **Orient** — `symbol_map` / `outline <file>` for structure.
+2. **Locate** — `goto_declaration`, `find_function`, `find_class`, `find_method`.
+3. **Assess impact** — `who_imports`, `dependency_tree`, `call_hierarchy`, `find_references`.
+4. **Read the code** — with **`read_file`** (native), guided by the line numbers PyNavigator reported.
+5. **Change the code** — with **`edit_file`** / **`write_file`** (native).
+6. **Search for text** — with **`grep`** (native).
+7. **Sanity-check** — `dead_code` when refactoring, `audit_deps` when touching requirements.
 
 ---
 
-## Commands Reference
+## Commands (structure & intelligence only)
 
-### READ / NAVIGATE
-
+### STRUCTURE / LOCATE
 | Command | Args | Purpose |
 |---|---|---|
-| `outline` | `<file>` | File skeleton: all classes + methods + functions, no bodies |
+| `outline` | `<file>` | File skeleton: classes + methods + functions, no bodies |
 | `find_function` | `<file> <n>` | Location (L start–end) of a function |
 | `find_class` | `<file> <n>` | Location of a class |
 | `find_method` | `<file> <class> <method>` | Location of a method |
-| `read_function` | `<file> <n>` | Full function body with │ line numbers |
-| `read_class` | `<file> <n>` | Full class body with │ line numbers |
-| `read_method` | `<file> <class> <method>` | Full method body with │ line numbers |
-| `read_lines` | `<file> <start> <end>` | Arbitrary line range with │ numbers |
-| `get_signature` | `<file> <n>` | def line + docstring only (smallest possible read) |
-| `get_context` | `<file> <line> [n=10]` | N lines around a target line |
+| `get_signature` | `<file> <n>` | def line + docstring only (interface, not body) |
 
-All read outputs include │ line numbers for precise follow-up edits.
+> To read the located code, call **`read_file`** with the reported line range.
 
----
-
-### SEARCH / ANALYSIS
-
+### SYMBOL GRAPH / IMPACT
 | Command | Args | Purpose |
 |---|---|---|
-| `search` | `<root> <pattern>` | Regex search across all .py files |
-| `find_usages` | `<root> <n>` | All occurrences of identifier |
-| `find_references` | `<root> <n>` | Import & usage references cross-file |
-| `goto_declaration` | `<root> <n>` | Where name is defined (def/class/assign) |
-| `call_hierarchy` | `<file> <target>` | All functions in file that call target |
-| `find_todos` | `<root>` | All TODO / FIXME / HACK / BUG / NOTE |
-
----
-
-### EDIT
-
-> ⚠️ All edit commands auto-backup before writing. Claude will always be told
-> the backup path. No edit is ever silent.
-
-| Command | Args | Purpose |
-|---|---|---|
-| `diff_preview` | `<file> <start> <end> <new_content>` | Preview edit without applying |
-| `edit_lines` | `<file> <start> <end> <new_content>` | Replace lines (1-indexed, inclusive) |
-| `insert_after` | `<file> <target_name> <content>` | Insert after named block's last line |
-| `insert_before` | `<file> <target_name> <content>` | Insert before named block's first line |
-| `delete_block` | `<file> <n>` | Remove a named function/class entirely |
-| `add_import` | `<file> <import_stmt>` | Safely add import (skips if already present) |
-| `refactor` | `<root> <old_name> <new_name>` | Rename symbol (identifier) across whole project |
-| `rename_file` | `<root> <old_module> <new_module>` | Rename a .py file + rewrite all imports across project |
-
-> **`refactor` vs `rename_file`:** `refactor` is for symbols (function names, class names, variables). `rename_file` is for renaming a `.py` file on disk — it takes dotted module paths (e.g. `core.session_manager`), moves the file, and rewrites all `import` / `from … import` references across the whole project. Both auto-backup every touched file.
-
----
-
-### METRICS
-
-| Command | Args | Purpose |
-|---|---|---|
-| `line_count` | `<file>` | Lines in one file — total, code, comments, blank with bar chart |
-| `line_count_project` | `<root>` | Full project table sorted by size, code/comment/blank columns |
-
----
-
-### SAFETY
-
-| Command | Args | Purpose |
-|---|---|---|
-| `validate` | `<file>` | Syntax-check without executing |
-
-**Always run `validate` after any edit.**
-
----
-
-### BACKUP MANAGEMENT
-
-| Command | Args | Purpose |
-|---|---|---|
-| `backup_snapshot` | `<file> <label>` | Manually name a snapshot for human recovery |
-| `list_backups` | `<root>` | Show all sessions and their snapshots |
-| `new_session` | `<root>` | Start a fresh session folder |
-
-Backups are stored at `.pynavigator/backups/session_YYYY-MM-DD_HHhMM/` as
-named snapshots (`auth_before_edit_lines_L42-46.py`) plus a `changes.log`
-audit trail. Three layers: session folder (A) + named snapshots (D) + diff
-log (C). Stacks automatically: `_1`, `_2`, etc.
-
----
-
-### INDEX  ★
-
-> The index is PyNavigator's brain. Run `index <root>` once at the start
-> of every session on a new codebase. All search/goto commands auto-trigger
-> it if missing.
-
-| Command | Args | Purpose |
-|---|---|---|
-| `index` | `<root>` | **The git-init moment.** Full project crawl → `.pynavigator/index.json` |
-| `index_status` | `<root>` | Health check: staleness, file count, symbol count, last indexed |
-| `symbol_map` | `<root>` | **Full codebase in one shot.** Every file with classified imports, classes, functions, signatures — instant codebase awareness without reading source |
+| `goto_declaration` | `<root> <n>` | Where a name is defined (def/class/assign) |
+| `find_references` | `<root> <n>` | Import & usage references across files |
+| `call_hierarchy` | `<file> <target>` | Functions in a file that call target |
 | `who_imports` | `<root> <module>` | Which files import a given module |
 | `dependency_tree` | `<root> <file>` | Full recursive import chain for a file |
-| `dead_code` | `<root>` | Symbols defined but never called — cleanup opportunities |
+| `dead_code` | `<root>` | Symbols defined but never called (hints, not facts) |
 
-How the index stays current: edits patch the edited file + all callers
-instantly on the main thread. Stale files (detected by mtime) are re-indexed
-in a background daemon thread — commands never block. Atomic writes (temp →
-rename) mean the index is never corrupt mid-update.
-
----
-
-### IMPORT AWARENESS  ★
-
-> These commands answer the question `symbol_map` previously couldn't:
-> *what does this project actually depend on, and is it correct?*
-
+### INDEX / IMPORTS
 | Command | Args | Purpose |
 |---|---|---|
-| `list_imports` | `<root>` | **Full import picture.** Every module classified as `stdlib` / `third-party` / `local`, with frequency bar and which files use it |
-| `get_dependencies` | `<root>` | Third-party packages only — what belongs in `requirements.txt`, sorted by usage frequency |
-| `audit_deps` | `<root>` | Cross-reference detected imports against `requirements.txt`. Flags: missing from requirements, and in requirements but never imported |
+| `index` | `<root>` | Build/refresh `.pynavigator/index.json` (the brain) |
+| `index_status` | `<root>` | Staleness, file/symbol counts, last indexed |
+| `symbol_map` | `<root>` | Every file with classified imports, classes, functions, signatures |
+| `list_imports` | `<root>` | Every module classified stdlib / third-party / local, with usage |
+| `get_dependencies` | `<root>` | Third-party packages only — what belongs in requirements.txt |
+| `audit_deps` | `<root>` | Cross-check detected imports against requirements.txt |
 
-#### Import classification
-
-- **`third-party`** — packages requiring `pip install` (PyQt6, requests, numpy…)
-- **`local`** — `.py` files inside the project itself
-- **`stdlib`** — Python's standard library (os, threading, json…)
-
-Uses `sys.stdlib_module_names` on Python 3.10+ for perfect accuracy, with a
-comprehensive hardcoded fallback for older versions.
-
-`audit_deps` catches real mismatches: `PIL` vs `pillow`, `speech_recognition`
-vs `SpeechRecognition`, `webrtcvad` vs `webrtcvad_wheels`, and packages in
-requirements.txt that are never actually imported (dead dependencies).
+### METRICS / SAFETY
+| Command | Args | Purpose |
+|---|---|---|
+| `line_count` | `<file>` | Lines in one file (total/code/comment/blank) |
+| `line_count_project` | `<root>` | Project table sorted by size |
+| `validate` | `<file>` | Syntax-check a file without executing it |
 
 ---
 
 ## Agent Tips
 
-- `symbol_map` + `list_imports` at session start = complete situational awareness, zero source files read
-- `get_signature` before `read_function` when you only need the interface, not the body
-- `call_hierarchy` before deleting a function — confirm nothing calls it first
-- After `refactor`, run `find_usages <root> <old_name>` to confirm no stragglers
-- Use `rename_file` (not `refactor`) when renaming a `.py` file — it moves the file AND fixes all imports
-- After `rename_file`, run `search <root> <old_module_name>` to catch any string literals that reference the old name
-- `line_count_project` before refactoring — know which files are biggest and most worth splitting
-- `audit_deps` before any dependency change — know what's real vs stale
-- `dead_code` has false positives for polymorphic calls (`action.execute()`) — treat as hints, not facts
+- `symbol_map` + `list_imports` at session start = full situational awareness, zero source files read.
+- `get_signature` before reading a whole function when you only need the interface.
+- `call_hierarchy` / `find_references` before deleting or renaming — confirm impact first.
+- Use `goto_declaration` to jump to a definition, then **`read_file`** at that line range.
+- For text/regex search use **`grep`**, not a PyNavigator command.
+- For any edit use **`edit_file`** / **`write_file`**; run `validate <file>` afterward.
+- `audit_deps` before any dependency change; `dead_code` is a hint list (false positives on polymorphic calls).

@@ -110,20 +110,20 @@ class ManualResponseWindow(BaseWindow):
     Parameters
     ----------
     context       : str   — the user's last message (shown as context)
-    work_mode     : bool  — whether the AI was in work mode
-    work_output   : str   — the system tool output (only used if work_mode=True)
+    is_working    : bool  — whether the AI was in work mode
+    work_output   : str   — the system tool output (only used if is_working=True)
     result_holder : list  — single-element list; window puts the response here
     done_event    : threading.Event — released when the user submits / cancels
     """
 
-    def __init__(self, context: str, work_mode: bool,
+    def __init__(self, context: str, is_working: bool,
                  work_output: str, result_holder: list,
                  done_event: threading.Event):
         super().__init__()
         self._init_chrome_state()
 
         self._context      = context
-        self._work_mode    = work_mode
+        self._is_working   = is_working
         self._work_output  = work_output
         self._result       = result_holder
         self._done         = done_event
@@ -135,7 +135,7 @@ class ManualResponseWindow(BaseWindow):
         self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
         self.setStyleSheet(_WINDOW_SS)
 
-        if work_mode:
+        if is_working:
             self.setMinimumSize(920, 560)
             self.resize(960, 600)
         else:
@@ -191,7 +191,7 @@ class ManualResponseWindow(BaseWindow):
         h_lay.setContentsMargins(16, 0, 12, 0)
 
         # Mode tag
-        tag_text = "📋  System Message" if self._work_mode else "✏️  Manual Response"
+        tag_text = "📋  System Message" if self._is_working else "✏️  Manual Response"
         tag = QLabel(tag_text)
         tag.setStyleSheet(f"""
             QLabel {{
@@ -258,7 +258,7 @@ class ManualResponseWindow(BaseWindow):
         body_lay.addWidget(ctx_frame)
 
         # Main content area
-        if self._work_mode:
+        if self._is_working:
             body_lay.addLayout(self._build_split_layout())
         else:
             body_lay.addLayout(self._build_simple_layout())

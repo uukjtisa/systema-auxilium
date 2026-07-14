@@ -84,6 +84,16 @@ from systema import APP_ROOT as _APP_ROOT
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+class InlineStatus(QLabel):
+    """A compact status / work-mode label that lives INSIDE the input pill's
+    bottom action row (not a floating bar). It auto-hides when its text is
+    cleared, so an empty label never reserves space in the row."""
+
+    def setText(self, text):
+        super().setText(text or "")
+        self.setVisible(bool(text))
+
+
 class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
     """Modern chat window with AI conversation"""
 
@@ -960,40 +970,37 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
 
         # Install event filter on the viewport for smooth inertia scrolling (main chat)
         scroll_area.viewport().installEventFilter(self)
-        # Status label (thinking indicator)
-        self.status_label = QLabel("")
+
+        # ── Inline status + work labels ───────────────────────────────────────
+        # These live INSIDE the input pill's bottom action row (added there
+        # during input construction), so the thinking dots / "Working:" text take
+        # no extra vertical space and never push the chat. Both auto-hide when
+        # their text is cleared (InlineStatus).
+        self.status_label = InlineStatus()
         self.status_label.setObjectName("statusLabel")
         self.status_label.setStyleSheet("""
             QLabel#statusLabel {
-                color: #9AA0A6;
+                color: #C7CBD1;
                 font-style: italic;
-                font-size: 11px;
-                padding: 5px 14px;
-                background-color: #0D1117;
-                border-top: 1px solid #21262D;
+                font-size: 10px;
+                background: transparent;
+                padding: 0 4px;
             }
         """)
-        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        chat_layout.addWidget(self.status_label)
+        self.status_label.hide()
 
-        # ── Work Mode Banner ─────────────────────────────────────────────────
-        self._work_banner = QLabel("")
+        self._work_banner = InlineStatus()
         self._work_banner.setObjectName("workBanner")
-        self._work_banner.setWordWrap(True)
-        self._work_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._work_banner.setStyleSheet("""
-                    QLabel#workBanner {
-                        background-color: #1A1F2E;
-                        border-top: 1px solid #2D3A5C;
-                        border-bottom: 1px solid #2D3A5C;
-                        color: #7EB8F7;
-                        font-size: 11px;
-                        font-style: italic;
-                        padding: 6px 14px;
-                    }
-                """)
+            QLabel#workBanner {
+                color: #7EB8F7;
+                font-size: 10px;
+                font-style: italic;
+                background: transparent;
+                padding: 0 4px;
+            }
+        """)
         self._work_banner.hide()
-        chat_layout.addWidget(self._work_banner)
         # ─────────────────────────────────────────────────────────────────────
 
         # Input area
@@ -1009,10 +1016,18 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         input_layout = QVBoxLayout(input_container)
         input_layout.setContentsMargins(14, 8, 14, 12)
         input_layout.setSpacing(0)
+        # Keep the container's layout pinned to its content so an oversized
+        # overlay geometry can never distribute extra height into the pill.
+        input_layout.setSizeConstraint(QVBoxLayout.SizeConstraint.SetMinimumSize)
 
         # ── Pill-shaped input card ────────────────────────────────────────────
         combined_container = QFrame()
         combined_container.setObjectName("inputCard")
+        # Vertical Maximum: the pill may never grow TALLER than its content, even
+        # if the floating overlay is briefly given a larger rect on a snap-resize
+        # (that stretch was making the empty pill balloon and clip off the bottom).
+        combined_container.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         combined_container.setStyleSheet("""
             QFrame#inputCard {
                 background-color: #1C2128;
@@ -1133,6 +1148,11 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         self._token_refresh_timer.setInterval(2000)
         self._token_refresh_timer.timeout.connect(self._update_token_count)
         self._token_refresh_timer.start()
+
+        # Inline status + work-mode indicators (created earlier) live here, left
+        # of the stretch — the thinking dots / "Working:" text sit in the pill.
+        bottom_row_layout.addWidget(self._work_banner)
+        bottom_row_layout.addWidget(self.status_label)
 
         bottom_row_layout.addStretch()
 
@@ -1317,8 +1337,27 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         # ─────────────────────────────────────────────────────────────────────
 
         self.input_container = input_container  # stored for glass background toggle
+        self._input_card = combined_container    # pill; used to size the overlay
         self.input_container.installEventFilter(self)
-        chat_layout.addWidget(input_container)
+        # The input is a FLOATING OVERLAY over the chat area (not a layout row):
+        # the message scroll area fills the full height behind it, so the
+        # transparent gaps around the solid pill reveal the chat, not the window
+        # background/desktop. _position_input_overlay() anchors it to the bottom
+        # and keeps the message list padded so nothing hides behind it.
+        self._chat_container = chat_container
+        input_container.setParent(chat_container)
+        input_container.raise_()
+        # Re-anchor the moment the chat area actually changes size (the window's
+        # resizeEvent fires before the layout propagates the new width down to
+        # chat_container, so reading its width there is stale — this fires after).
+        chat_container.installEventFilter(self)
+        # Re-anchor the instant auto-grow changes the pill height. This is a
+        # DIRECT (non-deferred) connection fired right after setFixedHeight, so
+        # the overlay is re-measured with the already-grown geometry and stays
+        # bottom-anchored (growing upward) instead of spilling downward off the
+        # window edge while a deferred reposition waited a frame.
+        self.input_field.text_input.heightChanged.connect(self._position_input_overlay)
+        QTimer.singleShot(0, self._position_input_overlay)
 
         main_layout.addWidget(chat_container)
 
@@ -1419,7 +1458,12 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         zoom = getattr(self, 'chat_zoom', 1.0) or 1.0
         cap = int(900 * zoom)             # readable upper bound (capped)
         responsive = int(vw * 0.82)       # ~82% of the available width
-        return max(320, min(responsive, cap))
+        width = min(responsive, cap)
+        # Never exceed the actual viewport (minus a small margin) — otherwise a
+        # narrow window pushes bubbles / cards off-screen. The 320 readability
+        # floor is itself clamped to what the viewport can hold.
+        hard_max = max(200, vw - 24)
+        return max(min(320, hard_max), min(width, hard_max))
 
     def _reflow_bubbles(self):
         """Re-apply the responsive max width to every existing bubble. Cheap —
@@ -1457,6 +1501,48 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         if hasattr(self, '_session_list_overlay') and hasattr(self, '_session_list_body'):
             self._session_list_overlay.setGeometry(self._session_list_body.rect())
         self._reflow_bubbles()
+        self._position_input_overlay()
+
+    def _position_input_overlay(self):
+        """Anchor the floating input container to the bottom of the chat area,
+        full width, and pad the message list so the last message can scroll
+        clear of it. No-op until the overlay is wired up."""
+        ic = getattr(self, 'input_container', None)
+        cc = getattr(self, '_chat_container', None)
+        if ic is None or cc is None:
+            return
+        try:
+            # Force the pill's SetMinimumSize layouts to recompute before we
+            # measure, so a fresh (grown) height is used — otherwise the overlay
+            # keeps its old short rect and the grown content spills downward.
+            lay = ic.layout()
+            if lay is not None:
+                lay.activate()
+            # Compute the overlay height DETERMINISTICALLY from the pill's own
+            # content + the container margins, rather than the container's
+            # sizeHint/minimumSizeHint (which a snap-resize could inflate, letting
+            # the pill balloon and clip off the bottom edge).
+            card = getattr(self, '_input_card', None)
+            if card is not None:
+                card.layout().activate()
+                m = lay.contentsMargins() if lay is not None else None
+                pad = (m.top() + m.bottom()) if m is not None else 20
+                h = card.sizeHint().height() + pad
+            else:
+                h = max(ic.sizeHint().height(), ic.minimumSizeHint().height())
+            # Never let the top go negative (pill taller than the whole chat area).
+            top = max(0, cc.height() - h)
+            ic.setGeometry(0, top, cc.width(), h)
+            ic.raise_()
+            if hasattr(self, 'chat_layout'):
+                m = self.chat_layout.contentsMargins()
+                if m.bottom() != h + 8:
+                    self.chat_layout.setContentsMargins(m.left(), m.top(), m.right(), h + 8)
+            # keep the pinned-image strip glued just above the moved input
+            if hasattr(self, '_update_pinned_overlay'):
+                self._update_pinned_overlay()
+        except RuntimeError:
+            pass
 
     def _animate_sidebar(self, show: bool):
         """Slide the sidebar in (show=True) or out (show=False)."""
@@ -1915,8 +2001,8 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         menu.addSeparator()
 
         # Tool mode
-        tool_action = QAction("🔧 Use Work Environment", self)
-        tool_action.triggered.connect(lambda: self.set_force_mode('work_environment'))
+        tool_action = QAction("🔧 Use Python Interpreter", self)
+        tool_action.triggered.connect(lambda: self.set_force_mode('python_interpreter'))
         menu.addAction(tool_action)
 
         # Show menu below button
@@ -1927,12 +2013,12 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         """Set force mode"""
         self.force_mode = mode
 
-        if mode == 'work_environment':
+        if mode == 'python_interpreter':
             self.mode_dropdown.setText("🔧")
-            self.add_system_message("🔧 **Work Environment** - AI will enter its work environment to do some complex task.")
+            self.add_system_message("🔧 **Python Interpreter** - AI will enter its python interpreter to do some complex task.")
         else:
             self.mode_dropdown.setText("💬")
-            self.add_system_message("💬 **Normal Mode** - AI decides when to use its Work Environment")
+            self.add_system_message("💬 **Normal Mode** - AI decides when to use its Python Interpreter")
 
     def toggle_voice(self):
         """Toggle voice mode on/off"""
@@ -2055,7 +2141,7 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         elif status in ('listening', 'inactive'):
             try:
                 still_busy = (self.controller.is_processing
-                              or self.controller.ai.tool_manager.in_work_mode
+                              or self.controller.ai.tool_manager.work.is_working
                               or self.controller.voice_busy())
             except Exception:
                 still_busy = False
@@ -2368,17 +2454,17 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         """Render messages from loaded session.
 
         Work-mode chatter is hidden on reload: everything the agent 'said' while
-        inside a work_environment (between entering work mode and exiting it) is
+        inside a python_interpreter (between entering work mode and exiting it) is
         internal workspace narration, not a real reply. We keep each step's
         execution NOTE (the ui_event) and the EXIT turn's summary (the report meant
         for the user), but drop the assistant text bubbles in between."""
         try:
             import re
-            _WE_RE = re.compile(r'```[ \t]*work_environment\b[^\n]*\n(.*?)```', re.DOTALL)
+            _WE_RE = re.compile(r'```[ \t]*python_interpreter\b[^\n]*\n(.*?)```', re.DOTALL)
             self.clear_chat_silent()
             tm = self.controller.ai.tool_manager
             history = self.controller.ai.conversation_history
-            in_work_mode = False
+            in_work_step = False
             for msg in history:
                 role = msg.get("role", "")
                 raw = msg.get("content", "")
@@ -2392,19 +2478,19 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
 
                 # ── Work-mode chatter suppression (assistant bubbles only) ──────
                 # The exit sentinel was removed: a work step is an assistant turn
-                # that runs a work_environment fence (its narration is internal, so
+                # that runs a python_interpreter fence (its narration is internal, so
                 # hide it). Work mode ends at the first assistant turn WITHOUT a
-                # work_environment code fence — that turn is the report, rendered
+                # python_interpreter code fence — that turn is the report, rendered
                 # normally below. (A legacy bare `exit` fence counts as a finishing
                 # turn too, so its summary still shows.)
                 if role == "assistant":
                     _we = _WE_RE.search(raw)
                     if _we and _we.group(1).strip().lower() not in ("exit", ""):
-                        in_work_mode = True   # a work step — hide the narration
+                        in_work_step = True   # a work step — hide the narration
                         continue
-                    in_work_mode = False      # finish / normal reply — fall through to render
+                    in_work_step = False      # finish / normal reply — fall through to render
                 elif role == "user":
-                    in_work_mode = False   # a user turn ends any dangling work mode
+                    in_work_step = False   # a user turn ends any dangling work mode
 
                 content = tm.strip_tool_calls(raw)
                 if role == "ui_event":
@@ -2735,7 +2821,7 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
 
     def _start_session_lock_watcher(self):
         """Lock the session list then start a QTimer on the main thread that polls
-        until both is_processing and in_work_mode are False, then unlocks."""
+        until both is_processing and work.is_working are False, then unlocks."""
         self.set_session_list_locked(True, "AI is responding…")
 
         if hasattr(self, '_lock_watcher_timer') and self._lock_watcher_timer is not None:
@@ -2754,7 +2840,7 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         try:
             processing = getattr(self.controller, 'is_processing', False)
             try:
-                in_work = self.controller.ai.tool_manager.in_work_mode
+                in_work = self.controller.ai.tool_manager.work.is_working
             except Exception:
                 in_work = False
             if not processing and not in_work:
@@ -3001,7 +3087,7 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
 
         # ── Guard 3: AI is in work / tool-use mode ─────────────────────────
         try:
-            in_work = self.controller.ai.tool_manager.in_work_mode
+            in_work = self.controller.ai.tool_manager.work.is_working
         except Exception:
             in_work = False
         if in_work:
@@ -3351,7 +3437,7 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
                     if not first_text_label:
                         first_text_label = text_label
                 elif part[0] == 'code':
-                    code_widget = CodeBlockWidget(part[1], part[2])
+                    code_widget = CodeBlockWidget(part[1], part[2], self._t())
                     content_wrapper_layout.addWidget(code_widget)
                 elif part[0] == 'table':
                     table_widget = TableBlockWidget(part[1], self._t(), self.render_markdown)
@@ -4516,9 +4602,6 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
 
         self._user_scrolling = False
 
-        was_manually_resized = self.input_field.text_input.manual_resize
-        stored_height = self.input_field.text_input.height() if was_manually_resized else None
-
         # ── Collect all images for this send ─────────────────────────────────
         # pinned first (persistent context), then newly attached from input bar
         provider = self.controller.get_ai_provider()
@@ -4529,8 +4612,8 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
             )
         # ─────────────────────────────────────────────────────────────────────
 
-        if self.force_mode == 'work_environment':
-            message = "[VERY CRITICAL THE USER HAS ENFORCED: work_environment ONLY and FULFILL THIS TASK EFFICIENTLY (ignore if the message of the user doesn't request of anything)] " + message
+        if self.force_mode == 'python_interpreter':
+            message = "[VERY CRITICAL THE USER HAS ENFORCED: python_interpreter ONLY and FULFILL THIS TASK EFFICIENTLY (ignore if the message of the user doesn't request of anything)] " + message
 
         display_message = self.input_field.toPlainText().strip()
         self.last_sent_message = display_message
@@ -4542,12 +4625,8 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
 
         # ── Pin newly attached images, then clear input bar ───────────────────
         newly_attached = list(self.attached_images)  # snapshot before clear
-        self.input_field.clear()
+        self.input_field.clear()   # collapses to one line (drops any drag floor)
         self._clear_image_preview()
-
-        if was_manually_resized and stored_height:
-            self.input_field.text_input.manual_resize = True
-            self.input_field.text_input.setFixedHeight(stored_height)
 
         # Add newly attached images as persistent pinned widgets
         if provider in ('puter', 'custom_script'):
@@ -4969,7 +5048,7 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         self.input_field.setPlaceholderText(text)
 
     def show_ai_message(self, message):
-        if self.voice_enabled and not self.controller.ai.tool_manager.in_work_mode:
+        if self.voice_enabled and not self.controller.ai.tool_manager.work.is_working:
             self.log("[Voice] Buffering message, starting TTS...")
 
             self.pending_voice_message = message
@@ -5024,7 +5103,7 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
             self.show_ai_message(result['response'])
 
     def add_work_execution_widget(self, code: str, output: str):
-        """Add a collapsible code+output block to the chat for work environment execution."""
+        """Add a collapsible code+output block to the chat for python interpreter execution."""
         from PyQt6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QScrollArea, QWidget, QSizePolicy
         from PyQt6.QtGui import QFont
 
@@ -5154,7 +5233,7 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         _tc = self._t()
         if annotation is None:
             try:
-                annotation = self.controller.ai.tool_manager.last_work_annotation or ""
+                annotation = self.controller.ai.tool_manager.work.interpreter.last_annotation or ""
             except Exception:
                 annotation = ""
 
@@ -5279,7 +5358,7 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         # Use the Working: annotation as the label if available
         if annotation is None:
             try:
-                annotation = self.controller.ai.tool_manager.last_work_annotation or ""
+                annotation = self.controller.ai.tool_manager.work.interpreter.last_annotation or ""
             except Exception:
                 annotation = ""
         header_label = f"{annotation}" if annotation else "Code executed"
@@ -5405,9 +5484,14 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         detail = info.get('detail', '')
         created = bool(info.get('created'))
         read_range = info.get('read_range', '')
+        rejected = bool(info.get('rejected'))
 
         GREEN, RED = "#3FB950", "#F85149"
-        icon_map = {'read_file': '›', 'edit_file': '±', 'write_file': '+'}
+        MUTED, CTX = "#8B949E", "#C9D1D9"
+        MONO = "'Consolas','Cascadia Mono','SF Mono',Menlo,monospace"
+        icon_map = {'read_file': '›', 'edit_file': '±', 'write_file': '+',
+                    'grep': '⌕'}
+        read_like = tool in ('read_file', 'grep')
 
         message_widget = QFrame()
         message_widget.setStyleSheet("QFrame { background-color: transparent; padding: 4px 16px; }")
@@ -5433,7 +5517,10 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         icon_lbl.setFixedWidth(14)
         header_lay.addWidget(icon_lbl)
 
-        if tool == 'read_file':
+        if rejected:
+            stats_html = (f"<span style='color:{RED};font-size:10px;font-weight:600;'>"
+                          f"rejected</span>")
+        elif read_like:
             stats_html = (f"<span style='color:#8B949E;font-size:10px;'>{read_range}</span>"
                           if read_range else "")
         else:
@@ -5442,26 +5529,33 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
             net_txt = f"+{net}" if net >= 0 else str(net)
             bits = []
             if added is not None:
-                bits.append(f"<span style='color:{GREEN};font-weight:600;'>+{added}</span>")
+                bits.append(f"<span style='color:{GREEN};font-size:11px;"
+                            f"font-weight:600;'>+{added}</span>")
             if removed is not None:
-                bits.append(f"<span style='color:{RED};font-weight:600;'>−{removed}</span>")
-            bits.append(f"<span style='color:#5F6368;'>·</span>"
-                        f"<span style='color:{net_color};'> net {net_txt}</span>")
+                bits.append(f"<span style='color:{RED};font-size:11px;"
+                            f"font-weight:600;'>−{removed}</span>")
+            bits.append(f"<span style='color:#5F6368;font-size:11px;'>·</span>"
+                        f"<span style='color:{net_color};font-size:11px;'> net {net_txt}</span>")
             if created:
                 bits.append(f"<span style='color:{GREEN};font-size:10px;'>&nbsp;new file</span>")
             stats_html = "&nbsp;&nbsp;".join(bits)
 
+        # Path styled like the python-interpreter card's annotation: accent, 11px,
+        # sans (NOT monospace) — the monospace face read as "off" against the diff.
         summary_lbl = QLabel(
-            f"<span style='font-family:monospace;font-size:11px;"
-            f"font-weight:600;'>{display}</span>"
-            f"&nbsp;&nbsp;{stats_html}"
-            f"&nbsp;&nbsp;<span style='color:#5F6368;font-size:10px;'>{tool}</span>")
+            f"<span style='color:{_tc['accent']};font-size:11px;'>{display}</span>"
+            f"&nbsp;&nbsp;<span style='color:#5F6368;'>·</span>&nbsp;&nbsp;{stats_html}"
+            f"&nbsp;&nbsp;<span style='color:{MUTED};font-size:10px;'>{tool}</span>")
         summary_lbl.setTextFormat(Qt.TextFormat.RichText)
         summary_lbl.setToolTip(info.get('path', ''))
         summary_lbl.setStyleSheet("background: transparent; border: none;")
+        # Wrap so the card can shrink with the window instead of forcing itself
+        # wider than the viewport (a single-line label has a fixed min width and
+        # can't resize down — that made the card feel "stuck").
+        summary_lbl.setWordWrap(True)
         header_lay.addWidget(summary_lbl, stretch=1)
 
-        toggle_btn = QPushButton("▶ Diff" if tool != 'read_file' else "▶ Show")
+        toggle_btn = QPushButton("▶ Show" if read_like else "▶ Diff")
         toggle_btn.setFixedSize(58, 20)
         toggle_btn.setStyleSheet(f"""
                     QPushButton {{
@@ -5474,14 +5568,39 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
 
         body = QTextEdit()
         body.setReadOnly(True)
-        body.setPlainText(detail or "(no detail)")
+        import html as _html
+        _detail = detail or "(no detail)"
+        if read_like:
+            # Plain content (file window or search results) — no diff coloring.
+            body.setHtml(
+                f"<pre style=\"margin:0;font-family:{MONO};font-size:12px;"
+                f"line-height:1.4;color:{CTX};white-space:pre;\">"
+                f"{_html.escape(_detail)}</pre>")
+        else:
+            # Unified diff — colorize per line so it reads like a real diff.
+            _rows = []
+            for _ln in _detail.split('\n'):
+                _e = _html.escape(_ln) or '&nbsp;'
+                if _ln.startswith('+++') or _ln.startswith('---'):
+                    _c, _w = MUTED, '700'
+                elif _ln.startswith('@@'):
+                    _c, _w = _tc['accent'], '600'
+                elif _ln.startswith('+'):
+                    _c, _w = GREEN, '400'
+                elif _ln.startswith('-'):
+                    _c, _w = RED, '400'
+                else:
+                    _c, _w = CTX, '400'
+                _rows.append(f"<span style=\"color:{_c};font-weight:{_w};\">{_e}</span>")
+            body.setHtml(
+                f"<pre style=\"margin:0;font-family:{MONO};font-size:12px;"
+                f"line-height:1.4;white-space:pre;\">" + "\n".join(_rows) + "</pre>")
         body.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
-        body.setMaximumHeight(240)
+        body.setMaximumHeight(280)
         body.setStyleSheet(f"""
                     QTextEdit {{
-                        background: {_tc['elevated']}; border: 1px solid {_tc['border']};
-                        border-radius: 8px; margin-top: 2px; padding: 6px;
-                        font-family: Consolas, monospace; font-size: 10px; color: #C9D1D9;
+                        background: {_tc['base']}; border: 1px solid {_tc['border']};
+                        border-radius: 8px; margin-top: 4px; padding: 8px;
                     }}""")
         body.hide()
         outer_lay.addWidget(body)
@@ -5489,10 +5608,13 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         def _toggle():
             showing = body.isVisible()
             body.setVisible(not showing)
-            base = "Diff" if tool != 'read_file' else "Show"
+            base = "Show" if read_like else "Diff"
             toggle_btn.setText(("▶ " + base) if showing else "▼ Hide")
         toggle_btn.clicked.connect(_toggle)
 
+        # Cap to the responsive bubble width so the card shrinks with the window
+        # (and never overflows a narrow viewport); _reflow_bubbles keeps it synced.
+        header.setMaximumWidth(self._bubble_max_width())
         if getattr(self, "_thinking_bubble_widget", None) is not None:
             idx = self.chat_layout.indexOf(self._thinking_bubble_widget)
             self.chat_layout.insertWidget(idx, message_widget)
@@ -5504,6 +5626,7 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
             'widget': message_widget,
             'role': 'file_op',
             'content_wrapper': header,
+            'main_container_widget': header,
         })
 
         if save_to_history:
@@ -5730,17 +5853,17 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         """Interrupt current AI response and restore message to input.
         Workmode branch: shows WorkmodeInterruptDialog with auto-dismiss polling;
         normal branch: delegates to controller.interrupt_request()."""
-        if not self.controller.is_processing and not self.controller.ai.tool_manager.in_work_mode and not self.controller.ai.tool_manager.work_code_running:
+        if not self.controller.is_processing and not self.controller.ai.tool_manager.work.is_working and not self.controller.ai.tool_manager.work.interpreter.is_running:
             return
 
         # If in work mode, only show dialog when code is actively executing
-        if self.controller.ai.tool_manager.in_work_mode or self.controller.ai.tool_manager.work_code_running:
-            if not self.controller.ai.tool_manager.work_code_running:
+        if self.controller.ai.tool_manager.work.is_working or self.controller.ai.tool_manager.work.interpreter.is_running:
+            if not self.controller.ai.tool_manager.work.interpreter.is_running:
                 # In work mode but no code is actively running — this is the
                 # "thinking" gap (AI analyzing the last output) or we're awaiting
                 # the model's next step. Cleanly cancel the whole work-mode
-                # operation (interrupt_work_mode handles UI teardown).
-                self.controller.interrupt_work_mode()
+                # operation (interrupt_work handles UI teardown).
+                self.controller.interrupt_work()
             else:
                 from systema.ui.dialogs.timeout_dialog import WorkmodeInterruptDialog
                 from PyQt6.QtWidgets import QDialog
@@ -5752,7 +5875,7 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
                 _poll = QTimer()
                 _poll.setInterval(200)
                 def _check():
-                    if not self.controller.ai.tool_manager.work_code_running:
+                    if not self.controller.ai.tool_manager.work.interpreter.is_running:
                         _poll.stop()
                         dialog.reject()
                 _poll.timeout.connect(_check)
@@ -5766,7 +5889,7 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
                 if accepted:
                     reason = dialog.reason_text
 
-                    notice = "ERROR:\nUser interrupted workmode. You must exit immediately."
+                    notice = "ERROR:\nUser interrupted the interpreter. You must exit immediately."
                     if reason:
                         notice += f"\nReason: {reason}"
                     else:
@@ -5774,7 +5897,7 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
 
                     # Interrupt the *running code* (not the worker): partial output
                     # is preserved and the notice is appended to it by
-                    # run_work_environment, so both you and the AI can see where it
+                    # run_python_interpreter, so both you and the AI can see where it
                     # stopped. The worker then finishes its cycle naturally — the
                     # AI analyzes the interrupted output and exits. No orphaned
                     # thread, and work_code_active(False) fires to clear the live
@@ -5783,7 +5906,7 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
                     if not delivered:
                         # Code already finished between accept and here — fall back
                         # to a clean work-mode cancel so we never get stuck.
-                        self.controller.interrupt_work_mode()
+                        self.controller.interrupt_work()
                     else:
                         # Keep the stop button — it now cancels the AI's exit
                         # response. A second click hard-cancels the whole op.
@@ -5816,7 +5939,7 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
             self.hide_thinking()
             self.hide_thinking_bubble()
 
-    def interrupt_work_mode(self):
+    def interrupt_work(self):
         """Legacy method - now redirects to interrupt_response"""
         self.interrupt_response()
 
@@ -5828,7 +5951,7 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
 
     def show_thinking(self):
         """Show thinking animation.
-        Interrupt btn enabled only when work_code_running is True during work mode;
+        Interrupt btn enabled only when work.interpreter.is_running is True during work mode;
         tooltip toggles between 'Interrupt work' and 'Cancel AI response'."""
         self.start_thinking_animation()
         self.thinking_label_shown = True
@@ -5839,12 +5962,12 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         # (code finished, AI analyzing) and while awaiting the model's next step.
         self.interrupt_btn.setEnabled(True)
         self.interrupt_btn.setToolTip(
-            "Interrupt work" if self.controller.ai.tool_manager.in_work_mode
+            "Interrupt work" if self.controller.ai.tool_manager.work.is_working
             else "Cancel AI response"
         )
         self.show_thinking_bubble()
         # Show work banner if already in work mode
-        if hasattr(self, '_work_banner') and self.controller.ai.tool_manager.in_work_mode:
+        if hasattr(self, '_work_banner') and self.controller.ai.tool_manager.work.is_working:
             if not self._work_banner.text():
                 self._work_banner.setText("⚙ Working…")
             self._work_banner.show()
@@ -6022,6 +6145,12 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
     def eventFilter(self, obj, event):
         """Handle resize handle events and smooth scroll viewport events."""
         from PyQt6.QtCore import QEvent
+
+        # ── Re-anchor the floating input when the chat area resizes ─────────
+        # (fires with the correct new width, unlike the window resizeEvent).
+        if obj is getattr(self, '_chat_container', None):
+            if event.type() == QEvent.Type.Resize:
+                self._position_input_overlay()
 
         # ── Reposition pinned overlay when input_container height changes ──
         if hasattr(self, 'input_container') and obj is self.input_container:

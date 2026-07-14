@@ -248,8 +248,9 @@ if result.returncode != 0:
 - **Always create tasks with `active: false`.** After running the script, tell the user: *"The task has been created as inactive. Open the Task Manager to activate it — or edit it first if you'd like to make changes before it runs."*
 - `id` and `created_at` are injected by the script. Never include them in the task dict.
 - To use a new function in a task's `{{...}}` block, register it with `add_function.py` first, then reference it by name in the instruction.
-- For script-trigger tasks, YOU must also create the script file and place it in `{app_root}/data/tasks/interval-scripts/`. Remind the user to verify the path after creation.
-- A task AI pushes messages to the main chat window by calling the `send_message_main("...")` function, which is available in its Python namespace — it just calls it from inside `work_environment`. This works in both Compatibility and Native tool-calling modes and delivers immediately. (Read-only tasks with no code execution instead emit `{"tool": "send_message_main", "input": "..."}` on its own line, since they can't run a function.)
+- For script-trigger tasks, YOU must also create the script file in `{app_root}/data/tasks/interval-scripts/` — do it with **`write_file`** (and `edit_file` for follow-up tweaks, `read_file` to re-check). Remind the user to verify the path after creation.
+- Use YOUR native file tools for all hand-authored files here: **`write_file`** to create trigger scripts, **`edit_file`** for surgical changes, **`read_file`** to inspect an existing `tasks.json` / script, and **`grep`** to find an existing task or function before adding a duplicate. The `create_task.py` / `add_function.py` helper scripts stay — they inject `id` / `created_at` and validate the schema, which a raw file write would skip.
+- A task AI pushes messages to the main chat window by calling the `send_message_main("...")` function, which is available in its Python namespace — it just calls it from inside `python_interpreter`. This works in both Compatibility and Native tool-calling modes and delivers immediately. (Read-only tasks with no code execution instead emit `{"tool": "send_message_main", "input": "..."}` on its own line, since they can't run a function.)
 
 ---
 
@@ -357,7 +358,7 @@ task = {
 }
 ```
 
-For the reply, the AI either uses a loaded skill (`loaded_skills`) or generates and executes the reply code inline via `work_environment` — no separate skill file is required if the platform's Python library is simple enough to use in one block.
+For the reply, the AI either uses a loaded skill (`loaded_skills`) or generates and executes the reply code inline via `python_interpreter` — no separate skill file is required if the platform's Python library is simple enough to use in one block.
 
 ---
 
@@ -378,13 +379,13 @@ This pattern is not platform-specific. Anything that has a Python interface, a R
 | OS clipboard or hotkey | `pyperclip` / `keyboard` library check |
 | Any HTTP endpoint | `requests.get()` and inspect the response |
 
-The agent on the other end is the same full AI session either way — work mode, tools, skills, `send_message_main` — just triggered by a different source. The script is the only part that changes between platforms.
+The agent on the other end is the same full AI session either way — interpreter mode, tools, skills, `send_message_main` — just triggered by a different source. The script is the only part that changes between platforms.
 
 ---
 
 ### Checklist
 
-1. Write the trigger script → save to `{app_root}/data/tasks/interval-scripts/`.
+1. Write the trigger script with **`write_file`** → save to `{app_root}/data/tasks/interval-scripts/`.
 2. If using a long-lived connection, write a separate listener process; have `fire_ping()` only check the state file it writes.
 3. Register the reader function → run `add_function.py` once.
 4. Create the task → `create_task.py`, set `ping_interval_mode: "script_trigger"`, point `script_name` at your file.

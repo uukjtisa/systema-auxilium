@@ -78,7 +78,7 @@ def get_system_prompt(
         include_execution_tools: bool = True,
         include_fence_syntax: bool = True,
         include_file_write: bool = True,
-        include_work_mode_rules: bool = True,
+        include_interpreter_mode_rules: bool = True,
         include_must_remember: bool = True,
         # Optionals, off by default (token cost).
         include_image_tools: bool = False,
@@ -104,7 +104,7 @@ def get_system_prompt(
             include_skills=skills_present))
     elif include_tool_format:
         body.append(compat.tool_format_section(
-            include_workmode=include_work_mode_rules and include_fence_syntax,
+            include_workmode=include_interpreter_mode_rules and include_fence_syntax,
             include_session_naming=include_session_naming,
             include_skills=skills_present))
 
@@ -114,18 +114,18 @@ def get_system_prompt(
                        else compat.SESSION_NAMING_TAIL))
     if include_memory:
         body.append(shared.memory_section(hint))
-    if include_execution_tools and include_work_mode_rules:
-        body.append(shared.WORK_ENVIRONMENT_SECTION)
+    if include_execution_tools and include_interpreter_mode_rules:
+        body.append(shared.PYTHON_INTERPRETER_SECTION)
         body.append(shared.FILE_TOOLS_SECTION)
     # The #@FILE / write_file() guide is tool-agnostic (about code CONTENT, not
     # invocation) — it appears in BOTH modes when execution is available.
-    if include_file_write and include_work_mode_rules:
+    if include_file_write and include_interpreter_mode_rules:
         if native_tools:
-            intro = ("Example: the `code` argument of a work_environment call is "
+            intro = ("Example: the `code` argument of a python_interpreter call is "
                      "exactly the following (executable lines first, then the "
                      "#@FILE blocks at the END):")
         else:
-            intro = ("Example: the content of ONE work_environment fence is "
+            intro = ("Example: the content of ONE python_interpreter fence is "
                      "exactly the following (executable lines first, then the "
                      "#@FILE blocks at the END):")
         body.append(shared.file_write_guide(intro))

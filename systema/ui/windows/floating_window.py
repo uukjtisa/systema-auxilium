@@ -818,7 +818,7 @@ class FloatingWindow(QWidget):
         from PyQt6.QtWidgets import QApplication
         QApplication.quit()
 
-    def handle_work_mode_update(self, result):
+    def handle_work_update(self, result):
         """Handle tool mode updates"""
         # ── Show code + output block in chat window when code ran ──────────────
         code   = result.get('code', '')
@@ -826,7 +826,7 @@ class FloatingWindow(QWidget):
                  if not code else ''
         # Grab output from the tool_manager directly
         try:
-            tm_output = self.controller.ai.tool_manager.last_work_output or ''
+            tm_output = self.controller.ai.tool_manager.work.last_output or ''
         except Exception:
             tm_output = ''
 
@@ -842,7 +842,7 @@ class FloatingWindow(QWidget):
             self.android_bridge.handle_ai_response(result)
 
         # ── Clear work banner when work mode finishes ──────────────────────────
-        exited   = result.get('exited_work_mode', False)
+        exited   = result.get('finished_working', False)
         thinking = result.get('thinking', False)
         if exited or not thinking:
             if self.chat_window and hasattr(self.chat_window, '_work_banner'):

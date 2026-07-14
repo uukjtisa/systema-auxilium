@@ -9,7 +9,7 @@ The engine and the provider scripts only ever speak two neutral shapes:
   CANONICAL TOOL  (input — what the tool registry produces)
   ----------------------------------------------------------
     {
-      "name":        "work_environment",
+      "name":        "python_interpreter",
       "description": "Run Python and see its output.",
       "parameters":  { ...JSON Schema object... }   # {"type":"object","properties":{...},"required":[...]}
     }

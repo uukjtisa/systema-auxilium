@@ -1,7 +1,7 @@
 """
 core/ai_worker.py
 AI Worker - Runs AI operations in background thread
-UPDATED: work_environment is the single execution tool
+UPDATED: python_interpreter is the single execution tool
 """
 
 from systema.common.logger import _make_logger, _NoOpLogger
@@ -48,21 +48,21 @@ class AIWorker(QThread):
                 result = self.ai_engine.generate_response_with_image(user_message, image_paths)
 
             elif self.operation == 'continue_tool':
-                log.debug("[AIWorker.run] Dispatching → ai_engine.continue_work_mode()")
-                result = self.ai_engine.continue_work_mode()
+                log.debug("[AIWorker.run] Dispatching → ai_engine.continue_work()")
+                result = self.ai_engine.continue_work()
 
             else:
                 log.warning(f"[AIWorker.run] Unknown operation: '{self.operation}' — returning stub result")
                 result = {
                     'response': 'Unknown operation',
                     'has_work_call': False,
-                    'in_work_mode': False,
+                    'is_working': False,
                     'thinking': False,
                 }
 
             log.info(f"[AIWorker.run] ✓ Operation '{self.operation}' complete | "
                      f"has_work_call={result.get('has_work_call')} | "
-                     f"in_work_mode={result.get('in_work_mode')} | "
+                     f"is_working={result.get('is_working')} | "
                      f"thinking={result.get('thinking')} | "
                      f"response_len={len(str(result.get('response', '')))}")
             log.debug("[AIWorker.run] Emitting response_ready signal")

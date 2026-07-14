@@ -13,20 +13,26 @@ fallback for single-call dialects.
 from systema.execution.tool_registry import CANONICAL_TOOLS
 
 # Frames a shared-core code example for native invocation (see shared.py).
-INVOKE_HINT = "make a work_environment tool call whose code argument is:"
+INVOKE_HINT = "make a python_interpreter tool call whose code argument is:"
 
 
 def native_header(include_session_naming: bool = True,
                   include_skills: bool = True) -> str:
     lines = [
-        "  - work_environment(code, annotation)   run Python and SEE its output — your",
+        "  - python_interpreter(code, annotation)   run Python and SEE its output — your",
         "                                         code-execution tool. annotation = a",
         "                                         short 3-6 word label of what the code",
         "                                         does (ALWAYS provide it).",
         "  - read_file(path, start_line, ...)     read a file as NUMBERED lines (windowed).",
         "  - edit_file(path, old_text, new_text)  surgical anchor edit — old_text must",
         "                                         match the file exactly and uniquely.",
+        "                                         OR edit_file(path, lines='A-B', new_text)",
+        "                                         to replace an entire line span A..B.",
         "  - write_file(path, content)            create or fully rewrite a file.",
+        "  - grep(pattern, path, glob, type, output_mode, ...) ripgrep-style content",
+        "                                         search. output_mode: files_with_matches",
+        "                                         (default) / content / count. Regex,",
+        "                                         context lines, skips build/VCS dirs.",
     ]
     if include_session_naming:
         lines.append(
@@ -55,13 +61,13 @@ the same words in both normal text and message_to_user — that shows your reply
 twice.
 
 CALLING TWO TOOLS IN ONE RESPONSE: you may emit set_session_name (or load_skill)
-ALONGSIDE your work_environment call as PARALLEL tool calls in the same
+ALONGSIDE your python_interpreter call as PARALLEL tool calls in the same
 response — do exactly that whenever you need to name the session AND act. Only
 if your provider limits you to a single tool call per response, use the fallback
 chaining arguments on set_session_name / load_skill instead: set
-then_tool='work_environment', put the Python in then_code, and pass
+then_tool='python_interpreter', put the Python in then_code, and pass
 then_annotation (the short step label). Never emit two ACTION calls
-(work_environment / read_file / edit_file / write_file) in one response.
+(python_interpreter / read_file / edit_file / write_file) in one response.
 
 Invoke every tool through your native function-calling mechanism. Everything
 below — WHEN and WHY to use each tool, staying in work mode, directory safety,
@@ -76,9 +82,9 @@ your normal reply as text in the same turn — naming runs quietly; don't announ
 it, and don't repeat your reply in message_to_user.
 
 The critical case — the user's FIRST message asks for work: emit BOTH calls in
-one response, set_session_name AND work_environment, as parallel tool calls.
+one response, set_session_name AND python_interpreter, as parallel tool calls.
 Fallback only if your provider permits a single call per response: put the work
-in set_session_name's chaining arguments (then_tool='work_environment',
+in set_session_name's chaining arguments (then_tool='python_interpreter',
 then_code, then_annotation). Either way, never name the session INSTEAD of
 doing the work.
 """
@@ -91,17 +97,17 @@ def skills_howto_tail() -> str:
         "  Call the load_skill tool with the skill name, and just write your reply\n"
         "  as normal text this turn (message_to_user is an optional fallback for\n"
         "  when you emit no text).\n"
-        "  To also act this turn, prefer a PARALLEL work_environment call; the\n"
-        "  then_tool='work_environment' + then_code chaining arguments are the\n"
+        "  To also act this turn, prefer a PARALLEL python_interpreter call; the\n"
+        "  then_tool='python_interpreter' + then_code chaining arguments are the\n"
         "  fallback for single-call providers.\n"
         "  The skill's full instructions will be injected into your system context.\n"
-        "  Works inside AND outside work_environment.\n"
+        "  Works inside AND outside python_interpreter.\n"
         "  Do NOT load a skill that already shows [LOADED] — it's already active!\n"
         "\n"
         "HOW TO UNLOAD A SKILL:\n"
         "  Call the unload_skill tool with the skill name.\n"
         "  Removes the skill from your active context.\n"
-        "  Works inside AND outside work_environment.\n"
+        "  Works inside AND outside python_interpreter.\n"
         "  Do NOT unload a skill that is not [LOADED] — it isn't loaded!\n"
     )
 
@@ -109,8 +115,8 @@ def skills_howto_tail() -> str:
 MUST_REMEMBER = """
 MUST REMEMBER (quick recall of the rules above):
 - Never roleplay: if you say you'll do it, MAKE THE TOOL CALL in the SAME response.
-- work_environment = your ONLY code tool; you SEE output; chain calls; print()
-  what you need. ONE work_environment call per response, ALWAYS with the
+- python_interpreter = your ONLY code tool; you SEE output; chain calls; print()
+  what you need. ONE python_interpreter call per response, ALWAYS with the
   `annotation` argument (a short 3-6 word label shown to the user).
 - Invoke tools as native function calls; to speak in the same turn, just write
   your reply as normal text alongside the call.
@@ -124,7 +130,7 @@ MUST REMEMBER (quick recall of the rules above):
 # once here for this injected channel).
 WORK_OPTIONS = """\
 Options:
-- More code:   call the work_environment tool with your Python in the `code`
+- More code:   call the python_interpreter tool with your Python in the `code`
                argument (plus a short `annotation`).
 - Finish:      reply with NO tool call — just normal reply text containing your
                COMPLETE report. That reply ends work mode and IS your final
@@ -141,7 +147,7 @@ PREFILLING_NATIVE = {
         {
             "role": "system",
             "content": (
-                "REMINDER: Invoke tools as NATIVE function calls (work_environment / "
+                "REMINDER: Invoke tools as NATIVE function calls (python_interpreter / "
                 "set_session_name / load_skill / unload_skill). NEVER write a tool "
                 "call as plain text — invoke it through your function-calling "
                 "mechanism. NEVER roleplay execution. ONE code tool call per "
@@ -162,10 +168,10 @@ PREFILLING_NATIVE = {
             "role": "assistant",
             "content": (
                 "Of course. I invoke my tools as native function calls — never as "
-                "written-out text. work_environment is my one execution tool: I run "
+                "written-out text. python_interpreter is my one execution tool: I run "
                 "code, see the output, and chain calls until the task is fully "
                 "complete, then finish with a normal reply containing my full "
-                "report. I make at most ONE work_environment call per response, "
+                "report. I make at most ONE python_interpreter call per response, "
                 "always with a short annotation label, and I may call "
                 "set_session_name alongside it in the same response — which I do "
                 "whenever the first request is work. I never roleplay execution; "
@@ -179,12 +185,12 @@ PREFILLING_NATIVE = {
 EXEC_CODE_TOOLCALL_VIOLATION_PROMPT_NATIVE = """<SYSTEM_MESSAGE>
 TOOL CALL POLICY VIOLATION DETECTED
 
-Your previous response contained MORE THAN ONE work_environment call. Only the
+Your previous response contained MORE THAN ONE python_interpreter call. Only the
 FIRST call was executed. All subsequent code-execution calls were SILENTLY
 DISCARDED — they did NOT run.
 
 RULE (absolute):
-  - You may make AT MOST ONE work_environment call per response.
+  - You may make AT MOST ONE python_interpreter call per response.
   - set_session_name is exempt — it may be called alongside the work call.
 
 WHY: multiple code blocks in a single turn create unpredictable state, confuse
@@ -192,7 +198,7 @@ the approval workflow, and make the conversation log ambiguous. Always wait for
 the result of one execution before issuing the next.
 
 WHAT YOU MUST DO NOW: if you still need to run the discarded code, make ONE
-work_environment call in your next response — strictly one code-execution call
+python_interpreter call in your next response — strictly one code-execution call
 per response.
 </SYSTEM_MESSAGE>"""
 
@@ -200,12 +206,12 @@ per response.
 EXECUTE_CODE_RETIRED_PROMPT_NATIVE = """<SYSTEM_MESSAGE>
 THE execute_code TOOL NO LONGER EXISTS — YOUR CALL WAS NOT RUN.
 
-work_environment is the ONLY way to run code, and you SEE its output. Re-issue
-the code now as a work_environment tool call (Python in the `code` argument,
+python_interpreter is the ONLY way to run code, and you SEE its output. Re-issue
+the code now as a python_interpreter tool call (Python in the `code` argument,
 plus a short `annotation` label).
 
 For launching apps or blocking programs, start them detached inside
-work_environment (subprocess.Popen / os.startfile) so the call returns and you
+python_interpreter (subprocess.Popen / os.startfile) so the call returns and you
 can confirm the result.
 </SYSTEM_MESSAGE>"""
 
@@ -216,7 +222,7 @@ MALFORMED_WORK_STEP_PROMPT_NATIVE = """<SYSTEM_MESSAGE>
 YOUR LAST RESPONSE LOOKED LIKE A CODE STEP BUT WAS NOT A VALID TOOL CALL — NOTHING WAS RUN.
 
 You are still in work mode. Choose ONE:
-- If that code was your next step, re-issue it now as a work_environment tool
+- If that code was your next step, re-issue it now as a python_interpreter tool
 call with the Python in its code argument (plus a short annotation label).
 - If the task is FINISHED, reply with your complete report as normal prose —
 that visible reply IS the report the user sees. Do not reply with a bare code

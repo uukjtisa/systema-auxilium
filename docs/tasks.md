@@ -10,15 +10,20 @@ Each task has:
 - an **instruction** (what the assistant should do when it wakes),
 - a **trigger** (when it wakes — an interval, or a custom Python **Script**
   trigger),
-- its own **permissions** (including whether code runs without a prompt),
+- its own **permissions** — a master *Allow Python Interpreter* toggle plus a
+  per-category **security policy** (allow/deny for each risky operation class),
 - optional **pre-loaded skills**, and
 - its own working context.
 
 A task agent can reach your main chat by calling `send_message_main()` from its
 Python namespace, so it can report back or notify you.
 
-> Because a task can be granted permission to execute code immediately (no
-> approval prompt), be deliberate about each task's instruction and permissions.
+> A background task has no one to answer an approval prompt, so its security is
+> decided up front by its policy grid: each operation category (file delete,
+> process spawn, network, dynamic exec, system, secrets, and the file
+> create/edit/write/move/copy classes) is set to **allow** or **deny**. A denied
+> operation is blocked automatically, the task is told to find another approach,
+> and you are alerted in your main chat. Be deliberate about what you allow.
 > See [Security](security.md).
 
 ## Trigger types

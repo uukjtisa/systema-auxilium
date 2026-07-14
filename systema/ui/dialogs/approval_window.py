@@ -1,5 +1,5 @@
 """
-systema/ui/dialogs/code_approval_dialog.py
+systema/ui/dialogs/approval_window.py
 
 Code Approval dialog — the gate before the app runs AI-authored code in
 supervised mode. Rebuilt as a small *personal coding agent*:
@@ -270,17 +270,25 @@ class _ProposalReviewView(QWidget):
             f"color: {p['muted']}; font-size: 10px; background: transparent;")
         row.addWidget(self.hint_lbl)
         row.addStretch()
-        dismiss = QPushButton("Dismiss")
-        dismiss.setStyleSheet(dialog._btn())
-        dismiss.setToolTip("Discard the proposal and go back to the code.")
-        dismiss.clicked.connect(lambda: dialog._finish_review(apply=False))
-        row.addWidget(dismiss)
+        self.dismiss_btn = QPushButton("Dismiss")
+        self.dismiss_btn.setStyleSheet(dialog._btn())
+        self.dismiss_btn.setToolTip("Discard the proposal and go back to the code.")
+        self.dismiss_btn.clicked.connect(lambda: dialog._finish_review(apply=False))
+        row.addWidget(self.dismiss_btn)
         self.apply_btn = QPushButton("Apply edit")
         self.apply_btn.setStyleSheet(dialog._btn(primary=True))
         self.apply_btn.setToolTip("Write the resolved changes into the code editor.")
         self.apply_btn.clicked.connect(lambda: dialog._finish_review(apply=True))
         row.addWidget(self.apply_btn)
         lay.addLayout(row)
+
+        # File-op mode: Apply/Dismiss here would duplicate the footer Approve/Reject
+        # (and the reviewer chat they log to doesn't exist). Hide them; the footer
+        # drives apply-on-approve / discard-on-reject.
+        if dialog._file_edit is not None:
+            self.hint_lbl.setText("Adjust any hunk below, then use Approve / Reject.")
+            self.dismiss_btn.hide()
+            self.apply_btn.hide()
 
     def load(self, segments, why):
         self.segments = segments
@@ -415,7 +423,8 @@ class CodeApprovalDialog(QDialog):
     # ── layout ──────────────────────────────────────────────────────────────
     def _build(self):
         p = self.p
-        self.setWindowTitle("Code Approval Required")
+        self.setWindowTitle("File Change Approval" if self._file_edit is not None
+                            else "Code Approval Required")
         self.setModal(True)
         self.setMinimumSize(940, 560)
         self.resize(1200, 660)
@@ -430,32 +439,48 @@ class CodeApprovalDialog(QDialog):
         root.setContentsMargins(18, 16, 18, 16)
         root.setSpacing(10)
 
-        title = QLabel("Code execution approval")
-        title.setStyleSheet(f"color: {p['text']}; font-size: 15px; font-weight: 600;"
-                            " background: transparent;")
-        root.addWidget(title)
-
+        # Title + blurb vary by what is being approved: a code run vs a file
+        # write/edit (each file tool gets its own wording).
         if self._file_edit is not None:
-            desc_text = (f"The AI wants to change {self._file_edit.get('path', 'a file')} "
-                         f"({self.execution_type}). Review the diff, adjust any block, "
-                         "and approve to write the file.")
+            _is_create = not (self._file_edit.get('old'))
+            _pathname = self._file_edit.get('path', 'a file')
+            if self.execution_type == 'write_file':
+                title_text = "File write approval"
+                _verb = "create" if _is_create else "overwrite"
+                desc_text = (f"The AI wants to {_verb} {_pathname}. Review the full "
+                             "contents below and approve to save the file.")
+            else:  # edit_file (surgical change)
+                title_text = "File edit approval"
+                desc_text = (f"The AI wants to edit {_pathname}. Review the diff, adjust "
+                             "any block, and approve to write the changes.")
         else:
-            where = ("work environment" if self.execution_type == "work_environment"
+            title_text = "Code execution approval"
+            where = ("python interpreter" if self.execution_type == "python_interpreter"
                      else "direct execution")
             desc_text = (f"The AI wants to run the code below ({where}). Review, edit if "
                          "needed, and approve. You can turn this prompt off in Settings.")
+
+        title = QLabel(title_text)
+        title.setStyleSheet(f"color: {p['text']}; font-size: 15px; font-weight: 600;"
+                            " background: transparent;")
+        root.addWidget(title)
         desc = QLabel(desc_text)
         desc.setWordWrap(True)
         desc.setStyleSheet(f"color: {p['muted']}; font-size: 11px; background: transparent;")
         root.addWidget(desc)
 
-        split = QSplitter(Qt.Orientation.Horizontal)
-        split.setChildrenCollapsible(False)
-        split.setStyleSheet(f"QSplitter::handle {{ background: {p['border']}; width: 2px; }}")
-        split.addWidget(self._build_code_side())
-        split.addWidget(self._build_side_panel())
-        split.setSizes([680, 420])
-        root.addWidget(split, stretch=1)
+        # File ops are "just files, not code" — no static risk scan, no Code
+        # Reviewer sub-agent. Show only the diff/content side, full width.
+        if self._file_edit is not None:
+            root.addWidget(self._build_code_side(), stretch=1)
+        else:
+            split = QSplitter(Qt.Orientation.Horizontal)
+            split.setChildrenCollapsible(False)
+            split.setStyleSheet(f"QSplitter::handle {{ background: {p['border']}; width: 2px; }}")
+            split.addWidget(self._build_code_side())
+            split.addWidget(self._build_side_panel())
+            split.setSizes([680, 420])
+            root.addWidget(split, stretch=1)
 
         # footer: tag-based "don't ask again" controls + reason + Reject / Accept
         foot = QHBoxLayout()
@@ -490,9 +515,12 @@ class CodeApprovalDialog(QDialog):
         reject_btn.clicked.connect(self.on_reject)
         foot.addWidget(reject_btn)
 
-        self.accept_btn = QPushButton(
-            "Approve file change" if self._file_edit is not None
-            else "Accept and execute")
+        if self._file_edit is not None:
+            _accept_label = ("Approve write" if self.execution_type == 'write_file'
+                             else "Approve edit")
+        else:
+            _accept_label = "Accept and execute"
+        self.accept_btn = QPushButton(_accept_label)
         self.accept_btn.setStyleSheet(self._btn(primary=True))
         self.accept_btn.clicked.connect(self.on_accept)
         self.accept_btn.setDefault(True)
@@ -625,6 +653,9 @@ class CodeApprovalDialog(QDialog):
         return findings
 
     def _refresh_security(self):
+        # File-op dialogs have no static-scan panel (dropped for simplicity).
+        if getattr(self, 'risk_list', None) is None:
+            return
         p = self.p
         code = self.code_edit.toPlainText()
         findings = self._scan(code)
@@ -755,6 +786,11 @@ class CodeApprovalDialog(QDialog):
         self._run_agent(q)
 
     def _append_chat(self, role, text):
+        # File-op dialogs have no Code Reviewer panel — self.chat is never built,
+        # so every reviewer-chat message (incl. the ones _finish_review emits) is
+        # a safe no-op here. Without this guard, approving a file edit throws.
+        if getattr(self, 'chat', None) is None:
+            return
         p = self.p
         who = {"you": p["accent"], "you-voice": p["accent"], "agent": p["text"],
                "system": p["muted"]}.get(role, p["text"])
@@ -934,8 +970,16 @@ class CodeApprovalDialog(QDialog):
 
     # ── accept / reject ──────────────────────────────────────────────────────
     def _risky_categories(self):
-        """Operation categories of the caution/danger findings in the current
-        code — the ones a "don't ask again" choice should act on."""
+        """Operation categories a "don't ask again" choice should act on. For a
+        file op it is the file-subsystem category (file_edit / file_create) — NOT
+        a scan of the file's contents (which would mis-classify the file body as
+        executable code). For a code run it is the caution/danger scan findings."""
+        if self._file_edit is not None:
+            try:
+                from systema.security.code_guard import CAT_FILE_EDIT, CAT_FILE_CREATE
+                return [CAT_FILE_EDIT if self._file_edit.get('old') else CAT_FILE_CREATE]
+            except Exception:
+                return ['file_edit' if self._file_edit.get('old') else 'file_create']
         try:
             findings = self._last_findings or self._scan(self.code_edit.toPlainText())
             return sorted({f.category for f in findings

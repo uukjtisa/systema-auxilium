@@ -1,6 +1,6 @@
 # Tool Calling: Native and Compatibility
 
-The assistant drives its tools — **work mode**, **execute code**, **load/unload
+The assistant drives its tools — **python_interpreter**, **read/edit/write files**, **load/unload
 skill**, and **session naming** — in one of two modes. Switch under
 **Settings → System → Tool Calling Mode**.
 
@@ -10,7 +10,7 @@ Tools are described in the system prompt, and the model invokes them by writing
 fenced blocks, for example:
 
 <pre>
-```work_environment
+```python_interpreter
 print("hello")
 ```
 </pre>

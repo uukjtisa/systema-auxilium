@@ -8,7 +8,7 @@ description: Systema Auxilium's knowledge of itself - what it is, how it works, 
 Use this when the user asks about **me** — what I am, how a part of me works, my
 status/version, my creator, or updates. Answer concisely from the overview below.
 For deep detail, open the relevant page in `docs/` (mapped at the end). Only enter
-the work environment to inspect the *live* system (files, settings, version) — the
+work mode to inspect the *live* system (files, settings, version) — the
 mandatory updater checkup is the main case.
 
 ## What I am
@@ -24,7 +24,7 @@ project (see **Creator** below).
 ```
 You ─▶ Chat / Voice / Android ─▶ AI Engine ─▶ LLM provider (your script)
                                      │
-                                     ├─ Tools: work mode, execute code,
+                                     ├─ Tools: python interpreter, file editing,
                                      │         load/unload skill, name session
                                      ▼
                               Security gate ─▶ Python interpreter
@@ -52,15 +52,17 @@ Two modes (Settings → System → Tool Calling Mode):
 
 ## Work mode & code execution
 
-- **Work mode** — for multi-step system tasks: I write Python, run it, read the
-  output, and iterate until done.
-- **Execute code** — run a single Python block directly in a chat turn.
+- **Work mode** — a STATE, not one tool: `python_interpreter`, the file subsystem
+  (`read_file`/`edit_file`/`write_file`), and load/unload skill all drive it. For
+  multi-step system tasks I write Python, run it, read the output, and iterate
+  until done — or chain a file edit or a skill load without ever leaving the loop.
 - **Persistent interpreter** — variables and imports persist across steps within a
   session, so later code can build on earlier state.
 - **`#@FILE` blocks** — a literal file-write syntax for dropping exact file content
   to disk without escaping.
-- **Finishing** — there is no "exit" command. When I reply with *no* work/execute
-  tool call, that reply is my final report and work mode ends.
+- **Finishing** — there is no "exit" command. When I reply with *no*
+  python_interpreter (or file, or skill) tool call, that reply is my final report
+  and work mode ends.
 
 ## Security — guarded execution
 
@@ -122,7 +124,7 @@ the matching page:
 | Install & first run | `docs/getting-started.md` |
 | Provider scripts & contracts | `docs/providers.md` |
 | Native vs compatibility tool calling | `docs/tool-calling.md` |
-| Work mode & the interpreter | `docs/work-mode.md` |
+| The Python interpreter | `docs/python-interpreter.md` |
 | Security policy & approvals | `docs/security.md` |
 | Scheduled tasks & triggers | `docs/tasks.md` |
 | Self-update mechanics | `docs/updates.md` |
@@ -136,7 +138,7 @@ Whenever the user asks about **me/myself, my version, my status, the system, or
 updates**, you MUST run the self-update check tool first and report its result, then
 answer.
 
-Run this in the work environment:
+Run this in the python interpreter:
 ```python
 import subprocess, sys
 r = subprocess.run([sys.executable, "skills/self-knowledge/self_update_check.py"],
@@ -153,8 +155,8 @@ auto-update is disabled here because this is the development copy.
 
 For questions about my capabilities, configuration, or how a part of me works,
 answer concisely from this overview (open the relevant `docs/` page for depth). Only
-enter work mode to inspect the live system (files, settings, version) — such as the
-mandatory updater checkup above.
+enter work mode to inspect the live system (files, settings, version) — such
+as the mandatory updater checkup above.
 
 ## Creator
 

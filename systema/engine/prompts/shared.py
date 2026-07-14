@@ -4,11 +4,11 @@ systema/engine/prompts/shared.py
 Mode-AGNOSTIC system-prompt sections, authored ONCE. Nothing in this module may
 mention an invocation syntax: no code fences, no "JSON", no native-call
 phrasing. Where a section needs a code example, it takes an `invoke_hint`
-parameter ("Run this in a work_environment fence whose code is:" vs "Make a
-work_environment tool call whose code is:") supplied by compat.py / native.py —
+parameter ("Run this in a python_interpreter fence whose code is:" vs "Make a
+python_interpreter tool call whose code is:") supplied by compat.py / native.py —
 this replaces the old fragile .replace()-built _NATIVE twins.
 
-The FINISH rule (how to leave work mode) is stated in WORK_ENVIRONMENT_SECTION
+The FINISH rule (how to leave work mode) is stated in PYTHON_INTERPRETER_SECTION
 and ONLY there within the assembled system prompt — do not restate it in other
 sections; drifted duplicates are exactly what this split removed.
 """
@@ -96,7 +96,7 @@ RULES:
   never skip it.
 - NEVER alone: always part of a real reply to the user.
 - If the user's message asks you to do work and the session is not yet named,
-  include set_session_name in the SAME response as your work_environment call —
+  include set_session_name in the SAME response as your python_interpreter call —
   never postpone naming until the work is done, and never name the session
   INSTEAD of doing the work.
 """
@@ -106,7 +106,7 @@ def memory_section(invoke_hint: str) -> str:
     return f"""
 MEMORY — PERSISTENT ACROSS SESSIONS
 
-Five functions are available inside work_environment for managing memory:
+Five functions are available inside python_interpreter for managing memory:
 
   memorize(title, body, tags="")          -> Save a memory permanently
   search_memory(query)                    -> Search memories by topic
@@ -145,18 +145,18 @@ When to delete/forget:
 
 If the user asks a memory question ("do you remember X?", "what do you know
 about me?"): take initiative — run search_memory() or
-view_all_memory(titles_only=True) in work_environment and report what you
+view_all_memory(titles_only=True) in python_interpreter and report what you
 found. NEVER mention any of this during unrelated conversation.
 """
 
 
 # The single home of the FINISH rule.
-WORK_ENVIRONMENT_SECTION = """
-WORK ENVIRONMENT — YOUR EXECUTION TOOL
+PYTHON_INTERPRETER_SECTION = """
+PYTHON INTERPRETER — YOUR EXECUTION TOOL
 
-work_environment is the ONLY way to run code, and it is your PRIVATE workspace —
+python_interpreter is the ONLY way to run code, and it is your PRIVATE workspace —
 the user cannot see inside it. Calling it enters work mode: run code, SEE its
-output, decide, run more. ONE work_environment call per response (never two);
+output, decide, run more. ONE python_interpreter call per response (never two);
 each call is a separate turn — wait for its output.
 
 Use it for everything that touches the system: reading files, calculations,
@@ -164,7 +164,7 @@ gathering data, checking state, and launching things.
 
 LAUNCHING APPS / GUI / BLOCKING PROGRAMS: start them DETACHED so your code
 returns immediately — subprocess.Popen([...]) or os.startfile(path) — and never
-run a blocking mainloop or wait on a GUI inside work code. Say what you are
+run a blocking mainloop or wait on a GUI inside interpreter code. Say what you are
 launching, then confirm the result after the call returns.
 
 Stay in work mode until you have EVERYTHING for a complete answer: verify
@@ -211,6 +211,9 @@ RULES:
 - edit_file's OLD text must match the file EXACTLY and uniquely (copy it
   verbatim from the read window; whitespace matters). A failed or ambiguous
   match returns an actionable error — re-read and retry.
+- To replace a whole RUN OF LINES instead of matching exact text, give a line
+  range: `lines: A-B` plus the replacement text (no OLD/NEW block). Still
+  read_file first so A-B are the lines you actually mean.
 - write_file is for NEW files or full rewrites; prefer edit_file for changes.
 - ONE file op per response, like any action call. Annotate every call.
 - Edits and writes may need user approval (they see a diff). A rejection comes
@@ -228,13 +231,13 @@ def file_write_guide(example_intro: str) -> str:
 WRITING FILES WHOSE CONTENT IS CODE OR HAS TRICKY CHARACTERS
 (backslashes, quotes, or triple-quotes — e.g. generating a .py script):
 
-Do NOT embed that content as a Python string literal. Your work_environment code
+Do NOT embed that content as a Python string literal. Your python_interpreter code
 is compiled as Python FIRST, so a backslash, a " or a """ inside a literal breaks
 it with "unterminated string literal". Instead put the literal content in a #@FILE
 block and write it with write_file(). Block content is captured VERBATIM and is
 never parsed as Python.
 
-You may define MULTIPLE #@FILE blocks in ONE work_environment call and write them
+You may define MULTIPLE #@FILE blocks in ONE python_interpreter call and write them
 all at once — each block becomes its own variable. ''' + example_intro + r'''
 
 write_file(r"D:\proj\downloader.py", downloader_src)
@@ -296,7 +299,7 @@ tell the user what you saw, use send_message_main.
 FLOW EXAMPLE — checking screen state during a task. """ + invoke_hint + """
     path = take_screenshot()
     print(f"Screenshot queued for context: {path}")
-  (The image is passed to you automatically on the next work step.)
+  (The image is passed to you automatically on the next interpreter step.)
 """
     else:
         variant = """
@@ -373,7 +376,7 @@ def skills_list_block(skills) -> str:
         "AVAILABLE SKILLS",
         "",
         "Skills give you deep, specific instructions for certain tasks.",
-        "You can load or unload skills at ANY time — inside or outside work_environment.",
+        "You can load or unload skills at ANY time — inside or outside python_interpreter.",
         "Format below is  - name [LOADED]: when to use  (the [LOADED] tag appears only on active skills).",
         "",
     ]
@@ -404,6 +407,13 @@ IF YOU NEED MORE INFO -> run more code!
 IF TASK IS INCOMPLETE -> run more code!
 IF YOU HAVE EVERYTHING -> finish with your full report.
 
+YOU CAN CHAIN TOOLS — one per turn, each keeps you in work mode and returns an observation:
+- python_interpreter — run logic/compute, gather data, launch apps
+- read_file -> edit_file — inspect a file, then surgically change it, then re-read to verify
+- write_file — create or fully rewrite a file
+- load_skill / unload_skill — pull in or drop task-specific instructions mid-work
+Session naming is NOT a work step — never emit set_session_name while in work mode.
+
 {options}
 
 ---
@@ -418,7 +428,7 @@ ANTI-PATTERNS — NEVER DO THESE:
 ---
 
 Don't rush — chain executions until you are genuinely ready. While you still
-have work to do, keep using work_environment and don't address the user
+have work to do, keep using python_interpreter and don't address the user
 mid-task.
 """
 
@@ -457,7 +467,7 @@ NOTE: If this message is part of an automated task-session ping, respond strictl
 You ended work mode (no tool call) but your reply was empty.
 The user saw nothing. They have no idea what you found or did.
 
-YOU MUST NOW write a complete summary of your work environment session:
+YOU MUST NOW write a complete summary of your python interpreter session:
   - What the user asked you to do
   - What you executed and what the outputs were
   - What you found, built, or concluded

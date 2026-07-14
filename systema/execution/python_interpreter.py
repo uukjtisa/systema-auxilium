@@ -25,7 +25,7 @@ log = _make_logger("PythonInterpreter") if _verbose else _NoOpLogger()
 def _wm_write_file(path, content, mode=None, encoding="utf-8"):
     """Write literal data to a file, creating parent directories as needed.
 
-    Always available inside work_environment as write_file().
+    Always available inside python_interpreter as write_file().
     Designed to pair with #@FILE … #@ENDFILE literal blocks: the block content
     is bound to a variable WITHOUT passing through Python's parser, so source
     text containing backslashes, quotes or triple-quotes survives intact.
@@ -453,7 +453,7 @@ class PythonInterpreter:
         log.info("[PythonInterpreter.reset] Reset complete — fresh interpreter attached, count=0")
 
     def _install_helpers(self):
-        """Inject always-available work-environment helpers into the namespace."""
+        """Inject always-available python interpreter helpers into the namespace."""
         self.namespace['write_file'] = _wm_write_file
 
     def inject_vars(self, mapping):

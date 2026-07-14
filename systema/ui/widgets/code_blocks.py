@@ -243,26 +243,28 @@ class CodeSyntaxHighlighter(QSyntaxHighlighter):
 
 
 class CodeBlockWidget(QWidget):
-    """Widget for displaying code blocks with syntax highlighting and resize handles"""
+    """Code block with syntax highlighting, rendered in the same minimal,
+    theme-driven frame as TableBlockWidget: a thin bordered box holding the
+    scrollable code, with a footer that carries the language label plus
+    Wrap / Copy / Hide chips and a resize grip. Expanded by default."""
 
-    # ── Obsidian Blue palette constants ───────────────────────────────────────
-    _CB_BASE    = "#0D1117"
-    _CB_HEADER  = "#161B22"
-    _CB_BORDER  = "rgba(88, 166, 255, 0.18)"
-    _CB_ACCENT  = "#58A6FF"
-    _CB_ACCENT2 = "rgba(88, 166, 255, 0.12)"
-    _CB_ACCENT3 = "rgba(88, 166, 255, 0.28)"
-    _CB_TEXT    = "#E6EDF3"
-    _CB_MUTED   = "#8B949E"
-    _CB_SB      = "#21262D"
-
-    def __init__(self, language, code, parent=None):
+    def __init__(self, language, code, theme=None, parent=None):
         super().__init__(parent)
         self.code = code
         self.language = language
 
-        self.is_expanded        = False
+        theme = theme or {}
+        base     = theme.get('base', '#0D1117')
+        elevated = theme.get('elevated', '#21262D')
+        border   = theme.get('border', '#30363D')
+        accent   = theme.get('accent', '#58A6FF')
+        muted    = '#8B949E'
+        text_col = '#E6EDF3'
+        self._accent = accent
+
+        self.is_expanded        = True
         self.is_resizing        = False
+        self._manual_h          = False  # set once the user drags the resize grip
         self.resize_start_pos   = None
         self.resize_start_size  = None   # (width, height) of main_container at drag start
         self.min_height = 60
@@ -274,110 +276,16 @@ class CodeBlockWidget(QWidget):
         root_layout.setContentsMargins(0, 6, 0, 0)
         root_layout.setSpacing(0)
 
-        # ── Main container ────────────────────────────────────────────────────
+        # ── Minimal frame (matches the table) ─────────────────────────────────
         self.main_container = QFrame()
         self.main_container.setObjectName("codeBlock")
-        self.main_container.setStyleSheet(f"""
-            QFrame#codeBlock {{
-                background: {self._CB_BASE};
-                border: 1px solid {self._CB_BORDER};
-                border-radius: 10px;
-            }}
-        """)
+        self.main_container.setStyleSheet(
+            f"QFrame#codeBlock {{ background: {base}; border: 1px solid {border}; "
+            f"border-radius: 8px; }}")
+        self._frame = self.main_container
         container_layout = QVBoxLayout(self.main_container)
         container_layout.setContentsMargins(0, 0, 0, 0)
         container_layout.setSpacing(0)
-
-        # ── Header (taller so buttons are never clipped) ──────────────────────
-        header = QFrame()
-        header.setObjectName("codeHeader")
-        header.setFixedHeight(54)
-        header.setStyleSheet(f"""
-            QFrame#codeHeader {{
-                background-color: {self._CB_HEADER};
-                border-top-left-radius: 10px;
-                border-top-right-radius: 10px;
-                border-bottom: 1px solid {self._CB_BORDER};
-            }}
-        """)
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(14, 0, 12, 0)
-        header_layout.setSpacing(6)
-        header_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
-
-        # Traffic-light dots
-        for _color in ("#FF5F57", "#FEBC2E", "#28C840"):
-            dot = QFrame()
-            dot.setFixedSize(11, 11)
-            dot.setStyleSheet(f"QFrame {{ background: {_color}; border-radius: 5px; border: none; }}")
-            header_layout.addWidget(dot)
-
-        header_layout.addSpacing(10)
-
-        # Language label — always visible
-        display_lang = language.strip().upper() if language and language.strip().lower() not in ('', 'text') else 'TEXT'
-        lang_label = QLabel(display_lang)
-        lang_label.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
-        )
-        lang_label.setStyleSheet(f"""
-            QLabel {{
-                background: transparent;
-                color: {self._CB_MUTED};
-                font-size: 11px;
-                font-weight: 700;
-                border: none;
-                padding: 0 4px;
-            }}
-        """)
-        header_layout.addWidget(lang_label)
-        header_layout.addStretch()
-
-        _btn_style = f"""
-            QPushButton {{
-                background-color: transparent;
-                border: 1px solid transparent;
-                border-radius: 5px;
-                padding: 4px 11px;
-                font-size: 11px;
-                font-weight: 500;
-                color: {self._CB_MUTED};
-                min-width: 64px;
-            }}
-            QPushButton:hover {{
-                background-color: {self._CB_ACCENT2};
-                border-color: {self._CB_ACCENT3};
-                color: {self._CB_ACCENT};
-            }}
-            QPushButton:pressed {{
-                background-color: {self._CB_ACCENT3};
-            }}
-        """
-
-        self.toggle_btn = QPushButton("▶  Show")
-        self.toggle_btn.setObjectName("codeToggleBtn")
-        self.toggle_btn.setStyleSheet(_btn_style)
-        self.toggle_btn.clicked.connect(self.toggle_expand)
-        self.toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        header_layout.addWidget(self.toggle_btn)
-
-        self.wrap_btn = QPushButton("↵  Wrap")
-        self.wrap_btn.setObjectName("codeWrapBtn")
-        self.wrap_btn.setStyleSheet(_btn_style)
-        self.wrap_btn.setCheckable(True)
-        self.wrap_btn.setChecked(False)
-        self.wrap_btn.clicked.connect(self._toggle_wrap)
-        self.wrap_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        header_layout.addWidget(self.wrap_btn)
-
-        self.copy_btn = QPushButton("📋  Copy")
-        self.copy_btn.setObjectName("codeCopyBtn")
-        self.copy_btn.setStyleSheet(_btn_style)
-        self.copy_btn.clicked.connect(self.copy_code)
-        self.copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        header_layout.addWidget(self.copy_btn)
-
-        container_layout.addWidget(header)
 
         # ── Scrollable code area ──────────────────────────────────────────────
         self.scroll_area = QScrollArea()
@@ -387,29 +295,24 @@ class CodeBlockWidget(QWidget):
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.scroll_area.setStyleSheet(f"""
             QScrollArea#codeScrollArea {{
-                background: {self._CB_BASE};
+                background: transparent;
                 border: none;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
             }}
-            QScrollBar:horizontal {{
-                background: transparent; height: 6px; border: none;
-            }}
-            QScrollBar::handle:horizontal {{
-                background: {self._CB_SB}; border-radius: 3px; min-width: 20px;
-            }}
-            QScrollBar::handle:horizontal:hover {{ background: #30363D; }}
-            QScrollBar:vertical {{
-                background: transparent; width: 6px; border: none;
-            }}
-            QScrollBar::handle:vertical {{
-                background: {self._CB_SB}; border-radius: 3px; min-height: 20px;
-            }}
-            QScrollBar::handle:vertical:hover {{ background: #30363D; }}
+            QScrollBar:horizontal {{ background: transparent; height: 7px; border: none; }}
+            QScrollBar::handle:horizontal {{ background: {border}; border-radius: 3px; min-width: 24px; }}
+            QScrollBar::handle:horizontal:hover {{ background: {accent}; }}
+            QScrollBar:vertical {{ background: transparent; width: 7px; border: none; }}
+            QScrollBar::handle:vertical {{ background: {border}; border-radius: 3px; min-height: 24px; }}
+            QScrollBar::handle:vertical:hover {{ background: {accent}; }}
             QScrollBar::add-line, QScrollBar::sub-line {{ border: none; background: none; height: 0; width: 0; }}
+            QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
             QScrollBar::corner {{ background: transparent; }}
         """)
 
         code_container = QWidget()
-        code_container.setStyleSheet(f"QWidget {{ background: {self._CB_BASE}; border: none; }}")
+        code_container.setStyleSheet("QWidget { background: transparent; border: none; }")
         code_container_layout = QVBoxLayout(code_container)
         code_container_layout.setContentsMargins(16, 12, 16, 12)
         code_container_layout.setSpacing(0)
@@ -426,7 +329,7 @@ class CodeBlockWidget(QWidget):
         self.code_editor.setStyleSheet(f"""
             QTextEdit#codeEditor {{
                 background: transparent; border: none;
-                color: {self._CB_TEXT};
+                color: {text_col};
                 selection-background-color: rgba(88, 166, 255, 0.25);
             }}
         """)
@@ -447,37 +350,72 @@ class CodeBlockWidget(QWidget):
         line_count = len(code.split('\n'))
         calculated_height = min(max(line_count * 17 + 24, self.min_height), self.max_height)
         self.scroll_area.setFixedHeight(calculated_height)
-        self.scroll_area.hide()
         container_layout.addWidget(self.scroll_area)
 
-        # ── Resize grip — inside the container, bottom-right ──────────────────
-        # A transparent footer row that floats at the bottom of the black box.
+        # ── Footer: LANG label (left) + Wrap / Copy / Hide chips + grip (right) ─
         grip_row = QWidget()
         grip_row.setObjectName("codeGripRow")
         grip_row.setStyleSheet("QWidget#codeGripRow { background: transparent; }")
-        grip_row.setFixedHeight(28)
-        grip_row.hide()
+        grip_row.setFixedHeight(30)
         grip_row_layout = QHBoxLayout(grip_row)
-        grip_row_layout.setContentsMargins(0, 0, 8, 4)
-        grip_row_layout.setSpacing(0)
+        grip_row_layout.setContentsMargins(10, 0, 8, 4)
+        grip_row_layout.setSpacing(6)
+
+        display_lang = language.strip().upper() if language and language.strip().lower() not in ('', 'text') else 'TEXT'
+        lang_label = QLabel(display_lang)
+        lang_label.setStyleSheet(
+            f"QLabel {{ background: transparent; color: {muted}; font-size: 10px; "
+            f"font-weight: 700; border: none; padding: 0 2px; }}")
+        grip_row_layout.addWidget(lang_label)
         grip_row_layout.addStretch()
+
+        self._chip_style = f"""
+            QPushButton {{
+                background: {elevated};
+                color: {accent};
+                font-size: 10px; font-weight: 600;
+                padding: 2px 9px;
+                border: 1px solid {border};
+                border-radius: 4px;
+            }}
+            QPushButton:hover {{ border-color: {accent}; }}
+            QPushButton:checked {{ border-color: {accent}; background: {base}; }}
+        """
+
+        self.wrap_btn = QPushButton("↵ Wrap")
+        self.wrap_btn.setObjectName("codeWrapBtn")
+        self.wrap_btn.setCheckable(True)
+        self.wrap_btn.setChecked(False)
+        self.wrap_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.wrap_btn.setStyleSheet(self._chip_style)
+        self.wrap_btn.clicked.connect(self._toggle_wrap)
+        grip_row_layout.addWidget(self.wrap_btn)
+
+        self.copy_btn = QPushButton("Copy")
+        self.copy_btn.setObjectName("codeCopyBtn")
+        self.copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.copy_btn.setStyleSheet(self._chip_style)
+        self.copy_btn.clicked.connect(self.copy_code)
+        grip_row_layout.addWidget(self.copy_btn)
+
+        self.toggle_btn = QPushButton("Hide")
+        self.toggle_btn.setObjectName("codeToggleBtn")
+        self.toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.toggle_btn.setStyleSheet(self._chip_style)
+        self.toggle_btn.clicked.connect(self.toggle_expand)
+        grip_row_layout.addWidget(self.toggle_btn)
 
         self.corner_grip = QLabel("⤡  Resize")
         self.corner_grip.setStyleSheet(f"""
             QLabel {{
-                background: rgba(88,166,255,0.08);
-                color: rgba(88,166,255,0.55);
-                font-size: 10px;
-                font-weight: 700;
+                background: {elevated};
+                color: {accent};
+                font-size: 10px; font-weight: 700;
                 padding: 2px 8px;
-                border: 1px solid rgba(88,166,255,0.20);
+                border: 1px solid {border};
                 border-radius: 4px;
             }}
-            QLabel:hover {{
-                background: rgba(88,166,255,0.18);
-                color: {self._CB_ACCENT};
-                border-color: rgba(88,166,255,0.45);
-            }}
+            QLabel:hover {{ border-color: {accent}; }}
         """)
         self.corner_grip.setCursor(Qt.CursorShape.SizeFDiagCursor)
         self.corner_grip.mousePressEvent   = self._corner_press
@@ -488,6 +426,26 @@ class CodeBlockWidget(QWidget):
         self._grip_row = grip_row
         container_layout.addWidget(grip_row)
         root_layout.addWidget(self.main_container)
+
+        # Re-fit height once the editor is laid out — the line-count guess made
+        # during construction under-sizes the visible area.
+        QTimer.singleShot(0, self._fit_height)
+
+    def _fit_height(self):
+        """Size the scroll area to the code's actual document height. Skipped
+        after a manual grip resize."""
+        if getattr(self, '_manual_h', False) or self.is_resizing:
+            return
+        try:
+            doc_h = int(self.code_editor.document().size().height())
+            h = min(max(doc_h + 24, self.min_height), self.max_height)
+            self.scroll_area.setFixedHeight(h)
+        except RuntimeError:
+            pass
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._fit_height)
 
     # ── Ctrl+Scroll ───────────────────────────────────────────────────────────
 
@@ -512,21 +470,21 @@ class CodeBlockWidget(QWidget):
             p = p.parent()
         return None
 
-    # ── Toggle ────────────────────────────────────────────────────────────────
+    # ── Toggle (collapse the code; the footer chips stay visible) ─────────────
 
     def toggle_expand(self):
         self.is_expanded = not self.is_expanded
         if self.is_expanded:
             self.scroll_area.show()
-            self._grip_row.show()
-            self.toggle_btn.setText("▼  Hide")
+            self.corner_grip.show()
+            self.toggle_btn.setText("Hide")
         else:
             self.scroll_area.hide()
-            self._grip_row.hide()
-            self.toggle_btn.setText("▶  Show")
+            self.corner_grip.hide()
+            self.toggle_btn.setText("Show")
 
     # ── Corner resize (width + height) ───────────────────────────────────────
-    # We resize main_container width so the whole block (header + scroll + bar)
+    # We resize main_container width so the whole block (scroll + footer)
     # moves together, rather than just the inner scroll area.
 
     def _corner_press(self, event):
@@ -549,7 +507,9 @@ class CodeBlockWidget(QWidget):
                 avail = min(avail, chat._bubble_max_width() - 28)
             except Exception:
                 pass
-        return max(self.min_width, int(avail))
+        # Floor low enough to fit a narrow bubble — the widget must never be
+        # forced wider than the space it has (min_width would overflow it).
+        return max(120, int(avail))
 
     def clamp_width(self):
         """Re-clamp a manually-resized block so it never exceeds the visible
@@ -564,6 +524,7 @@ class CodeBlockWidget(QWidget):
 
     def _corner_move(self, event):
         if self.is_resizing:
+            self._manual_h = True
             dx    = event.globalPosition().x() - self.resize_start_pos.x()
             dy    = event.globalPosition().y() - self.resize_start_pos.y()
             max_w = self._effective_max_width()
@@ -585,51 +546,31 @@ class CodeBlockWidget(QWidget):
         if self.wrap_btn.isChecked():
             self.code_editor.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
             self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            self.wrap_btn.setText("↵  Wrap ✓")
+            self.wrap_btn.setText("↵ Wrap ✓")
         else:
             self.code_editor.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
             self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-            self.wrap_btn.setText("↵  Wrap")
+            self.wrap_btn.setText("↵ Wrap")
 
     def copy_code(self):
         clipboard = QApplication.clipboard()
         clipboard.setText(self.code)
-        self.copy_btn.setText("✓  Copied!")
+        self.copy_btn.setText("Copied ✓")
         self.copy_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: rgba(52, 168, 83, 0.12);
-                border: 1px solid rgba(52, 168, 83, 0.3);
-                border-radius: 5px;
-                padding: 4px 11px;
-                font-size: 11px;
-                min-width: 64px;
+                background: rgba(52, 168, 83, 0.14);
                 color: #3FB950;
+                font-size: 10px; font-weight: 600;
+                padding: 2px 9px;
+                border: 1px solid rgba(52, 168, 83, 0.40);
+                border-radius: 4px;
             }}
         """)
         QTimer.singleShot(ANIM_COPY_FEEDBACK_MS, self.reset_copy_button)
 
     def reset_copy_button(self):
-        self.copy_btn.setText("📋  Copy")
-        self.copy_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: transparent;
-                border: 1px solid transparent;
-                border-radius: 5px;
-                padding: 4px 11px;
-                font-size: 11px;
-                font-weight: 500;
-                min-width: 64px;
-                color: {self._CB_MUTED};
-            }}
-            QPushButton:hover {{
-                background-color: {self._CB_ACCENT2};
-                border-color: {self._CB_ACCENT3};
-                color: {self._CB_ACCENT};
-            }}
-            QPushButton:pressed {{
-                background-color: {self._CB_ACCENT3};
-            }}
-        """)
+        self.copy_btn.setText("Copy")
+        self.copy_btn.setStyleSheet(self._chip_style)
 
 
 class TableBlockWidget(QWidget):
@@ -652,6 +593,7 @@ class TableBlockWidget(QWidget):
         text_col = '#E6EDF3'
 
         self.is_resizing = False
+        self._manual_h = False        # set once the user drags the resize grip
         self.min_width, self.max_width = 300, 1200
         self.min_height, self.max_height = 44, 800
 
@@ -677,7 +619,7 @@ class TableBlockWidget(QWidget):
         self.view = QTextEdit()
         self.view.setReadOnly(True)
         self.view.setHtml(styled)
-        self.view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)   # wide → horizontal scroll
+        self.view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)  # wrap to fit by default
         self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.view.setFrameShape(QTextEdit.Shape.NoFrame)
@@ -699,34 +641,13 @@ class TableBlockWidget(QWidget):
 
         fl.addWidget(self.view)
 
-        # ── Footer: wrap toggle (left) + resize grip (right) ──────────────────
-        # Both styled from the table's own theme colours (accent / border).
+        # ── Footer: resize grip only (wrapping is on by default) ──────────────
         grip_row = QWidget()
         grip_row.setStyleSheet("background: transparent;")
         grip_row.setFixedHeight(28)
         grl = QHBoxLayout(grip_row)
         grl.setContentsMargins(8, 0, 8, 4)
         grl.setSpacing(6)
-
-        _chip_style = f"""
-            QPushButton {{
-                background: {elevated};
-                color: {accent};
-                font-size: 10px; font-weight: 600;
-                padding: 2px 9px;
-                border: 1px solid {border};
-                border-radius: 4px;
-            }}
-            QPushButton:hover {{ border-color: {accent}; }}
-            QPushButton:checked {{ border-color: {accent}; background: {base}; }}
-        """
-        self.wrap_btn = QPushButton("↵ Wrap")
-        self.wrap_btn.setCheckable(True)
-        self.wrap_btn.setChecked(False)
-        self.wrap_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.wrap_btn.setStyleSheet(_chip_style)
-        self.wrap_btn.clicked.connect(self._toggle_wrap)
-        grl.addWidget(self.wrap_btn)
 
         grl.addStretch()
 
@@ -751,17 +672,28 @@ class TableBlockWidget(QWidget):
 
         root.addWidget(frame)
 
-    def _toggle_wrap(self):
-        """Toggle between horizontal-scroll (NoWrap, default) and wrap-to-fit —
-        same behaviour as the code-block wrap button."""
-        if self.wrap_btn.isChecked():
-            self.view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
-            self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            self.wrap_btn.setText("↵ Wrap ✓")
-        else:
-            self.view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
-            self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-            self.wrap_btn.setText("↵ Wrap")
+        # Re-fit once the widget has a real laid-out width — the height computed
+        # during construction (before layout) under-sizes wrapped tables.
+        QTimer.singleShot(0, self._fit_height)
+
+    def _fit_height(self):
+        """Size the table view to its content at the CURRENT width. Skipped once
+        the user has manually resized it."""
+        if getattr(self, '_manual_h', False):
+            return
+        try:
+            doc = self.view.document()
+            w = self.view.viewport().width()
+            if w > 0:
+                doc.setTextWidth(w)
+            content_h = int(doc.size().height()) + 6
+            self.view.setFixedHeight(min(max(content_h, self.min_height), self._MAX_HEIGHT))
+        except RuntimeError:
+            pass
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._fit_height)
 
     # ── Corner resize (width + height), clamped to the visible bubble ─────────
 
@@ -782,7 +714,9 @@ class TableBlockWidget(QWidget):
                 avail = min(avail, chat._bubble_max_width() - 28)
             except Exception:
                 pass
-        return max(self.min_width, int(avail))
+        # Floor low enough to fit a narrow bubble — the widget must never be
+        # forced wider than the space it has (min_width would overflow it).
+        return max(120, int(avail))
 
     def clamp_width(self):
         """Re-clamp a manually-resized table after the window shrinks."""
@@ -803,6 +737,7 @@ class TableBlockWidget(QWidget):
 
     def _corner_move(self, event):
         if self.is_resizing:
+            self._manual_h = True
             dx = event.globalPosition().x() - self.resize_start_pos.x()
             dy = event.globalPosition().y() - self.resize_start_pos.y()
             max_w = self._effective_max_width()

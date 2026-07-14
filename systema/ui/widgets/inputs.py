@@ -11,6 +11,10 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 class MultiLineInput(QTextEdit):
     """Custom text input with Shift+Enter support"""
     enterPressed = pyqtSignal()
+    # Emitted after auto-grow actually changes the field height, so an overlay
+    # host can re-anchor synchronously (a deferred reposition can measure a
+    # stale sizeHint and let the growing pill spill downward off the bottom).
+    heightChanged = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -18,7 +22,12 @@ class MultiLineInput(QTextEdit):
         self.setPlaceholderText("Send a message... (Shift+Enter for new line)")
         self.setMinimumHeight(24)
         self.setMaximumHeight(400)
-        self.manual_resize = False
+        self._grow_max = 400          # auto-grow ceiling (see adjust_height)
+        # A manual drag of the resize handle sets a TEMPORARY floor (px) here.
+        # Auto-grow is never disabled — it can still grow above the floor — and
+        # the floor is cleared the instant the field is emptied, so the box
+        # always collapses back to one line. 0 = no floor.
+        self._user_floor = 0
 
         from PyQt6.QtWidgets import QSizePolicy
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
@@ -99,13 +108,37 @@ class MultiLineInput(QTextEdit):
         return None
 
     def adjust_height(self):
-        if self.manual_resize:
-            return
-        doc_height = self.document().size().height()
-        new_height = min(max(int(doc_height) + 10, 24), self.maximumHeight())
-        self.setFixedHeight(new_height)
-        if self.parent():
-            self.parent().updateGeometry()
+        # Auto-grow is ALWAYS active. A manual drag only raises a temporary floor
+        # (self._user_floor) that auto-grow can still exceed; emptying the field
+        # clears the floor so it never stays stuck tall after a big paste is
+        # deleted (the two bugs this replaces).
+        # Force the document to lay out at the current editor width so its height
+        # reflects wrapped lines (without this the height can lag a keystroke or
+        # stay at one line when the widget hasn't been given a width yet).
+        doc = self.document()
+        vw = self.viewport().width()
+        if vw > 0:
+            doc.setTextWidth(vw)
+        if not self.toPlainText():
+            self._user_floor = 0
+        doc_height = doc.size().height()
+        # Effective height = max(content, manual floor), clamped. Cap against the
+        # CONSTANT ceiling, not maximumHeight() — setFixedHeight sets max==height,
+        # so reading maximumHeight() here would ratchet the cap down each call.
+        new_height = min(max(int(doc_height) + 10, self._user_floor, 24), self._grow_max)
+        if new_height != self.height():
+            self.setFixedHeight(new_height)
+            # Propagate up so the pill / input container actually expand (each
+            # ancestor uses a SetMinimumSize layout that must recompute).
+            w = self.parentWidget()
+            depth = 0
+            while w is not None and depth < 5:
+                w.updateGeometry()
+                w = w.parentWidget()
+                depth += 1
+            # Re-anchor any floating overlay host NOW (synchronously), while the
+            # grown geometry is fresh — see heightChanged docstring.
+            self.heightChanged.emit()
 
 
 class ResizableInput(QWidget):
@@ -159,18 +192,23 @@ class ResizableInput(QWidget):
                     self.is_resizing = True
                     self.resize_start_y = event.globalPosition().y()
                     self.resize_start_height = self.text_input.height()
-                    self.text_input.manual_resize = True
                     return True
             elif event.type() == event.Type.MouseMove and self.is_resizing:
                 delta = self.resize_start_y - event.globalPosition().y()
                 new_height = self.resize_start_height + delta
                 new_height = max(self.min_height, min(self.max_height, new_height))
                 self.text_input.setFixedHeight(int(new_height))
+                # Record the drag as a temporary floor; auto-grow can still grow
+                # above it, and it clears itself when the field is emptied.
+                self.text_input._user_floor = int(new_height)
                 self.updateGeometry()
                 if self.parent():
                     self.parent().updateGeometry()
                     if self.parent().parent():
                         self.parent().parent().updateGeometry()
+                # Re-anchor the floating overlay NOW so a manual drag grows the
+                # pill UPWARD too (keeps it bottom-anchored during the drag).
+                self.text_input.heightChanged.emit()
                 return True
             elif event.type() == event.Type.MouseButtonRelease:
                 self.is_resizing = False
@@ -181,18 +219,14 @@ class ResizableInput(QWidget):
         return self.text_input.toPlainText()
 
     def clear(self):
-        """Clear input and maintain manual resize state if needed"""
-        current_manual = self.text_input.manual_resize
-        current_height = self.text_input.height() if current_manual else self.min_height
-
+        """Clear input and collapse back to one line. Drops any manual-drag floor
+        (a drag only affects the message being composed) and re-anchors the
+        overlay. The explicit setFixedHeight wins over the adjust_height that
+        clear() triggers, keeping the collapsed height deterministic."""
+        self.text_input._user_floor = 0
         self.text_input.clear()
-
-        # Only reset if not manually resized
-        if not current_manual:
-            self.text_input.setFixedHeight(self.min_height)
-        else:
-            self.text_input.setFixedHeight(current_height)
-
+        self.text_input.setFixedHeight(self.min_height)
+        self.text_input.heightChanged.emit()
         self.updateGeometry()
         self.update()
 

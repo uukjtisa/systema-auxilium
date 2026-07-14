@@ -622,7 +622,7 @@ class AndroidBridge:
                 pass
             try:
                 tm = ai.tool_manager
-                state = "work mode" if getattr(tm, 'in_work_mode', False) else \
+                state = "work mode" if getattr(tm.work, 'is_working', False) else \
                         ("processing" if getattr(tm, 'is_processing', False) else "idle")
                 rows.append(["State", state])
             except Exception:
@@ -775,15 +775,15 @@ class AndroidBridge:
         """Replay current session history into the phone.
 
         Mirrors the desktop: work-mode chatter (assistant narration between
-        entering a work_environment and exiting it) is hidden; the step execution
+        entering a python_interpreter and exiting it) is hidden; the step execution
         notes and the exit summary are kept."""
         try:
             import re
-            _WE_RE = re.compile(r'```[ \t]*work_environment\b[^\n]*\n(.*?)```', re.DOTALL)
+            _WE_RE = re.compile(r'```[ \t]*python_interpreter\b[^\n]*\n(.*?)```', re.DOTALL)
             self.clear_chat_silent()
             tm = self.controller.ai.tool_manager
             history = self.controller.ai.conversation_history
-            in_work_mode = False
+            in_work_step = False
             for msg in history:
                 role    = msg.get("role", "")
                 raw = msg.get("content", "")
@@ -796,18 +796,18 @@ class AndroidBridge:
                     raw = ""
 
                 # Exit sentinel removed: a work step is an assistant turn running a
-                # work_environment fence (narration hidden); work mode ends at the
-                # first assistant turn WITHOUT a work_environment code fence — that
+                # python_interpreter fence (narration hidden); work mode ends at the
+                # first assistant turn WITHOUT a python_interpreter code fence — that
                 # turn is the report, rendered below. (Legacy bare `exit` fence still
                 # counts as a finishing turn.)
                 if role == "assistant":
                     _we = _WE_RE.search(raw)
                     if _we and _we.group(1).strip().lower() not in ("exit", ""):
-                        in_work_mode = True   # a work step — hide the narration
+                        in_work_step = True   # a work step — hide the narration
                         continue
-                    in_work_mode = False      # finish / normal reply — fall through to render
+                    in_work_step = False      # finish / normal reply — fall through to render
                 elif role == "user":
-                    in_work_mode = False
+                    in_work_step = False
 
                 content = tm.strip_tool_calls(raw)
                 if role == "ui_event":
@@ -817,6 +817,8 @@ class AndroidBridge:
                             "context_id": msg.get("_memory_context_id", ""),
                             "memories": msg.get("_memories_preview", []),
                         })
+                    elif msg.get("_type") == "file_op":
+                        self.add_file_op(msg.get("_file_op") or {})
                     else:
                         self._dispatch({
                             "cmd": "add_work_execution",
@@ -835,13 +837,13 @@ class AndroidBridge:
     def refresh_session_list(self):
         self._send_sessions_page(0, "")
 
-    def request_manual_response(self, context: str, work_mode: bool, work_output: str, callback):
+    def request_manual_response(self, context: str, is_working: bool, work_output: str, callback):
         """Send manual response request to Android phone."""
         self._pending_manual_response_cb = callback
         self._dispatch({
             "cmd": "show_manual_response",
             "context": context,
-            "work_mode": work_mode,
+            "work_mode": is_working,
             "work_output": work_output or ""
         })
 
@@ -872,6 +874,27 @@ class AndroidBridge:
     def add_work_execution(self, code: str, output: str, annotation: str = ""):
         """Send a code-block + its stdout/stderr output to the Android client."""
         self._dispatch({"cmd": "add_work_execution", "code": code, "output": output, "annotation": annotation})
+
+    def add_file_op(self, info: dict):
+        """Send a file-op card (read_file / edit_file / write_file) to the phone.
+        Mirrors chat_window.add_file_op_card — the phone renders a compact card
+        with the path, +added/-removed counts (or the read range), and an
+        expandable diff/content view. `added`/`removed` are -1 when absent
+        (read_file has no counts) so the phone shows the read range instead."""
+        _added = info.get("added")
+        _removed = info.get("removed")
+        self._dispatch({
+            "cmd": "add_file_op",
+            "tool": info.get("tool", "edit_file"),
+            "path": info.get("display") or info.get("path", ""),
+            "full_path": info.get("path", ""),
+            "added": -1 if _added is None else int(_added),
+            "removed": -1 if _removed is None else int(_removed),
+            "created": bool(info.get("created")),
+            "rejected": bool(info.get("rejected")),
+            "read_range": info.get("read_range", "") or "",
+            "detail": (info.get("detail") or "")[:20000],
+        })
 
     # ── Live work-mode output streaming (mirrors chat_window) ─────────────────
 

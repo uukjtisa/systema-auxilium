@@ -7,14 +7,67 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QFrame, QLineEdit, QTextEdit, QCheckBox,
     QSpinBox, QStackedWidget, QSizePolicy, QApplication,
-    QTimeEdit, QRadioButton, QDateTimeEdit, QMessageBox,
+    QTimeEdit, QRadioButton, QDateTimeEdit, QMessageBox, QComboBox,
 )
+from systema.security import code_guard as _guard
 from systema.common.logger import _make_logger, _NoOpLogger
 from PyQt6.QtCore import Qt, QTime, QDateTime, QPoint, QThread, pyqtSignal, QTimer, QFileSystemWatcher
 from PyQt6.QtGui import QFont, QSyntaxHighlighter, QTextCharFormat, QColor
 import re
 from systema.ui.base_window import BaseWindow
 from systema.ui import theme as _theme
+
+
+# ── Per-task security policy (allow/deny only — background agents can't prompt) ──
+# All code_guard categories. A new task allows the non-destructive ops and denies
+# the genuinely dangerous ones, so a typical fetch/compute/report task works out
+# of the box while deletes / process spawns / dynamic exec / OS-internals / secrets
+# stay blocked until the user opts in.
+_TASK_POLICY_DENY_BY_DEFAULT = (
+    _guard.CAT_FILE_DELETE, _guard.CAT_PROCESS, _guard.CAT_DYNAMIC,
+    _guard.CAT_SYSTEM, _guard.CAT_SECRETS,
+)
+
+
+def _all_policy_categories():
+    cats = []
+    for _title, _grp in _guard.CATEGORY_GROUPS:
+        cats.extend(_grp)
+    return cats
+
+
+def _default_task_policy():
+    return {c: ('deny' if c in _TASK_POLICY_DENY_BY_DEFAULT else 'allow')
+            for c in _all_policy_categories()}
+
+
+def _task_policy_presets():
+    """Built-in allow/deny presets for the per-task policy grid (background tasks
+    have no 'ask'). Returned as an ordered (label, {cat: 'allow'|'deny'}) list."""
+    cats = _all_policy_categories()
+    fetch = {c: 'deny' for c in cats}
+    if _guard.CAT_NETWORK in fetch:
+        fetch[_guard.CAT_NETWORK] = 'allow'
+    return [
+        ("Standard  —  safe file ops + network, dangerous ops blocked", _default_task_policy()),
+        ("Fetch & report  —  network only, everything else blocked", fetch),
+        ("Locked down  —  block everything", {c: 'deny' for c in cats}),
+        ("Trusted  —  allow everything (use with care)", {c: 'allow' for c in cats}),
+    ]
+
+
+def _migrate_task_policy(perms: dict) -> dict:
+    """Derive a per-category allow/deny policy for an OLD task dict that predates
+    the policy grid. bypass_supervised=True ran everything → all allow; a plain
+    workmode task only ever ran finding-free 'safe' code (risky ops hung on a
+    dialog nobody answered) → all deny; no workmode → all deny (moot, tool off)."""
+    if isinstance(perms.get('task_security_policy'), dict):
+        pol = _default_task_policy()
+        pol.update({k: v for k, v in perms['task_security_policy'].items()
+                    if v in ('allow', 'deny')})
+        return pol
+    all_allow = bool(perms.get('bypass_supervised', False))
+    return {c: ('allow' if all_allow else 'deny') for c in _all_policy_categories()}
 
 # ─────────────────────────── Colored Logger Setup ────────────────────────────
 _verbose = True
@@ -184,19 +237,19 @@ def _sep():
     return f
 
 def _extract_after_code_block(raw: str) -> str:
-    """Return any text that follows the closing ``` of a ```work_environment block."""
-    open_idx = raw.find('```work_environment')
+    """Return any text that follows the closing ``` of a ```python_interpreter block."""
+    open_idx = raw.find('```python_interpreter')
     if open_idx == -1:
         return ''
-    close_idx = raw.find('```', open_idx + len('```work_environment'))
+    close_idx = raw.find('```', open_idx + len('```python_interpreter'))
     if close_idx == -1:
         return ''
     return raw[close_idx + 3:].strip()
 
 def _split_work_message(content: str):
     """For an assistant message with a tool fence, return (visible_text, code, tool).
-    tool is '' when the message has no work_environment/execute_code fence."""
-    for tool in ('work_environment', 'execute_code'):
+    tool is '' when the message has no python_interpreter/execute_code fence."""
+    for tool in ('python_interpreter', 'execute_code'):
         marker = f'```{tool}'
         idx = content.find(marker)
         if idx != -1:
@@ -211,11 +264,11 @@ def _split_work_message(content: str):
 def _viewer_group_history(history: list) -> list:
     """
     Groups session chat history for viewer display.
-    Consecutive assistant messages that all contain a ```work_environment block
-    are merged into a single display unit so the viewer shows one 'Work Session'
+    Consecutive assistant messages that all contain a ```python_interpreter block
+    are merged into a single display unit so the viewer shows one 'Interpreter Session'
     bubble instead of N separate raw-code bubbles.
     Each group: {'role': str, 'content': str, '_step_count': int}
-    _step_count > 1 means it is a merged work-session group.
+    _step_count > 1 means it is a merged interpreter-session group.
     Session history is never modified.
     """
     groups = []
@@ -224,14 +277,14 @@ def _viewer_group_history(history: list) -> list:
         msg = history[i]
         role = msg.get('role', '')
         content = msg.get('content', '')
-        if role == 'assistant' and '```work_environment' in content:
-            # Collect all consecutive work_environment assistant messages
+        if role == 'assistant' and '```python_interpreter' in content:
+            # Collect all consecutive python_interpreter assistant messages
             collected = [msg]
             i += 1
             while i < len(history):
                 nxt = history[i]
                 if (nxt.get('role') == 'assistant'
-                        and '```work_environment' in nxt.get('content', '')):
+                        and '```python_interpreter' in nxt.get('content', '')):
                     collected.append(nxt)
                     i += 1
                 else:
@@ -239,13 +292,13 @@ def _viewer_group_history(history: list) -> list:
             # Build a merged display entry
             if len(collected) == 1:
                 raw1 = collected[0].get('content', '')
-                split1 = raw1.find('```work_environment')
+                split1 = raw1.find('```python_interpreter')
                 vis1 = raw1[:split1].strip() if split1 != -1 else raw1.strip()
                 inline_tail = _extract_after_code_block(raw1)
                 tail1 = inline_tail
                 if (not tail1 and i < len(history)
                         and history[i].get('role') == 'assistant'
-                        and '```work_environment' not in history[i].get('content', '')):
+                        and '```python_interpreter' not in history[i].get('content', '')):
                     tail1 = history[i].get('content', '').strip()
                     i += 1
                 groups.append({
@@ -255,12 +308,12 @@ def _viewer_group_history(history: list) -> list:
                     '_tail': tail1,
                 })
             else:
-                # Extract visible text before each work_environment block for display
+                # Extract visible text before each python_interpreter block for display
                 parts = []
                 for step_i, step_msg in enumerate(collected, 1):
                     raw = step_msg.get('content', '')
-                    # Grab text before the first ```work_environment marker
-                    split_idx = raw.find('```work_environment')
+                    # Grab text before the first ```python_interpreter marker
+                    split_idx = raw.find('```python_interpreter')
                     visible = raw[:split_idx].strip() if split_idx != -1 else raw.strip()
                     if visible:
                         parts.append(f"[Step {step_i}] {visible}")
@@ -276,7 +329,7 @@ def _viewer_group_history(history: list) -> list:
                 tail_content = inline_tail
                 if (not tail_content and i < len(history)
                         and history[i].get('role') == 'assistant'
-                        and '```work_environment' not in history[i].get('content', '')):
+                        and '```python_interpreter' not in history[i].get('content', '')):
                     tail_content = history[i].get('content', '').strip()
                     i += 1  # consume it so it won't also render as a separate bubble
 
@@ -1072,7 +1125,7 @@ class ManageTasksWindow(BaseWindow):
                 'inject_image_tools':      self._f_perm_image_tools.isChecked(),
                 'inject_controller_ref':   self._f_perm_controller_ref.isChecked(),
                 'inject_notify_tool':      self._f_perm_notify_tool.isChecked(),
-                'bypass_supervised':       self._f_perm_bypass.isChecked(),
+                'task_security_policy':    self._read_task_policy(),
             },
             'loaded_skills': self._get_checked_skill_names(),
         }))
@@ -1678,17 +1731,10 @@ class ManageTasksWindow(BaseWindow):
         perm_hint = QLabel("Controls what the agent is allowed to do during each ping.")
         perm_hint.setStyleSheet(f"color: {_MUTED}; font-size: 10px;")
 
-        self._f_perm_workmode = QCheckBox("Allow Work Mode  (can use work_environment to run code & see output)")
+        self._f_perm_workmode = QCheckBox("Allow Python Interpreter  (run code & see output; enables the file tools)")
         self._f_perm_image_tools = QCheckBox("Inject Image Tools on the system prompt")
         self._f_perm_controller_ref = QCheckBox("Inject Controller Reference on the system prompt")
         self._f_perm_notify_tool = QCheckBox("Inject Notify Tool on the system prompt")
-
-        # Opt-in: let this background task skip the approval dialog + security gate.
-        self._f_perm_bypass = QCheckBox("Bypass Supervised Execution & Security")
-        self._f_perm_bypass.setChecked(False)   # default OFF
-        _bypass_sub = QLabel("Only works if supervised execution is enabled")
-        _bypass_sub.setStyleSheet(f"color: {_MUTED}; font-size: 10px; margin-left: 26px;")
-        _bypass_sub.setWordWrap(True)
 
         # ── Work iterations row (sits under the workmode checkbox) ────────────
         _iter_row = QWidget()
@@ -1717,16 +1763,17 @@ class ManageTasksWindow(BaseWindow):
         )
         _ir.addWidget(self._f_unlimited_iterations)
         _ir.addStretch()
-        # disable the row when work mode is not allowed
+        # disable the row when the interpreter is not allowed
         self._f_perm_workmode.toggled.connect(_iter_row.setEnabled)
-        _iter_row.setEnabled(False)   # starts disabled until workmode is checked
+        _iter_row.setEnabled(False)   # starts disabled until the interpreter is checked
         # ─────────────────────────────────────────────────────────────────────
 
         self._f_perm_workmode.setToolTip(
-            "Lets the agent use the work_environment tool to write and execute code\n"
-            "in an isolated workspace and observe its full output.\n\n"
-            "⚠  Bypasses the 'Supervised Execution' setting.\n"
-            "Code runs automatically in the background — no approval prompt."
+            "Lets this background task use the python_interpreter tool (and the file\n"
+            "tools) to write and run code and observe its output.\n\n"
+            "What the code may DO is governed by the per-category security policy\n"
+            "below — background tasks never show an approval dialog, so each category\n"
+            "is simply allowed or denied."
         )
         self._f_perm_image_tools.setToolTip(
             "Injects the image tool instructions into this task session's system prompt.\n"
@@ -1740,28 +1787,44 @@ class ManageTasksWindow(BaseWindow):
             "Injects the notify tool instructions into this task session's system prompt.\n"
             "Only affects this task — does not change the main AI engine or other tasks."
         )
-        self._f_perm_bypass.setToolTip(
-            "Let this background task run code WITHOUT the approval dialog and WITHOUT\n"
-            "the security gate (static risk scan / policy / approval memory).\n\n"
-            "Default OFF: the task obeys your global Supervised Execution setting, just\n"
-            "like the main chat. Turn this ON only for a task you fully trust to run\n"
-            "unattended.\n\n"
-            "Only has an effect when Supervised Execution is enabled — if supervision is\n"
-            "already off globally, code auto-runs regardless."
-        )
 
         for cb in (self._f_perm_workmode,
                    self._f_perm_image_tools,
-                   self._f_perm_controller_ref, self._f_perm_notify_tool,
-                   self._f_perm_bypass):
+                   self._f_perm_controller_ref, self._f_perm_notify_tool):
             cb.setStyleSheet(_CHECK)
+
+        # ── Per-category security policy grid (allow/deny only) ───────────────
+        _policy_hdr = QLabel("Security policy")
+        _policy_hdr.setStyleSheet(_SEC + " margin-top:4px;")
+        _policy_note = QLabel(
+            "A safety net modeled on AI-agent harnesses. Every file, process, "
+            "network, dynamic-code, system and credential operation is sorted into "
+            "a category below. A background task can't answer a prompt, so each "
+            "category is simply ALLOWED (runs) or DENIED (blocked — the agent is "
+            "told why and asked to find another way, and you're alerted in the main "
+            "chat). Pick a preset to start, or fine-tune each row.")
+        _policy_note.setWordWrap(True)
+        _policy_note.setStyleSheet(
+            f"color:{_MUTED}; font-size:10px; background:{_SURFACE2}; "
+            f"border:1px solid {_BORDER}; border-radius:6px; padding:10px;")
+        self._f_policy_box = self._build_task_policy_grid()
+        self._f_perm_workmode.toggled.connect(self._f_policy_box.setEnabled)
+        self._f_policy_box.setEnabled(False)
 
         fl.addWidget(_card(perm_hint,
                            self._f_perm_workmode, _iter_row,
+                           _policy_hdr, _policy_note, self._f_policy_box,
+                           title="Agent Permissions", icon="🔐"))
+
+        # ══ CARD 4b: Optional Tools (prompt injections) ═══════════════════════
+        _opt_hint = QLabel("Extra tool instructions injected into THIS task's system "
+                           "prompt only. Off by default to keep the prompt lean.")
+        _opt_hint.setStyleSheet(f"color: {_MUTED}; font-size: 10px;")
+        _opt_hint.setWordWrap(True)
+        fl.addWidget(_card(_opt_hint,
                            self._f_perm_image_tools,
                            self._f_perm_controller_ref, self._f_perm_notify_tool,
-                           self._f_perm_bypass, _bypass_sub,
-                           title="Agent Permissions", icon="🔐"))
+                           title="Optional Tools", icon="🧩"))
 
         # ══ CARD 5: Pre-loaded Skills ══════════════════════════════════════════
         skills_hint = QLabel(
@@ -2580,7 +2643,8 @@ class ManageTasksWindow(BaseWindow):
         self._f_perm_image_tools.setChecked(False)
         self._f_perm_controller_ref.setChecked(False)
         self._f_perm_notify_tool.setChecked(False)
-        self._f_perm_bypass.setChecked(False)
+        self._apply_task_policy(_default_task_policy())
+        self._f_policy_box.setEnabled(False)
         self._f_max_iterations.setValue(20)
         self._f_max_iterations.setEnabled(True)
         self._f_unlimited_iterations.setChecked(False)
@@ -2602,6 +2666,68 @@ class ManageTasksWindow(BaseWindow):
         self._f_script_poll_ms.setValue(1000)
         self._refresh_functions_list()
         self._stack.setCurrentIndex(1)
+
+    def _build_task_policy_grid(self):
+        """Preset quick-pick + per-category allow/deny combos, grouped by
+        CATEGORY_GROUPS — styled to match Settings ▸ Security ▸ Execution Policy
+        (minus 'ask', which a background task can't answer)."""
+        box = QWidget(); box.setStyleSheet("background: transparent;")
+        lay = QVBoxLayout(box); lay.setContentsMargins(0, 2, 0, 0); lay.setSpacing(6)
+
+        # ── Preset quick-pick row ─────────────────────────────────────────────
+        preset_row = QHBoxLayout(); preset_row.setSpacing(8)
+        _pl = QLabel("Preset:")
+        _pl.setStyleSheet(f"color:{_TEXT}; font-size:11px; font-weight:600;")
+        preset_row.addWidget(_pl)
+        self._f_policy_preset = QComboBox()
+        self._f_policy_preset.setStyleSheet(_INPUT)
+        for _name, _ in _task_policy_presets():
+            self._f_policy_preset.addItem(_name)
+        preset_row.addWidget(self._f_policy_preset, 1)
+        _apply_btn = QPushButton("Apply")
+        _apply_btn.setStyleSheet(_BTN)
+        _apply_btn.setToolTip("Load the selected preset into the rows below.")
+        _apply_btn.clicked.connect(self._apply_task_policy_preset)
+        preset_row.addWidget(_apply_btn)
+        lay.addLayout(preset_row)
+
+        # ── Per-category rows, grouped so the finer list stays readable ───────
+        self._f_policy_combos = {}
+        for grp_title, grp_cats in _guard.CATEGORY_GROUPS:
+            sub = QLabel(grp_title)
+            sub.setStyleSheet(f"color:{_MUTED}; font-size:10px; font-weight:700;"
+                              " letter-spacing:1px; margin-top:8px;")
+            lay.addWidget(sub)
+            for cat in grp_cats:
+                row = QHBoxLayout()
+                row.setContentsMargins(4, 0, 0, 0); row.setSpacing(10)
+                lbl = QLabel(_guard.CATEGORY_LABELS.get(cat, cat))
+                lbl.setStyleSheet(f"color:{_TEXT}; font-size:12px;")
+                lbl.setWordWrap(True)
+                row.addWidget(lbl, 1)
+                combo = QComboBox(); combo.addItems(["allow", "deny"])
+                combo.setStyleSheet(_INPUT); combo.setFixedWidth(120)
+                row.addWidget(combo)
+                self._f_policy_combos[cat] = combo
+                lay.addLayout(row)
+        return box
+
+    def _apply_task_policy_preset(self):
+        """Load the chosen built-in preset into the policy combos."""
+        presets = dict(_task_policy_presets())
+        name = self._f_policy_preset.currentText()
+        if name in presets:
+            self._apply_task_policy(presets[name])
+
+    def _apply_task_policy(self, policy: dict):
+        for cat, combo in getattr(self, '_f_policy_combos', {}).items():
+            val = policy.get(cat, 'deny')
+            idx = combo.findText(val if val in ('allow', 'deny') else 'deny')
+            combo.setCurrentIndex(max(0, idx))
+
+    def _read_task_policy(self) -> dict:
+        return {cat: combo.currentText()
+                for cat, combo in getattr(self, '_f_policy_combos', {}).items()}
 
     def _edit_task(self, task: dict):
         self._editing_task_id = task['id']
@@ -2637,11 +2763,14 @@ class ManageTasksWindow(BaseWindow):
             self._f_end.setTime(QTime(21, 0))
 
         perms = task.get('permissions', {})
-        self._f_perm_workmode.setChecked(perms.get('allow_workmode', False))
+        _allow_interp = perms.get('allow_workmode', False)
+        self._f_perm_workmode.setChecked(_allow_interp)
         self._f_perm_image_tools.setChecked(perms.get('inject_image_tools', False))
         self._f_perm_controller_ref.setChecked(perms.get('inject_controller_ref', False))
         self._f_perm_notify_tool.setChecked(perms.get('inject_notify_tool', False))
-        self._f_perm_bypass.setChecked(perms.get('bypass_supervised', False))
+        # Per-category policy: use the saved grid, or migrate an old task's flags.
+        self._apply_task_policy(_migrate_task_policy(perms))
+        self._f_policy_box.setEnabled(_allow_interp)
 
         self._f_max_iterations.setValue(task.get('max_work_iterations', 20))
         unlimited = task.get('unlimited_work_iterations', False)
@@ -3240,7 +3369,7 @@ class ManageTasksWindow(BaseWindow):
                 "inject_image_tools": self._f_perm_image_tools.isChecked(),
                 "inject_controller_ref": self._f_perm_controller_ref.isChecked(),
                 "inject_notify_tool": self._f_perm_notify_tool.isChecked(),
-                "bypass_supervised": self._f_perm_bypass.isChecked(),
+                "task_security_policy": self._read_task_policy(),
             },
             "max_work_iterations": self._f_max_iterations.value(),
             "unlimited_work_iterations": self._f_unlimited_iterations.isChecked(),

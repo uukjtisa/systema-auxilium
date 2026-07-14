@@ -14,7 +14,7 @@ separate per-request primer channel, not part of the system prompt.
 from systema.execution.tool_registry import CANONICAL_TOOLS
 
 # Frames a shared-core code example for fence invocation (see shared.py).
-INVOKE_HINT = "run this in a work_environment fence — its code being:"
+INVOKE_HINT = "run this in a python_interpreter fence — its code being:"
 
 
 def tool_format_section(include_workmode: bool = True,
@@ -26,7 +26,8 @@ def tool_format_section(include_workmode: bool = True,
     active = []
     if include_workmode:
         # The file subsystem rides with execution capability (default-on).
-        active += ['work_environment', 'read_file', 'edit_file', 'write_file']
+        active += ['python_interpreter', 'read_file', 'edit_file', 'write_file',
+                   'grep']
     if include_session_naming:
         active.append('set_session_name')
     if include_skills:
@@ -45,7 +46,7 @@ def tool_format_section(include_workmode: bool = True,
     if include_workmode:
         rules = """
 RULES:
-- ONE action fence per response — never two. work_environment, read_file,
+- ONE action fence per response — never two. python_interpreter, read_file,
   edit_file and write_file all count as actions; each is one turn — wait for
   its output. (set_session_name is exempt — it may accompany the action fence
   in the same response.)
@@ -73,12 +74,12 @@ HOW TO INVOKE: a set_session_name fence, anywhere in your reply, alongside your
 other fence when needed. The critical case — the user's FIRST message asks for
 work:
 
-User: "test your workmode — what's on my desktop?"
+User: "test your interpreter — what's on my desktop?"
 Assistant: "On it — checking your desktop now.
 ```set_session_name
-Desktop Workmode Test
+Desktop Interpreter Test
 ```
-```work_environment: [Listing desktop files]
+```python_interpreter: [Listing desktop files]
 import os
 print(os.listdir(os.path.expanduser('~/Desktop')))
 ```"
@@ -98,14 +99,14 @@ def skills_howto_tail() -> str:
         "  Use the load_skill fence:\n"
         f"{ind_load}\n"
         "  The skill's full instructions will be injected into your system context.\n"
-        "  Works inside AND outside work_environment.\n"
+        "  Works inside AND outside python_interpreter.\n"
         "  Do NOT load a skill that already shows [LOADED] — it's already active!\n"
         "\n"
         "HOW TO UNLOAD A SKILL:\n"
         "  Use the unload_skill fence:\n"
         f"{ind_unload}\n"
         "  Removes the skill from your active context.\n"
-        "  Works inside AND outside work_environment.\n"
+        "  Works inside AND outside python_interpreter.\n"
         "  Do NOT unload a skill that is not [LOADED] — it isn't loaded!\n"
     )
 
@@ -113,9 +114,9 @@ def skills_howto_tail() -> str:
 MUST_REMEMBER = """
 MUST REMEMBER (quick recall of the rules above):
 - Never roleplay: if you say you'll do it, emit the fence in the SAME response.
-- work_environment = your ONLY code tool; you SEE output; chain turns; print()
-  what you need. ONE work_environment fence per response, at the END, ALWAYS
-  with an annotation: `work_environment: [short label]`.
+- python_interpreter = your ONLY code tool; you SEE output; chain turns; print()
+  what you need. ONE python_interpreter fence per response, at the END, ALWAYS
+  with an annotation: `python_interpreter: [short label]`.
 - Tool calls are code fences (tool name = fence language, content inside).
 - set_session_name: exempt from the one-fence limit. Use it ONCE, by your 4th
   reply — and in the SAME response as the work fence when the first request is
@@ -129,7 +130,7 @@ MUST REMEMBER (quick recall of the rules above):
 WORK_OPTIONS = """\
 Options:
 - More code:
-  ```work_environment: [Brief Description]
+  ```python_interpreter: [Brief Description]
   your_python_code
   ```
 - Finish: reply normally with your COMPLETE report and NO fence. That reply
@@ -170,10 +171,10 @@ PREFILLING = {
             "role": "assistant",
             "content": (
                 "Of course. I always use code-fence tool calls — never JSON, never "
-                "plain text. work_environment is my one execution tool: I run code, "
+                "plain text. python_interpreter is my one execution tool: I run code, "
                 "see the output, and chain executions until the task is fully "
                 "complete, then finish with a normal reply containing my full "
-                "report. I emit at most ONE work_environment fence per response, "
+                "report. I emit at most ONE python_interpreter fence per response, "
                 "always with a short annotation label, and I never roleplay "
                 "execution — if I say I'll do something, I do it in that same "
                 "response with the actual fence. When the first request is work, I "
@@ -187,12 +188,12 @@ PREFILLING = {
 EXEC_CODE_TOOLCALL_VIOLATION_PROMPT = """<SYSTEM_MESSAGE>
 TOOL CALL POLICY VIOLATION DETECTED
 
-Your previous response contained MORE THAN ONE work_environment call. Only the
+Your previous response contained MORE THAN ONE python_interpreter call. Only the
 FIRST call was executed. All subsequent code-execution calls were SILENTLY
 DISCARDED — they did NOT run.
 
 RULE (absolute):
-  - You may emit AT MOST ONE work_environment call per response.
+  - You may emit AT MOST ONE python_interpreter call per response.
   - set_session_name is exempt — it may coexist with the work call.
 
 WHY: multiple code blocks in a single turn create unpredictable state, confuse
@@ -203,7 +204,7 @@ WHAT YOU MUST DO NOW: if you still need to run the discarded code, re-issue it
 in your next response — strictly one code-execution call per response.
 
 Reminder of the correct format:
-```work_environment: [Brief Description]
+```python_interpreter: [Brief Description]
 your_code_here
 ```
 </SYSTEM_MESSAGE>"""
@@ -212,15 +213,15 @@ your_code_here
 EXECUTE_CODE_RETIRED_PROMPT = """<SYSTEM_MESSAGE>
 THE execute_code TOOL NO LONGER EXISTS — YOUR CALL WAS NOT RUN.
 
-work_environment is the ONLY way to run code, and you SEE its output. Re-issue
-the code now as a work_environment fence:
+python_interpreter is the ONLY way to run code, and you SEE its output. Re-issue
+the code now as a python_interpreter fence:
 
-```work_environment: [Brief label of what this does]
+```python_interpreter: [Brief label of what this does]
 your_code_here
 ```
 
 For launching apps or blocking programs, start them detached inside
-work_environment (subprocess.Popen / os.startfile) so the call returns and you
+python_interpreter (subprocess.Popen / os.startfile) so the call returns and you
 can confirm the result.
 </SYSTEM_MESSAGE>"""
 
@@ -231,7 +232,7 @@ can confirm the result.
 # list of what was corrected. (Delivered via history, NOT inside the tool
 # result — weak models ignore instructions embedded in observations.)
 FORMAT_AUTOFIX_REMINDER = """[FORMAT REMINDER] Your previous tool call was malformed and had to be auto-corrected ({details}). It DID run this time, but use the exact form from now on:
-```work_environment: [Brief label of what this does]
+```python_interpreter: [Brief label of what this does]
 your_code_here
 ```
 The annotation goes in [brackets] on the opener line; the code starts on the NEXT line."""
@@ -243,8 +244,8 @@ MALFORMED_WORK_STEP_PROMPT = """<SYSTEM_MESSAGE>
 YOUR LAST RESPONSE LOOKED LIKE A CODE STEP BUT WAS NOT A VALID TOOL CALL — NOTHING WAS RUN.
 
 You are still in work mode. Choose ONE:
-- If that code was your next step, re-issue it now as a work_environment fence:
-```work_environment: [Brief label of what this does]
+- If that code was your next step, re-issue it now as a python_interpreter fence:
+```python_interpreter: [Brief label of what this does]
 your_code_here
 ```
 - If the task is FINISHED, reply with your complete report as normal prose. Do

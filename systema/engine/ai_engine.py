@@ -28,7 +28,7 @@ log = _make_logger("AIEngine") if _verbose else _NoOpLogger()
 
 # Priming acknowledgement prepended to every conversation as an assistant turn
 _ASSISTANT_PRIMING = (
-    "I understand. I will use my Work Environment whenever a task needs code — "
+    "I understand. I will use my Python Interpreter whenever a task needs code — "
     "chaining executions until it is complete, then finishing with a full report."
 )
 
@@ -107,7 +107,7 @@ class AIEngine:
 
         # Manual provider — set by controller to a callable that blocks until
         # the user types a response.  Signature:
-        #   fn(context: str, work_mode: bool, work_output: str) -> str | None
+        #   fn(context: str, interpreter_mode: bool, work_output: str) -> str | None
         self.manual_response_fn = None
 
         # Custom script provider — path to user's .py file
@@ -133,7 +133,7 @@ class AIEngine:
     # ── ephemeral image context (mirrors TaskAIEngine) ──────────────────────
     def queue_context_image(self, path: str):
         """Queue an image path to feed to the provider once on the next work
-        step. Thread-safe (callable from a work_environment thread)."""
+        step. Thread-safe (callable from a python_interpreter thread)."""
         with self._images_lock:
             self._pending_context_images.append(path)
 
@@ -526,7 +526,7 @@ class AIEngine:
                 # user/assistant turn is never a tool result). Pairing is
                 # NAME-AWARE: set_session_name runs silently and produces no
                 # output entry, so it never consumes one — with parallel
-                # [set_session_name, work_environment] calls the work output
+                # [set_session_name, python_interpreter] calls the work output
                 # stays attached to the work call, not the naming call.
                 consumers = [c for c in calls if c.get('name') != 'set_session_name']
                 results = []
@@ -870,7 +870,7 @@ class AIEngine:
         return {
             'response': message,
             'has_work_call': False,
-            'in_work_mode': False,
+            'is_working': False,
             'thinking': False
         }
 
@@ -925,12 +925,12 @@ class AIEngine:
                  f"length={len(ai_text)} chars | → _process_ai_response()")
         return self._process_ai_response(ai_text)
 
-    def continue_work_mode(self):
+    def continue_work(self):
         """Continue work mode execution with AI analyzing previous output."""
-        log.info(f"[AIEngine.continue_work_mode] in_work_mode={self.tool_manager.in_work_mode} | "
+        log.info(f"[AIEngine.continue_work] is_working={self.tool_manager.work.is_working} | "
                  f"provider='{self.ai_provider}'")
-        if not self.tool_manager.in_work_mode:
-            log.warning("[AIEngine.continue_work_mode] Not in work mode — returning early")
+        if not self.tool_manager.work.is_working:
+            log.warning("[AIEngine.continue_work] Not in work mode — returning early")
             return self._make_error_result("Not in work mode")
 
         # Slim down the previous work-mode system message so only the latest ping
@@ -942,16 +942,16 @@ class AIEngine:
                 del entry['_is_work_prompt']
                 break
 
-        # Capture output now — before get_work_mode_prompt() — to store alongside the entry
-        _current_work_output = self.tool_manager.last_work_output or "No previous output"
-        work_prompt = self.tool_manager.get_work_mode_prompt()
+        # Capture output now — before get_work_prompt() — to store alongside the entry
+        _current_work_output = self.tool_manager.work.last_output or "No previous output"
+        work_prompt = self.tool_manager.get_work_prompt()
         self.conversation_history.append({
             'role': 'system',
             'content': work_prompt,
             '_is_work_prompt': True,      # marks this as the "live" work ping
             '_work_output': _current_work_output,  # stored so we can slim it next iteration
         })
-        log.debug(f"[AIEngine.continue_work_mode] Work mode prompt appended (full) | "
+        log.debug(f"[AIEngine.continue_work] Work mode prompt appended (full) | "
                   f"prompt_len={len(work_prompt)} | history_len={len(self.conversation_history)}")
 
         # Ephemeral image context: if the AI queued image(s) via
@@ -961,7 +961,7 @@ class AIEngine:
         # tokens are spent exactly once (same contract as a task session).
         _pending = self._drain_context_images()
         if _pending:
-            log.info(f"[AIEngine.continue_work_mode] Feeding {len(_pending)} ephemeral "
+            log.info(f"[AIEngine.continue_work] Feeding {len(_pending)} ephemeral "
                      "context image(s) to the provider for this turn only")
             ai_text = self._call_provider(images=_pending)
             import os as _os
@@ -973,12 +973,12 @@ class AIEngine:
         else:
             ai_text = self._call_provider()
         if not ai_text:
-            log.error("[AIEngine.continue_work_mode] ✗ No AI text returned")
+            log.error("[AIEngine.continue_work] ✗ No AI text returned")
             return self._make_error_result(f"Error: No response from {self.ai_provider} provider")
 
-        log.info(f"[AIEngine.continue_work_mode] ✓ Got response | length={len(ai_text)} chars | "
-                 f"→ _process_work_mode_response()")
-        return self._process_work_mode_response(ai_text)
+        log.info(f"[AIEngine.continue_work] ✓ Got response | length={len(ai_text)} chars | "
+                 f"→ _process_work_response()")
+        return self._process_work_response(ai_text)
 
     def _get_ai_response_internal(self, prompt):
         """Get a single-turn AI response without touching conversation history.
@@ -1010,7 +1010,7 @@ class AIEngine:
 
     def _process_ai_response(self, ai_text):
         """
-        Process AI response and handle work_environment / set_session_name / skill calls.
+        Process AI response and handle python_interpreter / set_session_name / skill calls.
 
         Returns:
             dict: Response data with execution status
@@ -1055,7 +1055,7 @@ class AIEngine:
             return {
                 'response': ai_text,
                 'has_work_call': False,
-                'in_work_mode': False,
+                'is_working': False,
                 'thinking': False,
                 'session_name': None
             }
@@ -1064,20 +1064,27 @@ class AIEngine:
         session_name = None
         log.debug("[AIEngine._process_ai_response] Checking for set_session_name call...")
         session_name_call = self.tool_manager.parse_set_session_name(ai_text)
+        # `ai_text` stays the FULL reconstructed text (incl. the set_session_name
+        # fence) so _append_assistant stores it — that fence is what lets compat
+        # mode reconstruct the name when the session is reloaded in the other
+        # tool-calling mode (mirrors python_interpreter, whose fence is never
+        # stripped from the stored turn). Downstream tool parsing uses the
+        # session-stripped `_display_text`; display is cleaned via strip_tool_calls.
+        _display_text = ai_text
         if session_name_call:
             session_name, remaining_text = session_name_call
             log.info(f"[AIEngine._process_ai_response] set_session_name detected → '{session_name}' | "
                      f"remaining text length={len(remaining_text)}")
             self.log(f"Set session name call detected: {session_name}")
-            ai_text = remaining_text
-
-        _display_text = ai_text
+            _display_text = remaining_text
 
         # ── Check for load_skill call (now valid anywhere) ────────────────────
         load_skill_result = self.tool_manager.parse_load_skill(_display_text)
 
         if load_skill_result:
-            from systema.engine.prompts.global_instructions import SKILL_LOADED_CHAT_PROMPT, SKILL_ALREADY_LOADED_PROMPT
+            from systema.engine.prompts.global_instructions import (
+                SKILL_ALREADY_LOADED_PROMPT, SKILL_LOADED_WORK_PROMPT,
+                SKILL_LOADED_WORK_PROMPT_NATIVE)
             skill_name, remaining_text = load_skill_result
             log.info(f"[AIEngine._process_ai_response] load_skill detected (outside work) → '{skill_name}'")
             if self.skill_manager:
@@ -1090,50 +1097,64 @@ class AIEngine:
                     'role': 'system',
                     'content': SKILL_ALREADY_LOADED_PROMPT.format(skill_name=skill_name, reason=msg)
                 })
-            else:
-                # ── Same-turn sub-tool chaining ───────────────────────────────
-                # If load_skill carried a chained code tool (native then_tool, or a
-                # compat two-fence response), run it NOW in this turn instead of a
-                # blind follow-up — the skill is loaded, so the chained action runs
-                # with the skill already in context. The recursion records the code
-                # turn + its result, so we don't append ai_text here (that would
-                # duplicate the chained fence in history).
-                # Detect via the side-effect-free _parse_fence (parse_work_environment
-                # emits the "Working:" banner — the recursion will fire it for real).
-                if self.tool_manager._parse_fence(remaining_text, 'work_environment'):
-                    log.info("[AIEngine._process_ai_response] load_skill chained a code tool — "
-                             "running it in-turn instead of a blind follow-up")
-                    self.conversation_history.append({
-                        'role': 'system',
-                        'content': SKILL_LOADED_CHAT_PROMPT.format(skill_name=skill_name)
-                    })
-                    _r = self._process_ai_response(remaining_text)
-                    _r['skill_loaded'] = skill_name
-                    return _r
-                self._append_assistant(ai_text)
-                self.conversation_history.append({
-                    'role': 'system',
-                    'content': SKILL_LOADED_CHAT_PROMPT.format(skill_name=skill_name)
-                })
-            # Auto-follow-up: call AI immediately so user doesn't have to prompt first
-            _followup = self._call_provider()
-            if _followup:
-                _r = self._process_ai_response(_followup)
-                _r['skill_loaded'] = skill_name if success else None
+                return {
+                    'response': f"⚠ {msg}",
+                    'has_work_call': False,
+                    'is_working': False,
+                    'thinking': False,
+                    'skill_loaded': None,
+                }
+
+            # ── Same-turn sub-tool chaining ───────────────────────────────
+            # If load_skill carried a chained code tool (native then_tool, or a
+            # compat two-fence response), run it NOW in this turn instead of a
+            # blind follow-up — the skill is loaded, so the chained action runs
+            # with the skill already in context. The recursion records the code
+            # turn + its result, so we don't append ai_text here (that would
+            # duplicate the chained fence in history).
+            # Detect via the side-effect-free _parse_fence (parse_python_interpreter
+            # emits the "Working:" banner — the recursion will fire it for real).
+            if self.tool_manager._parse_fence(remaining_text, 'python_interpreter'):
+                log.info("[AIEngine._process_ai_response] load_skill chained a code tool — "
+                         "running it in-turn instead of a blind follow-up")
+                self.tool_manager.work.is_working = True
+                self.tool_manager.work.last_tool = 'skill'
+                _r = self._process_ai_response(remaining_text)
+                _r['skill_loaded'] = skill_name
                 return _r
+
+            # A skill load now ALWAYS enters work mode — mirrors _dispatch_file_tool.
+            # The main chat's auto-continue (work_timer -> auto_continue_work) picks
+            # this up exactly like a python_interpreter step. Store the FULL ai_text
+            # (with the load_skill fence) unconditionally so the call survives a
+            # cross-mode session reload AND the native _pending_native metadata is
+            # consumed (an un-stored turn would leak it into the next turn).
+            self._append_assistant(ai_text)
+            self.tool_manager.work.is_working = True
+            self.tool_manager.work.last_tool = 'skill'
+            work_output = f"Skill '{skill_name}' loaded."
+            self.tool_manager.work.last_output = work_output
+            _skill_tmpl = (SKILL_LOADED_WORK_PROMPT_NATIVE
+                           if self._tool_mode() == 'native'
+                           else SKILL_LOADED_WORK_PROMPT)
+            self.conversation_history.append({
+                'role': 'system',
+                'content': _skill_tmpl.format(skill_name=skill_name, work_output=work_output)
+            })
             return {
-                'response': remaining_text.strip() if remaining_text and remaining_text.strip()
-                else (f"✅ Skill '{skill_name}' loaded." if success else f"⚠ {msg}"),
-                'has_work_call': False,
-                'in_work_mode': False,
-                'thinking': False,
-                'skill_loaded': skill_name if success else None,
+                'response': f"Loading skill: {skill_name}...",
+                'has_work_call': True,
+                'is_working': True,
+                'thinking': True,
+                'skill_loaded': skill_name,
             }
 
         # ── Check for unload_skill call (valid anywhere) ──────────────────────
         unload_skill_result = self.tool_manager.parse_unload_skill(_display_text)
         if unload_skill_result:
-            from systema.engine.prompts.global_instructions import SKILL_UNLOADED_CHAT_PROMPT, SKILL_NOT_LOADED_PROMPT
+            from systema.engine.prompts.global_instructions import (
+                SKILL_NOT_LOADED_PROMPT, SKILL_UNLOADED_WORK_PROMPT,
+                SKILL_UNLOADED_WORK_PROMPT_NATIVE)
             skill_name, remaining_text = unload_skill_result
             log.info(f"[AIEngine._process_ai_response] unload_skill detected (outside work) → '{skill_name}'")
             if self.skill_manager:
@@ -1146,36 +1167,44 @@ class AIEngine:
                     'role': 'system',
                     'content': SKILL_NOT_LOADED_PROMPT.format(skill_name=skill_name, reason=msg)
                 })
-            else:
-                self._append_assistant(ai_text)
-                self.conversation_history.append({
-                    'role': 'system',
-                    'content': SKILL_UNLOADED_CHAT_PROMPT.format(skill_name=skill_name)
-                })
-            # Auto-follow-up: call AI immediately so user doesn't have to prompt first
-            _followup = self._call_provider()
-            if _followup:
-                _r = self._process_ai_response(_followup)
-                _r['skill_unloaded'] = skill_name if success else None
-                return _r
+                return {
+                    'response': f"⚠ {msg}",
+                    'has_work_call': False,
+                    'is_working': False,
+                    'thinking': False,
+                    'skill_unloaded': None,
+                }
+
+            # A skill unload now ALWAYS enters work mode — mirrors load_skill above.
+            self._append_assistant(ai_text)
+            self.tool_manager.work.is_working = True
+            self.tool_manager.work.last_tool = 'skill'
+            work_output = f"Skill '{skill_name}' unloaded."
+            self.tool_manager.work.last_output = work_output
+            _unload_tmpl = (SKILL_UNLOADED_WORK_PROMPT_NATIVE
+                            if self._tool_mode() == 'native'
+                            else SKILL_UNLOADED_WORK_PROMPT)
+            self.conversation_history.append({
+                'role': 'system',
+                'content': _unload_tmpl.format(skill_name=skill_name, work_output=work_output)
+            })
             return {
-                'response': remaining_text.strip() if remaining_text and remaining_text.strip()
-                else (f"🗑 Skill '{skill_name}' unloaded." if success else f"⚠ {msg}"),
-                'has_work_call': False,
-                'in_work_mode': False,
-                'thinking': False,
-                'skill_unloaded': skill_name if success else None,
+                'response': f"Unloading skill: {skill_name}...",
+                'has_work_call': True,
+                'is_working': True,
+                'thinking': True,
+                'skill_unloaded': skill_name,
             }
 
-        # Check for work_environment call
-        log.debug("[AIEngine._process_ai_response] Checking for work_environment call...")
-        work_call = self.tool_manager.parse_work_environment(_display_text)
+        # Check for python_interpreter call
+        log.debug("[AIEngine._process_ai_response] Checking for python_interpreter call...")
+        work_call = self.tool_manager.parse_python_interpreter(_display_text)
 
         if work_call:
             code, visible_text = work_call
-            log.info(f"[AIEngine._process_ai_response] work_environment detected | "
+            log.info(f"[AIEngine._process_ai_response] python_interpreter detected | "
                      f"code_len={len(code)} | visible_text_len={len(visible_text)}")
-            self.log(f"Work environment call detected")
+            self.log(f"Python interpreter call detected")
 
             # A bare `exit`/empty work-call is not real code — the exit sentinel
             # was removed (work mode now ends when the AI replies with no tool
@@ -1183,27 +1212,28 @@ class AIEngine:
             # kept as a safety net for habituated / resumed sessions.
             if code.strip().lower() in ('exit', ''):
                 log.warning("[AIEngine._process_ai_response] Bare exit/empty work-call on entry — finishing")
-                self.tool_manager.in_work_mode = False
+                self.tool_manager.work.is_working = False
                 if ai_text and ai_text.strip():
                     self._append_assistant(ai_text)
                 return {
                     'response': visible_text if visible_text and visible_text.strip() else "",
                     'has_work_call': False,
-                    'in_work_mode': False,
+                    'is_working': False,
                     'thinking': False,
-                    'exited_work_mode': True,
+                    'finished_working': True,
                     'session_name': session_name
                 }
 
-            log.debug("[AIEngine._process_ai_response] → Calling tool_manager.run_work_environment()")
-            # Set BEFORE run_work_environment so interrupt_response() can detect active work
-            self.tool_manager.in_work_mode = True
-            self._malformed_step_retries = 0  # fresh work session — reset the guard-rail budget
-            work_output = self.tool_manager.run_work_environment(code)
+            log.debug("[AIEngine._process_ai_response] → Calling tool_manager.run_python_interpreter()")
+            # Set BEFORE run_python_interpreter so interrupt_response() can detect active work
+            self.tool_manager.work.is_working = True
+            self._malformed_step_retries = 0  # fresh interpreter session — reset the guard-rail budget
+            work_output = self.tool_manager.run_python_interpreter(code)
 
             log.debug(f"[AIEngine._process_ai_response] Storing work output | "
-                      f"length={len(work_output)} chars | in_work_mode → True")
-            self.tool_manager.last_work_output = work_output
+                      f"length={len(work_output)} chars | is_working → True")
+            self.tool_manager.work.last_output = work_output
+            self.tool_manager.work.last_tool = 'interpreter'
 
             self._append_assistant(ai_text)
             self._inject_pending_format_reminder()
@@ -1212,7 +1242,7 @@ class AIEngine:
             return {
                 'response': visible_text if visible_text else "Working...",
                 'has_work_call': True,
-                'in_work_mode': True,
+                'is_working': True,
                 'thinking': True,
                 'code': code,
                 'session_name': session_name
@@ -1234,7 +1264,7 @@ class AIEngine:
                         "emission — call NOT run; injecting corrective prompt")
             self.tool_manager.approval_signal.system_message.emit(
                 "**NOTICE:** The model attempted the retired `execute_code` tool; "
-                "the call was NOT run. It has been told to use work_environment.")
+                "the call was NOT run. It has been told to use python_interpreter.")
             from systema.engine.prompts.global_instructions import (
                 EXECUTE_CODE_RETIRED_PROMPT, EXECUTE_CODE_RETIRED_PROMPT_NATIVE)
             _retired = (EXECUTE_CODE_RETIRED_PROMPT_NATIVE
@@ -1251,7 +1281,7 @@ class AIEngine:
             return {
                 'response': self.tool_manager.strip_tool_calls(ai_text),
                 'has_work_call': False,
-                'in_work_mode': False,
+                'is_working': False,
                 'thinking': False,
                 'session_name': session_name,
             }
@@ -1280,7 +1310,7 @@ class AIEngine:
         return {
             'response': display_text,
             'has_work_call': False,
-            'in_work_mode': False,
+            'is_working': False,
             'thinking': False,
             'session_name': session_name,
             'memory_context': _mc,
@@ -1288,14 +1318,15 @@ class AIEngine:
 
     def _dispatch_file_tool(self, ai_text, session_name):
         """Detect and run a file-subsystem call (read_file / edit_file /
-        write_file). These are work-mode steps exactly like work_environment:
+        write_file). These are work-mode steps exactly like python_interpreter:
         the observation feeds the next ping and the loop stays alive.
         Returns the work-step result dict, or None when no file call."""
         tm = self.tool_manager
         for tool, parse, run in (
                 ('read_file', tm.parse_read_file, tm.run_read_file),
                 ('edit_file', tm.parse_edit_file, tm.run_edit_file),
-                ('write_file', tm.parse_write_file, tm.run_write_file)):
+                ('write_file', tm.parse_write_file, tm.run_write_file),
+                ('grep', tm.parse_grep, tm.run_grep)):
             parsed = parse(ai_text)
             if not parsed:
                 continue
@@ -1303,14 +1334,15 @@ class AIEngine:
             log.info(f"[AIEngine._dispatch_file_tool] {tool} call | "
                      f"path='{spec.get('path', '')}'")
             # Set BEFORE the run so interrupts see active work (same contract
-            # as work_environment).
-            tm.in_work_mode = True
+            # as python_interpreter).
+            tm.work.is_working = True
             observation = run(spec)
-            tm.last_work_output = observation
+            tm.work.last_output = observation
+            tm.work.last_tool = tool
             self._malformed_step_retries = 0
             entry = self._append_assistant(ai_text)
             jid = getattr(tm, 'last_file_op_journal_id', None)
-            if tool != 'read_file':
+            if tool not in ('read_file', 'grep'):
                 # Session-persisted record: the AI can see what it edited on
                 # reload, and the restore UI maps sessions to journal entries.
                 entry['_file_op'] = {'tool': tool, 'path': spec.get('path', ''),
@@ -1321,7 +1353,7 @@ class AIEngine:
             return {
                 'response': visible if visible else "Working...",
                 'has_work_call': True,
-                'in_work_mode': True,
+                'is_working': True,
                 'thinking': True,
                 'session_name': session_name,
             }
@@ -1368,11 +1400,11 @@ class AIEngine:
             return False
         return any(marker in text for marker in ('import ', 'def ', '=', '('))
 
-    def _process_work_mode_response(self, ai_text):
+    def _process_work_response(self, ai_text):
         """Process AI response while in work mode."""
-        log.info(f"[AIEngine._process_work_mode_response] Processing work mode response | "
+        log.info(f"[AIEngine._process_work_response] Processing work mode response | "
                  f"length={len(ai_text)} chars")
-        log.debug(f"[AIEngine._process_work_mode_response] Preview: "
+        log.debug(f"[AIEngine._process_work_response] Preview: "
                   f"'{ai_text[:100].replace(chr(10), '↵')}'")
         self.last_raw_response = ai_text
 
@@ -1398,27 +1430,32 @@ class AIEngine:
                 else EXEC_CODE_TOOLCALL_VIOLATION_PROMPT)
         # ──────────────────────────────────────────────────────────────────────────
 
-        log.debug("[AIEngine._process_work_mode_response] Checking for consecutive work_environment call...")
+        log.debug("[AIEngine._process_work_response] Checking for consecutive python_interpreter call...")
 
         # Check for set_session_name call (handle first as it's simple)
         session_name = None
         log.debug("[AIEngine._process_ai_response] Checking for set_session_name call...")
         session_name_call = self.tool_manager.parse_set_session_name(ai_text)
+        # Keep `ai_text` FULL so _append_assistant stores the set_session_name
+        # fence (compat-mode replay reconstructs the name from it). Parse the
+        # remaining tools from the session-stripped `_display_text`; final display
+        # is cleaned via strip_tool_calls.
+        _display_text = ai_text
         if session_name_call:
             session_name, remaining_text = session_name_call
             log.info(f"[AIEngine._process_ai_response] set_session_name detected → '{session_name}' | "
                      f"remaining text length={len(remaining_text)}")
             self.log(f"Set session name call detected: {session_name}")
-            ai_text = remaining_text
+            _display_text = remaining_text
 
-        # ── Check for load_skill call (work_environment exclusive) ────────────
-        load_skill_result = self.tool_manager.parse_load_skill(ai_text)
+        # ── Check for load_skill call (python_interpreter exclusive) ────────────
+        load_skill_result = self.tool_manager.parse_load_skill(_display_text)
         if load_skill_result:
             from systema.engine.prompts.global_instructions import (
                 SKILL_LOADED_WORK_PROMPT, SKILL_LOADED_WORK_PROMPT_NATIVE,
                 SKILL_ALREADY_LOADED_PROMPT)
             skill_name, remaining_text = load_skill_result
-            log.info(f"[AIEngine._process_work_mode_response] load_skill detected → '{skill_name}'")
+            log.info(f"[AIEngine._process_work_response] load_skill detected → '{skill_name}'")
 
             if self.skill_manager:
                 success, msg = self.skill_manager.load_skill(skill_name)
@@ -1426,25 +1463,27 @@ class AIEngine:
                 success, msg = False, f"ERROR: No skill manager — cannot load '{skill_name}'"
 
             if not success:
-                log.warning(f"[AIEngine._process_work_mode_response] load_skill failed: {msg}")
+                log.warning(f"[AIEngine._process_work_response] load_skill failed: {msg}")
                 already_msg = SKILL_ALREADY_LOADED_PROMPT.format(skill_name=skill_name, reason=msg)
                 self._append_assistant(ai_text)
                 self.conversation_history.append({'role': 'system', 'content': already_msg})
                 return {
                     'response': f"⚠ {msg}",
                     'has_work_call': True,
-                    'in_work_mode': True,
+                    'is_working': True,
                     'thinking': True,
                     'session_name': session_name,
                 }
 
-            log.info(f"[AIEngine._process_work_mode_response] Skill '{skill_name}' loaded | "
+            log.info(f"[AIEngine._process_work_response] Skill '{skill_name}' loaded | "
                      f"total loaded: {list(self.skill_manager.get_loaded_skills().keys())}")
 
-            if remaining_text and remaining_text.strip():
-                self._append_assistant(ai_text)
+            # Store the FULL ai_text (load_skill fence intact) unconditionally so
+            # the call survives a cross-mode reload and native _pending_native is
+            # consumed rather than leaking into the next turn.
+            self._append_assistant(ai_text)
 
-            work_output = self.tool_manager.last_work_output or "No previous output"
+            work_output = self.tool_manager.work.last_output or "No previous output"
             _skill_tmpl = (SKILL_LOADED_WORK_PROMPT_NATIVE
                            if self._tool_mode() == 'native'
                            else SKILL_LOADED_WORK_PROMPT)
@@ -1453,25 +1492,25 @@ class AIEngine:
                 work_output=work_output
             )
             self.conversation_history.append({'role': 'system', 'content': skill_loaded_msg})
-            log.debug("[AIEngine._process_work_mode_response] Skill-loaded work prompt appended to history")
+            log.debug("[AIEngine._process_work_response] Skill-loaded work prompt appended to history")
 
             return {
                 'response': f"Loading skill: {skill_name}...",
                 'has_work_call': True,
-                'in_work_mode': True,
+                'is_working': True,
                 'thinking': True,
                 'skill_loaded': skill_name,
                 'session_name': session_name,
             }
 
         # ── Check for unload_skill call ────────────────────────────────────────
-        unload_skill_result = self.tool_manager.parse_unload_skill(ai_text)
+        unload_skill_result = self.tool_manager.parse_unload_skill(_display_text)
         if unload_skill_result:
             from systema.engine.prompts.global_instructions import (
                 SKILL_UNLOADED_WORK_PROMPT, SKILL_UNLOADED_WORK_PROMPT_NATIVE,
                 SKILL_NOT_LOADED_PROMPT)
             skill_name, remaining_text = unload_skill_result
-            log.info(f"[AIEngine._process_work_mode_response] unload_skill detected → '{skill_name}'")
+            log.info(f"[AIEngine._process_work_response] unload_skill detected → '{skill_name}'")
 
             if self.skill_manager:
                 success, msg = self.skill_manager.unload_skill(skill_name)
@@ -1479,20 +1518,20 @@ class AIEngine:
                 success, msg = False, "ERROR: No skill manager"
 
             if not success:
-                log.warning(f"[AIEngine._process_work_mode_response] unload_skill failed: {msg}")
+                log.warning(f"[AIEngine._process_work_response] unload_skill failed: {msg}")
                 not_loaded_msg = SKILL_NOT_LOADED_PROMPT.format(skill_name=skill_name, reason=msg)
                 self._append_assistant(ai_text)
                 self.conversation_history.append({'role': 'system', 'content': not_loaded_msg})
                 return {
                     'response': f"⚠ {msg}",
                     'has_work_call': True,
-                    'in_work_mode': True,
+                    'is_working': True,
                     'thinking': True,
                     'session_name': session_name,
                 }
 
-            log.info(f"[AIEngine._process_work_mode_response] Skill '{skill_name}' unloaded")
-            work_output = self.tool_manager.last_work_output or "No previous output"
+            log.info(f"[AIEngine._process_work_response] Skill '{skill_name}' unloaded")
+            work_output = self.tool_manager.work.last_output or "No previous output"
             _unload_tmpl = (SKILL_UNLOADED_WORK_PROMPT_NATIVE
                             if self._tool_mode() == 'native'
                             else SKILL_UNLOADED_WORK_PROMPT)
@@ -1505,45 +1544,45 @@ class AIEngine:
             return {
                 'response': f"Unloading skill: {skill_name}...",
                 'has_work_call': True,
-                'in_work_mode': True,
+                'is_working': True,
                 'thinking': True,
                 'skill_unloaded': skill_name,
                 'session_name': session_name,
             }
 
-        work_call = self.tool_manager.parse_work_environment(ai_text)
+        work_call = self.tool_manager.parse_python_interpreter(_display_text)
 
         if work_call:
             code, visible_text = work_call
-            log.info(f"[AIEngine._process_work_mode_response] Consecutive work_environment call | "
+            log.info(f"[AIEngine._process_work_response] Consecutive python_interpreter call | "
                      f"code_len={len(code)} | visible_text_len={len(visible_text)}")
-            self.log(f"Consecutive work environment call detected")
+            self.log(f"Consecutive python interpreter call detected")
 
             # Bare `exit`/empty work-call → the exit sentinel was removed, so fold
             # it into the finish path (never executed). Normal finishing is a reply
             # with no work call at all (the else-branch below).
             if code.strip().lower() in ('exit', ''):
-                log.info("[AIEngine._process_work_mode_response] Bare exit/empty work-call — "
+                log.info("[AIEngine._process_work_response] Bare exit/empty work-call — "
                          "finishing work mode (skills persist)")
-                self.tool_manager.in_work_mode = False
+                self.tool_manager.work.is_working = False
 
                 # Slim down the last work-mode ping now that work mode is exiting.
-                # It was never slimmed by continue_work_mode() because no next ping came after it.
+                # It was never slimmed by continue_work() because no next ping came after it.
                 for entry in reversed(self.conversation_history):
                     if entry.get('role') == 'system' and entry.get('_is_work_prompt'):
                         prev_output = entry.get('_work_output', '')
                         entry['content'] = WORK_MODE_OUTPUT_ONLY_PROMPT.format(work_output=prev_output)
                         del entry['_is_work_prompt']
-                        log.debug("[AIEngine._process_work_mode_response] Last work-mode ping slimmed on exit")
+                        log.debug("[AIEngine._process_work_response] Last work-mode ping slimmed on exit")
                         break
 
                 if ai_text and ai_text.strip():
                     self._append_assistant(ai_text)
-                    log.debug("[AIEngine._process_work_mode_response] ai_text appended to history (exit)")
+                    log.debug("[AIEngine._process_work_response] ai_text appended to history (exit)")
 
                 # ── Empty-exit guard ──────────────────────────────────────────
                 if not visible_text or not visible_text.strip():
-                    log.warning("[AIEngine._process_work_mode_response] Exit without summary detected — "
+                    log.warning("[AIEngine._process_work_response] Exit without summary detected — "
                                 "injecting reminder and re-calling provider")
                     self.conversation_history.append({'role': 'system', 'content': EMPTY_EXIT_SUMMARY_PROMPT})
                     ai_text2 = self._call_provider()
@@ -1552,44 +1591,45 @@ class AIEngine:
                     return {
                         'response': "",
                         'has_work_call': False,
-                        'in_work_mode': False,
+                        'is_working': False,
                         'thinking': False,
                         'session_name': session_name,
-                        'exited_work_mode': True
+                        'finished_working': True
                     }
                 # ─────────────────────────────────────────────────────────────
 
                 return {
                     'response': visible_text,
                     'has_work_call': False,
-                    'in_work_mode': False,
+                    'is_working': False,
                     'thinking': False,
                     'session_name': session_name,
-                    'exited_work_mode': True
+                    'finished_working': True
                 }
 
-            log.debug("[AIEngine._process_work_mode_response] → run_work_environment()")
-            work_output = self.tool_manager.run_work_environment(code)
-            log.debug(f"[AIEngine._process_work_mode_response] Work output received | "
+            log.debug("[AIEngine._process_work_response] → run_python_interpreter()")
+            work_output = self.tool_manager.run_python_interpreter(code)
+            log.debug(f"[AIEngine._process_work_response] Work output received | "
                       f"output_len={len(work_output)} chars | storing for next iteration")
-            self.tool_manager.last_work_output = work_output
+            self.tool_manager.work.last_output = work_output
+            self.tool_manager.work.last_tool = 'interpreter'
             self._malformed_step_retries = 0  # valid step — reset the guard-rail budget
 
             self._append_assistant(ai_text)
             self._inject_pending_format_reminder()
-            log.debug("[AIEngine._process_work_mode_response] ai_text (with JSON) appended to history")
+            log.debug("[AIEngine._process_work_response] ai_text (with JSON) appended to history")
 
             return {
                 'response': visible_text if visible_text else "Working...",
                 'has_work_call': True,
-                'in_work_mode': True,
+                'is_working': True,
                 'thinking': True,
                 'code': code
             }
 
         else:
             # ── File-subsystem call (read_file / edit_file / write_file) ─────
-            # A file op continues work mode exactly like a work_environment
+            # A file op continues work mode exactly like a python_interpreter
             # step — it must never be mistaken for the exit reply.
             _ft = self._dispatch_file_tool(ai_text, session_name)
             if _ft is not None:
@@ -1597,13 +1637,13 @@ class AIEngine:
 
             # ── Legacy execute_code on exit — the tool is RETIRED ─────────────
             # The call is NOT run. Keep the work loop alive with a corrective
-            # prompt so the model re-issues the action via work_environment.
-            if self.tool_manager._parse_fence(ai_text, 'execute_code'):
-                log.warning("[AIEngine._process_work_mode_response] Retired "
+            # prompt so the model re-issues the action via python_interpreter.
+            if self.tool_manager._parse_fence(_display_text, 'execute_code'):
+                log.warning("[AIEngine._process_work_response] Retired "
                             "execute_code emission in work mode — call NOT run")
                 self.tool_manager.approval_signal.system_message.emit(
                     "**NOTICE:** The model attempted the retired `execute_code` tool; "
-                    "the call was NOT run. It has been told to use work_environment.")
+                    "the call was NOT run. It has been told to use python_interpreter.")
                 from systema.engine.prompts.global_instructions import (
                     EXECUTE_CODE_RETIRED_PROMPT, EXECUTE_CODE_RETIRED_PROMPT_NATIVE)
                 _retired = (EXECUTE_CODE_RETIRED_PROMPT_NATIVE
@@ -1614,7 +1654,7 @@ class AIEngine:
                 return {
                     'response': self.tool_manager.strip_tool_calls(ai_text),
                     'has_work_call': True,
-                    'in_work_mode': True,
+                    'is_working': True,
                     'thinking': True,
                     'session_name': session_name,
                 }
@@ -1624,19 +1664,19 @@ class AIEngine:
             # with no surrounding prose, or a bare compiling Python body) is a
             # failed tool call, not a report. NEVER guess-execute it: keep the
             # loop alive with a corrective prompt so the model re-issues the
-            # step via work_environment (or truly finishes with a prose report).
-            if self._suspect_malformed_work_step(ai_text):
+            # step via python_interpreter (or truly finishes with a prose report).
+            if self._suspect_malformed_work_step(_display_text):
                 retries = getattr(self, '_malformed_step_retries', 0)
                 if retries < 2:
                     self._malformed_step_retries = retries + 1
-                    log.warning(f"[AIEngine._process_work_mode_response] Suspected malformed "
-                                f"work step (code-shaped reply, no valid tool call) — "
+                    log.warning(f"[AIEngine._process_work_response] Suspected malformed "
+                                f"interpreter step (code-shaped reply, no valid tool call) — "
                                 f"corrective retry {retries + 1}/2, nothing was run")
-                    if retries == 0:   # NOTICE once per work session; retry 2 logs only
+                    if retries == 0:   # NOTICE once per interpreter session; retry 2 logs only
                         self.tool_manager.approval_signal.system_message.emit(
                             "**NOTICE:** The model replied with code that is not a valid "
                             "tool call; nothing was run. It has been asked to re-issue "
-                            "the step as a work_environment call.")
+                            "the step as a python_interpreter call.")
                     from systema.engine.prompts.global_instructions import (
                         MALFORMED_WORK_STEP_PROMPT, MALFORMED_WORK_STEP_PROMPT_NATIVE)
                     _malformed = (MALFORMED_WORK_STEP_PROMPT_NATIVE
@@ -1647,59 +1687,68 @@ class AIEngine:
                     return {
                         'response': "Working...",
                         'has_work_call': True,
-                        'in_work_mode': True,
+                        'is_working': True,
                         'thinking': True,
                         'session_name': session_name,
                     }
-                log.warning("[AIEngine._process_work_mode_response] Still code-shaped after "
+                log.warning("[AIEngine._process_work_response] Still code-shaped after "
                             "2 corrective retries — letting it through as the report")
 
-            log.info("[AIEngine._process_work_mode_response] No more work_environment calls — "
-                     "AI is done, clearing in_work_mode (skills persist)")
-            self.tool_manager.in_work_mode = False
+            log.info("[AIEngine._process_work_response] No more python_interpreter calls — "
+                     "AI is done, clearing work.is_working (skills persist)")
+            self.tool_manager.work.is_working = False
 
             # Slim down the last work-mode ping now that work mode is exiting.
-            # It was never slimmed by continue_work_mode() because no next ping came after it.
+            # It was never slimmed by continue_work() because no next ping came after it.
             for entry in reversed(self.conversation_history):
                 if entry.get('role') == 'system' and entry.get('_is_work_prompt'):
                     prev_output = entry.get('_work_output', '')
                     entry['content'] = WORK_MODE_OUTPUT_ONLY_PROMPT.format(work_output=prev_output)
                     del entry['_is_work_prompt']
-                    log.debug("[AIEngine._process_work_mode_response] Last work-mode ping slimmed on exit")
+                    log.debug("[AIEngine._process_work_response] Last work-mode ping slimmed on exit")
                     break
 
-            # ── Empty-finish guard ── this reply (no tool call) IS the report; an
-            # empty one means the user sees nothing, so prompt for a real summary.
-            if not ai_text or not ai_text.strip():
-                log.warning("[AIEngine._process_work_mode_response] Finished work mode with an empty reply — "
+            # ── Empty-finish guard ── the visible reply (no tool call) IS the
+            # report; an empty one means the user sees nothing, so prompt for a
+            # real summary. Judge emptiness on the session-stripped display text
+            # (a name-only turn has an empty report but a real set_session_name).
+            if not _display_text or not _display_text.strip():
+                log.warning("[AIEngine._process_work_response] Finished work mode with an empty reply — "
                             "injecting summary reminder and re-calling provider")
+                # Persist a name-only turn (its fence + native metadata) so the
+                # name survives even though we re-prompt for the missing summary.
+                if ai_text and ai_text.strip():
+                    self._append_assistant(ai_text)
                 self.conversation_history.append({'role': 'system', 'content': EMPTY_EXIT_SUMMARY_PROMPT})
                 ai_text2 = self._call_provider()
                 if ai_text2:
-                    return self._process_ai_response(ai_text2)
+                    _r = self._process_ai_response(ai_text2)
+                    if session_name and not _r.get('session_name'):
+                        _r['session_name'] = session_name
+                    return _r
                 return {
                     'response': "",
                     'has_work_call': False,
-                    'in_work_mode': False,
+                    'is_working': False,
                     'thinking': False,
                     'session_name': session_name,
-                    'exited_work_mode': True,
+                    'finished_working': True,
                 }
 
             self._append_assistant(ai_text)
-            log.debug("[AIEngine._process_work_mode_response] Normal response appended to history | "
+            log.debug("[AIEngine._process_work_response] Normal response appended to history | "
                       f"total entries={len(self.conversation_history)}")
 
-            # exited_work_mode=True is REQUIRED — it stops the controller's
-            # work_mode_timer and fires the exit UI. This is now the primary finish
+            # finished_working=True is REQUIRED — it stops the controller's
+            # work_timer and fires the exit UI. This is now the primary finish
             # path (the explicit exit sentinel was removed).
             return {
-                'response': ai_text,
+                'response': self.tool_manager.strip_tool_calls(ai_text),
                 'has_work_call': False,
-                'in_work_mode': False,
+                'is_working': False,
                 'session_name': session_name,
                 'thinking': False,
-                'exited_work_mode': True,
+                'finished_working': True,
             }
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -1881,10 +1930,9 @@ class AIEngine:
         """Clear conversation history and reset work mode"""
         log.info(f"[AIEngine.clear_history] Clearing conversation history | "
                  f"was {len(self.conversation_history)} entries | "
-                 f"in_work_mode={self.tool_manager.in_work_mode}")
+                 f"is_working={self.tool_manager.work.is_working}")
         self.conversation_history = []
-        self.tool_manager.in_work_mode = False
-        self.tool_manager.last_work_output = None
+        self.tool_manager.work.reset()
         self.last_raw_response = None
         log.debug("[AIEngine.clear_history] ✓ History cleared, work mode reset, last_raw_response cleared")
 

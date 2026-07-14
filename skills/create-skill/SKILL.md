@@ -100,7 +100,14 @@ if result.returncode != 0:
     print("SKILL ERROR:", result.stderr)
 ```
 
-After scaffolding, YOU write the `SKILL.md` body and any script stubs manually following the format above.
+After scaffolding, author the files with YOUR native file tools — not by hand-piping through the interpreter:
+
+- **`write_file`** — create `SKILL.md` and each `scripts/*.py` with its full contents.
+- **`edit_file`** — make surgical follow-up changes to any file you already wrote.
+- **`read_file`** — re-read a file to confirm what's there before editing.
+- **`grep`** — search existing `skills/` for a similar skill to model yours on (before creating a duplicate).
+
+(You may skip `scaffold.py` entirely and just `write_file` each path directly — the script is only a convenience for stamping out the empty directory layout.)
 
 ## A Complete Minimal Skill
 
@@ -112,7 +119,7 @@ the real file starts at column 0):
 
     ---
     name: say-hello
-    description: greet a person by name from the work environment
+    description: greet a person by name from the python interpreter
     ---
 
     ## Purpose

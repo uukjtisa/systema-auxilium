@@ -22,13 +22,13 @@ Each entry carries:
 ADDING A TOOL is a 3-touch change:
   1. Add its entry here — the native schema AND the compat fence docs render
      from this registry automatically, in both tool-calling modes.
-  2. Add a parse_<tool>() method on ToolManager (mirrors parse_work_environment).
+  2. Add a parse_<tool>() method on ToolManager (mirrors parse_python_interpreter).
   3. Add one dispatch branch in AIEngine._process_ai_response.
 
 RETIRED tools live in LEGACY_STRIP_KEYS: their fences in OLD sessions are
 still stripped for display, but they are never advertised, parsed as
 dispatchable, or included in native schemas. (execute_code was retired in
-2026-07 — work_environment is the only way to run code.)
+2026-07 — python_interpreter is the only way to run code.)
 """
 
 def _read_file_body(args):
@@ -64,14 +64,41 @@ def _write_file_body(args):
             + str(args.get('content', '') or ''))
 
 
+def _grep_body(args):
+    out = [str(args.get('pattern', '') or '').strip()]
+    for key in ('path', 'glob', 'type'):
+        v = str(args.get(key, '') or '').strip()
+        if v:
+            out.append(f"{key}: {v}")
+    om = str(args.get('output_mode', '') or '').strip()
+    if om and om != 'files_with_matches':
+        out.append(f"output: {om}")
+    if args.get('case_insensitive'):
+        out.append("case: true")
+    if args.get('line_numbers') is False:
+        out.append("line_numbers: false")
+    for key in ('before', 'after', 'context'):
+        if args.get(key):
+            out.append(f"{key}: {int(args[key])}")
+    if args.get('only_matching'):
+        out.append("only_matching: true")
+    if args.get('multiline'):
+        out.append("multiline: true")
+    if args.get('head_limit') not in (None, ''):
+        out.append(f"head_limit: {int(args['head_limit'])}")
+    if args.get('ignore_common') is False:
+        out.append("ignore_common: false")
+    return "\n".join(out)
+
+
 CANONICAL_TOOLS = {
-    'work_environment': {
+    'python_interpreter': {
         'description': (
             "Run Python in a persistent workspace and SEE its output (stdout + the last "
             "expression's value). The ONLY way to run code. Use it for everything: reading "
             "files, calculations, gathering data, launching apps (start them detached), and "
             "multi-step tasks where you observe results before continuing. The namespace "
-            "persists across calls within a work session."
+            "persists across calls within a interpreter session."
         ),
         'param': ('code', 'The Python code to execute. You receive its stdout and return value.'),
         'extra_params': [
@@ -88,9 +115,9 @@ CANONICAL_TOOLS = {
         ],
         'exec': True,
         'compat': {
-            'table_row': "work_environment: Python code to run (you SEE output)",
+            'table_row': "python_interpreter: Python code to run (you SEE output)",
             'fence_example': (
-                "```work_environment: [Brief label of what this block does]\n"
+                "```python_interpreter: [Brief label of what this block does]\n"
                 "import os\n"
                 "print(os.listdir('.'))\n"
                 "```"
@@ -113,14 +140,14 @@ CANONICAL_TOOLS = {
              False),
             ('then_tool',
              "FALLBACK chaining, for providers that only permit a single tool call per "
-             "response: name the tool to also run this turn ('work_environment'). Prefer "
+             "response: name the tool to also run this turn ('python_interpreter'). Prefer "
              "emitting set_session_name and the work call as two parallel calls instead.",
-             False, ('work_environment',)),
+             False, ('python_interpreter',)),
             ('then_code',
              "The Python code for the tool named in then_tool. Required when then_tool is set.",
              False),
             ('then_annotation',
-             "For then_tool='work_environment': a short 3-6 word label of what the chained "
+             "For then_tool='python_interpreter': a short 3-6 word label of what the chained "
              "code does (shown to the user as that step's title).",
              False),
         ],
@@ -133,7 +160,7 @@ CANONICAL_TOOLS = {
                 "```"
             ),
             'usage': ("Name the session once, early. Exempt from the one-code-tool rule — "
-                      "it may accompany a work_environment fence in the same response."),
+                      "it may accompany a python_interpreter fence in the same response."),
         },
     },
     'load_skill': {
@@ -150,13 +177,13 @@ CANONICAL_TOOLS = {
              False),
             ('then_tool',
              "FALLBACK chaining, for providers that only permit a single tool call per "
-             "response: run ONE code tool right after the skill loads ('work_environment').",
-             False, ('work_environment',)),
+             "response: run ONE code tool right after the skill loads ('python_interpreter').",
+             False, ('python_interpreter',)),
             ('then_code',
              "The Python code for the tool named in then_tool. Required when then_tool is set.",
              False),
             ('then_annotation',
-             "For then_tool='work_environment': a short 3-6 word label of what the chained "
+             "For then_tool='python_interpreter': a short 3-6 word label of what the chained "
              "code does (shown to the user as that step's title).",
              False),
         ],
@@ -284,10 +311,59 @@ CANONICAL_TOOLS = {
                       "content, verbatim."),
         },
     },
+    'grep': {
+        'description': (
+            "Search file CONTENTS for a regular-expression pattern (ripgrep-style). "
+            "Your fast code/text search — use it to LOCATE things across a tree before "
+            "reading or editing. Read-only; part of the work-mode file subsystem, never "
+            "breaks work-mode state. Three output modes; skips build/VCS dirs by default."
+        ),
+        'param': ('pattern', 'The regular expression to search for (full regex syntax).'),
+        'extra_params': [
+            ('path', "File or directory to search under. Default: the working dir.", False),
+            ('glob', "Glob to filter which files are searched, e.g. '**/*.py' or '*.{ts,tsx}'.", False),
+            ('type', "File-type filter, e.g. 'py', 'js', 'kotlin', 'go', 'rust'.", False),
+            ('output_mode', "'files_with_matches' (default — matching file paths), 'content' "
+                            "(matching lines), or 'count' (per-file match counts).", False,
+                            ('files_with_matches', 'content', 'count')),
+            ('case_insensitive', "Case-insensitive match (default false).", False),
+            ('line_numbers', "Show line numbers in content mode (default true).", False),
+            ('before', "Lines of context BEFORE each match (content mode).", False),
+            ('after', "Lines of context AFTER each match (content mode).", False),
+            ('context', "Lines of context BOTH before and after each match (content mode).", False),
+            ('only_matching', "Print only the matched part of each line (content mode).", False),
+            ('multiline', "Let the pattern span multiple lines (. matches newlines).", False),
+            ('head_limit', "Limit output to the first N results (default 250; 0 = unlimited).", False),
+            ('ignore_common', "Skip common build/VCS dirs like .git / __pycache__ / node_modules "
+                              "/ .venv (default true). Set false to search everything.", False),
+            ('annotation',
+             "A short 3-6 word label (e.g. 'Searching for callers'). ALWAYS include it — "
+             "shown to the user as this step's title.", False),
+        ],
+        'exec': True,
+        'to_fence': _grep_body,
+        'compat': {
+            'table_row': "grep: Search file contents by regex (ripgrep-style)",
+            'fence_example': (
+                "```grep: [Finding callers of send]\n"
+                "\\bsend\\(\n"
+                "glob: **/*.py\n"
+                "output: content\n"
+                "context: 1\n"
+                "```"
+            ),
+            'usage': ("Line 1 = the regex pattern. Optional opt lines: 'path:', 'glob:', "
+                      "'type:', 'output:' (files_with_matches|content|count), 'case: true', "
+                      "'before:'/'after:'/'context:', 'only_matching: true', "
+                      "'multiline: true', 'head_limit:', 'ignore_common: false'. "
+                      "Default mode lists matching file paths."),
+        },
+    },
 }
 
 # Tools that form the file-editing subsystem (used for prompt grouping and the
-# file-op UI cards).
+# file-op UI cards). grep rides with them in prompts but is read-only and
+# has no diff card, so it is NOT in FILE_TOOL_KEYS.
 FILE_TOOL_KEYS = ('read_file', 'edit_file', 'write_file')
 
 # Code-execution tools — subject to the single-exec policy and capability gates.

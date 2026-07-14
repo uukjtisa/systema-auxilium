@@ -39,7 +39,7 @@ It runs locally as a PyQt6 desktop app. The reasoning comes from a configurable 
 of your choice; everything else, including code execution, runs on your machine.
 
 > **Full documentation lives in [`docs/`](docs/).** Every subsystem — providers,
-> tool calling, work mode, security, tasks, updates, voice/TTS, skills & memory,
+> tool calling, the Python interpreter, security, tasks, updates, voice/TTS, skills & memory,
 > and the Android bridge — has its own page. Start at [docs/README.md](docs/README.md).
 
 ---
@@ -91,13 +91,17 @@ strongly encouraged.
 - **Self-knowledge** — the assistant can explain what it is and how it works, and check its own
   status and updates on request (see [Software Updates](#software-updates)).
 - **Self-updating** — update the app from GitHub inside the app: review the exact changes, pick
-  which files to apply, auto-install new dependencies, with a backup and one-click revert.
+  which files to apply, auto-install new dependencies, with a backup and one-click revert. Files
+  that hold your configured provider accounts/keys are flagged and never blindly overwritten, and a
+  built-in Manage view lets you resolve those changes hunk-by-hunk (or line-by-line) yourself.
 - **Session naming** — conversations are named automatically so you can navigate back easily.
-- **Guarded execution** — an optional mode that shows the generated Python before it runs, so
-  you can review, approve, or reject every action.
+- **Guarded execution** — reviews RISKY generated Python before it runs: an automatic static risk
+  scan, a built-in code editor you can chat with that proposes a safer version as a one-click-apply
+  diff, per-category allow/ask/deny policy, and a "don't ask again" memory. Obviously-safe snippets
+  (plain print, math) run without a prompt. You review, edit, approve, or reject every action.
 
-> Scheduled tasks approve code execution immediately within the task, so be deliberate about
-> each task's instructions and permissions.
+> Scheduled tasks can't answer an approval prompt, so each task's risky operations are governed by a
+> per-category allow/deny security policy you set up front — be deliberate about what you allow.
 
 ---
 
@@ -149,8 +153,8 @@ different fields; this keeps the codebase clean.
 
 ### Tool Calling: Native and Compatibility
 
-The assistant drives its tools (work mode, code execution, skill load/unload, session naming)
-in one of two modes. Switch in **Settings -> System -> Tool Calling Mode**:
+The assistant drives its tools (the Python interpreter, file editing, skill load/unload, session
+naming) in one of two modes. Switch in **Settings -> System -> Tool Calling Mode**:
 
 - **Native.** Tool calls travel through the provider's own function-calling API. The system prompt
   is rebuilt fence-free, so the model relies purely on the structured tools channel. This is the
@@ -159,7 +163,7 @@ in one of two modes. Switch in **Settings -> System -> Tool Calling Mode**:
   supports function calling. Background tasks work in native too (a task agent reaches your main
   chat via `send_message_main()` in its Python namespace).
 - **Compatibility (legacy, universal fallback).** Tools are described in the system prompt and the
-  model invokes them as fenced blocks (for example ```` ```work_environment ````). This works with
+  model invokes them as fenced blocks (for example ```` ```python_interpreter ````). This works with
   *any* model or provider, with no special API support. It costs prompt tokens, and a weaker model
   can occasionally mis-format a call. The app includes recovery safeguards for malformed calls, and
   if a provider does not declare native support (or ignores `tools`), it automatically falls back
@@ -191,9 +195,14 @@ Systema Auxilium can update itself from GitHub, in-app, under **Settings -> Syst
 or **Settings -> General** (shortcut) -> **Check for Updates**:
 
 - **Review before applying** — see every changed file and its exact diff; the files with real
-  textual changes are highlighted and selected for you, and you choose what to apply.
+  textual changes are highlighted and selected for you, and you choose what to apply. The commit
+  message(s) behind an update are shown, stacked when several updates have piled up unapplied.
 - **Preserves your local edits** — a 3-way merge folds upstream changes into files you have
   modified; genuine conflicts are marked for you to resolve rather than silently overwritten.
+- **Protects your configured accounts** — files that hold your provider accounts, API keys, or
+  tokens (e.g. under `providers/`) are flagged and auto-deselected, so an update can't wipe your
+  configuration. A built-in Manage view lets you resolve these hunk-by-hunk (or line-by-line)
+  yourself — keep your version, take the update, or hand-edit — before anything is written.
 - **Dependencies** — newly required Python packages are detected and installed automatically.
 - **Backup and revert** — a snapshot is taken before anything changes, so the whole update can be
   reverted with one click. Snapshot history is kept.

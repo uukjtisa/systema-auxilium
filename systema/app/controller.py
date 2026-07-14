@@ -2,7 +2,7 @@
 core/controller.py
 Main Controller - Orchestrates the AI assistant with Voice Support
 MAIN INITIATOR FOR ALL UI AND CORE MODULES
-UPDATED: work_environment integration, voice mode, device management, TTS control
+UPDATED: python_interpreter integration, voice mode, device management, TTS control
 """
 
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer
@@ -238,7 +238,7 @@ class AssistantController(QObject):
         def _agent_attach_image_to_context(path):
             """Feed an image to the AI as PRIVATE, one-turn context (NOT pinned to
             the chat, not shown to the user). It is sent to the provider's
-            chat_image() on the next work step, then deleted from disk — the tokens
+            chat_image() on the next interpreter step, then deleted from disk — the tokens
             are spent exactly once. Requires a provider that supports image
             analysis (defines chat_image()).
 
@@ -287,10 +287,10 @@ class AssistantController(QObject):
         log.debug("[AssistantController.__init__] FloatingWindow created")
 
         # Tool mode timer
-        self.work_mode_timer = QTimer()
-        self.work_mode_timer.timeout.connect(self.auto_continue_work_mode)
-        self.work_mode_timer.setInterval(1000)
-        log.debug("[AssistantController.__init__] work_mode_timer created | interval=1000ms")
+        self.work_timer = QTimer()
+        self.work_timer.timeout.connect(self.auto_continue_work)
+        self.work_timer.setInterval(1000)
+        log.debug("[AssistantController.__init__] work_timer created | interval=1000ms")
 
         # Live work-mode output streaming — polls the interpreter buffer while code runs
         self._live_output_timer = QTimer()
@@ -442,9 +442,9 @@ class AssistantController(QObject):
         reasons = []
         try:
             tm = self.ai.tool_manager
-            if getattr(tm, "in_work_mode", False):
+            if getattr(tm.work, "is_working", False):
                 reasons.append("the agent is in work mode")
-            if getattr(tm, "work_code_running", False):
+            if getattr(tm.work.interpreter, "is_running", False):
                 reasons.append("code execution is running")
         except Exception:
             pass
@@ -480,7 +480,7 @@ class AssistantController(QObject):
         """
         log.info("[AssistantController.graceful_stop_for_exit] Draining activity before exit")
         try:
-            self.work_mode_timer.stop()
+            self.work_timer.stop()
         except Exception:
             pass
         self._request_generation += 1  # discard any late worker response
@@ -493,13 +493,11 @@ class AssistantController(QObject):
             pass
         try:
             tm = self.ai.tool_manager
-            if getattr(tm, 'work_code_running', False):
+            if getattr(tm.work.interpreter, 'is_running', False):
                 log.warning("[AssistantController.graceful_stop_for_exit] Interrupting running code")
                 tm.interrupt_running_code(
                     "Interrupted: the user is restarting or shutting down the app.")
-            tm.in_work_mode = False
-            tm.work_code_running = False
-            tm.last_work_output = None
+            tm.work.reset()
         except Exception:
             pass
         self.is_processing = False
@@ -708,6 +706,7 @@ class AssistantController(QObject):
             'vad_aggressiveness': 3,
             'vad_silero_threshold': 0.5,
             'supervised_execution': True,  # Default ON for safety
+            'security_bypass_all': False,  # master override — auto-approve everything
             'memory_enabled': True,
             'memory_recall_mode': 'inject_all',  # 'inject_all' or 'rag'
             'memory_threshold': 0.4,  # float 0.0–1.0
@@ -861,14 +860,14 @@ class AssistantController(QObject):
             log.error(f"[AssistantController.disable_voice_mode] ✗ Exception: {type(e).__name__}: {e}")
             self.log(f"Error disabling voice: {e}", "ERROR")
 
-    def _request_manual_response(self, context: str, work_mode: bool, work_output: str):
+    def _request_manual_response(self, context: str, is_working: bool, work_output: str):
         """Called from the AIWorker thread — stores result_holder + done_event on
         self (so they stay as real references), then signals the main thread to
         show the popup and blocks until the user submits or cancels."""
         self._manual_result_holder = []
         self._manual_done_event = threading.Event()
         # Emit only display data — the window will read result_holder from self
-        self.manual_response_signal.emit(context, work_mode, work_output)
+        self.manual_response_signal.emit(context, is_working, work_output)
         # Block the worker thread until the window is dismissed (by PC or Android)
         self._manual_done_event.wait()
         result = self._manual_result_holder[0] if self._manual_result_holder else None
@@ -878,10 +877,10 @@ class AssistantController(QObject):
             ab.dismiss_manual_response()
         return result
 
-    def _show_manual_response_window(self, context, work_mode, work_output):
+    def _show_manual_response_window(self, context, is_working, work_output):
         """Slot — always runs on the main thread.  Creates and shows the popup."""
         from systema.ui.windows.manual_response_window import ManualResponseWindow
-        win = ManualResponseWindow(context, work_mode, work_output,
+        win = ManualResponseWindow(context, is_working, work_output,
                                    self._manual_result_holder,
                                    self._manual_done_event)
         # Keep a reference so it isn't garbage-collected before the user responds
@@ -903,7 +902,7 @@ class AssistantController(QObject):
                     close_win = getattr(self, '_manual_response_win', None)
                     if close_win:
                         QTimer.singleShot(0, close_win.close)
-            ab.request_manual_response(context, work_mode, work_output, on_android_manual_response)
+            ab.request_manual_response(context, is_working, work_output, on_android_manual_response)
 
     def _handle_bridge_attach_image(self, paths):
         """Slot — always runs on main thread. Pins images sent from the Android app."""
@@ -992,7 +991,7 @@ class AssistantController(QObject):
             pass
 
         # ── Barge-in: cancel the in-flight request and merge prompts ─────────
-        if (self.is_processing and not self.ai.tool_manager.in_work_mode
+        if (self.is_processing and not self.ai.tool_manager.work.is_working
                 and getattr(self, '_last_sent_user_text', None)):
             prev = self._last_sent_user_text
             log.info("[AssistantController._handle_voice_message_on_main_thread] "
@@ -1176,9 +1175,9 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             skills                     = None,    # task skills injected separately below
             include_session_naming     = False,   # tasks don't name sessions
             include_memory             = True,    # memorize is always useful for tasks
-            include_execution_tools    = _any_code,     # work-environment section
+            include_execution_tools    = _any_code,     # python interpreter section
             include_fence_syntax       = _any_code,     # fence syntax guide
-            include_work_mode_rules    = _allow_workmode,
+            include_interpreter_mode_rules    = _allow_workmode,
             include_must_remember      = _any_code,     # reminder block references tools
             include_image_tools        = perms.get('inject_image_tools',    False),
             include_controller_ref     = perms.get('inject_controller_ref', False),
@@ -1189,7 +1188,22 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         # ── Permissions block ─────────────────────────────────────────────────
         perm_lines = []
         if perms.get('allow_workmode'):
-            perm_lines.append("- You MAY use the work_environment tool to perform agentic tasks.")
+            perm_lines.append("- You MAY use the python_interpreter tool to perform agentic tasks.")
+            # Summarize the task's security policy so the agent knows its hard
+            # limits up front. Denied categories are blocked non-interactively —
+            # there is no one to approve a prompt in a background task.
+            _policy = perms.get('task_security_policy')
+            if isinstance(_policy, dict) and _policy:
+                _denied = sorted(k for k, v in _policy.items() if v == 'deny')
+                if _denied:
+                    perm_lines.append(
+                        "- Security policy for this task DENIES these operation "
+                        "categories: " + ", ".join(_denied) + ". Any code or file "
+                        "op needing one is BLOCKED automatically (no approval "
+                        "prompt exists in a background task). Plan around them — "
+                        "do not retry a blocked operation.")
+                else:
+                    perm_lines.append("- Security policy allows all operation categories.")
         if perms.get('allow_skill_load_unload'):
             perm_lines.append("- You MAY use load_skill and unload_skill.")
         if not perm_lines:
@@ -1205,7 +1219,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         if _any_code:
             send_main_block = (
                 f"Sending a message to the main chat session:\n"
-                f"  Call the send_message_main(message) function from inside work_environment. "
+                f"  Call the send_message_main(message) function from inside python_interpreter. "
                 f"It is available in your Python namespace. Example:\n"
                 f"    send_message_main(\"Your Discord friend just messaged you.\")\n"
                 f"  Delivers immediately. Do NOT write it as a code fence or JSON in your reply "
@@ -1264,7 +1278,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
     def speak_text(self, text):
         """Enqueue text on the serialized speech queue (voice mode only).
 
-        Non-blocking; utterances play strictly one at a time. Work-mode
+        Non-blocking; utterances play strictly one at a time. Interpreter-mode
         commentary is narrated too — callers must only ever pass the AI's
         message text here, never raw tool output or code."""
         log.debug(f"[AssistantController.speak_text] voice_mode_active={self.voice_mode_active} | "
@@ -1477,11 +1491,11 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             return
 
         # Reject messages during work mode — use the Stop button or timeout dialog instead
-        if self.ai.tool_manager.in_work_mode:
+        if self.ai.tool_manager.work.is_working:
             log.warning("[AssistantController.send_message] Message rejected — input locked during work mode")
             self.log("Input locked during work mode — use the Stop button to cancel.")
             if self._chat:
-                self._chat.add_system_message("⏳ **Input locked** — work mode is active. Use the **Stop** button or timeout dialog to cancel.")
+                self._chat.add_system_message("⏳ **Input locked** — the interpreter is running. Use the **Stop** button or timeout dialog to cancel.")
             return
 
         # Prevent overlapping requests
@@ -1578,13 +1592,13 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             return
         self.handle_ai_response(result)
 
-    def _dispatch_work_mode_response(self, result, generation):
-        """Route a work-mode response to handle_work_mode_response only if it's still current."""
+    def _dispatch_work_response(self, result, generation):
+        """Route a work-mode response to handle_work_response only if it's still current."""
         if generation != self._request_generation:
-            log.warning(f"[AssistantController._dispatch_work_mode_response] Stale work-mode response discarded "
+            log.warning(f"[AssistantController._dispatch_work_response] Stale work-mode response discarded "
                         f"(gen={generation}, current={self._request_generation})")
             return
-        self.handle_work_mode_response(result)
+        self.handle_work_response(result)
 
     # ── Debug-window provider observability ─────────────────────────────────────
     @staticmethod
@@ -1644,7 +1658,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         log.info(f"[AssistantController.handle_ai_response] ── Response received | "
                  f"executed={result.get('executed', False)} | "
                  f"has_work_call={result.get('has_work_call', False)} | "
-                 f"exited_work_mode={result.get('exited_work_mode', False)} | "
+                 f"finished_working={result.get('finished_working', False)} | "
                  f"thinking={result.get('thinking', False)} ──")
         if not result.get('thinking'):
             self.ui.hide_thinking()
@@ -1661,8 +1675,8 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
 
                 if result.get('has_work_call'):
                     self.ui.show_debug_message("system",
-                                               f"••• WORK_ENVIRONMENT CALL DETECTED •••\n"
-                                               f"In Work Mode: {result.get('in_work_mode', False)}\n\n"
+                                               f"••• PYTHON_INTERPRETER CALL DETECTED •••\n"
+                                               f"In Work Mode: {result.get('is_working', False)}\n\n"
                                                f"━━━ CODE ━━━\n"
                                                f"{result.get('code', 'N/A')}\n"
                                                f"━━━━━━━━━━━━━━━━━\n\n"
@@ -1707,83 +1721,83 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
                 self._chat.add_loaded_skills_card()
 
         # Check if AI just exited tool mode — summary is already in the response above
-        if result.get('exited_work_mode'):
+        if result.get('finished_working'):
             log.info(
                 "[AssistantController.handle_ai_response] AI exited work mode — summary included in response")
-            self.work_mode_timer.stop()
+            self.work_timer.stop()
             return
 
         # ── First work call branch ───────────────────────────────────────────────
-        # Stores last_work_output, shows code execution note, starts work_mode_timer
+        # Stores work.last_output, shows code execution note, starts work_timer
         if result['thinking']:
-            log.debug("[AssistantController.handle_ai_response] thinking=True — starting work_mode_timer")
+            log.debug("[AssistantController.handle_ai_response] thinking=True — starting work_timer")
             from PyQt6.QtCore import QTimer
             if self._chat:
                 QTimer.singleShot(0, lambda: self._chat.interrupt_btn.setToolTip("Interrupt work"))
-            # Show code execution widget for the FIRST work_environment call
+            # Show code execution widget for the FIRST python_interpreter call
             if result.get('has_work_call') and result.get('code'):
                 try:
-                    tm_output = self.ai.tool_manager.last_work_output or ''
+                    tm_output = self.ai.tool_manager.work.last_output or ''
                     if tm_output and self._chat:
                         self._chat.add_code_execution_note(result['code'], tm_output)
                 except Exception:
                     pass
             # Start tool mode timer
-            self.work_mode_timer.start()
+            self.work_timer.start()
 
-    def handle_work_mode_response(self, result):
+    def handle_work_response(self, result):
         """Handle tool mode response from worker thread"""
-        log.info(f"[AssistantController.handle_work_mode_response] ── Response received | "
-                  f"exited_work_mode={result.get('exited_work_mode', False)} | "
+        log.info(f"[AssistantController.handle_work_response] ── Response received | "
+                  f"finished_working={result.get('finished_working', False)} | "
                   f"has_work_call={result.get('has_work_call', False)} | "
                   f"thinking={result.get('thinking', False)} ──")
 
         # Debug mode: show everything that happened
         if self.settings.get('debug_mode'):
             self._push_provider_debug()
-            if self.ai.tool_manager.in_work_mode:
-                work_output = self.ai.tool_manager.last_work_output
+            if self.ai.tool_manager.work.is_working:
+                work_output = self.ai.tool_manager.work.last_output
                 if work_output:
-                    self.ui.show_debug_message("tool", f"••• WORK ENVIRONMENT OUTPUT •••\n{work_output}")
+                    self.ui.show_debug_message("tool", f"••• PYTHON INTERPRETER OUTPUT •••\n{work_output}")
 
             raw_response = self.ai.last_raw_response
             if raw_response:
                 self.ui.show_debug_message("ai", f"••• RAW AI RESPONSE (Work Mode) •••\n{raw_response}")
 
-                if result.get('exited_work_mode'):
+                if result.get('finished_working'):
                     self.ui.show_debug_message("system",
                         f"••• EXITING WORK MODE •••\n"
                         f"AI's final message to user:\n{result.get('response', '(none)')}")
                 elif result.get('has_work_call'):
                     self.ui.show_debug_message("system",
-                        f"••• NEXT WORK_ENVIRONMENT CALL •••\n"
+                        f"••• NEXT PYTHON_INTERPRETER CALL •••\n"
                         f"Code: {result.get('code', 'N/A')}\n\n"
                         f"━━━ CHAINING EXECUTION ━━━\n"
                         f"AI is analyzing output and chaining more executions...")
 
         # Check if AI set a session name
         if result.get('session_name'):
-            log.debug(f"[AssistantController.handle_work_mode_response] AI set session name: "
+            log.debug(f"[AssistantController.handle_work_response] AI set session name: "
                       f"'{result['session_name']}'")
             self.set_session_name(result['session_name'])
 
         # Show thinking bubble before the final summary when work mode exits
-        exited = result.get('exited_work_mode')
+        exited = result.get('finished_working')
         if exited:
             self.ui.show_thinking()
             from PyQt6.QtWidgets import QApplication
             QApplication.processEvents()
 
-        self.ui.handle_work_mode_update(result)
+        self.ui.handle_work_update(result)
 
         # ── Exited work mode ─────────────────────────────────────────────────────
         if exited:
             self.log("AI exited tool mode")
-            self.work_mode_timer.stop()
-            self.ai.tool_manager.in_work_mode = False
+            self.work_timer.stop()
+            self.ai.tool_manager.work.is_working = False
             self.is_processing = False
             self.ui.hide_thinking()
-            log.debug("[AssistantController.handle_work_mode_response] is_processing=False (work mode exited)")
+            log.debug("[AssistantController.handle_work_response] is_processing=False (work mode exited)")
             if not self.session_has_messages:
                 self.session_has_messages = True
             self._auto_save_session()
@@ -1794,13 +1808,13 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             # Still thinking — is_processing stays False to allow timer to fire
             self.ui.set_work_state(True)
             self.is_processing = False
-            self.work_mode_timer.start()
+            self.work_timer.start()
         else:
             # Done with work mode (final result received)
-            self.work_mode_timer.stop()
-            self.ai.tool_manager.in_work_mode = False
+            self.work_timer.stop()
+            self.ai.tool_manager.work.is_working = False
             self.is_processing = False
-            log.debug("[AssistantController.handle_work_mode_response] is_processing=False (work mode done)")
+            log.debug("[AssistantController.handle_work_response] is_processing=False (work mode done)")
             QTimer.singleShot(0, self.ui.hide_thinking)
             if not self.session_has_messages:
                 self.session_has_messages = True
@@ -1811,7 +1825,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         log.error(f"[AssistantController.handle_ai_error] ✗ Error received: '{error_message[:120]}'")
         self.ui.hide_thinking()
         self.ui.show_ai_message(f"Error: {error_message}")
-        self.work_mode_timer.stop()
+        self.work_timer.stop()
         self.is_processing = False
         log.debug("[AssistantController.handle_ai_error] is_processing=False | timer stopped")
         self.log(f"AI Error: {error_message}", "ERROR")
@@ -1820,14 +1834,14 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         if self.settings.get('debug_mode'):
             self.ui.show_debug_message("system", f"••• ERROR •••\n{error_message}")
 
-    def auto_continue_work_mode(self):
+    def auto_continue_work(self):
         """Automatically continue tool mode (non-blocking)"""
-        log.debug("[AssistantController.auto_continue_work_mode] Timer fired | "
-                  f"in_work_mode={self.ai.tool_manager.in_work_mode} | "
+        log.debug("[AssistantController.auto_continue_work] Timer fired | "
+                  f"is_working={self.ai.tool_manager.work.is_working} | "
                   f"is_processing={self.is_processing}")
-        if not self.ai.tool_manager.in_work_mode:
-            log.debug("[AssistantController.auto_continue_work_mode] Not in work mode — stopping timer")
-            self.work_mode_timer.stop()
+        if not self.ai.tool_manager.work.is_working:
+            log.debug("[AssistantController.auto_continue_work] Not in work mode — stopping timer")
+            self.work_timer.stop()
             return
 
         # Voice gating: never advance the chain (and thus never execute the next
@@ -1835,38 +1849,38 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         # keeps it polling every second — the chain resumes the moment speech
         # finishes, or instantly when the user skips it (stop_all clears the queue).
         if self.voice_busy():
-            log.debug("[AssistantController.auto_continue_work_mode] Speech pending — deferring continuation")
+            log.debug("[AssistantController.auto_continue_work] Speech pending — deferring continuation")
             return
 
         # Stop timer first to prevent duplicate calls
-        self.work_mode_timer.stop()
+        self.work_timer.stop()
 
         # Check if already processing
         if self.is_processing:
-            log.warning("[AssistantController.auto_continue_work_mode] Already processing — skipping")
+            log.warning("[AssistantController.auto_continue_work] Already processing — skipping")
             self.log("Already processing - skipping tool mode continuation")
             return
 
         self.is_processing = True
-        log.info("[AssistantController.auto_continue_work_mode] ── Continuing work mode ──────────────")
+        log.info("[AssistantController.auto_continue_work] ── Continuing work mode ──────────────")
 
         # Debug: Show tool mode prompt being sent
         if self.settings.get('debug_mode'):
-            tool_prompt = self.ai.tool_manager.get_work_mode_prompt()
+            tool_prompt = self.ai.tool_manager.get_work_prompt()
             self.ui.show_debug_message("system", f"••• CONTINUING TOOL MODE •••\nSending to AI:\n{tool_prompt}")
 
         # Create worker thread
-        log.debug("[AssistantController.auto_continue_work_mode] Creating AIWorker for 'continue_tool'")
+        log.debug("[AssistantController.auto_continue_work] Creating AIWorker for 'continue_tool'")
         self.current_worker = AIWorker(self.ai, 'continue_tool')
         self._request_generation += 1
         _gen = self._request_generation
         self.current_worker.response_ready.connect(
-            lambda result, g=_gen: self._dispatch_work_mode_response(result, g))
+            lambda result, g=_gen: self._dispatch_work_response(result, g))
         self.current_worker.error_occurred.connect(self.handle_ai_error)
         self.current_worker.start()
-        log.debug("[AssistantController.auto_continue_work_mode] Worker started")
+        log.debug("[AssistantController.auto_continue_work] Worker started")
 
-    def interrupt_work_mode(self):
+    def interrupt_work(self):
         """Interrupt and cancel tool mode.
 
         Handles cancellation during the 'thinking' gap (code finished, AI
@@ -1874,24 +1888,22 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         in-flight continuation worker, invalidates its pending response,
         stops the timer, and clears all work-mode state. The original user
         prompt is preserved in history (unlike interrupt_request())."""
-        log.info(f"[AssistantController.interrupt_work_mode] in_work_mode="
-                 f"{self.ai.tool_manager.in_work_mode}")
-        if self.ai.tool_manager.in_work_mode:
-            log.warning("[AssistantController.interrupt_work_mode] Interrupting tool mode by user")
+        log.info(f"[AssistantController.interrupt_work] is_working="
+                 f"{self.ai.tool_manager.work.is_working}")
+        if self.ai.tool_manager.work.is_working:
+            log.warning("[AssistantController.interrupt_work] Interrupting tool mode by user")
             self.log("Tool mode interrupted by user")
-            self.work_mode_timer.stop()
+            self.work_timer.stop()
 
             # Terminate the in-flight continuation worker if it's generating the
             # next step ("awaiting AI model response"), then discard its result.
             if getattr(self, 'current_worker', None) and self.current_worker.isRunning():
-                log.warning("[AssistantController.interrupt_work_mode] Terminating in-flight continuation worker")
+                log.warning("[AssistantController.interrupt_work] Terminating in-flight continuation worker")
                 self.current_worker.terminate()
                 self.current_worker.wait(1000)
             self._request_generation += 1  # invalidate any late worker signal
 
-            self.ai.tool_manager.in_work_mode = False
-            self.ai.tool_manager.work_code_running = False
-            self.ai.tool_manager.last_work_output = None
+            self.ai.tool_manager.work.reset()
             self.is_processing = False
 
             # Cancel any pending narration along with the work it described
@@ -1912,14 +1924,14 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
 
             self._auto_save_session()
             return True
-        log.debug("[AssistantController.interrupt_work_mode] Not in work mode — nothing to interrupt")
+        log.debug("[AssistantController.interrupt_work] Not in work mode — nothing to interrupt")
         return False
 
     def interrupt_request(self):
         """Interrupt current AI request and clean up state"""
         log.info(f"[AssistantController.interrupt_request] Interrupting | "
                  f"is_processing={self.is_processing} | "
-                 f"in_work_mode={self.ai.tool_manager.in_work_mode}")
+                 f"is_working={self.ai.tool_manager.work.is_working}")
         interrupted = False
 
         # Stop the current worker thread if it exists
@@ -1932,12 +1944,11 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             log.debug("[AssistantController.interrupt_request] Worker terminated")
 
         # Cancel work mode if active
-        if self.ai.tool_manager.in_work_mode:
+        if self.ai.tool_manager.work.is_working:
             log.warning("[AssistantController.interrupt_request] Canceling active work mode")
             self.log("Tool mode interrupted by user")
-            self.work_mode_timer.stop()
-            self.ai.tool_manager.in_work_mode = False
-            self.ai.tool_manager.last_work_output = None
+            self.work_timer.stop()
+            self.ai.tool_manager.work.reset()
             interrupted = True
 
         # Clear processing flag
@@ -1989,7 +2000,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             return
         _ab = getattr(getattr(self, 'ui', None), 'android_bridge', None)
         if active:
-            code = self.ai.tool_manager.last_work_code or ""
+            code = self.ai.tool_manager.work.interpreter.last_code or ""
             try:
                 self._chat.start_live_output(code)
             except Exception as e:
@@ -2030,12 +2041,12 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             pass
 
     def _update_interrupt_btn(self, active):
-        """Enable/disable the interrupt button based on work code execution state.
+        """Enable/disable the interrupt button based on interpreter code execution state.
 
         Stays enabled throughout work mode (not just while code is running) so the
         user can cancel during the 'thinking' gap or while awaiting the next step."""
         if self._chat:
-            enabled = active or self.ai.tool_manager.in_work_mode
+            enabled = active or self.ai.tool_manager.work.is_working
             self._chat.interrupt_btn.setEnabled(enabled)
 
     # ═══════════════════════════════════════════════════════════
@@ -2281,7 +2292,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
     # ── Memory namespace helpers ──────────────────────────────────────────────
 
     def memorize(self, title: str, body: str, tags: str = "") -> str:
-        """Store a structured memory. Call from work_environment:
+        """Store a structured memory. Call from python_interpreter:
            memorize('Title', 'Body sentence(s).', 'tag1, tag2')"""
         if not self.memory_manager or not self.memory_manager.is_ready:
             return "[memorize] Memory manager not ready."
@@ -2304,7 +2315,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         return "[memorize] ✗ Failed to store memory."
 
     def search_memory(self, query: str, threshold: float = 0.4, max_results: int = 5) -> str:
-        """Search memories by query. Call from work_environment: search_memory('query')"""
+        """Search memories by query. Call from python_interpreter: search_memory('query')"""
         if not self.memory_manager or not self.memory_manager.is_ready:
             return "[search_memory] Memory manager not ready."
         results = self.memory_manager.recall(query, threshold=threshold, max_results=max_results)
@@ -2316,7 +2327,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         return "\n".join(lines)
 
     def view_all_memory(self, titles_only: bool = False) -> str:
-        """List all stored memories. Call from work_environment:
+        """List all stored memories. Call from python_interpreter:
            view_all_memory()              → full entries
            view_all_memory(titles_only=True) → titles only (lighter)"""
         if not self.memory_manager or not self.memory_manager.is_ready:
@@ -2337,7 +2348,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
 
     def forget_memory(self, search_text: str) -> str:
         """Delete ALL memories whose text contains search_text.
-        Call from work_environment: forget_memory('text to find')"""
+        Call from python_interpreter: forget_memory('text to find')"""
         if not self.memory_manager or not self.memory_manager.is_ready:
             return "[forget_memory] Memory manager not ready."
         search_text = str(search_text).strip()
@@ -2357,7 +2368,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
 
     def delete_memory(self, title: str) -> str:
         """Delete exactly ONE memory by its exact title.
-        Call from work_environment: delete_memory('Exact Title')"""
+        Call from python_interpreter: delete_memory('Exact Title')"""
         if not self.memory_manager or not self.memory_manager.is_ready:
             return "[delete_memory] Memory manager not ready."
         title = str(title).strip()

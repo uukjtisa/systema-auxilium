@@ -120,7 +120,7 @@ class TaskAIEngine:
         self._task = task or {}
         self._engine = None
         # Delivery channel for the send_message_main() namespace function. Lets the
-        # task agent push a message to the main chat from INSIDE work_environment
+        # task agent push a message to the main chat from INSIDE python_interpreter
         # Python code — works identically in compat and native mode (it's just a
         # function call, not a fenced/JSON tool the model has to format as text).
         self._send_main_callback = send_main_callback
@@ -147,6 +147,7 @@ class TaskAIEngine:
             # (allow_execute_code was retired with the execute_code tool; old
             # task dicts may still carry the key — it is simply ignored.)
             self._apply_supervision(perms)
+            self._apply_background_policy(perms)
             self._inject_task_namespace()
             log.info("[TaskAIEngine._init_engine] ✓ Dedicated AIEngine instance created")
         except Exception as e:
@@ -156,20 +157,60 @@ class TaskAIEngine:
     def _apply_supervision(self, perms: dict | None = None):
         """Set the task engine's supervision policy from the task's permissions.
 
-        bypass_supervised ON  -> skip the whole gate (supervised + security),
-                                 code auto-runs unattended (the historical task
-                                 behaviour). Only meaningful when the user has
-                                 supervised execution enabled globally.
-        bypass_supervised OFF -> defer to the global supervised-execution setting
-                                 and the security gate, like the main session."""
+        A background task NEVER prompts (no UI to answer a dialog). Its security
+        is decided entirely by the per-task ``task_security_policy`` grid applied
+        in ``_apply_background_policy`` — so here we simply pin the tool_manager
+        into a non-prompting, non-bypassing state and let the policy be the gate.
+
+        (Legacy ``bypass_supervised`` tasks were migrated to an all-'allow' policy
+        on save; the flag itself is no longer consulted at runtime.)"""
+        tm = self._engine.tool_manager
+        tm.bypass_security = False
+        # False = never open a supervised-execution dialog. The background_policy
+        # is the sole authority on what runs.
+        tm.supervised_execution = False
+
+    def _apply_background_policy(self, perms: dict | None = None):
+        """Hand the task's per-category allow/deny policy to the tool_manager as a
+        ``background_policy`` override. When set, every code/file op is decided
+        purely from it — deny -> block with an actionable observation (no dialog),
+        allow -> run. A denied op also alerts the user's main chat.
+
+        Master toggle: ``allow_workmode`` off means the Python interpreter tool is
+        not offered at all (handled where tools are assembled), so the policy only
+        matters for tasks that CAN run code."""
         if perms is None:
             perms = self._task.get('permissions', {})
-        bypass = bool(perms.get('bypass_supervised', False))
+        policy = perms.get('task_security_policy')
         tm = self._engine.tool_manager
-        tm.bypass_security = bypass
-        # None = defer to global settings; keep it that way when NOT bypassing so a
-        # background task honours the user's supervised-execution + security choice.
-        tm.supervised_execution = False if bypass else None
+        if isinstance(policy, dict) and policy:
+            # Normalise to {category: 'allow'|'deny'}; ignore stray values.
+            tm.background_policy = {str(k): v for k, v in policy.items()
+                                    if v in ('allow', 'deny')}
+        else:
+            # No explicit policy (old task with no migration yet, or a bare dict):
+            # legacy bypass -> allow all; otherwise deny all (safe default — the
+            # historical non-bypass task only ever ran finding-free code anyway).
+            allow_all = bool(perms.get('bypass_supervised', False))
+            tm.background_policy = {'*': 'allow' if allow_all else 'deny'}
+        # Give the tool_manager a way to alert the main chat when it blocks an op.
+        tm.background_alert = self._alert_main_blocked
+
+    def _alert_main_blocked(self, category: str, detail: str = ""):
+        """Push a note to the user's main chat that this task hit its security
+        policy and blocked an op. Invoked by the tool_manager's background gate.
+        Best-effort: a missing delivery channel is silently non-fatal."""
+        try:
+            cb = self._send_main_callback
+            if cb is None:
+                return
+            name = self._task.get('name') or self._task.get('title') or 'A background task'
+            extra = f" ({detail})" if detail else ""
+            cb(f"[Task blocked] {name} tried an operation denied by its security "
+               f"policy — {category} is set to deny{extra}. It was told to find "
+               f"another approach.")
+        except Exception as _e:
+            log.error(f"[TaskAIEngine._alert_main_blocked] ✗ {_e}")
 
     def _inject_task_namespace(self):
         """(Re-)inject everything the task's Python tool needs. Idempotent and
@@ -232,7 +273,7 @@ class TaskAIEngine:
         # user's main chat. A plain namespace function so it works in BOTH tool
         # modes (the old "{"tool":"send_message_main",...}" JSON-in-text approach
         # breaks under native, where the model is told never to write tool calls as
-        # text). Delivers immediately when called from work_environment.
+        # text). Delivers immediately when called from python_interpreter.
         def _send_message_main(message):
             try:
                 cb = _task_ai_ref._send_main_callback
@@ -274,8 +315,8 @@ class TaskAIEngine:
                       max_iterations: int = 20, on_step=None) -> tuple:
         """
         Run a full ping using the same pipeline as the main session:
-        generate_response + continue_work_mode loop.
-        Supports work_environment, memorize, load_skill, etc.
+        generate_response + continue_work loop.
+        Supports python_interpreter, memorize, load_skill, etc.
 
         Returns:
             (response_text: str | None, send_main_calls: list[str], updated_history: list)
@@ -329,7 +370,7 @@ class TaskAIEngine:
             result = self._engine.generate_response(ping_content)
         except Exception as e:
             log.error(f"[TaskAIEngine.run_full_ping] generate_response failed: {e}")
-            self._reset_work_mode()
+            self._reset_work()
             return None, [], list(self._engine.conversation_history)
         _record(result)
         _emit_step()
@@ -351,7 +392,7 @@ class TaskAIEngine:
                 pending = self._drain_images()
                 if pending:
                     import os as _os
-                    work_prompt = self._engine.tool_manager.get_work_mode_prompt()
+                    work_prompt = self._engine.tool_manager.get_work_prompt()
                     self._engine.conversation_history.append({'role': 'system', 'content': work_prompt})
                     ai_text = self._engine._call_provider(images=pending)
                     for _p in pending:
@@ -360,13 +401,13 @@ class TaskAIEngine:
                     if not ai_text:
                         step_failed = True
                     else:
-                        step_result = self._engine._process_work_mode_response(ai_text)
+                        step_result = self._engine._process_work_response(ai_text)
                 else:
-                    step_result = self._engine.continue_work_mode()
+                    step_result = self._engine.continue_work()
                     if self._is_provider_error(step_result):
                         step_failed = True
             except Exception as e:
-                log.error(f"[TaskAIEngine.run_full_ping] work step failed: {type(e).__name__}: {e}")
+                log.error(f"[TaskAIEngine.run_full_ping] interpreter step failed: {type(e).__name__}: {e}")
                 step_failed = True
 
             if step_failed:
@@ -375,7 +416,7 @@ class TaskAIEngine:
                     log.error(f"[TaskAIEngine.run_full_ping] {consecutive_failures} consecutive step "
                               f"failures — ending ping with partial output (iter {iteration})")
                     break
-                log.warning(f"[TaskAIEngine.run_full_ping] work step failed "
+                log.warning(f"[TaskAIEngine.run_full_ping] interpreter step failed "
                             f"({consecutive_failures}/{MAX_STEP_FAILURES}) — retrying after backoff")
                 time.sleep(3.0 * consecutive_failures)
                 # `result` is left unchanged (still thinking=True) so the loop retries.
@@ -386,16 +427,16 @@ class TaskAIEngine:
             _record(result)
             _emit_step()
 
-            if result.get('exited_work_mode'):
+            if result.get('finished_working'):
                 log.info(f"[TaskAIEngine.run_full_ping] Work mode exited after {iteration} iteration(s)")
                 break
 
-        if iteration >= max_iterations and self._engine.tool_manager.in_work_mode:
+        if iteration >= max_iterations and self._engine.tool_manager.work.is_working:
             log.warning(f"[TaskAIEngine.run_full_ping] Hit max_iterations={max_iterations} without clean exit")
 
         # Always clear a dangling work-mode flag so a broken ping never poisons
         # the next one (covers max-iterations AND repeated-failure exits).
-        self._reset_work_mode()
+        self._reset_work()
 
         # Cleanup any leftover queued images that never got flushed
         for _p in self._drain_images():
@@ -412,11 +453,11 @@ class TaskAIEngine:
         resp = (result or {}).get('response') or ''
         return resp.startswith('Error: No response')
 
-    def _reset_work_mode(self):
-        """Clear the engine's work-mode flag, guarded."""
+    def _reset_work(self):
+        """Clear the engine's work-mode state, guarded."""
         try:
-            if self._engine and self._engine.tool_manager.in_work_mode:
-                self._engine.tool_manager.in_work_mode = False
+            if self._engine and self._engine.tool_manager.work.is_working:
+                self._engine.tool_manager.work.reset()
         except Exception:
             pass
 

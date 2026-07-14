@@ -118,13 +118,15 @@ class ThemingMixin:
                     font-family: 'Segoe UI', -apple-system, system-ui, sans-serif;
                 }}
             """)
-            # Chat body
+            # Chat body — the darkest surface (base) so user bubbles (surface)
+            # and AI bubbles (elevated) both read as raised above it. Using
+            # surface here made user bubbles vanish on near-black themes (void).
             self.chat_widget.setStyleSheet(
-                f"QWidget {{ background-color: {t['surface']}; }}"
+                f"QWidget {{ background-color: {t['base']}; }}"
             )
             # Scroll area
             self.chat_scroll_area.setStyleSheet(f"""
-                QScrollArea {{ border: none; background-color: {t['surface']}; }}
+                QScrollArea {{ border: none; background-color: {t['base']}; }}
                 QScrollBar:vertical {{
                     background: transparent; width: 12px; margin: 0;
                 }}
@@ -144,38 +146,31 @@ class ThemingMixin:
                 }}
                 QLabel {{ background-color: transparent; }}
             """)
-            # Status label
-            self.status_label.setStyleSheet(f"""
-                QLabel#statusLabel {{
-                    color: #9AA0A6; font-style: italic; font-size: 11px;
-                    padding: 5px 14px;
-                    background-color: {t['deep']};
-                    border-top: 1px solid {t['border']};
-                }}
+            # Status + work labels — compact inline chips inside the input pill
+            self.status_label.setStyleSheet("""
+                QLabel#statusLabel {
+                    color: #C7CBD1; font-style: italic; font-size: 10px;
+                    background: transparent; padding: 0 4px;
+                }
             """)
-            # Work mode banner — recolour with active theme
             if hasattr(self, '_work_banner'):
                 self._work_banner.setStyleSheet(f"""
-                                QLabel#workBanner {{
-                                    background-color: {t['elevated']};
-                                    border-top: 1px solid {t['border']};
-                                    border-bottom: 1px solid {t['border']};
-                                    color: {t['accent']};
-                                    font-size: 11px;
-                                    font-style: italic;
-                                    padding: 6px 14px;
-                                }}
-                            """)
-            # Input container
-            self.input_container.setStyleSheet(f"""
-                            QFrame#inputContainer {{
-                                background-color: {t['deep']};
-                                border-top: 1px solid {t['border']};
-                            }}
+                    QLabel#workBanner {{
+                        color: {t['accent']}; font-size: 10px; font-style: italic;
+                        background: transparent; padding: 0 4px;
+                    }}
+                """)
+            # Input container — the OUTER band is fully transparent so the chat
+            # shows through around the pill (the pill itself stays solid).
+            self.input_container.setStyleSheet("""
+                            QFrame#inputContainer {
+                                background: transparent;
+                                border: none;
+                            }
                         """)
             # Sidebar (solid themed styling)
             self._apply_sidebar_theme()
-            # Input card — use stored reference first, then fallback search
+            # Input card — SOLID (opaque) pill so the text stays crisp
             from PyQt6.QtWidgets import QFrame as _QF
             _ic = getattr(self, '_input_card_ref', None)
             if _ic is None:
@@ -345,6 +340,7 @@ class ThemingMixin:
             """
 
             if enabled:
+                t = self._t()
                 # ── outer container: fully transparent ────────────────────────
                 self.container.setStyleSheet("""
                     QWidget#container {
@@ -377,27 +373,51 @@ class ThemingMixin:
                     }}
                 """)
 
-                # ── status / thinking bar: frosted so text is always readable ─
-                self.status_label.setStyleSheet(f"""
-                    QLabel#statusLabel {{
-                        color: #9AA0A6;
-                        font-style: italic;
-                        font-size: 11px;
-                        padding: 5px 14px;
-                        background-color: {bg_rgba};
-                        border-top: 1px solid rgba(50, 50, 50, 0.5);
-                    }}
+                # ── status + work chips: compact, inside the pill (no bar) ────
+                self.status_label.setStyleSheet("""
+                    QLabel#statusLabel {
+                        color: #C7CBD1; font-style: italic; font-size: 10px;
+                        background: transparent; padding: 0 4px;
+                    }
                 """)
+                if hasattr(self, '_work_banner'):
+                    self._work_banner.setStyleSheet(f"""
+                        QLabel#workBanner {{
+                            color: {t['accent']}; font-size: 10px; font-style: italic;
+                            background: transparent; padding: 0 4px;
+                        }}
+                    """)
 
-                # ── input container: frosted opaque panel — stays visible ─────
+                # ── input container: fully SEE-THROUGH band (chat/desktop shows
+                #    through around the pill) ───────────────────────────────────
                 self.input_container.setStyleSheet("""
                     QFrame#inputContainer {
-                        background-color: rgba(18, 18, 18, 0.85);
-                        border-top: 1px solid rgba(50, 50, 50, 0.6);
+                        background: transparent;
+                        border: none;
                         border-bottom-left-radius: 12px;
                         border-bottom-right-radius: 12px;
                     }
                 """)
+                # ── input pill: SOLID (opaque) even in glass mode ─────────────
+                _ic = getattr(self, '_input_card_ref', None)
+                if _ic is None:
+                    from PyQt6.QtWidgets import QFrame as _QF2
+                    for child in self.container.findChildren(_QF2):
+                        if child.objectName() == "inputCard":
+                            self._input_card_ref = child
+                            _ic = child
+                            break
+                if _ic:
+                    try:
+                        _ic.setStyleSheet(f"""
+                            QFrame#inputCard {{
+                                background-color: {t['input_card']};
+                                border: 1px solid {t['input_card_border']};
+                                border-radius: 18px;
+                            }}
+                        """)
+                    except RuntimeError:
+                        self._input_card_ref = None
 
                 # ── sidebar: frost it only if the user opted the sidebar in.
                 #    Otherwise leave it solid-themed (its own checklist sub-toggle).

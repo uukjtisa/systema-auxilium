@@ -1,8 +1,8 @@
 """
 systema/execution/tool_manager.py
-Tool Manager — the work-environment execution system and compat fence parser.
+Tool Manager — the python interpreter execution system and compat fence parser.
 
-work_environment is the ONLY code-execution tool (execute_code was retired in
+python_interpreter is the ONLY code-execution tool (execute_code was retired in
 2026-07; see systema.execution.tool_registry.LEGACY_STRIP_KEYS). The code
 approval dialog runs on the main thread via Qt signals; a single-exec policy
 allows one code tool per AI turn (set_session_name exempt).
@@ -13,6 +13,7 @@ import keyword
 import re
 import threading
 import os
+from dataclasses import dataclass, field
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer
 from systema.execution.python_interpreter import PythonInterpreter
 from systema.execution import tool_registry
@@ -26,10 +27,36 @@ log = _make_logger("ToolManager") if _verbose else _NoOpLogger()
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+@dataclass
+class InterpreterState:
+    """python_interpreter's own runtime state — only the interpreter runs code,
+    so this stays nested under WorkState.interpreter rather than flattened."""
+    is_running: bool = False              # python_interpreter executing code RIGHT NOW
+    last_code: str | None = None          # last source run (UI note / interrupt)
+    last_annotation: str | None = None    # last banner label
+
+
+@dataclass
+class WorkState:
+    """Consolidated observe/act loop state. Every tool (python_interpreter,
+    read_file/edit_file/write_file, load_skill/unload_skill) drives it — the
+    loop is not owned by any single tool. Owned by ToolManager as `.work`."""
+    is_working: bool = False              # in the loop (any tool)
+    last_output: str | None = None        # the latest step's observation (feeds next ping)
+    last_tool: str | None = None          # what produced it: interpreter/read_file/edit_file/write_file/skill
+    interpreter: InterpreterState = field(default_factory=InterpreterState)
+
+    def reset(self):
+        self.is_working = False
+        self.last_output = None
+        self.last_tool = None
+        self.interpreter = InterpreterState()
+
+
 # Tools whose fence opener carries a ": [annotation]" label (parsed by the
 # tolerant annotated branch of _parse_fence, returning a 3-tuple).
 _ANNOTATED_TOOL_NORMS = frozenset(
-    {'workenvironment', 'readfile', 'editfile', 'writefile'})
+    {'pythoninterpreter', 'readfile', 'editfile', 'writefile', 'grep'})
 
 
 # ──────────────── Malformed-opener tolerance helpers (weak models) ───────────
@@ -125,12 +152,12 @@ class ApprovalSignal(QObject):
 
 
 class ToolManager:
-    """Manages the work environment and compat fence parsing.
+    """Manages the python interpreter and compat fence parsing.
 
     ADDING A TOOL is a 3-touch change (see tool_registry.py):
         1. Add its entry to systema/execution/tool_registry.py — the native
            schema AND the compat prompt docs render from it automatically.
-        2. Add a parse_<tool>() method here (mirrors parse_work_environment).
+        2. Add a parse_<tool>() method here (mirrors parse_python_interpreter).
         3. Add one dispatch branch in AIEngine._process_ai_response.
     Format detection, fuzzy matching, stripping and unclosed-fence recovery
     all work automatically off the registry keys.
@@ -154,14 +181,10 @@ class ToolManager:
         }
         log.debug(f"[ToolManager.__init__] Tools initialized: {list(self.tools.keys())}")
 
-        # Work mode state
-        self.in_work_mode = False
-        self.last_work_output = None
-        self.last_work_annotation = None  # set by parse_work_environment when bracket present
-        self.last_work_code = None        # set by run_work_environment before execution
-        self.work_code_running = False
+        # Work-mode state — the observe/act loop, consolidated. Any tool drives it.
+        self.work = WorkState()
         self._pending_interrupt_notice = None  # appended to output when user interrupts running code
-        log.debug("[ToolManager.__init__] Work mode state: in_work_mode=False | last_work_output=None")
+        log.debug("[ToolManager.__init__] work state initialised (WorkState)")
 
         # ── Malformed-call auto-correction (weak-model guard rails) ──────────
         # _parse_fence(record=True) appends one short description per auto-fix;
@@ -204,6 +227,15 @@ class ToolManager:
         # When True, skip the ENTIRE gate (scan/policy/dialog) and auto-run.
         # Used by background scheduled tasks that opt into bypassing supervision.
         self.bypass_security = False
+        # Background-task security override. None = normal (interactive) gating.
+        # A dict {category: 'allow'|'deny'} (a single '*' key means all-categories)
+        # switches the gate into non-interactive mode: a risky op whose category
+        # is denied is BLOCKED with an actionable observation (never a dialog);
+        # everything else runs. Set by TaskAIEngine for scheduled background tasks.
+        self.background_policy = None
+        # Optional callback(category:str, detail:str) invoked when background_policy
+        # blocks an op, so the task layer can alert the user's main chat.
+        self.background_alert = None
         # Tag-based "don't ask again for this session" — operation categories the
         # user session-approved from the code-approval dialog. Ephemeral: never
         # persisted, wiped on restart. The gate auto-approves a run whose risky
@@ -214,7 +246,7 @@ class ToolManager:
         # thread before the approval callback fires (happens-before the worker
         # read via the approval Event).
         self._last_reject_reason = ""
-        # Capability gate — enforced by run_work_environment, not just narrated
+        # Capability gate — enforced by run_python_interpreter, not just narrated
         # in the system prompt. Set by TaskAIEngine from the task dict.
         self.allow_workmode = True
 
@@ -274,13 +306,20 @@ class ToolManager:
         return chat
 
     def _deliver_file_op(self, info: dict):
-        """Slot — main thread. Renders a file-op card in the chat window."""
+        """Slot — main thread. Renders a file-op card in the chat window and
+        mirrors it to the Android client (if connected)."""
         chat = self._chat
         if chat is not None and hasattr(chat, 'add_file_op_card'):
             try:
                 chat.add_file_op_card(info)
             except Exception as e:
                 log.error(f"[ToolManager._deliver_file_op] card failed: {e}")
+        ab = self._get_android_bridge() if callable(self._get_android_bridge) else None
+        if ab is not None and getattr(ab, '_conn', None) is not None:
+            try:
+                ab.add_file_op(info)
+            except Exception as e:
+                log.debug(f"[ToolManager._deliver_file_op] android mirror skipped: {e}")
 
     def _deliver_system_message(self, text: str):
         """
@@ -344,7 +383,7 @@ class ToolManager:
         result to systema.engine.native_adapters.to_<dialect>_tools() for native mode."""
         active = []
         if self.allow_workmode:
-            active.append('work_environment')
+            active.append('python_interpreter')
         if include_session_naming:
             active.append('set_session_name')
         if include_skills:
@@ -378,7 +417,7 @@ class ToolManager:
         return out
 
     def _code_fence(self, tool_name: str, code, annotation: str = "") -> str:
-        """Render one tool fence. Annotated tools (work_environment + the file
+        """Render one tool fence. Annotated tools (python_interpreter + the file
         subsystem) fold their annotation into the ```tool: [label] form;
         everything else is a plain fence."""
         if not isinstance(code, str):
@@ -471,12 +510,12 @@ class ToolManager:
         """
         Extract content from a code fence whose language identifier matches tool_name.
         Returns (content, remaining_text) or None.
-        For work_environment, returns (content, remaining_text, annotation).
+        For python_interpreter, returns (content, remaining_text, annotation).
 
         Tolerant opener parsing (weak-model guard rails, 2026-07):
-          - tag near-misses resolve via _resolve_tool_tag (work_enviroment,
-            work-environment, workEnvironment, 4+ backtick fences)
-          - the work_environment annotation is accepted bracketless in any of
+          - tag near-misses resolve via _resolve_tool_tag (python_interpeter,
+            python interpreter, pythonInterpreter, 4+ backtick fences)
+          - the python_interpreter annotation is accepted bracketless in any of
             `tool: text` / bare prose / "quoted" / (parens) / - dash form, and a
             misplaced prose/[bracketed] FIRST LINE inside the fence is lifted
             out so it can't poison the code with a SyntaxError
@@ -487,9 +526,9 @@ class ToolManager:
         norm_target = self._norm_key(tool_name)
 
         # ── Annotated tools: tolerant opener with optional annotation ────────
-        # work_environment + the file subsystem all take ": [label]" openers.
+        # python_interpreter + the file subsystem all take ": [label]" openers.
         if norm_target in _ANNOTATED_TOOL_NORMS:
-            is_we = norm_target == "workenvironment"
+            is_we = norm_target == "pythoninterpreter"
             # ```tool[:] [annotation-any-decoration]\n<body>\n```
             pattern_we = r'(`{3,})[ \t]*([A-Za-z][\w-]*)[ \t]*(:?)[ \t]*([^\n]*?)[ \t]*\r?\n(.*?)[ \t]*`{3,}'
             for match in re.finditer(pattern_we, text, re.DOTALL):
@@ -555,7 +594,7 @@ class ToolManager:
     def recover_unclosed_tool_fence(self, text):
         """Recover a tool call whose closing ``` fence the model forgot.
 
-        The #1 weak-model failure: the model opens ```work_environment but never
+        The #1 weak-model failure: the model opens ```python_interpreter but never
         closes the fence, so the call is neither executed NOR stripped — the raw
         block leaks into chat. Here we detect an *unbalanced* fence whose opening
         tag is a known tool and auto-close it by appending a synthetic ```, so the
@@ -623,7 +662,7 @@ class ToolManager:
     def _flush_parse_corrections(self, tool_name):
         """Turn recorded parse auto-fixes into: a log warning, ONE chat NOTICE
         per session (weak models auto-fix often — no NOTICE bombing), and (for
-        work_environment) a format reminder the engine appends to conversation
+        python_interpreter) a format reminder the engine appends to conversation
         history as a role:system entry so the model actually learns from it."""
         if not self._parse_corrections:
             return
@@ -637,37 +676,37 @@ class ToolManager:
                 f"**NOTICE:** Auto-corrected a malformed `{tool_name}` call ({details}). "
                 f"The call was run and the model is being reminded of the correct "
                 f"format. Further auto-fixes this session will be silent (logged only).")
-        if tool_name == 'work_environment':
+        if tool_name == 'python_interpreter':
             from systema.engine.prompts.global_instructions import FORMAT_AUTOFIX_REMINDER
             self._pending_format_reminder = FORMAT_AUTOFIX_REMINDER.format(details=details)
 
-    def parse_work_environment(self, text):
-        """Parse work_environment fence from AI output. Returns (code, remaining_text) or None."""
-        log.debug(f"[ToolManager.parse_work_environment] Parsing {len(text)} chars")
+    def parse_python_interpreter(self, text):
+        """Parse python_interpreter fence from AI output. Returns (code, remaining_text) or None."""
+        log.debug(f"[ToolManager.parse_python_interpreter] Parsing {len(text)} chars")
 
-        result = self._parse_fence(text, 'work_environment', record=True)
+        result = self._parse_fence(text, 'python_interpreter', record=True)
 
         if result:
             if len(result) == 3:
                 code, remaining, annotation = result
-                self.last_work_annotation = annotation
+                self.work.interpreter.last_annotation = annotation
                 log.info(
-                    f"[ToolManager.parse_work_environment] ✓ Found with annotation='{annotation}' | code_len={len(code)}")
+                    f"[ToolManager.parse_python_interpreter] ✓ Found with annotation='{annotation}' | code_len={len(code)}")
                 if annotation:
                     # Emit via signal — safe from any thread
                     self.approval_signal.system_message.emit(
                         f"**Working:** ***{annotation}***"
                     )
-                    log.debug(f"[ToolManager.parse_work_environment] | SENT SYSTEM MESSAGE TO CHAT: {annotation}")
+                    log.debug(f"[ToolManager.parse_python_interpreter] | SENT SYSTEM MESSAGE TO CHAT: {annotation}")
             else:
                 code, remaining = result
-                self.last_work_annotation = None
-                log.info(f"[ToolManager.parse_work_environment] ✓ Found (no annotation) | code_len={len(code)}")
+                self.work.interpreter.last_annotation = None
+                log.info(f"[ToolManager.parse_python_interpreter] ✓ Found (no annotation) | code_len={len(code)}")
 
-            self._flush_parse_corrections('work_environment')
+            self._flush_parse_corrections('python_interpreter')
             return code, remaining
 
-        log.debug("[ToolManager.parse_work_environment] Not found")
+        log.debug("[ToolManager.parse_python_interpreter] Not found")
         return None
 
     def parse_set_session_name(self, text):
@@ -717,6 +756,10 @@ class ToolManager:
         re.DOTALL)
     _OPT_LINE_RE = re.compile(r'^[ \t]*(flags|lines)[ \t]*:[ \t]*(\S[^\n]*?)[ \t]*$',
                               re.IGNORECASE)
+    _GREP_OPT_RE = re.compile(
+        r'^[ \t]*(path|glob|type|output|output_mode|case|case_insensitive|'
+        r'line_numbers|before|after|context|only_matching|multiline|head_limit|'
+        r'max|ignore_common)[ \t]*:[ \t]*(\S[^\n]*?)[ \t]*$', re.IGNORECASE)
 
     def _split_file_body(self, content, annotation, consume_options=True):
         """Common body head parsing for the file tools: line 1 = path, then
@@ -765,7 +808,7 @@ class ToolManager:
         spec = {'path': path, 'annotation': annotation,
                 'start': start or 1,
                 'count': (end - (start or 1) + 1) if (start and end) else 200}
-        self.last_work_annotation = annotation or None
+        self.work.interpreter.last_annotation = annotation or None
         self._flush_parse_corrections('read_file')
         log.info(f"[ToolManager.parse_read_file] ✓ path='{path}' | lines={opts.get('lines')}")
         return spec, remaining
@@ -793,7 +836,7 @@ class ToolManager:
             spec['error'] = ("edit_file needs an OLD/NEW marker block "
                              "(<<<<<<< OLD / ======= / >>>>>>> NEW) or a "
                              "'lines: A-B' range plus the new text")
-        self.last_work_annotation = annotation or None
+        self.work.interpreter.last_annotation = annotation or None
         self._flush_parse_corrections('edit_file')
         log.info(f"[ToolManager.parse_edit_file] ✓ path='{path}' | "
                  f"mode={'range' if spec['start'] else 'anchor'} | err={spec['error']}")
@@ -809,14 +852,14 @@ class ToolManager:
         path, annotation, _opts, payload = self._split_file_body(
             content, annotation, consume_options=False)
         spec = {'path': path, 'annotation': annotation, 'content': payload}
-        self.last_work_annotation = annotation or None
+        self.work.interpreter.last_annotation = annotation or None
         self._flush_parse_corrections('write_file')
         log.info(f"[ToolManager.parse_write_file] ✓ path='{path}' | "
                  f"content_len={len(payload)}")
         return spec, remaining
 
     def _emit_file_op_card(self, tool, path, added=None, removed=None,
-                           detail="", created=False, read_range=""):
+                           detail="", created=False, read_range="", rejected=False):
         """Structured file-op UI event -> chat card (thread-safe signal)."""
         try:
             from systema.execution import file_tools as ft
@@ -826,7 +869,7 @@ class ToolManager:
                 'display': ft.short_display(path),
                 'added': added, 'removed': removed,
                 'created': created, 'read_range': read_range,
-                'detail': detail,
+                'detail': detail, 'rejected': rejected,
             })
         except Exception as e:
             log.debug(f"[ToolManager._emit_file_op_card] skipped: {e}")
@@ -880,6 +923,7 @@ class ToolManager:
             path, old_content, new_content, 'edit_file')
         if not approved:
             msg = "File edit rejected by user" if not reason else reason
+            self._emit_file_op_card('edit_file', path, rejected=True, detail=msg)
             return "ERROR:\n" + msg
         journal_on, git_on = self._journal_settings()
         jid = file_journal.record(path, 'edit_file', self._session_id()) if journal_on else None
@@ -907,6 +951,7 @@ class ToolManager:
             path, old_content, new_content, 'write_file')
         if not approved:
             msg = "File write rejected by user" if not reason else reason
+            self._emit_file_op_card('write_file', path, rejected=True, detail=msg)
             return "ERROR:\n" + msg
         journal_on, git_on = self._journal_settings()
         jid = file_journal.record(path, 'write_file', self._session_id()) if journal_on else None
@@ -923,6 +968,93 @@ class ToolManager:
         verb = "CREATED" if not existed else "OVERWROTE"
         return f"{verb} {path} | +{added} -{removed} lines"
 
+    def parse_grep(self, text):
+        """Returns (spec, remaining) or None. Line 1 = the regex pattern; the rest
+        are 'key: value' opts (path/glob/type/output/context/...)."""
+        result = self._parse_fence(text, 'grep', record=True)
+        if not result:
+            return None
+        content, remaining, annotation = result
+        lines = content.split('\n')
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        pattern = lines.pop(0) if lines else ''
+        opts = {}
+        for ln in lines:
+            m = self._GREP_OPT_RE.match(ln)
+            if m:
+                opts[m.group(1).lower()] = m.group(2).strip()
+
+        def _b(val, default):
+            s = str(val).strip().lower() if val is not None else ''
+            if s in ('true', '1', 'yes', 'on'):
+                return True
+            if s in ('false', '0', 'no', 'off'):
+                return False
+            return default
+
+        def _i(val, default):
+            try:
+                return int(str(val).strip())
+            except (TypeError, ValueError):
+                return default
+
+        om = (opts.get('output') or opts.get('output_mode')
+              or 'files_with_matches').strip().lower()
+        if om not in ('files_with_matches', 'content', 'count'):
+            om = 'files_with_matches'
+        spec = {
+            'pattern': pattern,
+            'path': opts.get('path', '').strip() or '.',
+            'glob': opts.get('glob', '').strip() or None,
+            'type': opts.get('type', '').strip() or None,
+            'output_mode': om,
+            'case_insensitive': _b(opts.get('case', opts.get('case_insensitive')), False),
+            'line_numbers': _b(opts.get('line_numbers'), True),
+            'before': _i(opts.get('before'), 0),
+            'after': _i(opts.get('after'), 0),
+            'context': _i(opts.get('context'), 0),
+            'only_matching': _b(opts.get('only_matching'), False),
+            'multiline': _b(opts.get('multiline'), False),
+            'head_limit': _i(opts.get('head_limit', opts.get('max')), None),
+            'ignore_common': _b(opts.get('ignore_common'), True),
+            'annotation': annotation,
+            'error': None,
+        }
+        if not pattern.strip():
+            spec['error'] = "grep needs a regex pattern on the first line."
+        self.work.interpreter.last_annotation = annotation or None
+        self._flush_parse_corrections('grep')
+        log.info(f"[ToolManager.parse_grep] ✓ pattern={pattern!r} | "
+                 f"path='{spec['path']}' | mode='{om}'")
+        return spec, remaining
+
+    def run_grep(self, spec):
+        """ripgrep-style search. Read-only (no approval gate). Returns observation."""
+        from systema.execution import file_tools as ft
+        if spec.get('error'):
+            return "ERROR:\n" + spec['error']
+        obs = ft.grep(
+            spec['pattern'], path=spec.get('path', '.'),
+            glob=spec.get('glob'), type=spec.get('type'),
+            output_mode=spec.get('output_mode', 'files_with_matches'),
+            case_insensitive=spec.get('case_insensitive', False),
+            line_numbers=spec.get('line_numbers', True),
+            before=spec.get('before', 0), after=spec.get('after', 0),
+            context=spec.get('context', 0),
+            only_matching=spec.get('only_matching', False),
+            multiline=spec.get('multiline', False),
+            head_limit=spec.get('head_limit'),
+            ignore_common=spec.get('ignore_common', True))
+        try:
+            summary = obs.split('\n', 1)[0][:90]
+            self._emit_file_op_card(
+                'grep', ft.resolve_path(spec.get('path', '.')),
+                read_range=summary, detail=obs)
+        except Exception as e:
+            log.debug(f"[ToolManager.run_grep] card skipped: {e}")
+        return obs
+
     @staticmethod
     def _op_diff_text(old, new, limit=400):
         """Unified diff for the card's expandable body (capped)."""
@@ -933,15 +1065,49 @@ class ToolManager:
             lines = lines[:limit] + [f"... ({len(lines) - limit} more diff lines)"]
         return "\n".join(lines)
 
+    def _global_bypass(self):
+        """True when the user has flipped the global 'Bypass all security' setting
+        (Settings > Security). Overrides the whole policy — every op auto-approves.
+        Distinct from self.bypass_security (a per-background-task opt-out)."""
+        try:
+            s = self.settings_callback() if self.settings_callback else {}
+            return bool((s or {}).get('security_bypass_all', False))
+        except Exception:
+            return False
+
     def _check_file_op_approval(self, path, old_text, new_text, tool):
         """The supervised-execution ladder for a FILE op (same order as
         _check_supervised_execution, with a synthesized file_create/file_edit
         finding and the per-hunk diff approval dialog).
 
         Returns (approved, final_new_text, reject_reason)."""
-        if self.bypass_security:
-            self._audit_decision(f"{tool}: {path}", tool, 'auto', 'task-bypass')
+        if self.bypass_security or self._global_bypass():
+            self._audit_decision(f"{tool}: {path}", tool, 'auto',
+                                 'task-bypass' if self.bypass_security else 'user-bypass')
             return True, new_text, ''
+
+        # Background-task policy gate (non-interactive) — runs before the
+        # supervised logic so a background task's file op is decided purely from
+        # its allow/deny grid, never a dialog.
+        if self.background_policy is not None:
+            try:
+                from systema.security import code_guard as guard
+                category = guard.CAT_FILE_EDIT if old_text else guard.CAT_FILE_CREATE
+            except Exception:
+                category = 'file_edit' if old_text else 'file_create'
+            if self._bg_policy_for(category) == 'deny':
+                self._audit_decision(f"{tool}: {path}", tool, 'denied', 'task-policy')
+                try:
+                    if callable(self.background_alert):
+                        self.background_alert(category, str(path))
+                except Exception:
+                    pass
+                return (False, new_text,
+                        f"blocked by this task's security policy ({category} is denied). "
+                        f"Find another approach that does not need it.")
+            self._audit_decision(f"{tool}: {path}", tool, 'auto', 'task-policy')
+            return True, new_text, ''
+
         try:
             settings = self.settings_callback() if self.settings_callback else {}
         except Exception:
@@ -1010,7 +1176,7 @@ class ToolManager:
 
     def enforce_single_exec_policy(self, text):
         """
-        Scan text for code-execution tool fences (work_environment). If more
+        Scan text for code-execution tool fences (python_interpreter). If more
         than one is found, keep only the first and drop the rest.
         set_session_name is intentionally EXEMPT from this policy.
 
@@ -1046,8 +1212,12 @@ class ToolManager:
         self.approval_signal.system_message.emit(
             f"**NOTICE:** The model emitted {len(extras)} extra code-execution "
             f"call(s) in one response ({', '.join(dropped_names)}). Only the first "
-            f"call was kept and executed. To reduce how often this happens, "
-            f"consider a more capable model.\n"
+            f"call was kept and executed — the rest were dropped so the observe/act "
+            f"loop stays one step at a time.\n"
+            f"To reduce how often this happens: use a more capable model, wire up a "
+            f"provider script (Settings ▸ Providers) so you can reach one, and turn "
+            f"on native tool-calling if your provider supports it — native mode makes "
+            f"the model call one tool per turn instead of emitting several at once.\n"
             f"Total violations this session: {_v}"
         )
 
@@ -1061,6 +1231,62 @@ class ToolManager:
     # Supervised execution helpers
     # ─────────────────────────────────────────────────────────────────────────
 
+    def _bg_policy_for(self, category):
+        """Resolve a single category against the background policy. A '*' key is
+        the catch-all; an unlisted category defaults to 'deny' (fail-safe)."""
+        pol = self.background_policy or {}
+        if category in pol:
+            return pol[category]
+        return pol.get('*', 'deny')
+
+    def _decide_background_policy(self, code, execution_type):
+        """Non-interactive gate for background tasks. Scans the code, maps every
+        risky operation's category to the task's allow/deny policy, and blocks on
+        the FIRST denied category. Returns (approved, block_reason). On a block it
+        also fires the background_alert callback so the main chat is notified.
+
+        Defensive: any fault in the safety layer denies (a background task must
+        never run unreviewed risky code because scanning hiccupped)."""
+        try:
+            from systema.security import code_guard as guard
+            findings = guard.scan_code(code)
+            try:
+                _ns = self.tools['python'].namespace if 'python' in self.tools else None
+                findings = guard.refine_file_ops(findings, code, _ns)
+            except Exception:
+                pass
+            # Only real operations gate. INFO-level signals (bare import, chdir,
+            # print) never block on their own — same rule as interactive mode.
+            risky = [f for f in findings
+                     if f.severity in (guard.SEV_CAUTION, guard.SEV_DANGER)]
+            denied = sorted({f.category for f in risky
+                             if self._bg_policy_for(f.category) == 'deny'})
+            if denied:
+                guard.AuditLog.record(code=code, execution_type=execution_type,
+                                      decision='denied', source='task-policy',
+                                      findings=findings, extra={'categories': denied})
+                cat_list = ", ".join(denied)
+                log.warning(f"[ToolManager._decide_background_policy] blocked — "
+                            f"denied categories {denied}")
+                try:
+                    if callable(self.background_alert):
+                        self.background_alert(cat_list, "")
+                except Exception as _e:
+                    log.error(f"[ToolManager._decide_background_policy] alert error: {_e}")
+                reason = (f"blocked by this task's security policy "
+                          f"({cat_list} {'is' if len(denied) == 1 else 'are'} denied). "
+                          f"Find another approach that does not need it — do NOT retry "
+                          f"the same operation.")
+                return False, reason
+            guard.AuditLog.record(code=code, execution_type=execution_type,
+                                  decision='auto', source='task-policy', findings=findings)
+            return True, ""
+        except Exception as e:
+            log.error(f"[ToolManager._decide_background_policy] security layer error — "
+                      f"denying by default: {type(e).__name__}: {e}")
+            return False, ("blocked — the task security layer could not verify this "
+                           "operation. Try a simpler, clearly-safe approach.")
+
     def _check_supervised_execution(self, code, execution_type):
         """
         Check if supervised execution is enabled and get approval if needed.
@@ -1068,7 +1294,7 @@ class ToolManager:
 
         Args:
             code: Code to execute
-            execution_type: audit label (normally 'work_environment')
+            execution_type: audit label (normally 'python_interpreter')
 
         Returns:
             tuple: (approved: bool, modified_code: str)
@@ -1078,9 +1304,21 @@ class ToolManager:
 
         # Full bypass — a background task explicitly opted out of supervision AND
         # the security gate. Auto-approve, but still leave an audit trail.
-        if self.bypass_security:
-            log.info("[ToolManager._check_supervised_execution] bypass_security — auto-approving")
-            self._audit_decision(code, execution_type, 'auto', 'task-bypass')
+        if self.bypass_security or self._global_bypass():
+            _why = 'task-bypass' if self.bypass_security else 'user-bypass'
+            log.info(f"[ToolManager._check_supervised_execution] {_why} — auto-approving")
+            self._audit_decision(code, execution_type, 'auto', _why)
+            return True, code
+
+        # Background-task policy gate — runs BEFORE the interactive supervised
+        # logic (a background task pins supervised_execution=False, which would
+        # otherwise auto-run everything). Non-interactive: deny -> block with an
+        # actionable observation + alert the main chat; otherwise run.
+        if self.background_policy is not None:
+            approved, block_reason = self._decide_background_policy(code, execution_type)
+            if not approved:
+                self._last_policy_block_msg = block_reason
+                return False, code
             return True, code
 
         # Resolve settings + whether supervised prompting is on.
@@ -1270,13 +1508,13 @@ class ToolManager:
 
         Args:
             code: Code to execute
-            execution_type: audit label (normally 'work_environment')
+            execution_type: audit label (normally 'python_interpreter')
             callback: Function to call with (approved, modified_code)
         """
         log.info(f"[ToolManager._show_approval_dialog_on_main_thread] execution_type='{execution_type}' | "
                  f"code_len={len(code)} | has_ai_engine={self.ai_engine is not None}")
         try:
-            from systema.ui.dialogs.code_approval_dialog import CodeApprovalDialog
+            from systema.ui.dialogs.approval_window import CodeApprovalDialog
 
             if not self.ai_engine:
                 log.warning("[ToolManager._show_approval_dialog_on_main_thread] No AI engine — "
@@ -1498,37 +1736,45 @@ class ToolManager:
         self._pending_interrupt_notice = None
         return False
 
-    def run_work_environment(self, code):
+    def run_python_interpreter(self, code):
         """
-        Execute code in work environment mode.
+        Execute code in the python interpreter.
         AI will see the output and can chain more executions.
 
-        Wraps PythonInterpreter.execute() with work_code_running flag and
-        last_work_code tracking for interrupt/UI state propagation.
+        Wraps PythonInterpreter.execute() with the work.interpreter.is_running flag
+        and work.interpreter.last_code tracking for interrupt/UI state propagation.
 
         Returns:
             str: Formatted output for AI
         """
         code_preview = code.strip()[:80].replace('\n', '↵')
-        log.info(f"[ToolManager.run_work_environment] ── Executing code | "
+        log.info(f"[ToolManager.run_python_interpreter] ── Executing code | "
                  f"code_len={len(code)} | preview='{code_preview}' ──")
 
         # NOTE: the explicit `exit` sentinel was removed — work mode now ends when
-        # the AI replies with no work_environment call (auto-exit, handled in
+        # the AI replies with no python_interpreter call (auto-exit, handled in
         # AIEngine). A bare `exit`/empty work-call is folded into that finish
         # path BEFORE this method is called, so it never reaches execution.
 
         # Capability gate — real enforcement, not just prompt text
         if not self.allow_workmode:
-            log.warning("[ToolManager.run_work_environment] Blocked — allow_workmode is False for this session")
-            return "ERROR:\nwork_environment is disabled for this session."
+            log.warning("[ToolManager.run_python_interpreter] Blocked — allow_workmode is False for this session")
+            return "ERROR:\npython_interpreter is disabled for this session."
 
         # Check supervised execution (now properly on main thread)
-        log.debug("[ToolManager.run_work_environment] Checking supervised execution...")
-        approved, modified_code = self._check_supervised_execution(code, 'work_environment')
+        log.debug("[ToolManager.run_python_interpreter] Checking supervised execution...")
+        approved, modified_code = self._check_supervised_execution(code, 'python_interpreter')
 
         if not approved:
-            log.warning("[ToolManager.run_work_environment] ✗ Execution rejected by user")
+            # A background-policy block sets _last_policy_block_msg — surface that
+            # actionable text directly (not the "rejected by user" wording, which
+            # is wrong for an unattended task).
+            policy_msg = getattr(self, '_last_policy_block_msg', None)
+            if policy_msg:
+                self._last_policy_block_msg = None
+                log.warning("[ToolManager.run_python_interpreter] ✗ Blocked by task security policy")
+                return "ERROR: " + policy_msg
+            log.warning("[ToolManager.run_python_interpreter] ✗ Execution rejected by user")
             reason = getattr(self, '_last_reject_reason', '') or ''
             msg = "Code execution rejected by user"
             if reason:
@@ -1537,13 +1783,13 @@ class ToolManager:
 
         # Use modified code if user edited it
         if modified_code != code:
-            log.info("[ToolManager.run_work_environment] Code was modified by user in approval dialog")
+            log.info("[ToolManager.run_python_interpreter] Code was modified by user in approval dialog")
         code = modified_code
 
         # Pull literal #@FILE blocks out before execution so their content is
-        # never parsed as Python. last_work_code keeps the full source (blocks
-        # included) for the UI note / history; only exec_code runs.
-        self.last_work_code = code
+        # never parsed as Python. work.interpreter.last_code keeps the full source
+        # (blocks included) for the UI note / history; only exec_code runs.
+        self.work.interpreter.last_code = code
         exec_code, _file_blocks = self._extract_file_blocks(code)
         if _file_blocks:
             self.tools['python'].inject_vars(_file_blocks)
@@ -1552,9 +1798,9 @@ class ToolManager:
         timeout = None
         if self.settings_callback:
             timeout = self.settings_callback().get('tool_execution_timeout_seconds', None)
-        log.debug(f"[ToolManager.run_work_environment] → Executing via PythonInterpreter | "
+        log.debug(f"[ToolManager.run_python_interpreter] → Executing via PythonInterpreter | "
                   f"timeout={timeout}s")
-        self.work_code_running = True
+        self.work.interpreter.is_running = True
         self.approval_signal.work_code_active.emit(True)
         try:
             result = self.tools['python'].execute(
@@ -1563,9 +1809,9 @@ class ToolManager:
                 timeout_callback=self._handle_execution_timeout if timeout else None
             )
         finally:
-            self.work_code_running = False
+            self.work.interpreter.is_running = False
             self.approval_signal.work_code_active.emit(False)
-        log.debug(f"[ToolManager.run_work_environment] Python result: success={result['success']} | "
+        log.debug(f"[ToolManager.run_python_interpreter] Python result: success={result['success']} | "
                   f"stdout_len={len(result['stdout'])} | stderr_len={len(result['stderr'])} | "
                   f"has_error={bool(result['error'])} | timed_out={result.get('timed_out', False)}")
 
@@ -1600,17 +1846,17 @@ class ToolManager:
                 "Code executed but produced no output. "
                 "RECOMMENDATION: Use print() or return values to see results!"
             )
-            log.debug("[ToolManager.run_work_environment] No output produced — sending recommendation")
+            log.debug("[ToolManager.run_python_interpreter] No output produced — sending recommendation")
 
         combined = "\n\n".join(output_parts)
-        log.info(f"[ToolManager.run_work_environment] ✓ Work environment output ready | "
+        log.info(f"[ToolManager.run_python_interpreter] ✓ Python interpreter output ready | "
                  f"parts={len(output_parts)} | total_len={len(combined)}")
 
         # ── Mirror code + output to Android bridge ────────────────────────
         try:
             ab = self._get_android_bridge() if callable(self._get_android_bridge) else None
             if ab and ab.isVisible():
-                ab.add_work_execution(code, combined, annotation=self.last_work_annotation or "")
+                ab.add_work_execution(code, combined, annotation=self.work.interpreter.last_annotation or "")
         except Exception:
             pass
         # ─────────────────────────────────────────────────────────────────
@@ -1621,11 +1867,11 @@ class ToolManager:
     # Prompt helpers
     # ─────────────────────────────────────────────────────────────────────────
 
-    def get_work_mode_prompt(self):
+    def get_work_prompt(self):
         """Get the prompt for work mode continuation. In native tool-calling mode
         the variant that instructs native tool calls (not fences) is used."""
-        log.debug(f"[ToolManager.get_work_mode_prompt] Building work mode prompt | "
-                  f"has_last_output={self.last_work_output is not None}")
+        log.debug(f"[ToolManager.get_work_prompt] Building work mode prompt | "
+                  f"has_last_output={self.work.last_output is not None}")
         from systema.engine.prompts.global_instructions import WORK_MODE_PROMPT, WORK_MODE_PROMPT_NATIVE
 
         native = False
@@ -1636,9 +1882,9 @@ class ToolManager:
             native = False
 
         template = WORK_MODE_PROMPT_NATIVE if native else WORK_MODE_PROMPT
-        output = self.last_work_output or "No previous output"
+        output = self.work.last_output or "No previous output"
         prompt = template.format(work_output=output)
-        log.debug(f"[ToolManager.get_work_mode_prompt] Prompt built | native={native} | length={len(prompt)}")
+        log.debug(f"[ToolManager.get_work_prompt] Prompt built | native={native} | length={len(prompt)}")
         return prompt
 
     def reset_python(self):
@@ -1661,8 +1907,8 @@ class ToolManager:
         for key in self._tool_keys + list(tool_registry.LEGACY_STRIP_KEYS):
             result = self._parse_fence(text, key)
             while result is not None:
-                # _parse_fence returns 3-tuple for annotated work_environment,
-                # 2-tuple for everything else (including plain work_environment)
+                # _parse_fence returns 3-tuple for annotated python_interpreter,
+                # 2-tuple for everything else (including plain python_interpreter)
                 if len(result) == 3:
                     _, text, _ = result  # annotation discarded — not re-injected on session load
                 else:
@@ -1677,15 +1923,15 @@ class ToolManager:
 
     def _norm_key(self, key):
         """Normalise a key for fuzzy comparison — strip underscores, hyphens and
-        spaces, then lowercase. So work_environment / work-environment /
-        'work environment' / WorkEnvironment all resolve to the same canonical key."""
+        spaces, then lowercase. So python_interpreter / 'python interpreter' /
+        PythonInterpreter all resolve to the same canonical key."""
         return key.replace('_', '').replace('-', '').replace(' ', '').lower()
 
     def _resolve_tool_tag(self, tag, include_legacy=False):
         """Resolve a fence tag to a canonical tool key.
 
         Exact normalised lookup first; failing that, a UNIQUE edit-distance-1
-        near-miss (weak models emit e.g. work_enviroment / load_skills). Short
+        near-miss (weak models emit e.g. python_interpeter / load_skills). Short
         tags (<6 chars, e.g. 'python', 'bash') never fuzzy-match, so prose code
         fences can't be mistaken for tools.
 
@@ -1708,8 +1954,8 @@ class ToolManager:
         Return the canonical tool key present in a parsed JSON dict, or None.
 
         Handles two formats:
-          NEW:    {"tool": "work_environment", "input": "..."}
-          LEGACY: {"work_environment": true,   "input": "..."}
+          NEW:    {"tool": "python_interpreter", "input": "..."}
+          LEGACY: {"python_interpreter": true,   "input": "..."}
                   {"set_session_name": "Name"}
 
         Also handles AI inconsistencies like 'setsessionname' vs 'set_session_name'.
@@ -1746,8 +1992,8 @@ class ToolManager:
         """
         Check if data contains tool_key (or a fuzzy variant).
 
-        Handles new format {"tool": "work_environment"} and
-        legacy format     {"work_environment": true}.
+        Handles new format {"tool": "python_interpreter"} and
+        legacy format     {"python_interpreter": true}.
         """
         target = self._norm_key(tool_key)
 
