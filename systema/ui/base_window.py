@@ -138,8 +138,13 @@ class BaseWindow(QWidget):
     # ── Resize handles ─────────────────────────────────────────────────────────
 
     def create_resize_handles(self):
-        """Create 8 invisible edge/corner resize handles and install event filter."""
-        handle_size = 8
+        """Create 8 invisible edge/corner resize handles and install event filter.
+
+        Edge strips are 5px (was 8): they sit ON TOP of the window content, and
+        a wider right-edge strip swallowed most scrollbar clicks — users kept
+        grabbing resize instead of the scrollbar. Corners stay 16px (easy to
+        hit, nothing scrollable lives there)."""
+        handle_size = 5
         corner_size = 16
 
         self.resize_handles = {}
@@ -172,7 +177,7 @@ class BaseWindow(QWidget):
         """Reposition all 8 handles to match the current window size."""
         w = self.width()
         h = self.height()
-        hs = 8   # handle_size
+        hs = 5   # handle_size (keep in sync with create_resize_handles)
         cs = 16  # corner_size
         hh = self._header_height
 

@@ -331,12 +331,14 @@ def check_qss(p: dict) -> str:
 
 
 def scrollbar_qss(p: dict) -> str:
-    return f"""
-    QScrollBar:vertical {{ background: transparent; width: 12px; margin: 0; }}
-    QScrollBar::handle:vertical {{ background: {rgba(p['accent'], 0.30)};
-        border-radius: 6px; min-height: 30px; margin: 2px; }}
-    QScrollBar::handle:vertical:hover  {{ background: {rgba(p['accent'], 0.50)}; }}
-    QScrollBar::handle:vertical:pressed {{ background: {rgba(p['accent'], 0.70)}; }}
-    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
-    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
+    # Neutral translucent-white handle: blends into every palette instead of
+    # painting an accent-colored (often blue) bar down the window edge.
+    return """
+    QScrollBar:vertical { background: transparent; width: 10px; margin: 0; }
+    QScrollBar::handle:vertical { background: rgba(255,255,255,0.15);
+        border-radius: 5px; min-height: 30px; margin: 2px; }
+    QScrollBar::handle:vertical:hover  { background: rgba(255,255,255,0.28); }
+    QScrollBar::handle:vertical:pressed { background: rgba(255,255,255,0.38); }
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
     """

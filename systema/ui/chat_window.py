@@ -94,6 +94,45 @@ class InlineStatus(QLabel):
         self.setVisible(bool(text))
 
 
+class _ChatBottomFade(QWidget):
+    """Mouse-transparent gradient strip anchored to the BOTTOM of the chat
+    display (not to the pill): chat content dims as it approaches the window's
+    bottom edge, and the input pill simply floats on top of it. Fixed in
+    place — growing/dragging the input taller covers more of it instead of
+    dragging the dim band up mid-screen. Purely cosmetic: all mouse events
+    pass through to the messages below."""
+
+    # Total strip height from the container's bottom edge. The compact pill
+    # (~110px) covers the strongest part; ~90px of dim stays visible above it.
+    HEIGHT = 200
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._color = QColor('#0D1117')
+
+    def set_color(self, hex_color):
+        try:
+            self._color = QColor(hex_color)
+        except Exception:
+            self._color = QColor('#0D1117')
+        self.update()
+
+    def paintEvent(self, event):
+        from PyQt6.QtGui import QPainter, QLinearGradient
+        p = QPainter(self)
+        grad = QLinearGradient(0, 0, 0, self.height())
+        # Gentle dim in the visible upper half; strong toward the bottom edge
+        # (mostly covered by the floating pill).
+        for stop, alpha in ((0.0, 0), (0.45, 90), (0.75, 180), (1.0, 225)):
+            c = QColor(self._color)
+            c.setAlpha(alpha)
+            grad.setColorAt(stop, c)
+        p.fillRect(self.rect(), grad)
+        p.end()
+
+
 class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
     """Modern chat window with AI conversation"""
 
@@ -369,8 +408,8 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         self._sidebar_drag_handle = QFrame(self.sidebar)
         self._sidebar_drag_handle.setFixedWidth(6)
         self._sidebar_drag_handle.setStyleSheet("""
-            QFrame { background-color: rgba(168,199,250,0.12); border-radius: 3px; }
-            QFrame:hover { background-color: rgba(168,199,250,0.35); }
+            QFrame { background-color: rgba(255,255,255,0.07); border-radius: 3px; }
+            QFrame:hover { background-color: rgba(255,255,255,0.18); }
         """)
         self._sidebar_drag_handle.setCursor(Qt.CursorShape.SizeHorCursor)
         self._sidebar_drag_handle.setToolTip("Drag to resize sidebar")
@@ -384,9 +423,9 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         self.sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.sidebar_scroll.setStyleSheet("""
             QScrollArea { border: none; background: transparent; }
-            QScrollBar:vertical { background: transparent; width: 6px; margin: 0; }
-            QScrollBar::handle:vertical { background: rgba(168,199,250,0.25); border-radius: 3px; min-height: 20px; }
-            QScrollBar::handle:vertical:hover { background: rgba(168,199,250,0.45); }
+            QScrollBar:vertical { background: transparent; width: 10px; margin: 0; }
+            QScrollBar::handle:vertical { background: rgba(255,255,255,0.13); border-radius: 5px; min-height: 24px; }
+            QScrollBar::handle:vertical:hover { background: rgba(255,255,255,0.26); }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
             QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
         """)
@@ -932,16 +971,16 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
                         margin: 0;
                     }
                     QScrollBar::handle:vertical {
-                        background: rgba(168, 199, 250, 0.3);
+                        background: rgba(255,255,255,0.15);
                         border-radius: 6px;
                         min-height: 30px;
                         margin: 2px;
                     }
                     QScrollBar::handle:vertical:hover {
-                        background: rgba(168, 199, 250, 0.5);
+                        background: rgba(255,255,255,0.28);
                     }
                     QScrollBar::handle:vertical:pressed {
-                        background: rgba(168, 199, 250, 0.7);
+                        background: rgba(255,255,255,0.38);
                     }
                     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
                         height: 0px;
@@ -1146,8 +1185,18 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         self._token_count_lbl.setVisible(_show_tk)
         self._token_refresh_timer = QTimer(self)
         self._token_refresh_timer.setInterval(2000)
-        self._token_refresh_timer.timeout.connect(self._update_token_count)
+        # The periodic tick re-measures the effective system prompt too (mode
+        # switches, memory-block growth); keystrokes reuse the cached number.
+        self._token_refresh_timer.timeout.connect(self._invalidate_token_estimate)
         self._token_refresh_timer.start()
+        # Loading/unloading a skill changes the next request immediately —
+        # refresh the estimate right away instead of waiting for the tick.
+        _tk_skill_mgr = getattr(self.controller, 'skill_manager', None)
+        if _tk_skill_mgr is not None:
+            try:
+                _tk_skill_mgr.loaded_skills_changed.connect(self._invalidate_token_estimate)
+            except Exception:
+                pass
 
         # Inline status + work-mode indicators (created earlier) live here, left
         # of the stretch — the thinking dots / "Working:" text sit in the pill.
@@ -1318,9 +1367,9 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
                         border: none; border-radius: 3px; margin: 0;
                     }
                     QScrollBar::handle:horizontal {
-                        background: rgba(168,199,250,0.3); border-radius: 3px; min-width: 20px;
+                        background: rgba(255,255,255,0.15); border-radius: 3px; min-width: 20px;
                     }
-                    QScrollBar::handle:horizontal:hover { background: rgba(168,199,250,0.55); }
+                    QScrollBar::handle:horizontal:hover { background: rgba(255,255,255,0.30); }
                     QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
                 """)
 
@@ -1347,6 +1396,11 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         self._chat_container = chat_container
         input_container.setParent(chat_container)
         input_container.raise_()
+        # Bottom fade: a mouse-transparent gradient strip glued just above the
+        # pill — chat content dims as it slides underneath (clear on top, dim
+        # near the input), in both glass and solid themes.
+        self._chat_fade = _ChatBottomFade(chat_container)
+        self._chat_fade.show()
         # Re-anchor the moment the chat area actually changes size (the window's
         # resizeEvent fires before the layout propagates the new width down to
         # chat_container, so reading its width there is stale — this fires after).
@@ -1513,10 +1567,15 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
             return
         try:
             # Force the pill's SetMinimumSize layouts to recompute before we
-            # measure, so a fresh (grown) height is used — otherwise the overlay
-            # keeps its old short rect and the grown content spills downward.
+            # measure. invalidate() FIRST: activate() alone no-ops when the
+            # layout cache isn't marked dirty yet — Qt propagates a child
+            # setFixedHeight upward via posted events, so on a synchronous
+            # SHRINK (send → clear) the cached hints are still tall and the
+            # pill stays suspended mid-screen. Growth invalidates eagerly,
+            # which is why only the collapse direction ever stuck.
             lay = ic.layout()
             if lay is not None:
+                lay.invalidate()
                 lay.activate()
             # Compute the overlay height DETERMINISTICALLY from the pill's own
             # content + the container margins, rather than the container's
@@ -1524,21 +1583,96 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
             # the pill balloon and clip off the bottom edge).
             card = getattr(self, '_input_card', None)
             if card is not None:
+                card.layout().invalidate()
                 card.layout().activate()
                 m = lay.contentsMargins() if lay is not None else None
                 pad = (m.top() + m.bottom()) if m is not None else 20
                 h = card.sizeHint().height() + pad
             else:
                 h = max(ic.sizeHint().height(), ic.minimumSizeHint().height())
+            # A mid-relayout hint can momentarily read ~0 — never let the pill
+            # collapse to an invisible sliver at the bottom edge ("input box
+            # disappeared until I resized the window").
+            h = max(h, 44)
             # Never let the top go negative (pill taller than the whole chat area).
             top = max(0, cc.height() - h)
             ic.setGeometry(0, top, cc.width(), h)
+            # Bottom fade stays anchored to the chat display's bottom edge —
+            # independent of the pill's height; the pill floats on top of it.
+            fade = getattr(self, '_chat_fade', None)
+            if fade is not None:
+                fh = min(fade.HEIGHT, cc.height())
+                fade.setGeometry(0, cc.height() - fh, cc.width(), fh)
+                fade.raise_()
             ic.raise_()
-            if hasattr(self, 'chat_layout'):
-                m = self.chat_layout.contentsMargins()
-                if m.bottom() != h + 8:
-                    self.chat_layout.setContentsMargins(m.left(), m.top(), m.right(), h + 8)
+            # Guarded separately: a dead chat_layout must never abort the
+            # settle-pass scheduling below.
+            try:
+                if hasattr(self, 'chat_layout'):
+                    m = self.chat_layout.contentsMargins()
+                    if m.bottom() != h + 8:
+                        self.chat_layout.setContentsMargins(m.left(), m.top(), m.right(), h + 8)
+            except RuntimeError:
+                pass
             # keep the pinned-image strip glued just above the moved input
+            if hasattr(self, '_update_pinned_overlay'):
+                self._update_pinned_overlay()
+            # Self-correction net: one deferred re-anchor after the event loop
+            # settles catches any hint that was still stale on this pass. It
+            # re-measures and no-ops when the rect is already right.
+            if not getattr(self, '_overlay_recheck_scheduled', False):
+                self._overlay_recheck_scheduled = True
+
+                def _recheck():
+                    self._overlay_recheck_scheduled = False
+                    ic2 = getattr(self, 'input_container', None)
+                    cc2 = getattr(self, '_chat_container', None)
+                    if ic2 is None or cc2 is None:
+                        return
+                    self._position_input_overlay_settle()
+                QTimer.singleShot(0, _recheck)
+        except RuntimeError:
+            pass
+
+    def _position_input_overlay_settle(self):
+        """Deferred second measurement pass — identical math to
+        _position_input_overlay but never schedules another recheck, so the
+        pair can't ping-pong."""
+        ic = getattr(self, 'input_container', None)
+        cc = getattr(self, '_chat_container', None)
+        if ic is None or cc is None:
+            return
+        try:
+            lay = ic.layout()
+            if lay is not None:
+                lay.invalidate()
+                lay.activate()
+            card = getattr(self, '_input_card', None)
+            if card is not None:
+                card.layout().invalidate()
+                card.layout().activate()
+                m = lay.contentsMargins() if lay is not None else None
+                pad = (m.top() + m.bottom()) if m is not None else 20
+                h = card.sizeHint().height() + pad
+            else:
+                h = max(ic.sizeHint().height(), ic.minimumSizeHint().height())
+            h = max(h, 44)
+            top = max(0, cc.height() - h)
+            if ic.geometry() != QRect(0, top, cc.width(), h):
+                ic.setGeometry(0, top, cc.width(), h)
+                fade = getattr(self, '_chat_fade', None)
+                if fade is not None:
+                    fh = min(fade.HEIGHT, cc.height())
+                    fade.setGeometry(0, cc.height() - fh, cc.width(), fh)
+                    fade.raise_()
+                ic.raise_()
+            try:
+                if hasattr(self, 'chat_layout'):
+                    m = self.chat_layout.contentsMargins()
+                    if m.bottom() != h + 8:
+                        self.chat_layout.setContentsMargins(m.left(), m.top(), m.right(), h + 8)
+            except RuntimeError:
+                pass
             if hasattr(self, '_update_pinned_overlay'):
                 self._update_pinned_overlay()
         except RuntimeError:
@@ -4649,6 +4783,12 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
         QTimer.singleShot(600, self._start_session_lock_watcher)
 
 
+    def _invalidate_token_estimate(self):
+        """Mark the cached system-prompt token estimate stale (skills were
+        loaded/unloaded, mode switched, …) and refresh the label."""
+        self._sys_tokens_dirty = True
+        self._update_token_count()
+
     def _update_token_count(self):
         """Update the token estimate label whenever the input text changes."""
         try:
@@ -4661,7 +4801,21 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin):
             ai = getattr(self.controller, 'ai', None)
             if ai:
                 hist = getattr(ai, 'chat_history', []) or getattr(ai, 'conversation_history', [])
-                sys_tokens = estimate_tokens(getattr(ai, 'system_prompt', '') or '')
+                # The EFFECTIVE prompt (base + loaded skills + memory block) is
+                # what the provider actually receives — measuring ai.system_prompt
+                # missed loaded skills entirely (the pill sat at the fresh-session
+                # value while the Debug window showed the real count). It is
+                # rebuilt only when marked dirty (skill load/unload, 2s tick);
+                # keystrokes reuse the cached number.
+                if getattr(self, '_sys_tokens_dirty', True) or \
+                        getattr(self, '_sys_tokens_cache', None) is None:
+                    try:
+                        _sys_prompt = ai._get_effective_system_prompt()
+                    except Exception:
+                        _sys_prompt = getattr(ai, 'system_prompt', '') or ''
+                    self._sys_tokens_cache = estimate_tokens(_sys_prompt)
+                    self._sys_tokens_dirty = False
+                sys_tokens = self._sys_tokens_cache or 0
             total = estimate_next_message_tokens(text, hist) + sys_tokens
             lbl = f"~{total/1000:.1f}k token per request" if total >= 1000 else f"~{total} token per request"
             if total > 50000:

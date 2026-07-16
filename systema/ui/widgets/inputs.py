@@ -119,26 +119,44 @@ class MultiLineInput(QTextEdit):
         vw = self.viewport().width()
         if vw > 0:
             doc.setTextWidth(vw)
-        if not self.toPlainText():
+        empty = not self.toPlainText()
+        if empty:
             self._user_floor = 0
         doc_height = doc.size().height()
         # Effective height = max(content, manual floor), clamped. Cap against the
         # CONSTANT ceiling, not maximumHeight() — setFixedHeight sets max==height,
         # so reading maximumHeight() here would ratchet the cap down each call.
-        new_height = min(max(int(doc_height) + 10, self._user_floor, 24), self._grow_max)
+        # An EMPTY field always collapses to the one-line design height — the
+        # empty document briefly reports a taller height right after a clear,
+        # which used to leave an 8px residue floored into the pill.
+        new_height = 24 if empty else min(
+            max(int(doc_height) + 10, self._user_floor, 24), self._grow_max)
         if new_height != self.height():
             self.setFixedHeight(new_height)
-            # Propagate up so the pill / input container actually expand (each
-            # ancestor uses a SetMinimumSize layout that must recompute).
-            w = self.parentWidget()
-            depth = 0
-            while w is not None and depth < 5:
-                w.updateGeometry()
-                w = w.parentWidget()
-                depth += 1
+            self._relayout_ancestors()
             # Re-anchor any floating overlay host NOW (synchronously), while the
             # grown geometry is fresh — see heightChanged docstring.
             self.heightChanged.emit()
+
+    def _relayout_ancestors(self):
+        """Bottom-up re-activation of every ancestor's layout after a height
+        change. Each ancestor (ResizableInput → row → pill card → overlay
+        container) uses a SetMinimumSize layout, which writes an EXPLICIT
+        minimum size onto its widget; Qt only re-applies those lazily, so on a
+        SHRINK (send → clear) the stale tall minimums floored the pill's size
+        hint and the overlay stayed suspended mid-screen. invalidate() +
+        activate() child-before-parent re-applies every minimum with fresh
+        values, synchronously."""
+        w = self.parentWidget()
+        depth = 0
+        while w is not None and depth < 5:
+            w.updateGeometry()
+            lay = w.layout()
+            if lay is not None:
+                lay.invalidate()
+                lay.activate()
+            w = w.parentWidget()
+            depth += 1
 
 
 class ResizableInput(QWidget):
@@ -186,7 +204,10 @@ class ResizableInput(QWidget):
         layout.addWidget(self.text_input)
 
     def eventFilter(self, obj, event):
-        if obj == self.resize_handle:
+        # getattr guard: if the Python wrapper was GC'd and PyQt recreated it
+        # for a live C++ widget, instance attributes are gone — never crash in
+        # an event filter over that.
+        if obj is getattr(self, 'resize_handle', None):
             if event.type() == event.Type.MouseButtonPress:
                 if event.button() == Qt.MouseButton.LeftButton:
                     self.is_resizing = True
@@ -201,11 +222,9 @@ class ResizableInput(QWidget):
                 # Record the drag as a temporary floor; auto-grow can still grow
                 # above it, and it clears itself when the field is emptied.
                 self.text_input._user_floor = int(new_height)
-                self.updateGeometry()
-                if self.parent():
-                    self.parent().updateGeometry()
-                    if self.parent().parent():
-                        self.parent().parent().updateGeometry()
+                # Bottom-up relayout so drag-SHRINK releases the stale
+                # SetMinimumSize floors too, not just drag-grow.
+                self.text_input._relayout_ancestors()
                 # Re-anchor the floating overlay NOW so a manual drag grows the
                 # pill UPWARD too (keeps it bottom-anchored during the drag).
                 self.text_input.heightChanged.emit()
@@ -226,6 +245,10 @@ class ResizableInput(QWidget):
         self.text_input._user_floor = 0
         self.text_input.clear()
         self.text_input.setFixedHeight(self.min_height)
+        # Release the ancestors' SetMinimumSize floors for THIS height too —
+        # without it the pill keeps whatever floor the clear()-triggered
+        # adjust_height pass left behind.
+        self.text_input._relayout_ancestors()
         self.text_input.heightChanged.emit()
         self.updateGeometry()
         self.update()

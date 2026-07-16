@@ -118,23 +118,33 @@ class ThemingMixin:
                     font-family: 'Segoe UI', -apple-system, system-ui, sans-serif;
                 }}
             """)
-            # Chat body — the darkest surface (base) so user bubbles (surface)
-            # and AI bubbles (elevated) both read as raised above it. Using
-            # surface here made user bubbles vanish on near-black themes (void).
+            # Chat body — transparent, so the SCROLL AREA's gradient shows
+            # through. The gradient spans the fixed viewport (not the full
+            # scroll content), giving the solid themes depth: slightly lit at
+            # the top, sinking into the theme's deep tone at the bottom where
+            # the input pill floats. Bubbles (surface/elevated) still read as
+            # raised — the backdrop stays at/below base brightness throughout.
+            from systema.ui.theme import lighten as _lighten
             self.chat_widget.setStyleSheet(
-                f"QWidget {{ background-color: {t['base']}; }}"
+                "QWidget { background-color: transparent; }"
             )
+            _grad_top = _lighten(t['base'], 0.025)
+            _grad_bottom = t.get('deep', t['base'])
             # Scroll area
             self.chat_scroll_area.setStyleSheet(f"""
-                QScrollArea {{ border: none; background-color: {t['base']}; }}
+                QScrollArea {{ border: none;
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 {_grad_top}, stop:0.55 {t['base']},
+                        stop:1 {_grad_bottom}); }}
+                QScrollArea > QWidget > QWidget {{ background: transparent; }}
                 QScrollBar:vertical {{
                     background: transparent; width: 12px; margin: 0;
                 }}
                 QScrollBar::handle:vertical {{
-                    background: rgba(168,199,250,0.3); border-radius:6px; min-height:30px; margin:2px;
+                    background: rgba(255,255,255,0.15); border-radius:6px; min-height:30px; margin:2px;
                 }}
-                QScrollBar::handle:vertical:hover  {{ background: rgba(168,199,250,0.5); }}
-                QScrollBar::handle:vertical:pressed {{ background: rgba(168,199,250,0.7); }}
+                QScrollBar::handle:vertical:hover  {{ background: rgba(255,255,255,0.28); }}
+                QScrollBar::handle:vertical:pressed {{ background: rgba(255,255,255,0.38); }}
                 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
                 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
             """)
@@ -160,6 +170,10 @@ class ThemingMixin:
                         background: transparent; padding: 0 4px;
                     }}
                 """)
+            # Bottom fade strip above the pill follows the theme's base tone.
+            _fade = getattr(self, '_chat_fade', None)
+            if _fade is not None:
+                _fade.set_color(t['base'])
             # Input container — the OUTER band is fully transparent so the chat
             # shows through around the pill (the pill itself stays solid).
             self.input_container.setStyleSheet("""
@@ -313,11 +327,11 @@ class ThemingMixin:
                     width: 12px; margin: 0; border-radius: 6px;
                 }
                 QScrollBar::handle:vertical {
-                    background: rgba(168,199,250,0.35);
+                    background: rgba(255,255,255,0.18);
                     border-radius: 6px; min-height: 30px; margin: 2px;
                 }
-                QScrollBar::handle:vertical:hover  { background: rgba(168,199,250,0.55); }
-                QScrollBar::handle:vertical:pressed { background: rgba(168,199,250,0.75); }
+                QScrollBar::handle:vertical:hover  { background: rgba(255,255,255,0.30); }
+                QScrollBar::handle:vertical:pressed { background: rgba(255,255,255,0.40); }
                 QScrollBar::add-line:vertical,
                 QScrollBar::sub-line:vertical { height: 0px; }
                 QScrollBar::add-page:vertical,
@@ -328,11 +342,11 @@ class ThemingMixin:
                     background: transparent; width: 12px; margin: 0;
                 }
                 QScrollBar::handle:vertical {
-                    background: rgba(168,199,250,0.3);
+                    background: rgba(255,255,255,0.15);
                     border-radius: 6px; min-height: 30px; margin: 2px;
                 }
-                QScrollBar::handle:vertical:hover  { background: rgba(168,199,250,0.5); }
-                QScrollBar::handle:vertical:pressed { background: rgba(168,199,250,0.7); }
+                QScrollBar::handle:vertical:hover  { background: rgba(255,255,255,0.28); }
+                QScrollBar::handle:vertical:pressed { background: rgba(255,255,255,0.38); }
                 QScrollBar::add-line:vertical,
                 QScrollBar::sub-line:vertical { height: 0px; }
                 QScrollBar::add-page:vertical,

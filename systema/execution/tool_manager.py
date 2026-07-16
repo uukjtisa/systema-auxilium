@@ -419,14 +419,20 @@ class ToolManager:
     def _code_fence(self, tool_name: str, code, annotation: str = "") -> str:
         """Render one tool fence. Annotated tools (python_interpreter + the file
         subsystem) fold their annotation into the ```tool: [label] form;
-        everything else is a plain fence."""
+        everything else is a plain fence. The outer fence is always LONGER than
+        any backtick run inside the body (min 3), so a body that itself contains
+        markdown code fences survives the store → compat-reload → re-parse
+        round-trip intact (depth-aware fences; the parser treats shorter inner
+        runs as literal content)."""
         if not isinstance(code, str):
             code = str(code)
         code = code.strip()
+        longest = max((len(m.group(0)) for m in re.finditer(r'`+', code)), default=0)
+        fence = '`' * max(3, longest + 1)
         if (self._norm_key(tool_name) in _ANNOTATED_TOOL_NORMS
                 and isinstance(annotation, str) and annotation.strip()):
-            return f"```{tool_name}: [{annotation.strip()}]\n{code}\n```"
-        return f"```{tool_name}\n{code}\n```"
+            return f"{fence}{tool_name}: [{annotation.strip()}]\n{code}\n{fence}"
+        return f"{fence}{tool_name}\n{code}\n{fence}"
 
     def tool_calls_to_fences(self, tool_calls: list, include_messages: bool = True) -> str:
         """Reconstruct canonical fence text from normalized native tool calls
@@ -449,7 +455,8 @@ class ToolManager:
                     # (strip + corrective prompt) instead of the call silently
                     # vanishing.
                     _body = (call.get('arguments') or {}).get('code', '') or ''
-                    parts.append(f"```{self._legacy_keys_norm[self._norm_key(str(name))]}\n{_body}\n```")
+                    parts.append(self._code_fence(
+                        self._legacy_keys_norm[self._norm_key(str(name))], _body))
                     log.warning(f"[ToolManager.tool_calls_to_fences] RETIRED tool "
                                 f"'{name}' called natively — reconstructed for "
                                 f"the engine's retired-tool handling")
@@ -530,7 +537,9 @@ class ToolManager:
         if norm_target in _ANNOTATED_TOOL_NORMS:
             is_we = norm_target == "pythoninterpreter"
             # ```tool[:] [annotation-any-decoration]\n<body>\n```
-            pattern_we = r'(`{3,})[ \t]*([A-Za-z][\w-]*)[ \t]*(:?)[ \t]*([^\n]*?)[ \t]*\r?\n(.*?)[ \t]*`{3,}'
+            # Depth-aware close: the closing run must be >= the opener's length
+            # (\1`* backreference), so shorter inner fences are literal body.
+            pattern_we = r'(`{3,})[ \t]*([A-Za-z][\w-]*)[ \t]*(:?)[ \t]*([^\n]*?)[ \t]*\r?\n(.*?)[ \t]*\1`*'
             for match in re.finditer(pattern_we, text, re.DOTALL):
                 canonical, exact = self._resolve_tool_tag(match.group(2), include_legacy=True)
                 if canonical is None or self._norm_key(canonical) != norm_target:
@@ -575,17 +584,18 @@ class ToolManager:
             return None
 
         # ── General case for all other tools ─────────────────────────────────
-        pattern = r'`{3,}[ \t]*([A-Za-z][\w-]*)(?:[ \t]*\r?\n|[ \t]+)(.*?)[ \t]*`{3,}'
+        # Depth-aware close (\1`*): closing run >= opener run, inner fences literal.
+        pattern = r'(`{3,})[ \t]*([A-Za-z][\w-]*)(?:[ \t]*\r?\n|[ \t]+)(.*?)[ \t]*\1`*'
         for match in re.finditer(pattern, text, re.DOTALL):
-            norm_tag = self._norm_key(match.group(1))
+            norm_tag = self._norm_key(match.group(2))
             if norm_tag != norm_target:
-                canonical, _exact = self._resolve_tool_tag(match.group(1), include_legacy=True)
+                canonical, _exact = self._resolve_tool_tag(match.group(2), include_legacy=True)
                 if canonical is None or self._norm_key(canonical) != norm_target:
                     continue
                 if record:
                     self._parse_corrections.append(
-                        f"tool name '{match.group(1)}' corrected to {tool_name}")
-            content = match.group(2).strip()
+                        f"tool name '{match.group(2)}' corrected to {tool_name}")
+            content = match.group(3).strip()
             remaining = (text[:match.start()] + text[match.end():]).strip()
             log.debug(f"[ToolManager._parse_fence] ✓ Matched '{tool_name}' | content_len={len(content)}")
             return content, remaining
@@ -608,14 +618,16 @@ class ToolManager:
         if not text or '```' not in text:
             return text, None
 
-        fence_positions = [m.start() for m in re.finditer(r'```', text)]
+        # Count fence RUNS (a run of 3+ backticks = one marker) so the
+        # depth-aware longer fences _code_fence emits still pair up correctly.
+        fence_runs = list(re.finditer(r'`{3,}', text))
         # Balanced fences pair up left-to-right → nothing dangling.
-        if len(fence_positions) % 2 == 0:
+        if len(fence_runs) % 2 == 0:
             return text, None
 
-        # Odd count → the last ``` is an unmatched opener. Is its tag a tool?
-        last = fence_positions[-1]
-        m = re.match(r'```[ \t]*([\w-]+)', text[last:])
+        # Odd count → the last run is an unmatched opener. Is its tag a tool?
+        last = fence_runs[-1]
+        m = re.match(r'[ \t]*([\w-]+)', text[last.end():])
         if not m:
             return text, None  # bare ``` with no tag — leave as prose
         # Legacy (retired) tools are auto-closed too, so the engine's
@@ -627,7 +639,9 @@ class ToolManager:
 
         log.warning(f"[ToolManager.recover_unclosed_tool_fence] Auto-closing unclosed "
                     f"'{canonical}' fence — model omitted the closing ``` (would have leaked)")
-        return (text.rstrip() + "\n```"), canonical
+        # Close with a run matching the opener's length — the depth-aware parser
+        # requires the closing run to be >= the opener.
+        return (text.rstrip() + "\n" + last.group(0)), canonical
 
     # Literal data blocks: #@FILE <name> … #@ENDFILE  (content captured verbatim)
     _FILE_BLOCK_RE = re.compile(
@@ -1055,6 +1069,120 @@ class ToolManager:
             log.debug(f"[ToolManager.run_grep] card skipped: {e}")
         return obs
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # Native argument extraction — the native front-end's replacement for
+    # fence parsing (see AIEngine._process_native_response). A native call's
+    # structured arguments become exactly the payload the matching run_* /
+    # handler expects, with the same UI side effects the parse_* methods have.
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _native_bool(val, default):
+        if isinstance(val, bool):
+            return val
+        s = str(val).strip().lower() if val is not None else ''
+        if s in ('true', '1', 'yes', 'on'):
+            return True
+        if s in ('false', '0', 'no', 'off'):
+            return False
+        return default
+
+    @staticmethod
+    def _native_int(val, default):
+        try:
+            return int(str(val).strip())
+        except (TypeError, ValueError):
+            return default
+
+    def native_args_to_spec(self, name, args):
+        """Build what the matching handler expects from a native call's
+        structured arguments — no parsing involved. Mirrors the parse-side
+        side effects (annotation banner + last_annotation) so a native step
+        looks identical to a compat one in the chat.
+
+        Returns:
+          python_interpreter                  -> code (str)
+          set_session_name                    -> session name (str)
+          load_skill / unload_skill           -> skill name (str)
+          read_file/edit_file/write_file/grep -> spec (dict)
+          anything else                       -> None
+        """
+        args = args if isinstance(args, dict) else {}
+        annotation = str(args.get('annotation') or '').strip()
+
+        if name == 'python_interpreter':
+            self.work.interpreter.last_annotation = annotation or None
+            if annotation:
+                # Emit via signal — safe from any thread (same as the parser).
+                self.approval_signal.system_message.emit(
+                    f"**Working:** ***{annotation}***")
+            return str(args.get('code') or '')
+
+        if name == 'set_session_name':
+            return str(args.get('name') or '').strip()
+
+        if name in ('load_skill', 'unload_skill'):
+            return str(args.get('skill_name') or args.get('name') or '').strip()
+
+        if name in ('read_file', 'edit_file', 'write_file', 'grep'):
+            self.work.interpreter.last_annotation = annotation or None
+
+        if name == 'read_file':
+            return {'path': str(args.get('path') or '').strip(),
+                    'annotation': annotation,
+                    'start': max(1, self._native_int(args.get('start_line'), 1)),
+                    'count': max(1, self._native_int(args.get('max_lines'), 200))}
+
+        if name == 'edit_file':
+            old = args.get('old_text')
+            old = str(old) if old not in (None, '') else None
+            start = self._native_int(args.get('start_line'), None)
+            end = self._native_int(args.get('end_line'), None)
+            spec = {'path': str(args.get('path') or '').strip(),
+                    'annotation': annotation,
+                    'old': old,
+                    'new': str(args.get('new_text') or ''),
+                    'replace_all': self._native_bool(args.get('replace_all'), False),
+                    'start': start,
+                    'end': end if end is not None else start,
+                    'error': None}
+            if spec['old'] is None and spec['start'] is None:
+                spec['error'] = ("edit_file needs old_text + new_text (exact "
+                                 "anchor replace) or start_line/end_line + "
+                                 "new_text (range replace)")
+            return spec
+
+        if name == 'write_file':
+            return {'path': str(args.get('path') or '').strip(),
+                    'annotation': annotation,
+                    'content': str(args.get('content') or '')}
+
+        if name == 'grep':
+            om = str(args.get('output_mode') or 'files_with_matches').strip().lower()
+            if om not in ('files_with_matches', 'content', 'count'):
+                om = 'files_with_matches'
+            spec = {'pattern': str(args.get('pattern') or ''),
+                    'path': str(args.get('path') or '').strip() or '.',
+                    'glob': str(args.get('glob') or '').strip() or None,
+                    'type': str(args.get('type') or '').strip() or None,
+                    'output_mode': om,
+                    'case_insensitive': self._native_bool(args.get('case_insensitive'), False),
+                    'line_numbers': self._native_bool(args.get('line_numbers'), True),
+                    'before': self._native_int(args.get('before'), 0),
+                    'after': self._native_int(args.get('after'), 0),
+                    'context': self._native_int(args.get('context'), 0),
+                    'only_matching': self._native_bool(args.get('only_matching'), False),
+                    'multiline': self._native_bool(args.get('multiline'), False),
+                    'head_limit': self._native_int(args.get('head_limit'), None),
+                    'ignore_common': self._native_bool(args.get('ignore_common'), True),
+                    'annotation': annotation,
+                    'error': None}
+            if not spec['pattern'].strip():
+                spec['error'] = "grep needs a regex pattern in the 'pattern' argument."
+            return spec
+
+        return None
+
     @staticmethod
     def _op_diff_text(old, new, limit=400):
         """Unified diff for the card's expandable body (capped)."""
@@ -1184,10 +1312,11 @@ class ToolManager:
             tuple: (cleaned_text, violation_bool, violation_msg)
         """
         log.info(f"[ToolManager.enforce_single_exec_policy] Scanning {len(text)} chars for policy violations")
-        pattern = r'`{3,}[ \t]*([\w-]+)[^\n]*\n.*?`{3,}'
+        # Depth-aware close (\1`*): closing run >= opener run, inner fences literal.
+        pattern = r'(`{3,})[ \t]*([\w-]+)[^\n]*\n.*?\1`*'
         matches = []
         for match in re.finditer(pattern, text, re.DOTALL):
-            canonical, _exact = self._resolve_tool_tag(match.group(1))
+            canonical, _exact = self._resolve_tool_tag(match.group(2))
             if canonical and canonical in self._exec_tool_keys:
                 matches.append((match, canonical))
 
@@ -1226,6 +1355,55 @@ class ToolManager:
 
         log.info(f"[ToolManager.enforce_single_exec_policy] ✓ Policy enforced")
         return text.strip(), True, violation_msg
+
+    def enforce_single_exec_policy_native(self, tool_calls):
+        """Structured counterpart of enforce_single_exec_policy for native mode:
+        operates on the normalized tool_calls list itself — never on text. Also
+        canonicalizes near-miss names (a native model can typo 'readfile' just
+        like a compat one), keeps the FIRST exec-tool call, passes every
+        non-exec call through, and drops extra exec calls. Same violation
+        counter + user NOTICE as the compat version.
+
+        Returns (kept_calls, violation_bool, violation_msg).
+        """
+        kept, dropped_names = [], []
+        exec_taken = False
+        for call in (tool_calls or []):
+            name = str(call.get('name') or '')
+            canonical, exact = self._resolve_tool_tag(name, include_legacy=True)
+            if canonical and canonical != name:
+                log.warning(f"[ToolManager.enforce_single_exec_policy_native] "
+                            f"native tool name '{name}' corrected to '{canonical}'")
+                call = dict(call, name=canonical)
+            if canonical in self._exec_tool_keys:
+                if exec_taken:
+                    dropped_names.append(canonical)
+                    continue
+                exec_taken = True
+            kept.append(call)
+
+        if not dropped_names:
+            return kept, False, ""
+
+        with self._exec_violations_lock:
+            self.exec_violations += 1
+            _v = self.exec_violations
+        violation_msg = (
+            f"[POLICY] {len(dropped_names)} extra code-execution tool call(s) were "
+            f"dropped ({', '.join(dropped_names)}). Only the first call was kept. "
+            f"Total violations this session: {_v}."
+        )
+        log.warning(f"[ToolManager.enforce_single_exec_policy_native] ✗ POLICY "
+                    f"VIOLATION #{_v} — dropping {dropped_names}")
+        self.approval_signal.system_message.emit(
+            f"**NOTICE:** The model made {len(dropped_names)} extra code-execution "
+            f"tool call(s) in one response ({', '.join(dropped_names)}). Only the "
+            f"first call was kept and executed — the rest were dropped so the "
+            f"observe/act loop stays one step at a time. The model has been "
+            f"reminded to make one action call per turn.\n"
+            f"Total violations this session: {_v}"
+        )
+        return kept, True, violation_msg
 
     # ─────────────────────────────────────────────────────────────────────────
     # Supervised execution helpers

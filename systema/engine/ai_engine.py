@@ -211,6 +211,30 @@ class AIEngine:
         log.info(f"[AIEngine._on_skills_changed] System prompt regenerated | "
                  f"length={len(self.system_prompt)} chars")
 
+    def _neutralize_tool_fences(self, text: str) -> str:
+        """Rewrite compat tool-call fences inside skill docs into plain code
+        fences with a note line. In NATIVE mode the model must never SEE
+        fence-call syntax — skills documenting compat examples otherwise teach
+        it to write fences in free text instead of making real tool calls
+        (the meta-control skill triggered exactly that)."""
+        out = []
+        for line in text.split('\n'):
+            m = re.match(r'^(`{3,})[ \t]*([A-Za-z][\w-]*)[ \t]*(?::[ \t]*(.*))?[ \t]*$', line)
+            if m:
+                canonical, _ = self.tool_manager._resolve_tool_tag(
+                    m.group(2), include_legacy=True)
+                if canonical:
+                    ann = (m.group(3) or '').strip().strip('[]').strip()
+                    note = (f"(example — run via the {canonical} tool: {ann})"
+                            if ann else f"(example — run via the {canonical} tool)")
+                    lang = 'python' if canonical in ('python_interpreter',
+                                                     'execute_code') else 'text'
+                    out.append(note)
+                    out.append(f"{m.group(1)}{lang}")
+                    continue
+            out.append(line)
+        return '\n'.join(out)
+
     def _render_active_skills(self) -> str:
         """Build the skill injection block appended to the system prompt.
 
@@ -220,6 +244,10 @@ class AIEngine:
 
             SKILL: another-skill
             <instructions — frontmatter stripped>
+
+        In native tool-calling mode, compat fence examples inside skill docs
+        are neutralized (see _neutralize_tool_fences) and a banner tells the
+        model the fence syntax is reference-only.
         """
         active = self.skill_manager.get_loaded_skills() if self.skill_manager else {}
         if not active:
@@ -227,14 +255,23 @@ class AIEngine:
 
         from systema.agents.skill_manager import SkillManager
 
+        native = self._tool_mode() == 'native'
         lines = [
             "",
             "═══════════════════════════════════════════════════════════",
             "LOADED SKILLS (currently active)",
             "═══════════════════════════════════════════════════════════",
         ]
+        if native:
+            lines.append(
+                "NOTE: You are in NATIVE tool-calling mode. Any fenced tool "
+                "syntax inside skill docs is the compat format, shown for "
+                "reference only — NEVER write fences like that in your replies. "
+                "Invoke tools exclusively through native tool calls.")
         for name, content in active.items():
             instructions = SkillManager.strip_frontmatter(content)
+            if native:
+                instructions = self._neutralize_tool_fences(instructions)
             lines.append(f"\nSKILL: {name}")
             lines.append(instructions)
         lines.append("═══════════════════════════════════════════════════════════")
@@ -544,9 +581,13 @@ class AIEngine:
                         content = next(_it, '(no output)')
                     tool_results.append({'id': c['id'], 'name': c['name'],
                                          'content': content})
+                # _assistant_text is fence-stripped defensively: sessions saved
+                # BEFORE the native-purity fix can carry imitation fences the
+                # model wrote in free text — those must never go back out.
                 neutral.append({
                     'role': 'assistant',
-                    'content': (m.get('_assistant_text') or '').strip() or None,
+                    'content': self.tool_manager.strip_tool_calls(
+                        m.get('_assistant_text') or '').strip() or None,
                     'tool_calls': [{'id': c['id'], 'name': c['name'],
                                     'arguments': c.get('arguments') or {}} for c in calls],
                 })
@@ -563,9 +604,13 @@ class AIEngine:
                 neutral.append({'role': 'user', 'content': content})
             elif role == 'system':
                 # A system entry not consumed as a tool result → inject as a user
-                # turn (mirrors _extract_system_and_convo's handling).
+                # turn (mirrors _extract_system_and_convo's handling). Fence-
+                # stripped: old compat instructional prompts stored in history
+                # contain fence EXAMPLES that must not reach the native channel.
                 if content.strip():
-                    neutral.append({'role': 'user', 'content': f'[SYSTEM]: {content}'})
+                    content = self.tool_manager.strip_tool_calls(content)
+                    if content.strip():
+                        neutral.append({'role': 'user', 'content': f'[SYSTEM]: {content}'})
             i += 1
         return system_prompt, neutral
 
@@ -688,6 +733,31 @@ class AIEngine:
 
         text = (result.get('text') or "").strip()
         raw_calls = result.get('tool_calls') or []
+        # ── Native purity: sanitize at the mouth ──────────────────────────────
+        # The model's free text must carry NO fence-shaped tool syntax. Any
+        # imitation (learned from compat-era docs or old history) is stripped
+        # HERE, before storage/display/metadata, so it can never be executed
+        # and never leaks back to the API on later turns.
+        if text:
+            _clean = self.tool_manager.strip_tool_calls(text).strip()
+            if _clean != text:
+                log.warning(f"[AIEngine._provider_script_native] Model free text "
+                            f"contained fence-style tool syntax — stripped "
+                            f"({len(text)} → {len(_clean)} chars); native calls "
+                            f"are the only tool channel")
+                self.tool_manager.approval_signal.system_message.emit(
+                    "**NOTICE:** The model wrote fence-style tool text in native "
+                    "mode. That text was ignored — native tool calls are the only "
+                    "tool channel in this mode.")
+                text = _clean
+        # ── Single-exec policy on the STRUCTURED calls (never on text) ────────
+        # Keep the first exec call, pass non-exec calls through, drop extras.
+        # Runs BEFORE fences/metadata are built, so the stored compat view, the
+        # native metadata and what actually executes all agree.
+        _violated = False
+        if raw_calls:
+            raw_calls, _violated, _ = \
+                self.tool_manager.enforce_single_exec_policy_native(raw_calls)
         # Debug observability: record what actually went over the wire this turn
         # (the dialect-shaped payload + the raw normalized result) and the tool
         # transport, so the Debug window can show native-vs-plain + the structure.
@@ -701,6 +771,7 @@ class AIEngine:
         if raw_calls:
             self._pending_native = {
                 'text': text,
+                'violation': _violated,
                 'tool_calls': [
                     {'id': c.get('id') or na._new_call_id(),
                      'name': c.get('name', ''),
@@ -770,6 +841,10 @@ class AIEngine:
         # compat or text-only turn leaves it None so no stale native metadata
         # attaches to the next assistant entry.
         self._pending_native = None
+        # Fresh per turn as well: the manual provider returns before the
+        # custom-script labeling below, and the response processors route on
+        # this flag — a stale 'native' from a previous turn must never leak.
+        self.last_tool_transport = 'compat'
 
         log.debug(f"[AIEngine._call_provider] script='{self.custom_script_path}' | "
                   f"images={len(images) if images else 0}")
@@ -1005,8 +1080,365 @@ class AIEngine:
             return f"Error getting explanation: {str(e)}"
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # RESPONSE PROCESSING  (unchanged — already unified)
+    # RESPONSE PROCESSING
+    # Two front-ends, one pipeline: native turns dispatch their STRUCTURED
+    # tool calls (never fence parsing); compat turns run the fence machinery.
+    # Both feed the same handlers and return the same result-dict shape.
     # ═══════════════════════════════════════════════════════════════════════════
+
+    def _native_text_turn(self, ai_text, display, in_work: bool,
+                          session_name=None, appended: bool = False):
+        """A native turn that ends with plain text (no exec call): a normal
+        chat reply, or — mid-work — the finish report. Never fence-parsed;
+        the text was already sanitized at the provider mouth."""
+        if not in_work:
+            if not appended:
+                self._append_assistant(ai_text)
+            _mc = getattr(self, '_pending_memory_widget', None)
+            self._pending_memory_widget = None  # consume — prevent stale reuse
+            return {
+                'response': display,
+                'has_work_call': False,
+                'is_working': False,
+                'thinking': False,
+                'session_name': session_name,
+                'memory_context': _mc,
+            }
+
+        # Work mode: a reply with no exec call IS the finish report.
+        log.info("[AIEngine._native_text_turn] No exec call — work finished "
+                 "(skills persist)")
+        self.tool_manager.work.is_working = False
+        self._slim_last_work_ping()
+
+        if not display or not display.strip():
+            # Empty finish → ask for a real summary (same guard as compat).
+            log.warning("[AIEngine._native_text_turn] Finished work with an "
+                        "empty reply — injecting summary reminder")
+            if not appended and ai_text and ai_text.strip():
+                self._append_assistant(ai_text)
+            self.conversation_history.append(
+                {'role': 'system', 'content': EMPTY_EXIT_SUMMARY_PROMPT})
+            ai_text2 = self._call_provider()
+            if ai_text2:
+                _r = self._process_ai_response(ai_text2)
+                if session_name and not _r.get('session_name'):
+                    _r['session_name'] = session_name
+                return _r
+            return {
+                'response': "",
+                'has_work_call': False,
+                'is_working': False,
+                'thinking': False,
+                'session_name': session_name,
+                'finished_working': True,
+            }
+
+        if not appended:
+            self._append_assistant(ai_text)
+        return {
+            'response': display,
+            'has_work_call': False,
+            'is_working': False,
+            'thinking': False,
+            'session_name': session_name,
+            'finished_working': True,
+        }
+
+    def _process_native_response(self, ai_text, in_work: bool):
+        """Process a NATIVE-transport turn from its structured tool calls —
+        the native counterpart of _process_ai_response / _process_work_response.
+
+        NO fence parsing happens here: the provider's tool_calls (stashed in
+        self._pending_native by _provider_script_native) are dispatched
+        straight to the same handlers the compat parsers feed
+        (run_python_interpreter, run_read_file/…, the skill manager, session
+        naming). The reconstructed fence text in ai_text is STORAGE/DISPLAY
+        ONLY — it is never parsed, so fence-shaped text can never execute in
+        native mode, and the compat guard rails (fence recovery, typo
+        tolerance, malformed-step retry) stay compat-only. Returns the same
+        result-dict shape as the compat processors, so the work loop and the
+        UI see no difference.
+        """
+        tm = self.tool_manager
+        pend = self._pending_native or {}
+        calls = pend.get('tool_calls') or []
+        text = (pend.get('text') or '').strip()
+        log.info(f"[AIEngine._process_native_response] ── "
+                 f"{'work' if in_work else 'chat'} turn | "
+                 f"calls={[c.get('name') for c in calls]} | "
+                 f"text_len={len(text)} ──")
+
+        # Violation on the structured calls (extras already pruned by
+        # _provider_script_native) → teach the model. Same placement as
+        # compat: the correction precedes the stored assistant turn.
+        if pend.get('violation'):
+            from systema.engine.prompts.global_instructions import (
+                EXEC_CODE_TOOLCALL_VIOLATION_PROMPT_NATIVE)
+            self.conversation_history.append({
+                'role': 'system',
+                'content': EXEC_CODE_TOOLCALL_VIOLATION_PROMPT_NATIVE})
+
+        if not in_work and self.tool_execution_lockout:
+            self._append_assistant(ai_text)
+            return {
+                'response': ai_text,
+                'has_work_call': False,
+                'is_working': False,
+                'thinking': False,
+                'session_name': None,
+            }
+
+        # ── Plain text turn (no structured calls) ────────────────────────────
+        if not calls:
+            return self._native_text_turn(ai_text, ai_text, in_work)
+
+        # ── then_tool chaining (single-call dialects): hoist the chained code
+        # into its own synthetic call — the structured twin of the fence
+        # expansion tool_calls_to_fences already applied to ai_text. Skipped
+        # when a parallel exec call exists (one exec per turn).
+        has_exec = any(c.get('name') in tm._exec_tool_keys for c in calls)
+        for c in list(calls):
+            if c.get('name') not in ('set_session_name', 'load_skill'):
+                continue
+            args = c.get('arguments') or {}
+            then_raw = str(args.get('then_tool') or '')
+            if not then_raw:
+                continue
+            then_name = tm._tool_keys_norm.get(tm._norm_key(then_raw))
+            then_code = args.get('then_code') or ''
+            if (then_name in tm._exec_tool_keys and isinstance(then_code, str)
+                    and then_code.strip() and not has_exec):
+                calls.append({'id': na._new_call_id(), 'name': then_name,
+                              'arguments': {'code': then_code,
+                                            'annotation': args.get('then_annotation', '')}})
+                has_exec = True
+                log.info(f"[AIEngine._process_native_response] '{c.get('name')}' "
+                         f"chained a '{then_name}' sub-tool call")
+
+        # Dispatch order: non-exec first, the (single) exec call last. The
+        # result entries appended during dispatch then land in history in the
+        # same order _build_native_convo's positional pairing consumes them
+        # (the exec observation arrives later, via the next work ping).
+        calls.sort(key=lambda c: 1 if c.get('name') in tm._exec_tool_keys else 0)
+        pend['tool_calls'] = calls
+
+        # set_session_name: extract the name; the call stays in the metadata
+        # (pairing feeds it a synthetic '(session named)' result).
+        session_name = None
+        for c in calls:
+            if c.get('name') == 'set_session_name' and not session_name:
+                session_name = tm.native_args_to_spec(
+                    'set_session_name', c.get('arguments')) or None
+                if session_name:
+                    log.info(f"[AIEngine._process_native_response] "
+                             f"set_session_name → '{session_name}'")
+                    self.log(f"Set session name call detected: {session_name}")
+
+        # Store the assistant turn ONCE, up front (fences for the compat view
+        # + native metadata). Result entries appended below FOLLOW it — which
+        # is exactly where _build_native_convo's pairing looks for them.
+        entry = self._append_assistant(ai_text)
+
+        loaded_skill = None
+        unloaded_skill = None
+        unknown_call = False
+        for call in calls:
+            name = call.get('name') or ''
+            args = call.get('arguments') or {}
+
+            if name == 'set_session_name':
+                continue  # extracted above; runs silently
+
+            if name == 'load_skill':
+                from systema.engine.prompts.global_instructions import (
+                    SKILL_ALREADY_LOADED_PROMPT, SKILL_LOADED_WORK_PROMPT_NATIVE)
+                skill_name = tm.native_args_to_spec('load_skill', args)
+                if self.skill_manager:
+                    success, msg = self.skill_manager.load_skill(skill_name)
+                else:
+                    success, msg = False, "ERROR: No skill manager"
+                if not success:
+                    log.warning(f"[AIEngine._process_native_response] "
+                                f"load_skill failed: {msg}")
+                    self.conversation_history.append({
+                        'role': 'system',
+                        'content': SKILL_ALREADY_LOADED_PROMPT.format(
+                            skill_name=skill_name, reason=msg)})
+                    return {
+                        'response': f"⚠ {msg}",
+                        'has_work_call': in_work,
+                        'is_working': in_work,
+                        'thinking': in_work,
+                        'session_name': session_name,
+                        'skill_loaded': None,
+                    }
+                if in_work:
+                    work_output = tm.work.last_output or "No previous output"
+                else:
+                    tm.work.is_working = True
+                    tm.work.last_tool = 'skill'
+                    work_output = f"Skill '{skill_name}' loaded."
+                    tm.work.last_output = work_output
+                self.conversation_history.append({
+                    'role': 'system',
+                    'content': SKILL_LOADED_WORK_PROMPT_NATIVE.format(
+                        skill_name=skill_name, work_output=work_output)})
+                loaded_skill = skill_name
+                log.info(f"[AIEngine._process_native_response] Skill "
+                         f"'{skill_name}' loaded")
+                continue
+
+            if name == 'unload_skill':
+                from systema.engine.prompts.global_instructions import (
+                    SKILL_NOT_LOADED_PROMPT, SKILL_UNLOADED_WORK_PROMPT_NATIVE)
+                skill_name = tm.native_args_to_spec('unload_skill', args)
+                if self.skill_manager:
+                    success, msg = self.skill_manager.unload_skill(skill_name)
+                else:
+                    success, msg = False, "ERROR: No skill manager"
+                if not success:
+                    log.warning(f"[AIEngine._process_native_response] "
+                                f"unload_skill failed: {msg}")
+                    self.conversation_history.append({
+                        'role': 'system',
+                        'content': SKILL_NOT_LOADED_PROMPT.format(
+                            skill_name=skill_name, reason=msg)})
+                    return {
+                        'response': f"⚠ {msg}",
+                        'has_work_call': in_work,
+                        'is_working': in_work,
+                        'thinking': in_work,
+                        'session_name': session_name,
+                        'skill_unloaded': None,
+                    }
+                if in_work:
+                    work_output = tm.work.last_output or "No previous output"
+                else:
+                    tm.work.is_working = True
+                    tm.work.last_tool = 'skill'
+                    work_output = f"Skill '{skill_name}' unloaded."
+                    tm.work.last_output = work_output
+                self.conversation_history.append({
+                    'role': 'system',
+                    'content': SKILL_UNLOADED_WORK_PROMPT_NATIVE.format(
+                        skill_name=skill_name, work_output=work_output)})
+                unloaded_skill = skill_name
+                log.info(f"[AIEngine._process_native_response] Skill "
+                         f"'{skill_name}' unloaded")
+                continue
+
+            if name == 'python_interpreter':
+                code = tm.native_args_to_spec('python_interpreter', args)
+                if code.strip().lower() in ('exit', ''):
+                    # Bare/empty call — never executed; fold into the finish
+                    # path (same safety net as compat).
+                    log.warning("[AIEngine._process_native_response] Bare exit/"
+                                "empty python_interpreter call — finishing")
+                    tm.work.is_working = False
+                    r = self._native_text_turn(ai_text, text, in_work,
+                                               session_name=session_name,
+                                               appended=True)
+                    r.setdefault('finished_working', True)
+                    return r
+                log.debug("[AIEngine._process_native_response] → run_python_interpreter()")
+                # Set BEFORE the run so interrupts see active work.
+                tm.work.is_working = True
+                self._malformed_step_retries = 0
+                work_output = tm.run_python_interpreter(code)
+                tm.work.last_output = work_output
+                tm.work.last_tool = 'interpreter'
+                return {
+                    'response': text if text else "Working...",
+                    'has_work_call': True,
+                    'is_working': True,
+                    'thinking': True,
+                    'code': code,
+                    'session_name': session_name,
+                    'skill_loaded': loaded_skill,
+                    'skill_unloaded': unloaded_skill,
+                }
+
+            if name in ('read_file', 'edit_file', 'write_file', 'grep'):
+                spec = tm.native_args_to_spec(name, args)
+                r = self._run_file_tool_step(name, spec, ai_text, session_name,
+                                             text, entry=entry)
+                r['skill_loaded'] = loaded_skill
+                r['skill_unloaded'] = unloaded_skill
+                return r
+
+            if tm._legacy_keys_norm.get(tm._norm_key(name)):
+                # A retired tool called natively — never run; teach + follow
+                # up (chat) or keep the loop alive (work), mirroring compat.
+                log.warning(f"[AIEngine._process_native_response] Retired "
+                            f"'{name}' called natively — NOT run")
+                tm.approval_signal.system_message.emit(
+                    "**NOTICE:** The model attempted the retired `execute_code` "
+                    "tool; the call was NOT run. It has been told to use "
+                    "python_interpreter.")
+                from systema.engine.prompts.global_instructions import (
+                    EXECUTE_CODE_RETIRED_PROMPT_NATIVE)
+                self.conversation_history.append({
+                    'role': 'system',
+                    'content': EXECUTE_CODE_RETIRED_PROMPT_NATIVE})
+                if in_work:
+                    return {
+                        'response': text or "Working...",
+                        'has_work_call': True,
+                        'is_working': True,
+                        'thinking': True,
+                        'session_name': session_name,
+                    }
+                _followup = self._call_provider()
+                if _followup:
+                    _r = self._process_ai_response(_followup)
+                    if session_name and not _r.get('session_name'):
+                        _r['session_name'] = session_name
+                    return _r
+                return {
+                    'response': text,
+                    'has_work_call': False,
+                    'is_working': False,
+                    'thinking': False,
+                    'session_name': session_name,
+                }
+
+            # Unknown tool: feed the model a corrective result instead of
+            # silently dropping its intent (pairing serves it as this call's
+            # tool result on the next turn).
+            unknown_call = True
+            log.warning(f"[AIEngine._process_native_response] Unknown native "
+                        f"tool '{name}' — not run")
+            self.conversation_history.append({
+                'role': 'system',
+                'content': (f"Tool '{name}' does not exist and was NOT run. "
+                            f"Available tools: {', '.join(tm._tool_keys)}.")})
+
+        # No exec call ran this turn.
+        if loaded_skill or unloaded_skill:
+            resp = (f"Loading skill: {loaded_skill}..." if loaded_skill
+                    else f"Unloading skill: {unloaded_skill}...")
+            return {
+                'response': resp,
+                'has_work_call': True,
+                'is_working': True,
+                'thinking': True,
+                'session_name': session_name,
+                'skill_loaded': loaded_skill,
+                'skill_unloaded': unloaded_skill,
+            }
+        if unknown_call and in_work:
+            # Keep the loop alive so the model can retry off the correction.
+            return {
+                'response': "Working...",
+                'has_work_call': True,
+                'is_working': True,
+                'thinking': True,
+                'session_name': session_name,
+            }
+        # Naming-only (or unknown-only, in chat) turn: the free text is the reply.
+        return self._native_text_turn(ai_text, text, in_work,
+                                      session_name=session_name, appended=True)
 
     def _process_ai_response(self, ai_text):
         """
@@ -1020,6 +1452,12 @@ class AIEngine:
         log.debug(f"[AIEngine._process_ai_response] Preview: '{ai_text[:120].replace(chr(10), '↵')}'")
         self._clear_memory_context()
         self.last_raw_response = ai_text
+
+        # ── Native transport → structured dispatch, never fence parsing ──────────
+        # Exact match on 'native': the 'native→compat (…)' fallback label means
+        # the turn traveled as fenced text and must run the compat machinery.
+        if getattr(self, 'last_tool_transport', 'compat') == 'native':
+            return self._process_native_response(ai_text, in_work=False)
 
         # ── Unclosed-fence recovery ────────────────────────────────────────────────
         # If the model forgot the closing ``` on a tool call, auto-close it so the
@@ -1318,46 +1756,62 @@ class AIEngine:
 
     def _dispatch_file_tool(self, ai_text, session_name):
         """Detect and run a file-subsystem call (read_file / edit_file /
-        write_file). These are work-mode steps exactly like python_interpreter:
-        the observation feeds the next ping and the loop stays alive.
-        Returns the work-step result dict, or None when no file call."""
+        write_file / grep) from COMPAT fence text. These are work-mode steps
+        exactly like python_interpreter: the observation feeds the next ping
+        and the loop stays alive. Returns the work-step result dict, or None
+        when no file call."""
         tm = self.tool_manager
-        for tool, parse, run in (
-                ('read_file', tm.parse_read_file, tm.run_read_file),
-                ('edit_file', tm.parse_edit_file, tm.run_edit_file),
-                ('write_file', tm.parse_write_file, tm.run_write_file),
-                ('grep', tm.parse_grep, tm.run_grep)):
+        for tool, parse in (
+                ('read_file', tm.parse_read_file),
+                ('edit_file', tm.parse_edit_file),
+                ('write_file', tm.parse_write_file),
+                ('grep', tm.parse_grep)):
             parsed = parse(ai_text)
             if not parsed:
                 continue
             spec, remaining = parsed
-            log.info(f"[AIEngine._dispatch_file_tool] {tool} call | "
-                     f"path='{spec.get('path', '')}'")
-            # Set BEFORE the run so interrupts see active work (same contract
-            # as python_interpreter).
-            tm.work.is_working = True
-            observation = run(spec)
-            tm.work.last_output = observation
-            tm.work.last_tool = tool
-            self._malformed_step_retries = 0
-            entry = self._append_assistant(ai_text)
-            jid = getattr(tm, 'last_file_op_journal_id', None)
-            if tool not in ('read_file', 'grep'):
-                # Session-persisted record: the AI can see what it edited on
-                # reload, and the restore UI maps sessions to journal entries.
-                entry['_file_op'] = {'tool': tool, 'path': spec.get('path', ''),
-                                     'journal_id': jid}
-                tm.last_file_op_journal_id = None
-            self._inject_pending_format_reminder()
             visible = tm.strip_tool_calls(remaining).strip() if remaining else ""
-            return {
-                'response': visible if visible else "Working...",
-                'has_work_call': True,
-                'is_working': True,
-                'thinking': True,
-                'session_name': session_name,
-            }
+            return self._run_file_tool_step(tool, spec, ai_text, session_name,
+                                            visible)
         return None
+
+    def _run_file_tool_step(self, tool, spec, ai_text, session_name, visible,
+                            entry=None):
+        """Shared post-extraction body of a file-subsystem step — fed by both
+        the compat parser front-end (_dispatch_file_tool) and the native
+        front-end (_process_native_response).
+
+        entry: the already-stored assistant history entry (the native path
+        stores it up front); None → this method stores it (compat path)."""
+        tm = self.tool_manager
+        run = {'read_file': tm.run_read_file, 'edit_file': tm.run_edit_file,
+               'write_file': tm.run_write_file, 'grep': tm.run_grep}[tool]
+        log.info(f"[AIEngine._run_file_tool_step] {tool} call | "
+                 f"path='{spec.get('path', '')}'")
+        # Set BEFORE the run so interrupts see active work (same contract
+        # as python_interpreter).
+        tm.work.is_working = True
+        observation = run(spec)
+        tm.work.last_output = observation
+        tm.work.last_tool = tool
+        self._malformed_step_retries = 0
+        if entry is None:
+            entry = self._append_assistant(ai_text)
+        jid = getattr(tm, 'last_file_op_journal_id', None)
+        if tool not in ('read_file', 'grep'):
+            # Session-persisted record: the AI can see what it edited on
+            # reload, and the restore UI maps sessions to journal entries.
+            entry['_file_op'] = {'tool': tool, 'path': spec.get('path', ''),
+                                 'journal_id': jid}
+            tm.last_file_op_journal_id = None
+        self._inject_pending_format_reminder()
+        return {
+            'response': visible if visible else "Working...",
+            'has_work_call': True,
+            'is_working': True,
+            'thinking': True,
+            'session_name': session_name,
+        }
 
     def _inject_pending_format_reminder(self):
         """A parse auto-fix queued a format reminder — deliver it to the model
@@ -1400,6 +1854,20 @@ class AIEngine:
             return False
         return any(marker in text for marker in ('import ', 'def ', '=', '('))
 
+    def _slim_last_work_ping(self):
+        """Slim the last live work-mode ping down to its output-only form on
+        work exit — it was never slimmed by continue_work() because no next
+        ping came after it."""
+        for entry in reversed(self.conversation_history):
+            if entry.get('role') == 'system' and entry.get('_is_work_prompt'):
+                prev_output = entry.get('_work_output', '')
+                entry['content'] = WORK_MODE_OUTPUT_ONLY_PROMPT.format(
+                    work_output=prev_output)
+                del entry['_is_work_prompt']
+                log.debug("[AIEngine._slim_last_work_ping] Last work-mode ping "
+                          "slimmed on exit")
+                break
+
     def _process_work_response(self, ai_text):
         """Process AI response while in work mode."""
         log.info(f"[AIEngine._process_work_response] Processing work mode response | "
@@ -1407,6 +1875,10 @@ class AIEngine:
         log.debug(f"[AIEngine._process_work_response] Preview: "
                   f"'{ai_text[:100].replace(chr(10), '↵')}'")
         self.last_raw_response = ai_text
+
+        # ── Native transport → structured dispatch, never fence parsing ──────────
+        if getattr(self, 'last_tool_transport', 'compat') == 'native':
+            return self._process_native_response(ai_text, in_work=True)
 
         # ── Unclosed-fence recovery ────────────────────────────────────────────────
         ai_text, _recovered_tool = self.tool_manager.recover_unclosed_tool_fence(ai_text)
@@ -1424,10 +1896,13 @@ class AIEngine:
             from systema.engine.prompts.global_instructions import (
                 EXEC_CODE_TOOLCALL_VIOLATION_PROMPT,
                 EXEC_CODE_TOOLCALL_VIOLATION_PROMPT_NATIVE)
-            self._pending_exec_violation_prompt = (
-                EXEC_CODE_TOOLCALL_VIOLATION_PROMPT_NATIVE
-                if self._tool_mode() == 'native'
-                else EXEC_CODE_TOOLCALL_VIOLATION_PROMPT)
+            _viol = (EXEC_CODE_TOOLCALL_VIOLATION_PROMPT_NATIVE
+                     if self._tool_mode() == 'native'
+                     else EXEC_CODE_TOOLCALL_VIOLATION_PROMPT)
+            # Appended directly — the old _pending_exec_violation_prompt stash
+            # was never consumed anywhere, so work-mode violations silently
+            # vanished instead of teaching the model.
+            self.conversation_history.append({'role': 'system', 'content': _viol})
         # ──────────────────────────────────────────────────────────────────────────
 
         log.debug("[AIEngine._process_work_response] Checking for consecutive python_interpreter call...")
@@ -1567,14 +2042,7 @@ class AIEngine:
                 self.tool_manager.work.is_working = False
 
                 # Slim down the last work-mode ping now that work mode is exiting.
-                # It was never slimmed by continue_work() because no next ping came after it.
-                for entry in reversed(self.conversation_history):
-                    if entry.get('role') == 'system' and entry.get('_is_work_prompt'):
-                        prev_output = entry.get('_work_output', '')
-                        entry['content'] = WORK_MODE_OUTPUT_ONLY_PROMPT.format(work_output=prev_output)
-                        del entry['_is_work_prompt']
-                        log.debug("[AIEngine._process_work_response] Last work-mode ping slimmed on exit")
-                        break
+                self._slim_last_work_ping()
 
                 if ai_text and ai_text.strip():
                     self._append_assistant(ai_text)
@@ -1699,14 +2167,7 @@ class AIEngine:
             self.tool_manager.work.is_working = False
 
             # Slim down the last work-mode ping now that work mode is exiting.
-            # It was never slimmed by continue_work() because no next ping came after it.
-            for entry in reversed(self.conversation_history):
-                if entry.get('role') == 'system' and entry.get('_is_work_prompt'):
-                    prev_output = entry.get('_work_output', '')
-                    entry['content'] = WORK_MODE_OUTPUT_ONLY_PROMPT.format(work_output=prev_output)
-                    del entry['_is_work_prompt']
-                    log.debug("[AIEngine._process_work_response] Last work-mode ping slimmed on exit")
-                    break
+            self._slim_last_work_ping()
 
             # ── Empty-finish guard ── the visible reply (no tool call) IS the
             # report; an empty one means the user sees nothing, so prompt for a

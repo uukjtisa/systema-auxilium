@@ -8,6 +8,7 @@ HANDLES ALL CODE FROM CODE EXECUTION TOOL CALLS
 import sys
 import os
 import io
+import time
 import traceback
 import code
 import threading
@@ -115,6 +116,12 @@ class PythonInterpreter:
         self._live_stderr = None
         # Thread id of the code currently running — lets another thread interrupt it.
         self._current_exec_tid = None
+        # Interrupt escalation state: interrupt_current() sets the event; the
+        # execute() supervisor loop watches it and escalates (async-exc →
+        # child-process kill → abandon) when the exec thread is blocked in a
+        # C call the async exception can't reach.
+        self._interrupt_event = threading.Event()
+        self._interrupt_time = 0.0
         log.info("[PythonInterpreter.__init__] PythonInterpreter ready — "
                  "execution_count=0, interpreter attached")
 
@@ -122,14 +129,66 @@ class PythonInterpreter:
         """Raise KeyboardInterrupt in the currently-executing code thread, so a
         running work-mode execution stops while preserving its partial output.
         Returns True if an interrupt was delivered, False if nothing was running.
-        Safe to call from another thread (e.g. the GUI)."""
+        Safe to call from another thread (e.g. the GUI).
+
+        The async exception only lands when the thread runs Python bytecode —
+        code blocked in a C call (subprocess.run, time.sleep, sockets) never
+        sees it. The execute() supervisor watches _interrupt_event and
+        escalates: kill child processes spawned by the step (unblocks a
+        subprocess wait so the pending interrupt fires), then abandon the
+        thread + reset the interpreter as a last resort."""
         tid = self._current_exec_tid
         if tid:
             log.warning(f"[PythonInterpreter.interrupt_current] Interrupting exec thread {tid}")
+            self._interrupt_time = time.monotonic()
+            self._interrupt_event.set()
             self._async_raise(tid, KeyboardInterrupt)
             return True
         log.debug("[PythonInterpreter.interrupt_current] No execution in progress")
         return False
+
+    @staticmethod
+    def _snapshot_children():
+        """PIDs of this process's children before a step runs — the baseline
+        for _kill_new_children. None when psutil is unavailable."""
+        try:
+            import psutil
+            return {p.pid for p in psutil.Process().children(recursive=True)}
+        except Exception:
+            return None
+
+    @staticmethod
+    def _kill_new_children(before):
+        """Terminate child processes spawned since the step started. A
+        C-blocked subprocess wait is the #1 reason an interrupt can't land —
+        killing the child returns the wait, and the pending KeyboardInterrupt
+        fires on the next bytecode instruction. May also catch an unrelated
+        process the app spawned mid-step (rare); an unstoppable step is the
+        worse failure."""
+        try:
+            import psutil
+            new = [p for p in psutil.Process().children(recursive=True)
+                   if before is None or p.pid not in before]
+            if not new:
+                return 0
+            log.warning(f"[PythonInterpreter._kill_new_children] Terminating "
+                        f"{len(new)} child process(es) spawned by the "
+                        f"interrupted step: {[p.pid for p in new]}")
+            for p in new:
+                try:
+                    p.terminate()
+                except Exception:
+                    pass
+            _gone, alive = psutil.wait_procs(new, timeout=1.5)
+            for p in alive:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+            return len(new)
+        except Exception as e:
+            log.warning(f"[PythonInterpreter._kill_new_children] skipped: {e}")
+            return 0
 
     def peek_live_output(self) -> str:
         """Best-effort snapshot of the currently-executing code's stdout+stderr.
@@ -199,16 +258,23 @@ class PythonInterpreter:
         log.debug(f"[PythonInterpreter.execute] Code preview: '{code_preview}' "
                   f"| total chars: {len(code_str)}")
 
-        # ── If no timeout, run inline (original fast path) ────────────────────
-        if timeout is None or not callable(timeout_callback):
-            return self._execute_inline(code_str)
-
-        # ── Timed execution via worker thread ─────────────────────────────────
+        # ── Supervised execution via worker thread ────────────────────────────
+        # ALWAYS supervised (the old no-timeout path ran inline on the calling
+        # thread, which made a user interrupt powerless against code blocked in
+        # a C call — the async KeyboardInterrupt never landed and nothing else
+        # could unblock it). The supervisor watches for:
+        #   • completion (done_event),
+        #   • the optional timeout (extend-or-kill via timeout_callback),
+        #   • a user interrupt (escalation: the already-delivered async-exc →
+        #     kill child processes spawned by the step → abandon the thread
+        #     and reset the interpreter).
         stdout_capture = io.StringIO()
         stderr_capture = io.StringIO()
         result_holder  = {'error': None}
         done_event = threading.Event()
         exec_exception = []
+        self._interrupt_event.clear()
+        children_before = self._snapshot_children()
 
         def _run():
             try:
@@ -228,36 +294,57 @@ class PythonInterpreter:
         exec_thread.start()
         thread_ident = exec_thread.ident
 
-        remaining = timeout
+        timed = timeout is not None and callable(timeout_callback)
+        deadline = (time.monotonic() + timeout) if timed else None
         timed_out = False
+        abandoned = False
+        interrupt_children_killed = False
 
-        while remaining > 0:
-            done = done_event.wait(timeout=remaining)
-            if done:
-                timed_out = False
-                break
-            # Timeout hit — ask the callback what to do
-            timed_out = True
-            log.warning(f"[PythonInterpreter.execute] Execution #{self.execution_count} "
-                        f"timed out after {timeout}s")
-            decision = timeout_callback(thread_ident, done_event)
-            # If execution finished while the dialog was up, treat as normal completion
-            if done_event.is_set():
-                timed_out = False
-                log.info("[PythonInterpreter.execute] Execution completed during timeout dialog — normal result")
-                break
-            if decision is None:
-                decision = 0  # treat None as kill
-            if isinstance(decision, (int, float)) and decision > 0:
-                remaining = decision
-                log.info(f"[PythonInterpreter.execute] User extended by {decision}s")
-                continue
-            else:
+        while not done_event.wait(timeout=0.25):
+            now = time.monotonic()
+
+            # ── Interrupt escalation ─────────────────────────────────────────
+            if self._interrupt_event.is_set():
+                since = now - self._interrupt_time
+                if since > 1.5 and not interrupt_children_killed:
+                    # The async-exc hasn't landed — the thread is blocked in a
+                    # C call. Kill the step's child processes to unblock it.
+                    self._kill_new_children(children_before)
+                    interrupt_children_killed = True
+                elif since > 5.0:
+                    # Still blocked (sleep/socket/native code with no child to
+                    # kill). Abandon the daemon thread and reset the
+                    # interpreter — the user asked for a stop, they get one.
+                    log.warning("[PythonInterpreter.execute] Interrupted thread "
+                                "still blocked after escalation — abandoning it "
+                                "and resetting the interpreter")
+                    abandoned = True
+                    break
+
+            # ── Timeout handling (extend-or-kill, unchanged contract) ────────
+            if deadline is not None and now >= deadline:
+                timed_out = True
+                log.warning(f"[PythonInterpreter.execute] Execution #{self.execution_count} "
+                            f"timed out after {timeout}s")
+                decision = timeout_callback(thread_ident, done_event)
+                # If execution finished while the dialog was up, treat as normal completion
+                if done_event.is_set():
+                    timed_out = False
+                    log.info("[PythonInterpreter.execute] Execution completed during timeout dialog — normal result")
+                    break
+                if decision is None:
+                    decision = 0  # treat None as kill
+                if isinstance(decision, (int, float)) and decision > 0:
+                    deadline = time.monotonic() + decision
+                    timed_out = False
+                    log.info(f"[PythonInterpreter.execute] User extended by {decision}s")
+                    continue
                 # Kill the execution thread
                 log.warning(f"[PythonInterpreter.execute] User chose to kill execution "
                             f"#{self.execution_count}")
                 self._async_raise(thread_ident, KeyboardInterrupt)
-                # Give it a moment, then wait a bit more for cleanup
+                # Unblock a C-level wait too, then give cleanup a moment.
+                self._kill_new_children(children_before)
                 done_event.wait(timeout=3)
                 if not done_event.is_set():
                     log.warning("[PythonInterpreter.execute] Thread didn't stop after interrupt — "
@@ -266,6 +353,26 @@ class PythonInterpreter:
                 break
 
         # Collect results
+        if abandoned:
+            # Release the zombie's interrupt bookkeeping so the next execution
+            # starts clean (its finally skips cleanup once tid is cleared here).
+            self._current_exec_tid = None
+            self._live_stdout = None
+            self._live_stderr = None
+            self._interrupt_event.clear()
+            self.reset()
+            return {
+                'success': False,
+                'stdout': stdout_capture.getvalue(),
+                'stderr': stderr_capture.getvalue(),
+                'result': None,
+                'error': ("KeyboardInterrupt: execution interrupted by user "
+                          "(the code was blocked in a non-interruptible call; "
+                          "its thread was abandoned and the interpreter session "
+                          "was reset — variables from this session are gone)"),
+                'execution_count': self.execution_count,
+            }
+
         if timed_out:
             stderr_val = stderr_capture.getvalue()
             error_msg = f"Execution timed out after {timeout}s"
@@ -409,10 +516,13 @@ class PythonInterpreter:
                 sys.stdout.clear_capture()
             if hasattr(sys.stderr, 'clear_capture'):
                 sys.stderr.clear_capture()
-            # Stop publishing for live streaming — execution is finishing.
-            self._live_stdout = None
-            self._live_stderr = None
-            self._current_exec_tid = None
+            # Stop publishing — but only OUR OWN state. An abandoned zombie
+            # thread finishing late must never wipe the tid/buffers of a newer
+            # execution that started after it was given up on.
+            if self._current_exec_tid == threading.get_ident():
+                self._live_stdout = None
+                self._live_stderr = None
+                self._current_exec_tid = None
 
         stdout_val = stdout_capture.getvalue()
         stderr_val = stderr_capture.getvalue()

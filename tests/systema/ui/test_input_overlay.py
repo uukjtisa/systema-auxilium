@@ -61,9 +61,12 @@ def _build(qapp, cc_h=500, cc_w=600):
     stub = types.SimpleNamespace(
         input_container=ic, _input_card=combined, _chat_container=cc, chat_layout=cl,
         input_field=inp, _update_pinned_overlay=lambda: None,
+        _chat_layout_host=inner,  # keep the layout's widget alive (GC → dead layout)
     )
     stub._position_input_overlay = types.MethodType(
         ChatWindow._position_input_overlay, stub)
+    stub._position_input_overlay_settle = types.MethodType(
+        ChatWindow._position_input_overlay_settle, stub)
     # Wire growth exactly like the real app: synchronous re-anchor.
     inp.text_input.heightChanged.connect(lambda: stub._position_input_overlay())
     cc.show()
@@ -161,3 +164,22 @@ def test_overlay_reanchors_synchronously_on_growth(qapp):
     g = ic.geometry()
     assert g.y() + g.height() == cc.height()
     assert g.height() > 24
+
+
+def test_overlay_collapses_after_send_clear(qapp):
+    """Paste-long-then-send regression: send_message calls ResizableInput.clear(),
+    which shrinks the text box — the OVERLAY must collapse with it instead of
+    staying suspended mid-screen on stale layout caches."""
+    stub, cc, ic, inp = _build(qapp)
+    h0 = ic.geometry().height()
+
+    inp.text_input.setPlainText("line\n" * 12)   # auto-grow tall
+    qapp.processEvents()
+    assert ic.geometry().height() > h0
+
+    inp.clear()                                   # exactly what send_message calls
+    qapp.processEvents()
+
+    g = ic.geometry()
+    assert g.height() == h0                       # pill back to one line
+    assert g.y() + g.height() == cc.height()      # glued to the bottom again
