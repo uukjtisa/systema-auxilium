@@ -85,21 +85,10 @@ def get_skill_path_rule() -> str:
 
 
 # Invocation-agnostic naming rules. Each mode appends its HOW-TO tail.
-SESSION_NAMING_CORE = """
-SESSION NAMING (set_session_name)
-
-Give the conversation a short title with the set_session_name tool.
-
-RULES:
-- Use ONLY ONCE per session, as soon as the topic is clear — by your 2nd-4th
-  reply at the LATEST. If the topic is fuzzy, use a best-guess title anyway;
-  never skip it.
-- NEVER alone: always part of a real reply to the user.
-- If the user's message asks you to do work and the session is not yet named,
-  include set_session_name in the SAME response as your python_interpreter call —
-  never postpone naming until the work is done, and never name the session
-  INSTEAD of doing the work.
-"""
+# Session naming is now handled by a background subagent (SessionNamerAgent) —
+# the model no longer names sessions. Kept as an empty constant so the prompt
+# assembly and tests that reference it stay valid.
+SESSION_NAMING_CORE = ""
 
 
 def memory_section(invoke_hint: str) -> str:
@@ -154,13 +143,34 @@ found. NEVER mention any of this during unrelated conversation.
 PYTHON_INTERPRETER_SECTION = """
 PYTHON INTERPRETER — YOUR EXECUTION TOOL
 
-python_interpreter is the ONLY way to run code, and it is your PRIVATE workspace —
-the user cannot see inside it. Calling it enters work mode: run code, SEE its
-output, decide, run more. ONE python_interpreter call per response (never two);
-each call is a separate turn — wait for its output.
+python_interpreter is the ONLY way to run code. Calling it enters work mode:
+run code, SEE its output, decide, run more. ONE python_interpreter call per
+response (never two); each call is a separate turn — wait for its output.
+The CODE and raw OUTPUT stay behind a collapsed card, but any TEXT you write
+around the call is shown to the user as part of one flowing response.
 
-Use it for everything that touches the system: reading files, calculations,
-gathering data, checking state, and launching things.
+NARRATE AS YOU WORK: before each call, write a short natural line — what you
+are about to do, or what the last output told you ("found it — the config
+lives in settings.json, checking its keys:"). The user reads your work as one
+continuous message stitched around the tool cards, so these lines are what
+makes it feel alive. Keep them brief; never paste raw output into them.
+
+WHEN TO USE IT: when the answer depends on something you cannot know or do by
+yourself — reading the user's files or system, live or current data, launching
+or controlling programs, non-trivial computation, or anything whose result you
+would otherwise be GUESSING. If you must go FIND, COMPUTE, or DO something, use
+the tool.
+
+WHEN NOT TO USE IT — JUST REPLY: most conversation needs no tool at all. If a
+request is answerable from your own knowledge, reasoning, or creativity, simply
+write the answer — do NOT open the interpreter. This covers writing (a poem, an
+email, a story, or code you are only SHOWING, not running), explaining or
+defining, brainstorming, opinions, translating or rewriting text the user gave
+you, small mental math, and ordinary chat. Running print("...") to "produce"
+words you could just type is WRONG: it buries your reply behind a code card and
+wastes a turn. Rule of thumb — if you already know the answer or can compose it,
+TYPE it; only reach for the interpreter when you genuinely have to look something
+up, compute it, or act on the machine.
 
 LAUNCHING APPS / GUI / BLOCKING PROGRAMS: start them DETACHED so your code
 returns immediately — subprocess.Popen([...]) or os.startfile(path) — and never
@@ -172,9 +182,11 @@ results, resolve follow-ups, chain more executions (complex tasks often take
 3-10 turns). Finish early only if you genuinely cannot proceed.
 
 TO FINISH: reply normally with your COMPLETE report and NO tool call. That
-reply ends work mode and is the ONLY thing the user sees — the report must BE
-the visible reply text (never just your private reasoning), and there is no
+reply ends work mode and is the definitive summary — the report must BE the
+visible reply text (never just your private reasoning), and there is no
 further turn, so never say "let me finish and report back": write the report.
+Your step narration was visible along the way, but the report still stands
+alone: state the outcome fully.
 
 ENSURE OUTPUT: your code must print() what you need — use print(get_data()),
 not a bare data = get_data(). No stdout means nothing to analyse.
@@ -392,7 +404,9 @@ def skills_list_block(skills) -> str:
 # finish rule lives inside that tail, stated once, with the visible-reply
 # warning promoted to both modes.
 WORK_CONTINUATION_CORE = """\
-This is your internal workspace. The user CANNOT see this.
+This block (the raw output below) is internal — but the TEXT you write in your
+reply IS shown to the user, stitched around the tool cards as one flowing
+response. Say a short line about what the output told you / what you do next.
 
 Previous execution output:
 {work_output}
@@ -403,8 +417,8 @@ Previous execution output:
 3. Are there follow-up checks needed?
 4. What was the user's original request?
 
-IF YOU NEED MORE INFO -> run more code!
-IF TASK IS INCOMPLETE -> run more code!
+IF YOU NEED MORE INFO -> run more code (with a brief narration line)!
+IF TASK IS INCOMPLETE -> run more code (with a brief narration line)!
 IF YOU HAVE EVERYTHING -> finish with your full report.
 
 YOU CAN CHAIN TOOLS — one per turn, each keeps you in work mode and returns an observation:
@@ -412,7 +426,6 @@ YOU CAN CHAIN TOOLS — one per turn, each keeps you in work mode and returns an
 - read_file -> edit_file — inspect a file, then surgically change it, then re-read to verify
 - write_file — create or fully rewrite a file
 - load_skill / unload_skill — pull in or drop task-specific instructions mid-work
-Session naming is NOT a work step — never emit set_session_name while in work mode.
 
 {options}
 

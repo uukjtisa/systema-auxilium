@@ -16,7 +16,7 @@ from systema.execution.tool_registry import CANONICAL_TOOLS
 INVOKE_HINT = "make a python_interpreter tool call whose code argument is:"
 
 
-def native_header(include_session_naming: bool = True,
+def native_header(include_session_naming: bool = False,
                   include_skills: bool = True) -> str:
     lines = [
         "  - python_interpreter(code, annotation)   run Python and SEE its output — your",
@@ -60,14 +60,13 @@ as a fallback if you make a tool call while emitting no text at all. NEVER put
 the same words in both normal text and message_to_user — that shows your reply
 twice.
 
-CALLING TWO TOOLS IN ONE RESPONSE: you may emit set_session_name (or load_skill)
-ALONGSIDE your python_interpreter call as PARALLEL tool calls in the same
-response — do exactly that whenever you need to name the session AND act. Only
-if your provider limits you to a single tool call per response, use the fallback
-chaining arguments on set_session_name / load_skill instead: set
-then_tool='python_interpreter', put the Python in then_code, and pass
-then_annotation (the short step label). Never emit two ACTION calls
-(python_interpreter / read_file / edit_file / write_file) in one response.
+CALLING TWO TOOLS IN ONE RESPONSE: you may emit load_skill ALONGSIDE your
+python_interpreter call as PARALLEL tool calls in the same response. Only if your
+provider limits you to a single tool call per response, use the fallback chaining
+arguments on load_skill instead: set then_tool='python_interpreter', put the
+Python in then_code, and pass then_annotation (the short step label). Never emit
+two ACTION calls (python_interpreter / read_file / edit_file / write_file) in one
+response.
 
 Invoke every tool through your native function-calling mechanism. Everything
 below — WHEN and WHY to use each tool, staying in work mode, directory safety,
@@ -76,18 +75,9 @@ happens as a native tool call.
 """
 
 
-SESSION_NAMING_TAIL = """
-HOW TO INVOKE: call the set_session_name tool with `name` (a few words). Write
-your normal reply as text in the same turn — naming runs quietly; don't announce
-it, and don't repeat your reply in message_to_user.
-
-The critical case — the user's FIRST message asks for work: emit BOTH calls in
-one response, set_session_name AND python_interpreter, as parallel tool calls.
-Fallback only if your provider permits a single call per response: put the work
-in set_session_name's chaining arguments (then_tool='python_interpreter',
-then_code, then_annotation). Either way, never name the session INSTEAD of
-doing the work.
-"""
+# Naming moved to the background SessionNamerAgent — empty tail (referenced by
+# the prompt assembly + tests; must stay fence-free / JSON-free).
+SESSION_NAMING_TAIL = ""
 
 
 def skills_howto_tail() -> str:
@@ -114,14 +104,15 @@ def skills_howto_tail() -> str:
 
 MUST_REMEMBER = """
 MUST REMEMBER (quick recall of the rules above):
+- No tool needed? Just reply. Poems, explanations, chat, and anything you can
+  answer from your own knowledge get a plain response — never run print() to
+  "produce" text you could simply type.
 - Never roleplay: if you say you'll do it, MAKE THE TOOL CALL in the SAME response.
 - python_interpreter = your ONLY code tool; you SEE output; chain calls; print()
   what you need. ONE python_interpreter call per response, ALWAYS with the
   `annotation` argument (a short 3-6 word label shown to the user).
 - Invoke tools as native function calls; to speak in the same turn, just write
   your reply as normal text alongside the call.
-- set_session_name: call it ONCE, by your 4th reply — emitted ALONGSIDE the
-  work call (parallel calls) when the first request is work.
 - Be friendly and descriptive.
 """
 
@@ -150,11 +141,13 @@ PREFILLING_NATIVE = {
                 "REMINDER: Invoke tools as NATIVE function calls (python_interpreter / "
                 "set_session_name / load_skill / unload_skill). NEVER write a tool "
                 "call as plain text — invoke it through your function-calling "
-                "mechanism. NEVER roleplay execution. ONE code tool call per "
-                "response maximum; set_session_name may be called alongside it. To "
-                "say something while calling a tool, just write it as normal text "
-                "alongside the call. If you say you will do something, do it in "
-                "that SAME response."
+                "mechanism. But do not call a tool when none is needed: answer "
+                "simple requests you can handle from your own knowledge or creativity "
+                "(writing, explaining, chat) with a normal reply and no tool call. "
+                "NEVER roleplay execution. ONE code tool call per response maximum; "
+                "set_session_name may be called alongside it. To say something while "
+                "calling a tool, just write it as normal text alongside the call. If "
+                "you say you will do something, do it in that SAME response."
             ),
         },
         {
@@ -168,7 +161,10 @@ PREFILLING_NATIVE = {
             "role": "assistant",
             "content": (
                 "Of course. I invoke my tools as native function calls — never as "
-                "written-out text. python_interpreter is my one execution tool: I run "
+                "written-out text. But I only reach for a tool when a request truly "
+                "needs one; things I can answer from my own knowledge or write myself "
+                "(a poem, an explanation, ordinary chat) I just reply to directly, "
+                "with no tool call. python_interpreter is my one execution tool: I run "
                 "code, see the output, and chain calls until the task is fully "
                 "complete, then finish with a normal reply containing my full "
                 "report. I make at most ONE python_interpreter call per response, "

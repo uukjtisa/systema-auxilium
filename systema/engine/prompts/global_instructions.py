@@ -73,7 +73,7 @@ def get_system_prompt(
         skills=None,
         # ── Modular section flags — all True by default ──
         include_tool_format: bool = True,
-        include_session_naming: bool = True,
+        include_session_naming: bool = False,   # naming is a background subagent now
         include_memory: bool = True,
         include_execution_tools: bool = True,
         include_fence_syntax: bool = True,

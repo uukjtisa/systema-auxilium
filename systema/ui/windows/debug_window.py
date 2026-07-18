@@ -80,6 +80,7 @@ class DebugWindow(BaseWindow):
             Qt.WindowType.Window |
             Qt.WindowType.WindowStaysOnTopHint
         )
+        self.setWindowTitle("Debug")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setMinimumSize(600, 400)
         self.resize(800, 700)

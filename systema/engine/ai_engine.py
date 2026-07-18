@@ -713,11 +713,10 @@ class AIEngine:
                       f"{traceback.format_exc()}")
             # Degrade to plain text turns so the turn still goes through.
             system_prompt, convo = self._extract_system_and_convo(messages)
-        # Keep the native tools list in lockstep with the prompt. Hijacked prompts
-        # are background tasks, which disable session naming — so don't offer
-        # set_session_name there (it would contradict the task prompt).
+        # Session naming is handled by the background SessionNamerAgent now — the
+        # model no longer names sessions, so set_session_name is never offered.
         tools = self.tool_manager.get_canonical_tools(
-            include_session_naming=not self.system_prompt_hijacked,
+            include_session_naming=False,
             include_skills=bool(self.skill_manager),
         )
         try:
@@ -1345,6 +1344,8 @@ class AIEngine:
                 # Set BEFORE the run so interrupts see active work.
                 tm.work.is_working = True
                 self._malformed_step_retries = 0
+                # Narration BEFORE execution → text bubble lands ahead of the tool card.
+                _narrated = self._emit_work_narration(text)
                 work_output = tm.run_python_interpreter(code)
                 tm.work.last_output = work_output
                 tm.work.last_tool = 'interpreter'
@@ -1357,6 +1358,7 @@ class AIEngine:
                     'session_name': session_name,
                     'skill_loaded': loaded_skill,
                     'skill_unloaded': unloaded_skill,
+                    'narration_shown': _narrated,
                 }
 
             if name in ('read_file', 'edit_file', 'write_file', 'grep'):
@@ -1439,6 +1441,23 @@ class AIEngine:
         # Naming-only (or unknown-only, in chat) turn: the free text is the reply.
         return self._native_text_turn(ai_text, text, in_work,
                                       session_name=session_name, appended=True)
+
+    def _emit_work_narration(self, text):
+        """Surface a work step's narration to the chat BEFORE its tool executes,
+        so the text bubble renders AHEAD of the live tool card (correct visual
+        order). Emitted from the worker thread via a queued signal; the controller
+        shows it on the GUI thread. Returns True when something real was emitted —
+        the caller then sets result['narration_shown'] so the worker-return handler
+        does not show the same text a second time."""
+        t = (text or '').strip()
+        if not t or t in ('Working...', 'Working…') \
+                or t.startswith(('Loading skill:', 'Unloading skill:')):
+            return False
+        try:
+            self.tool_manager.approval_signal.work_narration.emit(t)
+            return True
+        except Exception:
+            return False
 
     def _process_ai_response(self, ai_text):
         """
@@ -1666,6 +1685,8 @@ class AIEngine:
             # Set BEFORE run_python_interpreter so interrupt_response() can detect active work
             self.tool_manager.work.is_working = True
             self._malformed_step_retries = 0  # fresh interpreter session — reset the guard-rail budget
+            # Narration BEFORE execution → text bubble lands ahead of the tool card.
+            _narrated = self._emit_work_narration(visible_text)
             work_output = self.tool_manager.run_python_interpreter(code)
 
             log.debug(f"[AIEngine._process_ai_response] Storing work output | "
@@ -1683,7 +1704,8 @@ class AIEngine:
                 'is_working': True,
                 'thinking': True,
                 'code': code,
-                'session_name': session_name
+                'session_name': session_name,
+                'narration_shown': _narrated,
             }
 
         # ── File-subsystem call (read_file / edit_file / write_file) ─────────
@@ -1791,6 +1813,10 @@ class AIEngine:
         # Set BEFORE the run so interrupts see active work (same contract
         # as python_interpreter).
         tm.work.is_working = True
+        # Narration BEFORE the op runs → the text bubble lands ahead of the
+        # file-op card (read/edit/write/grep) exactly like the interpreter path.
+        # This is the choke point for ALL file tools in ALL three processors.
+        _narrated = self._emit_work_narration(visible)
         observation = run(spec)
         tm.work.last_output = observation
         tm.work.last_tool = tool
@@ -1811,6 +1837,7 @@ class AIEngine:
             'is_working': True,
             'thinking': True,
             'session_name': session_name,
+            'narration_shown': _narrated,
         }
 
     def _inject_pending_format_reminder(self):
@@ -2076,6 +2103,10 @@ class AIEngine:
                 }
 
             log.debug("[AIEngine._process_work_response] → run_python_interpreter()")
+            # Narration BEFORE execution → text bubble lands ahead of the tool card
+            # (same as the first-call path; without this, compat steps 2..N showed
+            # the card before the text).
+            _narrated = self._emit_work_narration(visible_text)
             work_output = self.tool_manager.run_python_interpreter(code)
             log.debug(f"[AIEngine._process_work_response] Work output received | "
                       f"output_len={len(work_output)} chars | storing for next iteration")
@@ -2092,7 +2123,8 @@ class AIEngine:
                 'has_work_call': True,
                 'is_working': True,
                 'thinking': True,
-                'code': code
+                'code': code,
+                'narration_shown': _narrated,
             }
 
         else:

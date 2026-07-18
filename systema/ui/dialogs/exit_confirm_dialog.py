@@ -17,9 +17,12 @@ class ExitConfirmDialog(QDialog):
     exec() returns truthy (Accepted) when the user confirms.
     """
 
-    def __init__(self, action, reason, parent=None):
-        """action: 'Restart' or 'Shutdown'; reason: human-readable busy reason."""
+    def __init__(self, action, reason, parent=None, theme=None):
+        """action: 'Restart' or 'Shutdown'; reason: human-readable busy reason.
+        theme: optional live theme dict (base/surface/elevated/border/accent) so
+        the dialog matches the active chat theme instead of a fixed palette."""
         super().__init__(parent)
+        self._theme = theme or {}
         self._init_ui(action, reason)
 
     def _init_ui(self, action, reason):
@@ -32,10 +35,11 @@ class ExitConfirmDialog(QDialog):
         self.setFixedSize(540, 190)
         self.setModal(True)
 
-        _SURFACE = "#161B22"
-        _ELEV    = "#21262D"
-        _BORDER  = "#30363D"
-        _ACCENT  = "#58A6FF"
+        _t = self._theme
+        _SURFACE = _t.get('surface', "#161B22")
+        _ELEV    = _t.get('elevated', "#21262D")
+        _BORDER  = _t.get('border', "#30363D")
+        _ACCENT  = _t.get('accent', "#58A6FF")
         _TEXT    = "#E6EDF3"
         _MUTED   = "#8B949E"
         _RED     = "#F85149"

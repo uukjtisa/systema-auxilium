@@ -459,8 +459,9 @@ class ManageTasksWindow(BaseWindow):
         self._viewer_msg_count: int = 0             # message count at last render
         self._viewer_ongoing: bool = False          # whether the open session is mid-ping
         self._viewer_refresh_timer: QTimer | None = None  # live-refresh timer
+        self._title_poll_timer: QTimer | None = None  # polls TaskManager.any_ping_active() for the title dot
 
-        self.setWindowTitle("Manage Tasks")
+        self.setWindowTitle("⚪ Manage Tasks")
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.resize(860, 680)
@@ -575,6 +576,25 @@ class ManageTasksWindow(BaseWindow):
     def closeEvent(self, event):
         self.hide()
         event.ignore()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._title_poll_timer is None:
+            self._title_poll_timer = QTimer(self)
+            self._title_poll_timer.timeout.connect(self._tick_title_status)
+        self._tick_title_status()
+        self._title_poll_timer.start(1000)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        if self._title_poll_timer:
+            self._title_poll_timer.stop()
+
+    def _tick_title_status(self):
+        """Green dot while any task is mid-ping, grey dot otherwise. Cheap
+        in-memory check (TaskManager.any_ping_active()) — no session-file I/O."""
+        active = bool(self._task_mgr and self._task_mgr.any_ping_active())
+        self.setWindowTitle(f"{'🟢' if active else '⚪'} Manage Tasks")
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

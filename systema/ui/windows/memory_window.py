@@ -81,6 +81,7 @@ class MemoryWindow(QWidget):
             Qt.WindowType.Window |
             Qt.WindowType.WindowStaysOnTopHint
         )
+        self.setWindowTitle("Memory Manager")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setMinimumSize(520, 450)
         self.resize(580, 680)

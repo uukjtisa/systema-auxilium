@@ -172,6 +172,7 @@ class AssistantController(QObject):
 
         # Track active code execution for interrupt button state
         self.ai.tool_manager.approval_signal.work_code_active.connect(self._on_work_code_active)
+        self.ai.tool_manager.approval_signal.work_narration.connect(self._on_work_narration)
 
         # ── Agent Image Attach ───────────────────────────────────────
         # Exposes attach_image() and take_screenshot() into the Python interpreter
@@ -324,6 +325,14 @@ class AssistantController(QObject):
         log.debug("[AssistantController.__init__] Initializing SessionManager...")
         self.session_manager = SessionManager()
         self.current_session_id = None
+        self._settings_batch = False   # suppresses redundant disk writes during a Settings save
+        # Background auto-naming (SessionNamerAgent): per-session user-turn count,
+        # sessions the user renamed by hand (never auto-overwrite), sessions with a
+        # naming call in flight, and live worker refs.
+        self._session_user_turns = {}
+        self._session_manually_named = set()
+        self._autoname_in_flight = set()
+        self._autoname_threads = set()
         self.session_has_messages = False
 
         # Create initial session
@@ -467,6 +476,8 @@ class AssistantController(QObject):
                 return "voice output is still playing"
         except Exception:
             pass
+        if self.compaction_active():
+            return "a toolcall compaction is still running"
         return None
 
     def graceful_stop_for_exit(self):
@@ -508,6 +519,11 @@ class AssistantController(QObject):
                     vh.stop_all()
                 else:
                     vh.interrupt_speech()
+        except Exception:
+            pass
+        # Cancel any running compaction jobs — per-step saves preserve progress.
+        try:
+            self.compaction_manager.stop_all()
         except Exception:
             pass
         try:
@@ -721,6 +737,11 @@ class AssistantController(QObject):
         }
 
     def save_settings(self):
+        if getattr(self, '_settings_batch', False):
+            # A batched Settings-window save is in flight — skip the repeated disk
+            # write + memory-block rebuild that each set_*() would otherwise trigger.
+            # The Settings window persists ONCE, off the GUI thread, at the end.
+            return
         log.debug(f"[AssistantController.save_settings] Writing to '{self.settings_file}'")
         self.log("Saving settings...", "INFO")
         try:
@@ -1505,6 +1526,10 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             return
 
         self.is_processing = True
+        # Auto-naming cadence: count user turns for the active session.
+        if self.current_session_id:
+            self._session_user_turns[self.current_session_id] = \
+                self._session_user_turns.get(self.current_session_id, 0) + 1
         # Remembered for voice barge-in: speaking while this request is in
         # flight cancels it and resends "<this text>\n<new speech>" as one.
         self._last_sent_user_text = user_message
@@ -1697,23 +1722,26 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             except Exception as e:
                 log.error(f"[AssistantController.handle_ai_response] Failed to show memory widget: {e}")
 
-        # Show visible text immediately (only if not empty) - NORMAL MODE or TOOL MODE
-        if result.get('response'):
-            log.debug(f"[AssistantController.handle_ai_response] Showing AI message | "
-                      f"len={len(result['response'])}")
-            self.ui.show_ai_message(result['response'])
+        # Show visible text immediately (only if not empty) - NORMAL MODE or TOOL MODE.
+        # Synthetic work placeholders ("Working...", skill-load echoes) are not
+        # narration — filter them so only real model text becomes a bubble.
+        _resp = (result.get('response') or '').strip()
+        _synthetic = result.get('thinking') and (
+            _resp in ('Working...', 'Working…')
+            or _resp.startswith(('Loading skill:', 'Unloading skill:')))
+        if _resp and not _synthetic:
+            # narration_shown → the engine already surfaced this text before the
+            # tool card (ordering fix); don't render it a second time here.
+            if not result.get('narration_shown'):
+                log.debug(f"[AssistantController.handle_ai_response] Showing AI message | "
+                          f"len={len(result['response'])}")
+                self.ui.show_ai_message(result['response'])
 
             # SESSION SAVE: Mark session as having messages and auto-save
             if not self.session_has_messages:
                 self.session_has_messages = True
                 log.debug("[AssistantController.handle_ai_response] session_has_messages=True")
             self._auto_save_session()
-
-        # Check if AI set a session name
-        if result.get('session_name'):
-            log.debug(f"[AssistantController.handle_ai_response] AI set session name: "
-                      f"'{result['session_name']}'")
-            self.set_session_name(result['session_name'])
 
         # Show (or scroll to) the unified skills card in chat
         if result.get('skill_loaded') or result.get('skill_unloaded'):
@@ -1725,6 +1753,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             log.info(
                 "[AssistantController.handle_ai_response] AI exited work mode — summary included in response")
             self.work_timer.stop()
+            self._on_turn_complete()
             return
 
         # ── First work call branch ───────────────────────────────────────────────
@@ -1744,6 +1773,10 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
                     pass
             # Start tool mode timer
             self.work_timer.start()
+
+        if not result.get('thinking'):
+            # Normal (no-work) reply — the turn is complete.
+            self._on_turn_complete()
 
     def handle_work_response(self, result):
         """Handle tool mode response from worker thread"""
@@ -1775,12 +1808,6 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
                         f"━━━ CHAINING EXECUTION ━━━\n"
                         f"AI is analyzing output and chaining more executions...")
 
-        # Check if AI set a session name
-        if result.get('session_name'):
-            log.debug(f"[AssistantController.handle_work_response] AI set session name: "
-                      f"'{result['session_name']}'")
-            self.set_session_name(result['session_name'])
-
         # Show thinking bubble before the final summary when work mode exits
         exited = result.get('finished_working')
         if exited:
@@ -1801,6 +1828,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             if not self.session_has_messages:
                 self.session_has_messages = True
             self._auto_save_session()
+            self._on_turn_complete()
             return
 
         # ── Still in work mode ────────────────────────────────────────────────────
@@ -1918,7 +1946,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
                     self._chat.set_session_list_locked(False)
                 except Exception:
                     pass
-                self._chat.add_system_message("⚡️ **Tool operation canceled**")
+                self._chat.add_system_message("**Tool operation canceled**")
                 self._chat.hide_thinking()
                 self._chat.set_input_enabled(True)
 
@@ -1983,6 +2011,27 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             pass
 
         return interrupted
+
+    def _on_work_narration(self, text):
+        """Slot for ApprovalSignal.work_narration — a work step's narration, sent
+        by the engine BEFORE the tool executes.
+
+        Render DIRECTLY (this slot already runs on the GUI thread, via the queued
+        cross-thread signal) so the narration lands in THIS event-loop pass. The
+        tool card's signal (work_code_active for the interpreter, file_op for
+        read/edit/write/grep) is emitted LATER, so it is processed in a later pass
+        — text therefore always renders first. Do NOT defer this via singleShot:
+        _deliver_file_op renders its card directly, so a deferred narration would
+        lose the race and the card would appear above the text (the long-standing
+        card-before-text bug)."""
+        self._show_work_narration(text)
+
+    def _show_work_narration(self, text):
+        try:
+            if self._chat:
+                self._chat.show_ai_message(text)
+        except Exception:
+            pass
 
     def _on_work_code_active(self, active):
         """Slot connected to ApprovalSignal.work_code_active — thread-safe delegation via QTimer.singleShot."""
@@ -2074,6 +2123,200 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         log.info(f"[AssistantController._create_new_session] ✓ New session created: "
                  f"'{self.current_session_id}'")
         self.log(f"Created new session: {self.current_session_id}")
+
+    def rewrite_tool_output(self, old: str, replacement: str, save: bool = True,
+                            stash_original: bool = True) -> int:
+        """Token-saving history surgery: replace a toolcall's OUTPUT everywhere
+        it lives — the ui_event's `_output` (card + reload display) AND every
+        entry whose content embeds it (the live `_is_work_prompt` ping, slimmed
+        output-only work prompts, skill work outputs) — so the model stops
+        paying for it. Saves the session unless `save=False` (bulk callers save
+        once at the end). Returns the number of entries touched.
+
+        When `replacement` is a compaction/clear STUB, the pre-rewrite original is
+        stashed on the ui_event as `_output_original` (unless already present or
+        `stash_original=False`) so Restore/Revert can reverse it later — this
+        replaces the old `.precompact.bak` file. `_output_original` is UI metadata,
+        never sent to the model, so it costs zero request tokens."""
+        if not isinstance(old, str) or len(old.strip()) < 8:
+            return 0
+        _is_stub = (replacement.startswith('[Compacted]')
+                    or replacement.strip() == 'Output cleared by the user')
+        touched = 0
+        try:
+            for entry in self.ai.conversation_history:
+                if entry.get('_output') == old:
+                    if stash_original and _is_stub and '_output_original' not in entry:
+                        entry['_output_original'] = old
+                    entry['_output'] = replacement
+                    touched += 1
+                if entry.get('_work_output') == old:
+                    entry['_work_output'] = replacement
+                c = entry.get('content')
+                if isinstance(c, str) and old in c:
+                    entry['content'] = c.replace(old, replacement)
+                    touched += 1
+        except Exception as e:
+            log.error(f"[AssistantController.rewrite_tool_output] {e}")
+            return touched
+        if touched and save:
+            self._auto_save_session()
+        log.info(f"[AssistantController.rewrite_tool_output] replaced in {touched} "
+                 f"entr{'y' if touched == 1 else 'ies'} | old_len={len(old)} → "
+                 f"new_len={len(replacement)}")
+        return touched
+
+    @property
+    def compaction_manager(self):
+        """Lazily-created CompactionManager (runs per-session background jobs)."""
+        if getattr(self, '_compaction_manager', None) is None:
+            from systema.agents.compaction_manager import CompactionManager
+            self._compaction_manager = CompactionManager(self)
+        return self._compaction_manager
+
+    def compact_all_toolcalls(self):
+        """Session tool: start a background compaction job for the CURRENT session
+        via the CompactionManager. Each chunky toolcall output becomes a
+        detail-preserving '[Compacted]' summary LIVE (the token pill drops per
+        step); the original is stashed in-history for Restore; the job SURVIVES
+        session switches and is listed + stoppable in the Compaction agents dialog."""
+        from PyQt6.QtWidgets import QMessageBox
+        from systema.common.token_est import estimate_tokens
+        chat = self._chat
+        if chat is None:
+            return
+        sid = self.current_session_id
+        if self.compaction_manager.is_active(sid):
+            chat.add_system_message("This session is already being compacted — "
+                                    "open Compaction agents… to stop it.")
+            return
+
+        _STUBS = ('[Compacted]', 'Output cleared by the user')
+        targets = []
+        for e in self.ai.conversation_history:
+            if e.get('role') != 'ui_event':
+                continue
+            out = e.get('_output')
+            if (isinstance(out, str) and len(out) > 400
+                    and not out.strip().startswith(_STUBS[0])
+                    and out.strip() != _STUBS[1]):
+                targets.append((e.get('_code', '') or '', out))
+        if not targets:
+            chat.add_system_message("Nothing to compact — no chunky tool outputs here.")
+            return
+
+        total_tok = sum(estimate_tokens(o) for _, o in targets)
+        ret = QMessageBox.question(
+            chat, "Compact all toolcalls",
+            f"Summarize {len(targets)} toolcall output(s) (~{total_tok:,} tokens) into\n"
+            f"concise detail-preserving versions? Runs in the background — keep\n"
+            f"working, Stop it, or Restore later.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+
+        if self.compaction_manager.start(sid, targets):
+            chat.add_system_message(
+                f"Compacting {len(targets)} toolcall output(s) in the background…")
+            self.open_compaction_agents_dialog()
+
+    def compaction_active(self) -> bool:
+        return self.compaction_manager.is_active()
+
+    def stop_compaction(self):
+        """Stop the CURRENT session's compaction job (progress is kept)."""
+        self.compaction_manager.stop(self.current_session_id)
+        if self._chat:
+            self._chat.add_system_message("Stopping compaction after the current item…")
+
+    def open_compaction_agents_dialog(self):
+        """Show the active-compaction-agents list (session · progress · Stop)."""
+        chat = self._chat
+        if chat is None:
+            return
+        try:
+            from systema.ui.dialogs.compaction_agents_dialog import CompactionAgentsDialog
+            dlg = getattr(self, '_compaction_dialog', None)
+            if dlg is None:
+                dlg = CompactionAgentsDialog(chat, self.compaction_manager)
+                self._compaction_dialog = dlg
+            dlg.refresh()
+            dlg.show()
+            dlg.raise_()
+        except Exception as e:
+            log.error(f"[open_compaction_agents_dialog] {e}")
+
+    def _rewrite_output_in_session_file(self, session_id, old, new) -> int:
+        """Background compaction of a NON-loaded session: rewrite the output stub
+        in that session's FILE (its history isn't in memory). Mirrors
+        rewrite_tool_output's fields + the `_output_original` stash. Per-step
+        load+save keeps the file current so switching INTO it mid-job is safe."""
+        if not isinstance(old, str) or len(old.strip()) < 8:
+            return 0
+        try:
+            data = self.session_manager.load_session(session_id)
+        except Exception:
+            return 0
+        if not data:
+            return 0
+        hist = data.get('chat_history', [])
+        _is_stub = (new.startswith('[Compacted]')
+                    or new.strip() == 'Output cleared by the user')
+        touched = 0
+        for entry in hist:
+            if entry.get('_output') == old:
+                if _is_stub and '_output_original' not in entry:
+                    entry['_output_original'] = old
+                entry['_output'] = new
+                touched += 1
+            if entry.get('_work_output') == old:
+                entry['_work_output'] = new
+            c = entry.get('content')
+            if isinstance(c, str) and old in c:
+                entry['content'] = c.replace(old, new)
+                touched += 1
+        if touched:
+            try:
+                self.session_manager.save_session(session_id, hist)
+            except Exception:
+                return 0
+        return touched
+
+    def restore_all_compacted(self):
+        """Reverse every '[Compacted]' output back to its stashed original."""
+        return self._restore_stashed(stub_prefix='[Compacted]', label='compacted')
+
+    def revert_cleared_outputs(self):
+        """Reverse every 'Output cleared by the user' output back to its original."""
+        return self._restore_stashed(exact='Output cleared by the user', label='cleared')
+
+    def _restore_stashed(self, stub_prefix=None, exact=None, label=''):
+        """Reverse compaction/clear stubs that carry an `_output_original` stash."""
+        chat = self._chat
+        n = 0
+        for entry in list(self.ai.conversation_history):
+            out = entry.get('_output')
+            orig = entry.get('_output_original')
+            if not isinstance(out, str) or not isinstance(orig, str):
+                continue
+            matched = ((stub_prefix and out.strip().startswith(stub_prefix))
+                       or (exact and out.strip() == exact))
+            if not matched:
+                continue
+            if self.rewrite_tool_output(out, orig, save=False, stash_original=False):
+                entry.pop('_output_original', None)
+                n += 1
+        if n:
+            self._auto_save_session()
+            if chat:
+                chat.render_loaded_messages()
+                if hasattr(chat, '_update_token_count'):
+                    chat._update_token_count()
+        if chat:
+            chat.add_system_message(
+                f"Restored {n} {label} output(s)." if n
+                else f"No {label} outputs to restore.")
+        return n
 
     def _auto_save_session(self):
         """Automatically save current session after AI response"""
@@ -2221,13 +2464,17 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
                 self._chat.refresh_session_list()
             log.info(f"[AssistantController.delete_session] ✓ Session deleted")
 
-    def set_session_name(self, name):
-        """Set name for current session (called by AI tool)"""
-        log.info(f"[AssistantController.set_session_name] name='{name}' | "
+    def set_session_name(self, name, manual: bool = False):
+        """Rename the current session. manual=True marks it user-set so the
+        background auto-namer never overwrites it. The AI no longer names
+        sessions — the SessionNamerAgent and the sidebar rename call this."""
+        log.info(f"[AssistantController.set_session_name] name='{name}' manual={manual} | "
                  f"session_id='{self.current_session_id}'")
         if not self.current_session_id:
             log.warning("[AssistantController.set_session_name] No current_session_id — aborting")
             return
+        if manual:
+            self._session_manually_named.add(self.current_session_id)
 
         # Rename session
         success = self.session_manager.rename_session(self.current_session_id, name)
@@ -2242,6 +2489,95 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         else:
             log.error(f"[AssistantController.set_session_name] ✗ Failed to rename to '{name}'")
             self.log(f"Failed to rename session", "ERROR")
+
+    def _on_turn_complete(self):
+        """A conversation turn just finished — refresh the input token pill (the
+        history grew, so the next request costs more) and try a background
+        auto-title."""
+        try:
+            if self._chat and hasattr(self._chat, '_update_token_count'):
+                self._chat._update_token_count()
+        except Exception:
+            pass
+        self._maybe_autoname_session()
+
+    def _autoname_digest(self, max_msgs: int = 8, max_chars: int = 1600) -> str:
+        """A compact plain-text digest of the recent conversation for the namer."""
+        parts = []
+        try:
+            for m in self.ai.conversation_history:
+                if m.get('role') not in ('user', 'assistant'):
+                    continue
+                c = m.get('content')
+                if not isinstance(c, str) or not c.strip():
+                    continue
+                try:
+                    c = self.ai.tool_manager.strip_tool_calls(c)
+                except Exception:
+                    pass
+                c = c.strip()
+                if c:
+                    parts.append(f"{m['role']}: {c[:400]}")
+        except Exception:
+            pass
+        return "\n".join(parts[-max_msgs:])[:max_chars]
+
+    def _maybe_autoname_session(self):
+        """Auto-title the current session in the background (SessionNamerAgent):
+        once after the first completed exchange, then a gentle refresh every 5
+        user turns. Silent; respects a manual rename; gated by a setting."""
+        if not self.settings.get('session_autoname_enabled', True):
+            return
+        sid = self.current_session_id
+        if (not sid or sid in self._session_manually_named
+                or sid in self._autoname_in_flight):
+            return
+        turns = self._session_user_turns.get(sid, 0)
+        if not (turns == 1 or (turns >= 5 and turns % 5 == 0)):
+            return
+        digest = self._autoname_digest()
+        if not digest.strip():
+            return
+        try:
+            current_title = self.session_manager.get_session_name(sid) or ""
+        except Exception:
+            current_title = ""
+
+        from PyQt6.QtCore import QThread, QObject, pyqtSignal
+        ctrl = self
+        self._autoname_in_flight.add(sid)
+
+        class _Namer(QObject):
+            done = pyqtSignal(str, str)   # sid, title
+
+            def run(self):
+                from systema.agents.session_namer_agent import SessionNamerAgent
+                title = ""
+                try:
+                    title = SessionNamerAgent(ctrl.ai).generate(digest, current_title) or ""
+                except Exception:
+                    title = ""
+                self.done.emit(sid, title)
+
+        thread = QThread()
+        worker = _Namer()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+
+        def _on_done(_sid, title):
+            try:
+                ctrl._autoname_in_flight.discard(_sid)
+                if (title and _sid == ctrl.current_session_id
+                        and _sid not in ctrl._session_manually_named):
+                    ctrl.set_session_name(title)   # auto (manual=False)
+            finally:
+                thread.quit()
+                thread.wait(1500)
+                ctrl._autoname_threads.discard((thread, worker))
+
+        worker.done.connect(_on_done)
+        self._autoname_threads.add((thread, worker))
+        thread.start()
 
     def _handle_task_message(self, message: str):
         """

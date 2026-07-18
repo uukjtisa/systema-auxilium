@@ -10,12 +10,15 @@ class RenderingMixin:
     """Markdown, LaTeX, and table rendering helpers (mixed into ChatWindow)."""
 
     def _latex_to_base64_img(self, latex_expr, display=True):
-        """Render a LaTeX expression to a tight base64-encoded PNG using matplotlib."""
+        """Render a LaTeX expression to a tight, transparent base64 PNG via
+        matplotlib mathtext. Returns ONLY the <img> — no raw-source duplicate;
+        the LaTeX source rides along in title= so it stays copy-inspectable.
+        Glyph color matches body text (#E8EAED) so formulas read like prose."""
         try:
             import matplotlib
             matplotlib.use('Agg')
             import matplotlib.pyplot as plt
-            import io, base64
+            import io, base64, html as _html
 
             fig = plt.figure(figsize=(0.01, 0.01))
             fig.patch.set_alpha(0)
@@ -23,62 +26,121 @@ class RenderingMixin:
             ax.set_axis_off()
             ax.patch.set_alpha(0)
 
-            fontsize = 13 if display else 11
+            fontsize = 15 if display else 12
             ax.text(0.5, 0.5, f'${latex_expr}$',
-                    fontsize=fontsize, color='#BDC1C6',
+                    fontsize=fontsize, color='#E8EAED',
                     ha='center', va='center',
                     transform=ax.transAxes)
 
             buf = io.BytesIO()
-            plt.savefig(buf, format='png', dpi=150, bbox_inches='tight',
-                        transparent=True, pad_inches=0.05, facecolor='none')
+            # High DPI + CSS max-height downscale = crisp on hi-dpi displays.
+            plt.savefig(buf, format='png', dpi=220, bbox_inches='tight',
+                        transparent=True, pad_inches=0.06, facecolor='none')
             plt.close(fig)
             buf.seek(0)
             b64 = base64.b64encode(buf.read()).decode('utf-8')
-
-            source_html = (
-                f'<span style="font-family:monospace;font-size:9px;'
-                f'color:#8B949E;user-select:text;">{latex_expr}</span>'
-            )
+            title = _html.escape(latex_expr, quote=True)
 
             if display:
                 return (
-                    f'<br>'
-                    f'<div style="text-align:center;margin:4px 0 2px 0;">'
-                    f'<img src="data:image/png;base64,{b64}" style="max-height:40px;">'
-                    f'</div>'
-                    f'<div style="text-align:center;margin:0 0 4px 0;">{source_html}</div>'
-                    f'<br>'
-                )
-            else:
-                return (
+                    f'<div style="text-align:center;margin:6px 0;">'
                     f'<img src="data:image/png;base64,{b64}" '
-                    f'style="vertical-align:middle;margin:0 2px;max-height:22px;">'
-                    f'&nbsp;{source_html}'
+                    f'style="max-height:52px;" title="{title}">'
+                    f'</div>'
                 )
+            return (
+                f'<img src="data:image/png;base64,{b64}" '
+                f'style="vertical-align:middle;margin:0 1px;max-height:20px;" '
+                f'title="{title}">'
+            )
         except Exception:
-            return f'<code>{latex_expr}</code>'
+            import html as _html
+            return f'<code>{_html.escape(latex_expr)}</code>'
+
+    def _looks_like_math(self, s):
+        """Heuristic: does the text between single $…$ read as MATH (not money)?
+        Currency/plain-number runs ($0.30, $3, $20 billion, $ rate / hour) are
+        rejected; a LaTeX command, sub/superscript, or a short symbolic
+        expression with a variable is accepted."""
+        import re
+        s = (s or '').strip()
+        if not s:
+            return False
+        # Pure number / currency / unit runs are NOT math.
+        if re.fullmatch(r'[\d.,%\s/×xX+\-]+', s):
+            return False
+        if re.fullmatch(r'[\d.,\s]+(?:billion|million|thousand|trillion|bn|mn|k|m|b)?',
+                        s, re.IGNORECASE):
+            return False
+        # Positive math signals.
+        if re.search(r'\\[a-zA-Z]+', s):            # \frac \int \alpha \sqrt …
+            return True
+        if re.search(r'[_^{}]', s):                # sub/superscript / groups
+            return True
+        if re.search(r'[=<>]', s) and re.search(r'[A-Za-z]', s):
+            return True                             # an equation with a variable
+        if (re.search(r'[A-Za-z]', s) and re.search(r'[+\-*/^]', s)
+                and not re.search(r'[A-Za-z]{4,}', s)):
+            return True                             # short symbolic expr (x+y), not prose
+        return False
 
     def _preprocess_latex(self, text):
-        """Detect and replace LaTeX math expressions with rendered PNG images."""
+        """Turn LaTeX math into rendered PNGs, adaptively and safely:
+          • fenced code, inline `code`, and pipe-table rows are masked first so a
+            `$` inside them is never read as math;
+          • $$…$$ and \\[…\\] render as centered display math;
+          • \\(…\\) renders inline; $…$ renders inline ONLY when it actually looks
+            like math — currency ($0.30, $3, $20 billion) stays literal text;
+          • \\$ is a literal dollar sign.
+        Masks are restored verbatim before returning (they never reach markdown2)."""
         import re
 
-        def replace_display(m):
+        # ── 1. Mask code / tables so their $ can't be mistaken for math ────────
+        _stash = []
+        def _mask(m):
+            _stash.append(m.group(0))
+            return f'\x00LX{len(_stash) - 1}\x00'
+        text = re.sub(r'```.*?```', _mask, text, flags=re.DOTALL)   # fenced code
+        text = re.sub(r'`[^`\n]+`', _mask, text)                    # inline code
+        text = re.sub(r'^[ \t]*\|.*\|[ \t]*$', _mask, text,         # table rows
+                      flags=re.MULTILINE)
+
+        # ── 2. Escaped dollar → sentinel (restored to a literal $ at the end) ──
+        text = text.replace(r'\$', '\x00USD\x00')
+
+        # ── 3. Display math: $$…$$ and \[…\] ──────────────────────────────────
+        def _display(m):
             return self._latex_to_base64_img(m.group(1).strip(), display=True)
-        text = re.sub(r'\\\[(.*?)\\\]', replace_display, text, flags=re.DOTALL)
+        text = re.sub(r'\$\$(.+?)\$\$', _display, text, flags=re.DOTALL)
+        text = re.sub(r'\\\[(.+?)\\\]', _display, text, flags=re.DOTALL)
 
-        def replace_inline(m):
+        # ── 4. Inline: \(…\) always; $…$ only when it looks like math ──────────
+        def _inline(m):
             return self._latex_to_base64_img(m.group(1).strip(), display=False)
-        text = re.sub(r'(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)', replace_inline, text)
+        text = re.sub(r'\\\((.+?)\\\)', _inline, text, flags=re.DOTALL)
 
-        def replace_bracket(m):
+        def _inline_dollar(m):
+            inner = m.group(1)
+            if self._looks_like_math(inner):
+                return self._latex_to_base64_img(inner.strip(), display=False)
+            return m.group(0)   # currency / prose — leave untouched
+        # Single $…$ on one line. Opening $ not preceded by a word char and not
+        # followed by whitespace/digit (kills $0.30 / $3); closing $ not followed
+        # by a word char. Bounded length so it can't run across a paragraph.
+        text = re.sub(r'(?<![\w$])\$(?![\s\d$])([^$\n]{1,120}?)\$(?![\w$])',
+                      _inline_dollar, text)
+
+        # ── 5. Loose bracketed display math: a whole line like [ … \frac … ] ──
+        def _bracket(m):
             inner = m.group(1).strip()
-            has_latex = bool(re.search(r'\\[a-zA-Z]+|[_^{}]|\bfrac\b|\bsum\b|\bint\b', inner))
-            if has_latex:
+            if re.search(r'\\[a-zA-Z]+|[_^{}]|\bfrac\b|\bsum\b|\bint\b', inner):
                 return self._latex_to_base64_img(inner, display=True)
             return m.group(0)
-        text = re.sub(r'^\[\s*(.+?)\s*\]\s*$', replace_bracket, text, flags=re.MULTILINE)
+        text = re.sub(r'^\[\s*(.+?)\s*\]\s*$', _bracket, text, flags=re.MULTILINE)
 
+        # ── 6. Restore literal $ and masked code / tables ─────────────────────
+        text = text.replace('\x00USD\x00', '$')
+        text = re.sub(r'\x00LX(\d+)\x00', lambda m: _stash[int(m.group(1))], text)
         return text
 
     def render_markdown(self, text):

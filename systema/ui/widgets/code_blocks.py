@@ -7,7 +7,7 @@ import re
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
                              QPushButton, QScrollArea, QTextEdit, QApplication,
                              QSizePolicy)
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QEvent
 from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QFont
 
 # Copy-button "Copied!" feedback duration (ms)
@@ -352,35 +352,37 @@ class CodeBlockWidget(QWidget):
         self.scroll_area.setFixedHeight(calculated_height)
         container_layout.addWidget(self.scroll_area)
 
-        # ── Footer: LANG label (left) + Wrap / Copy / Hide chips + grip (right) ─
-        grip_row = QWidget()
-        grip_row.setObjectName("codeGripRow")
-        grip_row.setStyleSheet("QWidget#codeGripRow { background: transparent; }")
-        grip_row.setFixedHeight(30)
-        grip_row_layout = QHBoxLayout(grip_row)
-        grip_row_layout.setContentsMargins(10, 0, 8, 4)
-        grip_row_layout.setSpacing(6)
-
+        # ── FLOATING overlays (2026-07 redesign): the old in-flow footer was a
+        #    solid strip blocking the last code lines. LANG chip = solid fitted
+        #    tag bottom-left (always readable over code); Wrap/Copy/Hide/Resize
+        #    = translucent chips bottom-right, floating over the frame. ──────
         display_lang = language.strip().upper() if language and language.strip().lower() not in ('', 'text') else 'TEXT'
-        lang_label = QLabel(display_lang)
-        lang_label.setStyleSheet(
-            f"QLabel {{ background: transparent; color: {muted}; font-size: 10px; "
-            f"font-weight: 700; border: none; padding: 0 2px; }}")
-        grip_row_layout.addWidget(lang_label)
-        grip_row_layout.addStretch()
+        self._lang_chip = QLabel(display_lang, self.main_container)
+        self._lang_chip.setStyleSheet(
+            f"QLabel {{ background: {elevated}; color: {muted}; font-size: 10px; "
+            f"font-weight: 700; border: 1px solid {border}; border-radius: 4px; "
+            f"padding: 2px 8px; }}")
+        self._lang_chip.adjustSize()
 
         self._chip_style = f"""
             QPushButton {{
-                background: {elevated};
+                background: rgba(33, 38, 45, 0.78);
                 color: {accent};
                 font-size: 10px; font-weight: 600;
                 padding: 2px 9px;
-                border: 1px solid {border};
+                border: 1px solid rgba(88, 166, 255, 0.30);
                 border-radius: 4px;
             }}
-            QPushButton:hover {{ border-color: {accent}; }}
-            QPushButton:checked {{ border-color: {accent}; background: {base}; }}
+            QPushButton:hover {{ border-color: {accent}; background: rgba(33, 38, 45, 0.95); }}
+            QPushButton:checked {{ border-color: {accent}; background: rgba(13, 17, 23, 0.9); }}
         """
+
+        self._controls_bar = QWidget(self.main_container)
+        self._controls_bar.setObjectName("codeControls")
+        self._controls_bar.setStyleSheet("QWidget#codeControls { background: transparent; }")
+        _cb_lay = QHBoxLayout(self._controls_bar)
+        _cb_lay.setContentsMargins(0, 0, 0, 0)
+        _cb_lay.setSpacing(6)
 
         self.wrap_btn = QPushButton("↵ Wrap")
         self.wrap_btn.setObjectName("codeWrapBtn")
@@ -389,47 +391,69 @@ class CodeBlockWidget(QWidget):
         self.wrap_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.wrap_btn.setStyleSheet(self._chip_style)
         self.wrap_btn.clicked.connect(self._toggle_wrap)
-        grip_row_layout.addWidget(self.wrap_btn)
+        _cb_lay.addWidget(self.wrap_btn)
 
         self.copy_btn = QPushButton("Copy")
         self.copy_btn.setObjectName("codeCopyBtn")
         self.copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.copy_btn.setStyleSheet(self._chip_style)
         self.copy_btn.clicked.connect(self.copy_code)
-        grip_row_layout.addWidget(self.copy_btn)
+        _cb_lay.addWidget(self.copy_btn)
 
         self.toggle_btn = QPushButton("Hide")
         self.toggle_btn.setObjectName("codeToggleBtn")
         self.toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.toggle_btn.setStyleSheet(self._chip_style)
         self.toggle_btn.clicked.connect(self.toggle_expand)
-        grip_row_layout.addWidget(self.toggle_btn)
+        _cb_lay.addWidget(self.toggle_btn)
 
         self.corner_grip = QLabel("⤡  Resize")
         self.corner_grip.setStyleSheet(f"""
             QLabel {{
-                background: {elevated};
+                background: rgba(33, 38, 45, 0.78);
                 color: {accent};
                 font-size: 10px; font-weight: 700;
                 padding: 2px 8px;
-                border: 1px solid {border};
+                border: 1px solid rgba(88, 166, 255, 0.30);
                 border-radius: 4px;
             }}
-            QLabel:hover {{ border-color: {accent}; }}
+            QLabel:hover {{ border-color: {accent}; background: rgba(33, 38, 45, 0.95); }}
         """)
         self.corner_grip.setCursor(Qt.CursorShape.SizeFDiagCursor)
         self.corner_grip.mousePressEvent   = self._corner_press
         self.corner_grip.mouseMoveEvent    = self._corner_move
         self.corner_grip.mouseReleaseEvent = self._corner_release
-        grip_row_layout.addWidget(self.corner_grip)
+        _cb_lay.addWidget(self.corner_grip)
+        self._controls_bar.adjustSize()
 
-        self._grip_row = grip_row
-        container_layout.addWidget(grip_row)
+        # Bottom padding inside the scroll content keeps the LAST code line
+        # scrollable clear of the floating chips.
+        code_container_layout.setContentsMargins(16, 12, 16, 34)
+
         root_layout.addWidget(self.main_container)
 
         # Re-fit height once the editor is laid out — the line-count guess made
         # during construction under-sizes the visible area.
         QTimer.singleShot(0, self._fit_height)
+        QTimer.singleShot(0, self._position_overlays)
+
+    def _position_overlays(self):
+        """Pin the lang chip bottom-left and the control chips bottom-right of
+        the frame (floating — they occupy no layout space)."""
+        try:
+            f = self.main_container
+            if self.is_expanded:
+                y = f.height() - self._controls_bar.height() - 8
+                self._lang_chip.move(10, f.height() - self._lang_chip.height() - 8)
+            else:
+                y = max(4, (f.height() - self._controls_bar.height()) // 2)
+                self._lang_chip.move(10, max(4, (f.height() - self._lang_chip.height()) // 2))
+            self._controls_bar.adjustSize()
+            self._controls_bar.move(f.width() - self._controls_bar.width() - 10, y)
+            self._lang_chip.raise_()
+            self._controls_bar.raise_()
+        except RuntimeError:
+            pass
 
     def _fit_height(self):
         """Size the scroll area to the code's actual document height. Skipped
@@ -438,14 +462,16 @@ class CodeBlockWidget(QWidget):
             return
         try:
             doc_h = int(self.code_editor.document().size().height())
-            h = min(max(doc_h + 24, self.min_height), self.max_height)
+            h = min(max(doc_h + 46, self.min_height), self.max_height)
             self.scroll_area.setFixedHeight(h)
+            self._position_overlays()
         except RuntimeError:
             pass
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         QTimer.singleShot(0, self._fit_height)
+        self._position_overlays()
 
     # ── Ctrl+Scroll ───────────────────────────────────────────────────────────
 
@@ -478,10 +504,15 @@ class CodeBlockWidget(QWidget):
             self.scroll_area.show()
             self.corner_grip.show()
             self.toggle_btn.setText("Hide")
+            self.main_container.setMinimumHeight(0)
         else:
             self.scroll_area.hide()
             self.corner_grip.hide()
             self.toggle_btn.setText("Show")
+            # Keep a slim host strip so the floating chips (Show!) survive
+            # the collapse — without it the frame shrinks to nothing.
+            self.main_container.setMinimumHeight(40)
+        QTimer.singleShot(0, self._position_overlays)
 
     # ── Corner resize (width + height) ───────────────────────────────────────
     # We resize main_container width so the whole block (scroll + footer)
@@ -641,34 +672,28 @@ class TableBlockWidget(QWidget):
 
         fl.addWidget(self.view)
 
-        # ── Footer: resize grip only (wrapping is on by default) ──────────────
-        grip_row = QWidget()
-        grip_row.setStyleSheet("background: transparent;")
-        grip_row.setFixedHeight(28)
-        grl = QHBoxLayout(grip_row)
-        grl.setContentsMargins(8, 0, 8, 4)
-        grl.setSpacing(6)
-
-        grl.addStretch()
-
-        self.corner_grip = QLabel("⤡  Resize")
+        # ── Resize grip: FLOATING overlay chip (bottom-right, translucent,
+        #    hover-revealed) — the old in-flow footer bar read as a solid
+        #    strip sitting over the last table row. ─────────────────────────
+        self.corner_grip = QLabel("⤡  Resize", frame)
         self.corner_grip.setStyleSheet(f"""
             QLabel {{
-                background: {elevated};
+                background: rgba(33, 38, 45, 0.72);
                 color: {accent};
                 font-size: 10px; font-weight: 700;
                 padding: 2px 8px;
-                border: 1px solid {border};
+                border: 1px solid rgba(88, 166, 255, 0.35);
                 border-radius: 4px;
             }}
-            QLabel:hover {{ border-color: {accent}; }}
+            QLabel:hover {{ background: rgba(33, 38, 45, 0.95); border-color: {accent}; }}
         """)
         self.corner_grip.setCursor(Qt.CursorShape.SizeFDiagCursor)
         self.corner_grip.mousePressEvent   = self._corner_press
         self.corner_grip.mouseMoveEvent    = self._corner_move
         self.corner_grip.mouseReleaseEvent = self._corner_release
-        grl.addWidget(self.corner_grip)
-        fl.addWidget(grip_row)
+        self.corner_grip.adjustSize()
+        self.corner_grip.hide()   # revealed on hover (enterEvent below)
+        frame.installEventFilter(self)
 
         root.addWidget(frame)
 
@@ -686,14 +711,42 @@ class TableBlockWidget(QWidget):
             w = self.view.viewport().width()
             if w > 0:
                 doc.setTextWidth(w)
-            content_h = int(doc.size().height()) + 6
+            content_h = int(doc.size().height()) + 12
+            # A visible horizontal scrollbar eats viewport height — add its
+            # thickness or the last row hides under it.
+            hbar = self.view.horizontalScrollBar()
+            if hbar is not None and hbar.maximum() > 0:
+                content_h += hbar.sizeHint().height()
             self.view.setFixedHeight(min(max(content_h, self.min_height), self._MAX_HEIGHT))
         except RuntimeError:
             pass
 
+    def _position_grip(self):
+        """Pin the floating grip to the frame's bottom-right corner."""
+        try:
+            g, f = self.corner_grip, self._frame
+            g.move(f.width() - g.width() - 8, f.height() - g.height() - 6)
+            g.raise_()
+        except RuntimeError:
+            pass
+
+    def eventFilter(self, obj, event):
+        if obj is getattr(self, '_frame', None):
+            et = event.type()
+            if et == QEvent.Type.Enter:
+                self._position_grip()
+                self.corner_grip.show()
+            elif et == QEvent.Type.Leave:
+                if not self.is_resizing:
+                    self.corner_grip.hide()
+            elif et == QEvent.Type.Resize:
+                self._position_grip()
+        return super().eventFilter(obj, event)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         QTimer.singleShot(0, self._fit_height)
+        self._position_grip()
 
     # ── Corner resize (width + height), clamped to the visible bubble ─────────
 

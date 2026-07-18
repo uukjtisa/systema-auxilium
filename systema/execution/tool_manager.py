@@ -34,6 +34,9 @@ class InterpreterState:
     is_running: bool = False              # python_interpreter executing code RIGHT NOW
     last_code: str | None = None          # last source run (UI note / interrupt)
     last_annotation: str | None = None    # last banner label
+    step_seq: int = 0                     # monotonic per-execution id — lets the UI
+                                          # dedup the live card vs the permanent note
+                                          # regardless of which signal wins the race
 
 
 @dataclass
@@ -149,6 +152,7 @@ class ApprovalSignal(QObject):
     close_approval_dialog = pyqtSignal(bool, str)  # approved, modified_code — closes active dialog
     timeout_signal   = pyqtSignal(int, object, object, object)  # elapsed, done_event, result_holder, user_event — timeout prompt
     work_code_active = pyqtSignal(bool)                          # True when code execution starts, False when it finishes
+    work_narration   = pyqtSignal(str)               # a work step's narration → chat BEFORE its tool runs (ordering)
 
 
 class ToolManager:
@@ -339,7 +343,7 @@ class ToolManager:
             # Only update the work banner — no chat widget
             clean = _re.sub(r'\*+', '', text).replace("Working:", "").strip()
             if hasattr(chat, '_work_banner'):
-                chat._work_banner.setText(f"⚙ Working: {clean}")
+                chat._work_banner.setText(f"Working: {clean}")
                 chat._work_banner.show()
             # Narrate the annotation, then a short beat. The commentary text is
             # enqueued later (show_ai_message), so FIFO order gives
@@ -376,7 +380,7 @@ class ToolManager:
     # ─────────────────────────────────────────────────────────────────────────
     _CANONICAL_TOOLS = tool_registry.CANONICAL_TOOLS
 
-    def get_canonical_tools(self, include_session_naming: bool = True,
+    def get_canonical_tools(self, include_session_naming: bool = False,
                             include_skills: bool = True) -> list:
         """Return the active tools as canonical schema dicts (name/description/
         parameters), gated by the same capability flags the prompt uses. Feed the
@@ -889,9 +893,13 @@ class ToolManager:
             log.debug(f"[ToolManager._emit_file_op_card] skipped: {e}")
 
     def _session_id(self):
+        # current_session_id lives on the CONTROLLER, not the engine — reach it
+        # through ai_engine.controller. (Reading it off ai_engine always returned
+        # '' so every journal entry was stamped session-less and the Files-touched
+        # dialog filtered them all out.)
         try:
-            eng = self.ai_engine
-            return getattr(eng, 'current_session_id', '') or ''
+            ctrl = getattr(self.ai_engine, 'controller', None)
+            return getattr(ctrl, 'current_session_id', '') or ''
         except Exception:
             return ''
 
@@ -1968,6 +1976,7 @@ class ToolManager:
         # never parsed as Python. work.interpreter.last_code keeps the full source
         # (blocks included) for the UI note / history; only exec_code runs.
         self.work.interpreter.last_code = code
+        self.work.interpreter.step_seq += 1   # new execution — new dedup id
         exec_code, _file_blocks = self._extract_file_blocks(code)
         if _file_blocks:
             self.tools['python'].inject_vars(_file_blocks)
@@ -2205,5 +2214,3 @@ class ToolManager:
                 return v
         log.debug(f"[ToolManager._get_tool_value] Field '{field_key}' not found in data keys {list(data.keys())}")
         return None
-
-

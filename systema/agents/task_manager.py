@@ -482,7 +482,7 @@ class TaskThread(threading.Thread):
 
     """One daemon thread per task — runs the scheduled ping loop independently."""
 
-    def __init__(self, task: dict, controller, skill_manager, send_main_callback, set_inactive_callback=None):
+    def __init__(self, task: dict, controller, skill_manager, send_main_callback, set_inactive_callback=None, task_manager=None):
         super().__init__(daemon=True, name=f"Task-{task['id'][:8]}")
         self._task = task
         self._controller = controller
@@ -490,6 +490,7 @@ class TaskThread(threading.Thread):
         self._skill_manager = skill_manager
         self._send_main = send_main_callback   # fn(str) → appends to main session
         self._set_inactive = set_inactive_callback   # fn(task_id) → marks task inactive after one-shot
+        self._task_manager = task_manager   # owning TaskManager — used to flag "ping active" for the UI title dot
         self._stop_event = threading.Event()
         self._ping_lock = threading.Lock()   # serializes scheduled + manual pings per task
         # Pass _safe_send_main so the agent's send_message_main() namespace function
@@ -714,7 +715,13 @@ class TaskThread(threading.Thread):
         (code-block error) or produced nothing.
         """
         with self._ping_lock:
-            return self._execute_ping_locked(session, task_id, today, override_instruction)
+            if self._task_manager is not None:
+                self._task_manager._ping_started()
+            try:
+                return self._execute_ping_locked(session, task_id, today, override_instruction)
+            finally:
+                if self._task_manager is not None:
+                    self._task_manager._ping_finished()
 
     def _execute_ping_locked(self, session: dict, task_id: str, today: str,
                              override_instruction: str | None = None) -> bool:
@@ -1110,6 +1117,8 @@ class TaskManager:
         self._controller = controller
         self._tasks: list = []
         self._threads: dict = {}           # task_id → TaskThread
+        self._active_ping_count = 0        # tasks currently inside _execute_ping (any_ping_active)
+        self._active_ping_count_lock = threading.Lock()
         self.TASKS_FILE.parent.mkdir(parents=True, exist_ok=True)
         self.SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
         self._ensure_script_template()
@@ -1303,6 +1312,7 @@ class TaskManager:
             skill_manager=getattr(self._controller, 'skill_manager', None),
             send_main_callback=self._send_to_main,
             set_inactive_callback=self.set_task_inactive,
+            task_manager=self,
         )
         t.start()
         self._threads[task['id']] = t
@@ -1332,6 +1342,7 @@ class TaskManager:
                 task=task,
                 controller=self._controller,
                 skill_manager=getattr(self._controller, 'skill_manager', None),
+                task_manager=self,
                 send_main_callback=self._send_to_main,
                 set_inactive_callback=self.set_task_inactive,
             )
@@ -1347,6 +1358,21 @@ class TaskManager:
     def stop(self):
         for task_id in list(self._threads.keys()):
             self._stop_thread(task_id)
+
+    # ── Ping-active state (drives the Manage Tasks window title dot) ──────────
+
+    def _ping_started(self):
+        with self._active_ping_count_lock:
+            self._active_ping_count += 1
+
+    def _ping_finished(self):
+        with self._active_ping_count_lock:
+            self._active_ping_count = max(0, self._active_ping_count - 1)
+
+    def any_ping_active(self) -> bool:
+        """True if any task thread is currently inside a ping right now."""
+        with self._active_ping_count_lock:
+            return self._active_ping_count > 0
 
     # ── Session file API (used by the UI window) ──────────────────────────────
 

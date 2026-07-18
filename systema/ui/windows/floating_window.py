@@ -84,6 +84,7 @@ class FloatingWindow(QWidget):
             Qt.WindowType.WindowStaysOnTopHint |
             Qt.WindowType.Tool
         )
+        self.setWindowTitle("Systema Auxilium")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
         # Set size from bg dimensions (the visual footprint that the widget occupies)
@@ -571,7 +572,7 @@ class FloatingWindow(QWidget):
             placeholder = "Working..." if working else "AI is thinking..."
             self.chat_window.set_input_placeholder(placeholder)
             if working and hasattr(self.chat_window, '_work_banner'):
-                self.chat_window._work_banner.setText("⚙ Working…")
+                self.chat_window._work_banner.setText("Working…")
                 self.chat_window._work_banner.show()
 
     def show_ai_message(self, message):
@@ -767,8 +768,16 @@ class FloatingWindow(QWidget):
             reason = None
         if not reason:
             return True
+        # Match the dialog to the active chat theme (falls back to defaults).
+        _theme = None
+        try:
+            cw = getattr(self, 'chat_window', None)
+            if cw is not None and hasattr(cw, '_t'):
+                _theme = cw._t()
+        except Exception:
+            _theme = None
         from systema.ui.dialogs.exit_confirm_dialog import ExitConfirmDialog
-        dlg = ExitConfirmDialog(action, reason, parent=self)
+        dlg = ExitConfirmDialog(action, reason, parent=self, theme=_theme)
         if not dlg.exec():
             return False
         try:
@@ -830,16 +839,18 @@ class FloatingWindow(QWidget):
         except Exception:
             tm_output = ''
 
+        # Narration FIRST, then the code note — the model says what it's doing
+        # before the tool runs, and the merged turn bubble mirrors that order.
+        if self.chat_window:
+            self.chat_window.handle_ai_response(result)
+        if self.android_bridge and self.android_bridge.isVisible():
+            self.android_bridge.handle_ai_response(result)
+
         if code and tm_output:
             if self.chat_window:
                 self.chat_window.add_code_execution_note(code, tm_output)
             if self.android_bridge and self.android_bridge.isVisible():
                 self.android_bridge.add_work_execution(code, tm_output)
-
-        if self.chat_window:
-            self.chat_window.handle_ai_response(result)
-        if self.android_bridge and self.android_bridge.isVisible():
-            self.android_bridge.handle_ai_response(result)
 
         # ── Clear work banner when work mode finishes ──────────────────────────
         exited   = result.get('finished_working', False)

@@ -18,7 +18,7 @@ INVOKE_HINT = "run this in a python_interpreter fence — its code being:"
 
 
 def tool_format_section(include_workmode: bool = True,
-                        include_session_naming: bool = True,
+                        include_session_naming: bool = False,
                         include_skills: bool = False) -> str:
     """The ONE compat format section: fence rule, tool table + examples from
     the registry, the one-fence policy. (The finish rule is NOT here — the
@@ -48,8 +48,7 @@ def tool_format_section(include_workmode: bool = True,
 RULES:
 - ONE action fence per response — never two. python_interpreter, read_file,
   edit_file and write_file all count as actions; each is one turn — wait for
-  its output. (set_session_name is exempt — it may accompany the action fence
-  in the same response.)
+  its output.
 - Put the action fence at the END of your message.
 - Never roleplay: if you say you'll do it, put the fence in the SAME response.
 """
@@ -69,23 +68,9 @@ AVAILABLE TOOLS
 {rules}"""
 
 
-SESSION_NAMING_TAIL = """
-HOW TO INVOKE: a set_session_name fence, anywhere in your reply, alongside your
-other fence when needed. The critical case — the user's FIRST message asks for
-work:
-
-User: "test your interpreter — what's on my desktop?"
-Assistant: "On it — checking your desktop now.
-```set_session_name
-Desktop Interpreter Test
-```
-```python_interpreter: [Listing desktop files]
-import os
-print(os.listdir(os.path.expanduser('~/Desktop')))
-```"
-
-Never do the naming INSTEAD of the work — both fences go in the SAME response.
-"""
+# Naming moved to the background SessionNamerAgent — empty tail (referenced by
+# the prompt assembly + tests).
+SESSION_NAMING_TAIL = ""
 
 
 def skills_howto_tail() -> str:
@@ -113,14 +98,14 @@ def skills_howto_tail() -> str:
 
 MUST_REMEMBER = """
 MUST REMEMBER (quick recall of the rules above):
+- No tool needed? Just reply. Poems, explanations, chat, and anything you can
+  answer from your own knowledge get a plain response — never run print() to
+  "produce" text you could simply type.
 - Never roleplay: if you say you'll do it, emit the fence in the SAME response.
 - python_interpreter = your ONLY code tool; you SEE output; chain turns; print()
   what you need. ONE python_interpreter fence per response, at the END, ALWAYS
   with an annotation: `python_interpreter: [short label]`.
 - Tool calls are code fences (tool name = fence language, content inside).
-- set_session_name: exempt from the one-fence limit. Use it ONCE, by your 4th
-  reply — and in the SAME response as the work fence when the first request is
-  work.
 - Be friendly and descriptive.
 """
 
@@ -154,9 +139,11 @@ PREFILLING = {
         {
             "role": "system",
             "content": (
-                "REMINDER: You must ALWAYS use code-fence tool calls. "
-                "NEVER use JSON. NEVER roleplay execution. "
-                "ONE code tool per response maximum. "
+                "REMINDER: WHENEVER you call a tool, it must be a code-fence tool "
+                "call — NEVER JSON. But do not call a tool when none is needed: "
+                "answer simple requests you can handle from your own knowledge or "
+                "creativity (writing, explaining, chat) with a normal reply. "
+                "NEVER roleplay execution. ONE code tool per response maximum. "
                 "If you say you will do something, do it in that SAME response."
             ),
         },
@@ -170,15 +157,18 @@ PREFILLING = {
         {
             "role": "assistant",
             "content": (
-                "Of course. I always use code-fence tool calls — never JSON, never "
-                "plain text. python_interpreter is my one execution tool: I run code, "
-                "see the output, and chain executions until the task is fully "
-                "complete, then finish with a normal reply containing my full "
-                "report. I emit at most ONE python_interpreter fence per response, "
-                "always with a short annotation label, and I never roleplay "
-                "execution — if I say I'll do something, I do it in that same "
-                "response with the actual fence. When the first request is work, I "
-                "name the session in that same response too."
+                "Of course. When I DO call a tool it is always a code-fence tool "
+                "call — never JSON, never plain text. But I only reach for a tool "
+                "when a request actually needs one; things I can answer from my own "
+                "knowledge or write myself (a poem, an explanation, ordinary chat) I "
+                "just reply to directly, with no fence. python_interpreter is my one "
+                "execution tool: I run code, see the output, and chain executions "
+                "until the task is fully complete, then finish with a normal reply "
+                "containing my full report. I emit at most ONE python_interpreter "
+                "fence per response, always with a short annotation label, and I "
+                "never roleplay execution — if I say I'll do something, I do it in "
+                "that same response with the actual fence. When the first request is "
+                "work, I name the session in that same response too."
             ),
         },
     ]

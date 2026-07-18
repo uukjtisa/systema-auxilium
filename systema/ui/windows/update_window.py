@@ -103,6 +103,7 @@ class UpdateWindow(BaseWindow):
 
         body = self.build_shell(self._p, "Software Updates",
                                 min_size=(680, 520), buttons=("minimize", "close"))
+        self.setWindowTitle("Software Updates")
         self.resize(860, 620)
         self._build_body(body)
         self._wire_service()

@@ -21,7 +21,8 @@ def _stub_with_viewport(qapp, width):
     scroll.resize(width, 400)
     scroll.show()
     qapp.processEvents()
-    stub = types.SimpleNamespace(chat_scroll_area=scroll, chat_zoom=1.0)
+    stub = types.SimpleNamespace(chat_scroll_area=scroll, chat_zoom=1.0,
+                                 _bubble_style=lambda: 'blend')
     stub._bubble_max_width = types.MethodType(ChatWindow._bubble_max_width, stub)
     return stub, scroll.viewport().width()
 

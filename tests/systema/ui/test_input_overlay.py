@@ -61,6 +61,7 @@ def _build(qapp, cc_h=500, cc_w=600):
     stub = types.SimpleNamespace(
         input_container=ic, _input_card=combined, _chat_container=cc, chat_layout=cl,
         input_field=inp, _update_pinned_overlay=lambda: None,
+        _position_input_handles=lambda: None,  # width grab-bars (no-op in the mock)
         _chat_layout_host=inner,  # keep the layout's widget alive (GC → dead layout)
     )
     stub._position_input_overlay = types.MethodType(

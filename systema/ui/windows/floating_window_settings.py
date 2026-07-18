@@ -503,6 +503,7 @@ class AppearanceSettingsWindow(BaseWindow):
             Qt.WindowType.Window |
             Qt.WindowType.WindowStaysOnTopHint
         )
+        self.setWindowTitle("Appearance Settings")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         self.setMinimumSize(700, 550)

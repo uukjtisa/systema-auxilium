@@ -60,8 +60,19 @@ class BaseWindow(QWidget):
 
     # ── Rounded mask ───────────────────────────────────────────────────────────
 
+    # Subclasses whose corner-touching children all carry matching
+    # border-radii can opt in: the antialiased stylesheet corners then render
+    # SMOOTH with no mask. Default stays masked — a 1-bit mask is jagged, but
+    # a square child painting past the container's radius is worse.
+    _smooth_corners = False
+
     def apply_rounded_mask(self):
-        """Apply a 12-px rounded-corner clip mask to the window."""
+        """Round the window corners: smooth stylesheet corners for opted-in
+        windows (mask cleared), 12-px polygon clip mask otherwise."""
+        if getattr(self, '_smooth_corners', False) and self.testAttribute(
+                Qt.WidgetAttribute.WA_TranslucentBackground):
+            self.clearMask()
+            return
         from PyQt6.QtGui import QPainterPath
         from PyQt6.QtCore import QRectF
 

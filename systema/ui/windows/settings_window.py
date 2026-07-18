@@ -9,10 +9,65 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QCheckBox, QScrollArea, QFrame, QSlider, QSpinBox, QDoubleSpinBox,
                              QPlainTextEdit, QFileDialog, QStackedWidget, QMessageBox,
                              QInputDialog)
-from PyQt6.QtCore import Qt, QPoint, QTimer, QRect, QRectF
+from PyQt6.QtCore import Qt, QPoint, QTimer, QRect, QRectF, QThread, pyqtSignal
 from PyQt6.QtGui import QRegion, QPainter, QColor, QFont, QPen
 from systema.ui.base_window import BaseWindow
 from systema.ui import theme as _theme
+
+
+class _Spinner(QWidget):
+    """Minimal painted loading spinner — a rotating arc. No emoji, no image."""
+
+    def __init__(self, parent=None, size=46, color='#5A9CF8'):
+        super().__init__(parent)
+        self.setFixedSize(size, size)
+        self._angle = 0
+        self._color = QColor(color)
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+
+    def start(self):
+        if not self._timer.isActive():
+            self._timer.start(16)   # ~60 fps
+
+    def stop(self):
+        self._timer.stop()
+
+    def _tick(self):
+        self._angle = (self._angle + 7) % 360
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        m = 4.0
+        rect = QRectF(m, m, self.width() - 2 * m, self.height() - 2 * m)
+        track = QPen(QColor(255, 255, 255, 38), 3.0)
+        track.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(track)
+        p.drawArc(rect, 0, 360 * 16)
+        arc = QPen(self._color, 3.0)
+        arc.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(arc)
+        p.drawArc(rect, -self._angle * 16, 110 * 16)   # 110° moving sweep
+        p.end()
+
+
+class _SettingsSaveWorker(QThread):
+    """Persists settings to disk (json.dump + memory-block rebuild) off the GUI
+    thread so clicking Save can't freeze the UI."""
+    done = pyqtSignal()
+
+    def __init__(self, controller, parent=None):
+        super().__init__(parent)
+        self._controller = controller
+
+    def run(self):
+        try:
+            self._controller.save_settings()
+        except Exception:
+            pass
+        self.done.emit()
 
 
 class _SegmentedTabs(QWidget):
@@ -184,6 +239,7 @@ class SettingsWindow(BaseWindow):
             Qt.WindowType.Window |
             Qt.WindowType.WindowStaysOnTopHint
         )
+        self.setWindowTitle("Settings")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setMinimumSize(600, 500)
         self.resize(600, 750)  # Default size (but resizable!)
@@ -1266,6 +1322,112 @@ class SettingsWindow(BaseWindow):
         th_lay.addWidget(themes_grid)
         ui_lay.addWidget(theme_group)
 
+        # ── Chat bubble style section ────────────────────────────────────────
+        bubble_group = QGroupBox("Chat Bubbles")
+        bubble_group.setStyleSheet(_GROUP)
+        bs_lay = QVBoxLayout(bubble_group)
+        bs_lay.addWidget(_label(
+            "How chat messages are drawn. Applied immediately on Save.", muted=True))
+        bs_lay.addSpacing(6)
+
+        BUBBLE_STYLES = [
+            ("blend",   "Borderless blend",  "AI text sits directly on the backdrop; user gets a soft borderless fill (default)"),
+            ("compact", "Compact bordered",  "WhatsApp-style: bordered bubbles that hug their content width"),
+        ]
+        self._bubble_btn_group = QButtonGroup(self)
+        self._bubble_btn_group.setExclusive(True)
+        self._selected_bubble_style = self.controller.settings.get("chat_bubble_style", "blend")
+        if self._selected_bubble_style not in ("blend", "compact"):
+            self._selected_bubble_style = "blend"
+
+        bubbles_grid = QWidget()
+        bubbles_grid.setStyleSheet("background:transparent;")
+        bg_lay = QGridLayout(bubbles_grid)
+        bg_lay.setContentsMargins(0, 0, 0, 0)
+        bg_lay.setSpacing(10)
+
+        self._bubble_style_cards = {}
+        for idx, (key, name, desc) in enumerate(BUBBLE_STYLES):
+            card = QFrame()
+            card.setStyleSheet(f"""
+                QFrame {{
+                    background: {_ELEV};
+                    border: 2px solid {_ACCENT if key == self._selected_bubble_style else _BORDER};
+                    border-radius: 10px;
+                }}
+                QFrame:hover {{
+                    border-color: {_ACCENT};
+                }}
+            """)
+            card.setCursor(_Qt.CursorShape.PointingHandCursor)
+            cl = QVBoxLayout(card)
+            cl.setContentsMargins(12, 10, 12, 10)
+            cl.setSpacing(6)
+
+            rb = QRadioButton(name)
+            rb.setChecked(key == self._selected_bubble_style)
+            rb.setStyleSheet(f"""
+                QRadioButton {{ color:{_TEXT}; font-size:12px; font-weight:600; background:transparent; }}
+                QRadioButton::indicator {{ width:14px; height:14px;
+                    border-radius:7px; border:2px solid {_BORDER}; background:{_BASE}; }}
+                QRadioButton::indicator:checked {{
+                    background:{_ACCENT}; border-color:{_ACCENT};
+                }}
+            """)
+            rb.toggled.connect(lambda checked, k=key, c=card: self._on_bubble_style_selected(checked, k, c))
+            self._bubble_btn_group.addButton(rb)
+            cl.addWidget(rb)
+            _d = _label(desc, muted=True)
+            _d.setWordWrap(True)
+            cl.addWidget(_d)
+
+            def _make_bs_click(r): return lambda e: r.setChecked(True)
+            card.mousePressEvent = _make_bs_click(rb)
+
+            bg_lay.addWidget(card, 0, idx)
+            self._bubble_style_cards[key] = card
+
+        bs_lay.addWidget(bubbles_grid)
+
+        # Typing reveal — fake-streaming typewriter animation on AI replies
+        self.text_reveal_checkbox = QCheckBox("Typing reveal animation for AI replies")
+        self.text_reveal_checkbox.setStyleSheet(_CHECK)
+        self.text_reveal_checkbox.setChecked(
+            bool(self.controller.settings.get('chat_text_reveal', True)))
+        bs_lay.addWidget(self.text_reveal_checkbox)
+
+        # Typing speed (characters per second)
+        _tr_row = QHBoxLayout()
+        _tr_row.addWidget(_label("Typing speed:"))
+        self.text_reveal_speed_slider = QSlider(_Qt.Orientation.Horizontal)
+        self.text_reveal_speed_slider.setMinimum(15)
+        self.text_reveal_speed_slider.setMaximum(400)
+        try:
+            _cps = int(self.controller.settings.get('chat_text_reveal_cps', 90))
+        except Exception:
+            _cps = 90
+        self.text_reveal_speed_slider.setValue(max(15, min(400, _cps)))
+        self.text_reveal_speed_slider.setStyleSheet(f"""
+            QSlider::groove:horizontal {{
+                height:4px; background:{_BORDER}; border-radius:2px;
+            }}
+            QSlider::handle:horizontal {{
+                background:{_ACCENT}; border:none;
+                width:14px; height:14px; margin:-5px 0; border-radius:7px;
+            }}
+            QSlider::sub-page:horizontal {{ background:{_ACCENT}; border-radius:2px; }}
+        """)
+        _tr_row.addWidget(self.text_reveal_speed_slider, stretch=1)
+        self.text_reveal_speed_label = QLabel(f"{self.text_reveal_speed_slider.value()} ch/s")
+        self.text_reveal_speed_label.setFixedWidth(56)
+        self.text_reveal_speed_label.setStyleSheet(f"color:{_MUTED}; font-size:11px;")
+        _tr_row.addWidget(self.text_reveal_speed_label)
+        self.text_reveal_speed_slider.valueChanged.connect(
+            lambda v: self.text_reveal_speed_label.setText(f"{v} ch/s"))
+        bs_lay.addLayout(_tr_row)
+
+        ui_lay.addWidget(bubble_group)
+
         # ── Glass overlay section ────────────────────────────────────────────
         glass_group = QGroupBox("Glass Overlay")
         glass_group.setStyleSheet(_GROUP)
@@ -1904,6 +2066,27 @@ class SettingsWindow(BaseWindow):
         footer_lay.addWidget(save_btn)
 
         main_layout.addWidget(footer)
+
+    def _on_bubble_style_selected(self, checked, key, card):
+        """Handle bubble-style radio toggle — update card borders."""
+        if not checked:
+            return
+        self._selected_bubble_style = key
+        _, _, _ELEV, _BORDER, _ACCENT, _, _ = self._palette()
+        for k, c in getattr(self, '_bubble_style_cards', {}).items():
+            try:
+                c.setStyleSheet(f"""
+                    QFrame {{
+                        background: {_ELEV};
+                        border: 2px solid {_ACCENT if k == key else _BORDER};
+                        border-radius: 10px;
+                    }}
+                    QFrame:hover {{
+                        border-color: {_ACCENT};
+                    }}
+                """)
+            except RuntimeError:
+                pass
 
     def _on_theme_selected(self, checked, key, card):
         """Handle theme radio button toggle — update card borders."""
@@ -2899,7 +3082,97 @@ class SettingsWindow(BaseWindow):
             self.footer_status_label.setText("")
 
     def save_settings(self):
-        """Save settings to controller"""
+        """Persist settings WITHOUT freezing the UI: read widgets + apply set_*()
+        on the GUI thread (per-setting disk writes suppressed via
+        controller._settings_batch), then write to disk ONCE on a worker thread
+        behind a spinner, and apply the theme/bubble UI when it finishes."""
+        if getattr(self, '_saving_in_progress', False):
+            return   # a save is already mid-flight — ignore the double-click
+        self._saving_in_progress = True
+        self.controller._settings_batch = True
+        try:
+            self._write_settings_from_widgets()
+        finally:
+            self.controller._settings_batch = False
+        self._start_threaded_save()
+
+    def _start_threaded_save(self):
+        """Persist once, off the GUI thread, behind a blocking spinner overlay."""
+        self._show_save_spinner(True)
+        self._save_worker = _SettingsSaveWorker(self.controller)
+        self._save_worker.done.connect(self._on_settings_saved)
+        self._save_worker.start()
+
+    def _on_settings_saved(self):
+        """Worker finished the disk write — drop the spinner, then apply the
+        theme / bubble UI (GUI thread) and release the guard."""
+        self._show_save_spinner(False)
+        self._saving_in_progress = False
+
+        theme = self.controller.settings.get('chat_theme', 'obsidian_blue')
+        bubble_style = self.controller.settings.get('chat_bubble_style', 'blend')
+        # Broadcast the theme to every open window for instant unity.
+        try:
+            if hasattr(self.controller, 'broadcast_theme'):
+                self.controller.broadcast_theme(theme)
+            else:
+                chat_win = getattr(getattr(self.controller, 'ui', None), 'chat_window', None)
+                if chat_win and hasattr(chat_win, 'apply_theme'):
+                    chat_win.apply_theme(theme)
+        except Exception:
+            pass
+        # Apply the bubble style live (covers a bubble-only change).
+        try:
+            chat_win = getattr(getattr(self.controller, 'ui', None), 'chat_window', None)
+            if chat_win and hasattr(chat_win, 'apply_bubble_style'):
+                chat_win.apply_bubble_style(bubble_style)
+        except Exception:
+            pass
+        # Re-baseline so the just-saved values count as the new 'clean' state.
+        self._dirty = False
+        if hasattr(self, '_tracked_widgets'):
+            self._capture_baseline()
+        self.show_status_message("Settings saved")
+
+    def _show_save_spinner(self, show):
+        """Translucent overlay + centred spinner that also blocks interaction
+        while the disk write runs (so the dialog 'waits' for it). No emoji."""
+        if show:
+            try:
+                accent = _theme.current_palette(self.controller).get('accent', '#5A9CF8')
+            except Exception:
+                accent = '#5A9CF8'
+            ov = QWidget(self)
+            ov.setStyleSheet("background: rgba(0,0,0,0.38);")
+            col = QVBoxLayout(ov)
+            col.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            col.setSpacing(12)
+            sp = _Spinner(ov, size=46, color=accent)
+            col.addWidget(sp, alignment=Qt.AlignmentFlag.AlignCenter)
+            lbl = QLabel("Saving")
+            lbl.setStyleSheet("color:#E8EAED; font-size:12px; background:transparent;")
+            col.addWidget(lbl, alignment=Qt.AlignmentFlag.AlignCenter)
+            ov.setGeometry(self.rect())
+            ov.raise_()
+            ov.show()
+            sp.start()
+            self._save_overlay = ov
+            self._save_spinner = sp
+        else:
+            ov = getattr(self, '_save_overlay', None)
+            if ov is not None:
+                try:
+                    self._save_spinner.stop()
+                    ov.hide()
+                    ov.deleteLater()
+                except RuntimeError:
+                    pass
+                self._save_overlay = None
+                self._save_spinner = None
+
+    def _write_settings_from_widgets(self):
+        """Read every widget into controller.settings and apply the live set_*()
+        side-effects. Disk persistence is deferred (see save_settings)."""
         # Save General settings
         self.controller.settings['open_chat_on_startup'] = self.open_chat_on_startup_checkbox.isChecked()
         self.controller.settings['open_packet_on_startup'] = self.open_packet_on_startup_checkbox.isChecked()
@@ -3046,6 +3319,18 @@ class SettingsWindow(BaseWindow):
         theme = getattr(self, '_selected_theme', 'obsidian_blue')
         self.controller.settings['chat_theme'] = theme
 
+        # Save chat bubble style (blend default | compact)
+        bubble_style = getattr(self, '_selected_bubble_style', 'blend')
+        self.controller.settings['chat_bubble_style'] = bubble_style
+
+        # Save typing-reveal toggle + speed
+        if hasattr(self, 'text_reveal_checkbox'):
+            self.controller.settings['chat_text_reveal'] = \
+                self.text_reveal_checkbox.isChecked()
+        if hasattr(self, 'text_reveal_speed_slider'):
+            self.controller.settings['chat_text_reveal_cps'] = \
+                int(self.text_reveal_speed_slider.value())
+
         # Save glass background settings
         glass_enabled = self.glass_enabled_checkbox.isChecked()
         glass_opacity = self.glass_opacity_slider.value() / 100.0
@@ -3079,30 +3364,12 @@ class SettingsWindow(BaseWindow):
         self.controller.settings['vad_silero_enabled'] = silero_enabled
         self.controller.settings['vad_aggressiveness'] = vad_level
         self.controller.settings['vad_silero_threshold'] = silero_threshold
-        self.controller.save_settings()
 
-        # Apply to voice handler
+        # Apply to voice handler (its own save_settings() is suppressed by the
+        # batch flag — the single disk write happens on the worker thread).
         self.controller.set_vad_aggressiveness(vad_level)
-
-        # Broadcast the theme to every open window (incl. this one) for instant
-        # unity. Done last so the live retint can't disturb any widget reads.
-        try:
-            if hasattr(self.controller, 'broadcast_theme'):
-                self.controller.broadcast_theme(theme)
-            else:
-                chat_win = getattr(getattr(self.controller, 'ui', None), 'chat_window', None)
-                if chat_win and hasattr(chat_win, 'apply_theme'):
-                    chat_win.apply_theme(theme)
-        except Exception:
-            pass
-
-        # Show confirmation (footer was just rebuilt by the retint — safe).
-        # Re-baseline so the just-saved values count as the new 'clean' state
-        # (covers the case where the theme retint didn't rebuild the widgets).
-        self._dirty = False
-        if hasattr(self, '_tracked_widgets'):
-            self._capture_baseline()
-        self.show_status_message("✓ Settings saved successfully!")
+        # Theme / bubble UI + baseline + "Settings saved" status are applied in
+        # _on_settings_saved(), AFTER the off-thread disk write completes.
 
     def _set_tok_graph_mode(self, mode):
         """Switch the token graph time mode and refresh."""

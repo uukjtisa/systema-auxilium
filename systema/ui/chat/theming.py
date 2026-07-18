@@ -54,33 +54,25 @@ class ThemingMixin:
     # ═══════════════════════════════════════════════════════════════════════════
 
     def _apply_glass_to_bubbles(self, enabled: bool):
-        """Update all existing message bubble backgrounds for glass / solid mode."""
-        for md in self.message_widgets:
-            cw = md.get('content_wrapper')
-            if cw is None:
-                continue
-            role = md.get('role', '')
-            try:
-                if enabled:
-                    bg = 'rgba(37, 37, 37, 0.55)' if role == 'user' else 'rgba(42, 42, 42, 0.55)'
-                    cw.setStyleSheet(f"""
-                        QFrame {{
-                            background-color: {bg};
-                            border: 1px solid rgba(60, 60, 60, 0.4);
-                            border-radius: 12px;
-                        }}
-                    """)
-                else:
-                    bg = '#1E2228' if role == 'user' else '#21262D'
-                    cw.setStyleSheet(f"""
-                        QFrame {{
-                            background-color: {bg};
-                            border: 1px solid #30363D;
-                            border-radius: 12px;
-                        }}
-                    """)
-            except RuntimeError:
-                pass
+        """Update all existing message bubble backgrounds for glass / solid mode.
+        Delegates to apply_bubble_style, which reads self._glass_enabled and
+        renders the current style (blend | compact) accordingly."""
+        self._glass_enabled = enabled
+        self.apply_bubble_style()
+
+    def _sync_glass_effects(self):
+        """DWM acrylic RETIRED (2026-07-17): on current Win11 builds the
+        undocumented SetWindowCompositionAttribute accent renders the whole
+        translucent window BLACK instead of frosted (user-reproduced). Glass
+        mode is pure Qt translucency again; blend readability comes from the
+        smoked rgba text panels that bubble_wrapper_css applies in glass mode.
+        Kept as a best-effort CLEANUP so any accent left by an older run is
+        removed from the window."""
+        try:
+            from systema.ui.win_effects import disable_blur_behind
+            disable_blur_behind(int(self.winId()))
+        except Exception:
+            pass
 
     # ═══════════════════════════════════════════════════════════════════════════
     # THEME APPLICATION
@@ -96,7 +88,14 @@ class ThemingMixin:
         return self._THEMES.get(key, self._THEMES['obsidian_blue'])
 
     def apply_theme(self, theme_key: str):
-        """Apply a named colour theme to all major structural surfaces."""
+        """Apply a named colour theme to all major structural surfaces.
+
+        GLASS-AWARE: when the glass overlay is active it OWNS the window
+        chrome (container, chat backdrop, scroll area, input band, sidebar),
+        so those zones are delegated to apply_glass_background instead of
+        being painted solid first. The old paint-solid-then-reglass double
+        pass is what made glass toggles look broken and left the window
+        hanging glassy for a beat on long chats."""
         t = self._THEMES.get(theme_key, self._THEMES['obsidian_blue'])
         self._current_theme_key = theme_key   # remember for apply_glass_background
         # Mirror the theme to the Android phone if one is connected
@@ -106,104 +105,89 @@ class ThemingMixin:
                 _ab.send_theme(t)
         except Exception:
             pass
+        _glass_on = getattr(self, '_glass_enabled', False)
         try:
-            # Container
-            self.container.setStyleSheet(f"""
-                QWidget#container {{
-                    background-color: {t['surface']};
-                    border-radius: 12px;
-                }}
-                QWidget {{
-                    color: #E8EAED;
-                    font-family: 'Segoe UI', -apple-system, system-ui, sans-serif;
-                }}
-            """)
-            # Chat body — transparent, so the SCROLL AREA's gradient shows
-            # through. The gradient spans the fixed viewport (not the full
-            # scroll content), giving the solid themes depth: slightly lit at
-            # the top, sinking into the theme's deep tone at the bottom where
-            # the input pill floats. Bubbles (surface/elevated) still read as
-            # raised — the backdrop stays at/below base brightness throughout.
-            from systema.ui.theme import lighten as _lighten
-            self.chat_widget.setStyleSheet(
-                "QWidget { background-color: transparent; }"
-            )
-            _grad_top = _lighten(t['base'], 0.025)
-            _grad_bottom = t.get('deep', t['base'])
-            # Scroll area
-            self.chat_scroll_area.setStyleSheet(f"""
-                QScrollArea {{ border: none;
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 {_grad_top}, stop:0.55 {t['base']},
-                        stop:1 {_grad_bottom}); }}
-                QScrollArea > QWidget > QWidget {{ background: transparent; }}
-                QScrollBar:vertical {{
-                    background: transparent; width: 12px; margin: 0;
-                }}
-                QScrollBar::handle:vertical {{
-                    background: rgba(255,255,255,0.15); border-radius:6px; min-height:30px; margin:2px;
-                }}
-                QScrollBar::handle:vertical:hover  {{ background: rgba(255,255,255,0.28); }}
-                QScrollBar::handle:vertical:pressed {{ background: rgba(255,255,255,0.38); }}
-                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
-                QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
-            """)
-            # Header
-            self.header_bar.setStyleSheet(f"""
-                QFrame {{
-                    background-color: {t['surface']};
-                    border-bottom: 1px solid {t['border']};
-                }}
-                QLabel {{ background-color: transparent; }}
-            """)
-            # Status + work labels — compact inline chips inside the input pill
-            self.status_label.setStyleSheet("""
-                QLabel#statusLabel {
-                    color: #C7CBD1; font-style: italic; font-size: 10px;
-                    background: transparent; padding: 0 4px;
-                }
-            """)
-            if hasattr(self, '_work_banner'):
-                self._work_banner.setStyleSheet(f"""
-                    QLabel#workBanner {{
-                        color: {t['accent']}; font-size: 10px; font-style: italic;
-                        background: transparent; padding: 0 4px;
+            if not _glass_on:
+                # Container carries the WHOLE backdrop (theme gradient) —
+                # it is a plain QWidget, where background + border-radius
+                # compose into smooth antialiased corners. Backgrounds on the
+                # scroll area do NOT round (Qt paints them on the viewport,
+                # which ignores the frame radius — the square-corner bug).
+                from systema.ui.theme import lighten as _lighten
+                _grad_top = _lighten(t['base'], 0.025)
+                _grad_bottom = t.get('deep', t['base'])
+                self.container.setStyleSheet(f"""
+                    QWidget#container {{
+                        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                            stop:0 {_grad_top}, stop:0.55 {t['base']},
+                            stop:1 {_grad_bottom});
+                        border-radius: 12px;
+                    }}
+                    QWidget {{
+                        color: #E8EAED;
+                        font-family: 'Segoe UI', -apple-system, system-ui, sans-serif;
                     }}
                 """)
-            # Bottom fade strip above the pill follows the theme's base tone.
+                # Chat body + scroll area — fully transparent; the container's
+                # gradient shows through with rounded corners intact.
+                self.chat_widget.setStyleSheet(
+                    "QWidget { background-color: transparent; }"
+                )
+                self.chat_scroll_area.setStyleSheet("""
+                    QScrollArea { border: none; background: transparent; }
+                    QScrollArea > QWidget > QWidget { background: transparent; }
+                    QScrollBar:vertical { width: 0px; }
+                """)
+                # Status + work labels — compact inline chips inside the input pill
+                self.status_label.setStyleSheet("""
+                    QLabel#statusLabel {
+                        color: #C7CBD1; font-style: italic; font-size: 10px;
+                        background: transparent; padding: 0 4px;
+                    }
+                """)
+                if hasattr(self, '_work_banner'):
+                    self._work_banner.setStyleSheet(f"""
+                        QLabel#workBanner {{
+                            color: {t['accent']}; font-size: 10px; font-style: italic;
+                            background: transparent; padding: 0 4px;
+                        }}
+                    """)
+                # Input container — the OUTER band is fully transparent so the chat
+                # shows through around the pill (the pill itself stays solid).
+                self.input_container.setStyleSheet("""
+                                QFrame#inputContainer {
+                                    background: transparent;
+                                    border: none;
+                                }
+                            """)
+                # Sidebar (solid themed styling)
+                self._apply_sidebar_theme()
+                # Input card — SOLID (opaque) pill so the text stays crisp
+                from PyQt6.QtWidgets import QFrame as _QF
+                _ic = getattr(self, '_input_card_ref', None)
+                if _ic is None:
+                    for child in self.container.findChildren(_QF):
+                        if child.objectName() == "inputCard":
+                            self._input_card_ref = child
+                            _ic = child
+                            break
+                if _ic:
+                    try:
+                        _ic.setStyleSheet(f"""
+                            QFrame#inputCard {{
+                                background-color: {t['input_card']};
+                                border: 1px solid {t['input_card_border']};
+                                border-radius: 18px;
+                            }}
+                        """)
+                    except RuntimeError:
+                        self._input_card_ref = None
+
+            # Bottom fade strip above the pill follows the theme's base tone
+            # in BOTH modes.
             _fade = getattr(self, '_chat_fade', None)
             if _fade is not None:
                 _fade.set_color(t['base'])
-            # Input container — the OUTER band is fully transparent so the chat
-            # shows through around the pill (the pill itself stays solid).
-            self.input_container.setStyleSheet("""
-                            QFrame#inputContainer {
-                                background: transparent;
-                                border: none;
-                            }
-                        """)
-            # Sidebar (solid themed styling)
-            self._apply_sidebar_theme()
-            # Input card — SOLID (opaque) pill so the text stays crisp
-            from PyQt6.QtWidgets import QFrame as _QF
-            _ic = getattr(self, '_input_card_ref', None)
-            if _ic is None:
-                for child in self.container.findChildren(_QF):
-                    if child.objectName() == "inputCard":
-                        self._input_card_ref = child
-                        _ic = child
-                        break
-            if _ic:
-                try:
-                    _ic.setStyleSheet(f"""
-                        QFrame#inputCard {{
-                            background-color: {t['input_card']};
-                            border: 1px solid {t['input_card_border']};
-                            border-radius: 18px;
-                        }}
-                    """)
-                except RuntimeError:
-                    self._input_card_ref = None
 
             # Message bubbles
             for md in self.message_widgets:
@@ -244,22 +228,26 @@ class ThemingMixin:
                                                                 """)
                             except RuntimeError:
                                 pass
-                        else:
-                            bg = t['elevated'] if role != 'user' else t['surface']
-                            cw.setStyleSheet(f"""
-                                                            QFrame {{
-                                                                background-color: {bg};
-                                                                border: 1px solid {t['border']};
-                                                                border-radius: 12px;
-                                                            }}
-                                                        """)
+                        # user/assistant bubbles are handled by
+                        # apply_bubble_style() below (blend | compact).
                     except RuntimeError:
                         pass
 
-            # If glass mode is active, re-apply it on top so a theme change
-            # (e.g. the settings-Save broadcast) doesn't revert to solid surfaces.
-            if getattr(self, '_glass_enabled', False):
+            if _glass_on:
+                # Glass owns the chrome — re-affirm it with the new palette in
+                # ONE pass (ends with apply_bubble_style → bubbles + acrylic).
                 self.apply_glass_background(True, getattr(self, '_glass_opacity', 0.75))
+            else:
+                # Re-style user/assistant bubbles for the new palette in the
+                # currently selected bubble style (also syncs glass effects).
+                self.apply_bubble_style()
+            # Repaint the message navigator so its accent/panel follow the theme.
+            try:
+                nav = getattr(self, '_msg_navigator', None)
+                if nav is not None:
+                    nav.update()
+            except (RuntimeError, AttributeError):
+                pass
         except Exception as e:
             log.error(f"[ChatWindow.apply_theme] Error: {e}")
 
@@ -278,11 +266,13 @@ class ThemingMixin:
             }}
         """)
         from PyQt6.QtWidgets import QWidget as _QW, QLineEdit as _QLE
+        # Inner panels stay TRANSPARENT — the #sidebar frame paints the themed
+        # bg with its rounded left corners; opaque children squared them off.
         for w in self.sidebar.findChildren(_QW):
             if w.objectName() == "sidebarContent":
-                w.setStyleSheet(f"QWidget#sidebarContent {{ background-color: {t['base']}; }}")
+                w.setStyleSheet("QWidget#sidebarContent { background-color: transparent; }")
             elif w.objectName() == "sidebarHero":
-                w.setStyleSheet(f"QFrame#sidebarHero {{ background-color: {t['base']}; border-bottom: 1px solid {t['border']}; }}")
+                w.setStyleSheet(f"QFrame#sidebarHero {{ background-color: transparent; border-bottom: 1px solid {t['border']}; }}")
         for inp in self.sidebar.findChildren(_QLE):
             try:
                 inp.setStyleSheet(f"""
@@ -320,72 +310,37 @@ class ThemingMixin:
             self._glass_enabled = enabled
             self._glass_opacity = opacity
 
-            # Scrollbar: visible track in glass mode, solid in dark mode
-            _scrollbar_glass = """
-                QScrollBar:vertical {
-                    background: rgba(255,255,255,0.06);
-                    width: 12px; margin: 0; border-radius: 6px;
-                }
-                QScrollBar::handle:vertical {
-                    background: rgba(255,255,255,0.18);
-                    border-radius: 6px; min-height: 30px; margin: 2px;
-                }
-                QScrollBar::handle:vertical:hover  { background: rgba(255,255,255,0.30); }
-                QScrollBar::handle:vertical:pressed { background: rgba(255,255,255,0.40); }
-                QScrollBar::add-line:vertical,
-                QScrollBar::sub-line:vertical { height: 0px; }
-                QScrollBar::add-page:vertical,
-                QScrollBar::sub-page:vertical { background: transparent; }
-            """
-            _scrollbar_solid = """
-                QScrollBar:vertical {
-                    background: transparent; width: 12px; margin: 0;
-                }
-                QScrollBar::handle:vertical {
-                    background: rgba(255,255,255,0.15);
-                    border-radius: 6px; min-height: 30px; margin: 2px;
-                }
-                QScrollBar::handle:vertical:hover  { background: rgba(255,255,255,0.28); }
-                QScrollBar::handle:vertical:pressed { background: rgba(255,255,255,0.38); }
-                QScrollBar::add-line:vertical,
-                QScrollBar::sub-line:vertical { height: 0px; }
-                QScrollBar::add-page:vertical,
-                QScrollBar::sub-page:vertical { background: transparent; }
-            """
+            # Scrollbar: hidden in both modes — the MessageNavigator overlay
+            # replaces it (2026-07 redesign).
+            _scrollbar_glass = "QScrollBar:vertical { width: 0px; }"
+            _scrollbar_solid = "QScrollBar:vertical { width: 0px; }"
 
             if enabled:
                 t = self._t()
-                # ── outer container: fully transparent ────────────────────────
-                self.container.setStyleSheet("""
-                    QWidget#container {
-                        background-color: transparent;
+                # ── outer container: carries the translucent backdrop — a
+                #    plain QWidget rounds background + radius correctly (a
+                #    scroll-area background paints square on the viewport) ────
+                self.container.setStyleSheet(f"""
+                    QWidget#container {{
+                        background-color: {bg_rgba};
                         border-radius: 12px;
-                    }
-                    QWidget {
+                    }}
+                    QWidget {{
                         color: #E8EAED;
                         font-family: 'Segoe UI', -apple-system, system-ui, sans-serif;
-                    }
+                    }}
                 """)
 
-                # ── chat messages backdrop ─────────────────────────────────────
+                # ── chat area: fully transparent over the container ───────────
                 self.chat_widget.setStyleSheet(
-                    f"QWidget {{ background-color: {bg_rgba}; }}"
+                    "QWidget { background-color: transparent; }"
                 )
                 self.chat_scroll_area.setStyleSheet(
-                    "QScrollArea { border: none; background-color: transparent; }"
+                    "QScrollArea { border: none; background: transparent; }"
                     + _scrollbar_glass
                 )
 
-                # ── header: uniform with chat body (same bg_rgba) ─────────────
-                self.header_bar.setStyleSheet(f"""
-                    QFrame {{
-                        background-color: {bg_rgba};
-                        border-bottom: 1px solid rgba(50, 50, 50, 0.5);
-                    }}
-                    QLabel {{
-                        background-color: transparent;
-                    }}
-                """)
+                # (header bar removed in the 2026-07 redesign — no glass styling)
 
                 # ── status + work chips: compact, inside the pill (no bar) ────
                 self.status_label.setStyleSheet("""
@@ -465,12 +420,19 @@ class ThemingMixin:
                     # sidebar opted out of glass → keep it solid + themed
                     self._apply_sidebar_theme()
 
-                # ── message bubbles stay solid — no change needed ─────────────
+                # ── message bubbles: restyle for glass (blend gets the smoked
+                #    AI panel; compact gets translucent bordered cards) ────────
+                self.apply_bubble_style()
 
             else:
                 # ── restore solid theme surfaces ─────────────────────────────
+                # Drop the DWM acrylic IMMEDIATELY — the restyle below takes a
+                # moment on long chats, and a lingering accent is what made
+                # disabling glass hang "glassy" before snapping to normal.
+                self._sync_glass_effects()
                 # Delegate to apply_theme so the chosen palette is used,
-                # not hardcoded Obsidian Blue colours.
+                # not hardcoded Obsidian Blue colours. (_glass_enabled is
+                # already False, so apply_theme runs its solid path.)
                 theme_key = getattr(self, '_current_theme_key', 'obsidian_blue')
                 self.apply_theme(theme_key)
 

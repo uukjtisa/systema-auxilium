@@ -189,10 +189,11 @@ def read_current(path, base=None):
 
 
 def short_display(path):
-    """~parent/file.py — the compact card label."""
-    p = Path(str(path))
-    parent = p.parent.name or p.anchor.rstrip(":\\/")
-    return f"~{parent}/{p.name}" if parent else p.name
+    """Card label: the FULL path, forward-slash normalized (was ~parent/name —
+    the user wants to see where the file actually lives). Bare filenames pass
+    through unchanged; the chat card word-wraps long paths."""
+    s = str(path).replace("\\", "/")
+    return s if s else str(path)
 
 
 # ── grep (ripgrep-style recursive search) ────────────────────────────────────
