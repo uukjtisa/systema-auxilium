@@ -31,6 +31,9 @@ class SessionManager:
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self.active_session_id = None
         self.session_metadata = {}  # Cache for session names/dates
+        # list_sessions() metadata cache: filename -> ((mtime_ns, size), meta).
+        # Lets a sidebar refresh skip re-parsing unchanged session files.
+        self._list_cache = {}
         log.info(f"[SessionManager.__init__] Sessions directory: '{self.sessions_dir}' | "
                  f"active_session_id=None | metadata cache empty")
 
@@ -139,28 +142,47 @@ class SessionManager:
             return None
 
     def list_sessions(self):
-        """List all sessions, sorted by date (newest first)"""
+        """List all sessions, sorted by date (newest first).
+
+        Metadata is cached per file keyed by (mtime_ns, size): only new or
+        changed files are re-parsed. Session files hold whole chat histories
+        (MBs), and this runs on the GUI thread on every sidebar refresh /
+        auto-save — the full-directory parse was the top-ranked UI hitch."""
         log.info("[SessionManager.list_sessions] Scanning sessions directory")
-        log.debug(f"[SessionManager.list_sessions] Directory: '{self.sessions_dir}'")
         sessions = []
+        seen = set()
 
         for file_path in self.sessions_dir.glob("*.json"):
-            log.debug(f"[SessionManager.list_sessions] Reading: '{file_path.name}'")
+            fname = file_path.name
             try:
+                st = file_path.stat()
+                key = (st.st_mtime_ns, st.st_size)
+                seen.add(fname)
+                cached = self._list_cache.get(fname)
+                if cached and cached[0] == key:
+                    sessions.append(dict(cached[1]))
+                    continue
+
                 with open(file_path, 'r', encoding='utf-8') as f:
                     session_data = json.load(f)
 
-                sessions.append({
+                meta = {
                     'id': session_data.get('id', file_path.stem),
                     'name': session_data.get('session_name', 'Unnamed'),
                     'date': session_data.get('creation_time_and_date', ''),
-                    'file': file_path.name
-                })
-                log.debug(f"[SessionManager.list_sessions] Parsed: id='{session_data.get('id')}' | "
-                          f"name='{session_data.get('session_name')}'")
+                    'file': fname
+                }
+                self._list_cache[fname] = (key, meta)
+                sessions.append(dict(meta))
+                log.debug(f"[SessionManager.list_sessions] Parsed: id='{meta['id']}' | "
+                          f"name='{meta['name']}'")
             except Exception as e:
-                log.warning(f"[SessionManager.list_sessions] Skipping unreadable file '{file_path.name}': "
+                log.warning(f"[SessionManager.list_sessions] Skipping unreadable file '{fname}': "
                             f"{type(e).__name__}: {e}")
+
+        # Forget cache entries for files deleted from the directory.
+        for gone in set(self._list_cache) - seen:
+            del self._list_cache[gone]
 
         # Sort by ID (which is timestamp-based) - newest first
         sessions.sort(key=lambda x: x['id'], reverse=True)
