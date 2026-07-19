@@ -13,6 +13,9 @@ from PyQt6.QtCore import Qt, QPoint, QTimer, QRect, QRectF, QThread, pyqtSignal
 from PyQt6.QtGui import QRegion, QPainter, QColor, QFont, QPen
 from systema.ui.base_window import BaseWindow
 from systema.ui import theme as _theme
+from systema.common.logger import _make_logger
+
+log = _make_logger("SettingsWindow")
 
 
 class _Spinner(QWidget):
@@ -1576,34 +1579,23 @@ class SettingsWindow(BaseWindow):
         # ════════════════════════════════════════════════════════════════════
         sec_scroll, sec_lay = _make_scroll_tab()
 
-        # ── Master override: bypass ALL security (auto-approve everything) ───
-        self.bypass_security_checkbox = QCheckBox(
-            "Bypass all security — auto-approve every operation (DANGEROUS)")
-        self.bypass_security_checkbox.setStyleSheet(_CHECK)
-        self.bypass_security_checkbox.setToolTip(
-            "Overrides the entire policy below: code runs and files are written, "
-            "edited, or deleted with NO prompts and NO per-category rules.\n"
-            "Only enable if you fully trust the AI. Everything below is disabled "
-            "while this is on.")
-        sec_lay.addWidget(self.bypass_security_checkbox)
-        sec_lay.addWidget(_info_box(
-            "While this is ON, Supervised Execution and every per-category rule "
-            "below are ignored — turn it off to restore your policy."))
-
-        sec_group = QGroupBox("Code Execution Safety")
+        sec_group = QGroupBox("Master Security Switch")
         sec_group.setStyleSheet(_GROUP)
         sg_lay = QVBoxLayout(sec_group)
-        self.supervised_checkbox = QCheckBox("Enable Supervised Execution (Recommended)")
+        self.supervised_checkbox = QCheckBox(
+            "Enable Supervised Execution — OFF disables ALL security")
         self.supervised_checkbox.setChecked(True)
         self.supervised_checkbox.setStyleSheet(_CHECK)
         sg_lay.addWidget(self.supervised_checkbox)
         sg_lay.addWidget(_info_box(
-            "When enabled, you review RISKY code before it runs — edit, explain, or "
-            "reject it. Obviously-safe snippets (plain print, math, a bare import) run "
-            "without a prompt; use 'Review even safe code' below to be asked for "
-            "everything.\n\n"
-            "Warning: Disabling allows automatic code execution without review. "
-            "Only disable if you fully trust the AI."))
+            "The single kill-switch for the entire security layer.\n\n"
+            "ON: risky code and file changes are scanned and prompted for review "
+            "before they run — edit, explain, or reject them. Obviously-safe "
+            "snippets (plain print, math, a bare import) run without a prompt; "
+            "tick 'Review even safe code' below to be asked for everything.\n\n"
+            "OFF: the AI runs code and writes, edits, or deletes files with NO "
+            "prompts and NO rules — the whole policy below is ignored, including "
+            "'deny' categories. Only turn this off if you fully trust the AI."))
         sec_lay.addWidget(sec_group)
 
         # ── Execution policy + approval memory + audit ──────────────────────
@@ -1616,9 +1608,9 @@ class SettingsWindow(BaseWindow):
             "network, dynamic-code, system and credential operation is sorted into "
             "a category you control here. Each category can be set to: ask (prompt "
             "for approval), allow (run without a prompt), or deny (always block). "
-            "'ask' and 'deny' apply even when Supervised Execution is off, so risky "
-            "code is always caught. Pick a preset for a quick start, or fine-tune "
-            "each row. Works on Windows, Linux, and macOS."))
+            "This policy only applies while Supervised Execution is ON — turning "
+            "the master switch off disables all of it. Pick a preset for a quick "
+            "start, or fine-tune each row. Works on Windows, Linux, and macOS."))
 
         # ── Preset row ──────────────────────────────────────────────────────
         _preset_row = QHBoxLayout()
@@ -1678,18 +1670,6 @@ class SettingsWindow(BaseWindow):
             "reviewed.\nTick this to be prompted for EVERY code execution, no matter "
             "how trivial.")
         pol_lay.addWidget(self.review_safe_code_checkbox)
-
-        # Bypass lockout: while "Bypass all security" is on, the whole policy is
-        # overridden, so disable every control the user would otherwise tune.
-        def _update_bypass_lockout():
-            locked = self.bypass_security_checkbox.isChecked()
-            for _w in (self.supervised_checkbox, self.review_safe_code_checkbox,
-                       self._preset_combo, self._preset_apply, self._preset_save,
-                       self._preset_del, *self._policy_combos.values()):
-                _w.setEnabled(not locked)
-        self.bypass_security_checkbox.stateChanged.connect(
-            lambda _s: _update_bypass_lockout())
-        self._update_bypass_lockout = _update_bypass_lockout
 
         _forget_btn = QPushButton("Clear this session's allow-list")
         _forget_btn.setStyleSheet(_BTN)
@@ -2615,8 +2595,6 @@ class SettingsWindow(BaseWindow):
         # Load supervised execution mode
         supervised_mode = self.controller.settings.get('supervised_execution', True)  # Default ON
         self.supervised_checkbox.setChecked(supervised_mode)
-        self.bypass_security_checkbox.setChecked(
-            self.controller.settings.get('security_bypass_all', False))
 
         # Load execution policy + audit view
         try:
@@ -2631,12 +2609,6 @@ class SettingsWindow(BaseWindow):
             self._refresh_audit_view()
         except Exception:
             pass
-        # Apply the bypass lockout to reflect the loaded state.
-        try:
-            self._update_bypass_lockout()
-        except Exception:
-            pass
-
         # Load voice mode approval
         try:
             s = self.controller.settings
@@ -3089,16 +3061,58 @@ class SettingsWindow(BaseWindow):
         if getattr(self, '_saving_in_progress', False):
             return   # a save is already mid-flight — ignore the double-click
         self._saving_in_progress = True
+        # Show + PAINT the spinner BEFORE the widget-collect phase: the set_*()
+        # side effects below block the GUI thread, and running them first meant
+        # the overlay only ever appeared for the (short) disk write — i.e. never.
+        self._show_save_spinner(True)
+        QTimer.singleShot(0, self._collect_then_save)
+
+    def _collect_then_save(self):
+        """Collect widgets (fast dict writes), then apply only the CHANGED
+        set_*() side effects one event-loop tick at a time — the spinner keeps
+        animating and the app stays responsive between steps. The single disk
+        write then runs on the worker thread."""
+        import time as _time
+        t0 = _time.perf_counter()
         self.controller._settings_batch = True
         try:
+            snap = dict(self.controller.settings)   # pre-save values (change-gating)
             self._write_settings_from_widgets()
-        finally:
+            queue = self._build_side_effect_queue(snap)
+            self._theme_changed = (snap.get('chat_theme')
+                                   != self.controller.settings.get('chat_theme'))
+            self._bubble_changed = (snap.get('chat_bubble_style', 'blend')
+                                    != self.controller.settings.get('chat_bubble_style', 'blend'))
+        except Exception:
             self.controller._settings_batch = False
-        self._start_threaded_save()
+            self._show_save_spinner(False)
+            self._saving_in_progress = False
+            raise
+        log.info(f"[save] collect {(_time.perf_counter() - t0) * 1000:.0f} ms, "
+                 f"{len(queue)} changed side effect(s): {[l for l, _ in queue]}")
+        self._run_side_effects(queue)
+
+    def _run_side_effects(self, queue):
+        """Apply one queued setter per event-loop tick (logging slow ones), then
+        hand off to the disk-write worker. Yielding between setters is what
+        keeps the spinner spinning and every window responsive mid-save."""
+        if not queue:
+            self.controller._settings_batch = False
+            self._start_threaded_save()
+            return
+        import time as _time
+        label, fn = queue.pop(0)
+        t0 = _time.perf_counter()
+        try:
+            fn()
+        except Exception as e:
+            log.error(f"[_run_side_effects] '{label}' failed: {e}")
+        ms = (_time.perf_counter() - t0) * 1000
+        (log.info if ms >= 50 else log.debug)(f"[save] {label}: {ms:.0f} ms")
+        QTimer.singleShot(0, lambda: self._run_side_effects(queue))
 
     def _start_threaded_save(self):
-        """Persist once, off the GUI thread, behind a blocking spinner overlay."""
-        self._show_save_spinner(True)
+        """Persist once, off the GUI thread, behind the blocking spinner overlay."""
         self._save_worker = _SettingsSaveWorker(self.controller)
         self._save_worker.done.connect(self._on_settings_saved)
         self._save_worker.start()
@@ -3111,23 +3125,27 @@ class SettingsWindow(BaseWindow):
 
         theme = self.controller.settings.get('chat_theme', 'obsidian_blue')
         bubble_style = self.controller.settings.get('chat_bubble_style', 'blend')
-        # Broadcast the theme to every open window for instant unity.
-        try:
-            if hasattr(self.controller, 'broadcast_theme'):
-                self.controller.broadcast_theme(theme)
-            else:
+        # Broadcast the theme to every open window — ONLY when it actually
+        # changed. The full-app restyle is the one save step Qt can't do
+        # off-thread, so an unrelated save must never pay for it.
+        if getattr(self, '_theme_changed', True):
+            try:
+                if hasattr(self.controller, 'broadcast_theme'):
+                    self.controller.broadcast_theme(theme)
+                else:
+                    chat_win = getattr(getattr(self.controller, 'ui', None), 'chat_window', None)
+                    if chat_win and hasattr(chat_win, 'apply_theme'):
+                        chat_win.apply_theme(theme)
+            except Exception:
+                pass
+        # Apply the bubble style live — same change-gate reasoning.
+        if getattr(self, '_bubble_changed', True):
+            try:
                 chat_win = getattr(getattr(self.controller, 'ui', None), 'chat_window', None)
-                if chat_win and hasattr(chat_win, 'apply_theme'):
-                    chat_win.apply_theme(theme)
-        except Exception:
-            pass
-        # Apply the bubble style live (covers a bubble-only change).
-        try:
-            chat_win = getattr(getattr(self.controller, 'ui', None), 'chat_window', None)
-            if chat_win and hasattr(chat_win, 'apply_bubble_style'):
-                chat_win.apply_bubble_style(bubble_style)
-        except Exception:
-            pass
+                if chat_win and hasattr(chat_win, 'apply_bubble_style'):
+                    chat_win.apply_bubble_style(bubble_style)
+            except Exception:
+                pass
         # Re-baseline so the just-saved values count as the new 'clean' state.
         self._dirty = False
         if hasattr(self, '_tracked_widgets'):
@@ -3156,6 +3174,10 @@ class SettingsWindow(BaseWindow):
             ov.raise_()
             ov.show()
             sp.start()
+            # Synchronous first paint — the collect phase blocks the GUI thread
+            # right after this, and a queued paint event would never get to run
+            # before it (the spinner freezes mid-collect but stays visible).
+            ov.repaint()
             self._save_overlay = ov
             self._save_spinner = sp
         else:
@@ -3171,205 +3193,222 @@ class SettingsWindow(BaseWindow):
                 self._save_spinner = None
 
     def _write_settings_from_widgets(self):
-        """Read every widget into controller.settings and apply the live set_*()
-        side-effects. Disk persistence is deferred (see save_settings)."""
-        # Save General settings
-        self.controller.settings['open_chat_on_startup'] = self.open_chat_on_startup_checkbox.isChecked()
-        self.controller.settings['open_packet_on_startup'] = self.open_packet_on_startup_checkbox.isChecked()
-        self.controller.settings['show_token_count'] = self.show_token_count_checkbox.isChecked()
+        """Read every widget into controller.settings — PLAIN dict writes and
+        cheap GUI touches only. The live set_*() side effects are queued by
+        _build_side_effect_queue() and applied one event-loop tick at a time
+        (see _collect_then_save), so this stays fast on the GUI thread."""
+        s = self.controller.settings
+
+        # General
+        s['open_chat_on_startup'] = self.open_chat_on_startup_checkbox.isChecked()
+        s['open_packet_on_startup'] = self.open_packet_on_startup_checkbox.isChecked()
+        s['show_token_count'] = self.show_token_count_checkbox.isChecked()
         try:
             chat_win = getattr(getattr(self.controller, 'ui', None), 'chat_window', None)
             if chat_win and hasattr(chat_win, '_token_count_lbl'):
                 chat_win._token_count_lbl.setVisible(self.show_token_count_checkbox.isChecked())
         except Exception:
             pass
-        self.controller.settings['tool_execution_timeout_seconds'] = self.exec_timeout_spin.value()
-        self.controller.settings['packet_port'] = self.packet_port_spin.value()
-        self.controller.settings['tool_calling_mode'] = self.tool_calling_mode_combo.currentData()
+        s['tool_execution_timeout_seconds'] = self.exec_timeout_spin.value()
+        s['packet_port'] = self.packet_port_spin.value()
+        s['tool_calling_mode'] = self.tool_calling_mode_combo.currentData()
 
-        # Save active LLM provider script
-        script_path = self.provider_script_combo.currentData() or ''
-        if not script_path:
-            self.controller.set_ai_provider('manual')
-        elif script_path:
-            self.controller.set_ai_provider('custom_script')
-            self.controller.set_custom_script_path(script_path)
-
-        # Save debug mode
-        debug_mode = self.debug_checkbox.isChecked()
-        self.controller.set_debug_mode(debug_mode)
-
-        # Save supervised execution mode
-        supervised_mode = self.supervised_checkbox.isChecked()
-        self.controller.settings['supervised_execution'] = supervised_mode
-        self.controller.settings['security_bypass_all'] = \
-            self.bypass_security_checkbox.isChecked()
-
-        # Save execution policy
+        # Supervised execution + policy
+        s['supervised_execution'] = self.supervised_checkbox.isChecked()
         try:
-            self.controller.settings['security_exec_policy'] = {
+            s['security_exec_policy'] = {
                 _cat: _combo.currentText()
                 for _cat, _combo in getattr(self, '_policy_combos', {}).items()}
-            self.controller.settings['security_review_safe_code'] = \
+            s['security_review_safe_code'] = \
                 self.review_safe_code_checkbox.isChecked()
         except Exception:
             pass
 
-        # Save voice mode approval
+        # Voice mode approval
         try:
-            self.controller.settings['voice_approval_enabled'] = \
-                self.voice_approval_checkbox.isChecked()
-            self.controller.settings['voice_approval_mode'] = \
-                self.voice_approval_mode_combo.currentData()
-            self.controller.settings['voice_approval_confirm_risky'] = \
+            s['voice_approval_enabled'] = self.voice_approval_checkbox.isChecked()
+            s['voice_approval_mode'] = self.voice_approval_mode_combo.currentData()
+            s['voice_approval_confirm_risky'] = \
                 self.voice_approval_confirm_checkbox.isChecked()
-            self.controller.settings['voice_approval_announce'] = \
+            s['voice_approval_announce'] = \
                 self.voice_approval_announce_checkbox.isChecked()
-            self.controller.settings['voice_approval_custom_words'] = \
-                self._voice_approval_words_dict()
-            self.controller.settings['approval_mini_enabled'] = \
-                self.approval_mini_checkbox.isChecked()
+            s['voice_approval_custom_words'] = self._voice_approval_words_dict()
+            s['approval_mini_enabled'] = self.approval_mini_checkbox.isChecked()
         except Exception:
             pass
 
-        # Save system prompt hijacking and Tool lockout switch
-        self.controller.set_tool_execution_lockout(self.tool_exec_lockout_checkbox.isChecked())
-        self.controller.set_system_prompt_hijack(
-            self.system_prompt_hijack_checkbox.isChecked(),
-            self.system_prompt_hijack_input.toPlainText()
-        )
-        self.controller.set_system_prompt_extras(
-            include_image_tools=self.include_image_tools_checkbox.isChecked(),
-            include_controller_ref=self.include_controller_ref_checkbox.isChecked(),
-            include_notify_tool=self.include_notify_tool_checkbox.isChecked(),
-        )
+        # Custom system prompt text (the hijack SETTER is queued when changed)
+        s['custom_system_prompt'] = self.system_prompt_hijack_input.toPlainText()
 
-        # Save custom system prompt
-        self.controller.settings['custom_system_prompt'] = self.system_prompt_hijack_input.toPlainText()
+        # File-tools history
+        s['file_history_enabled'] = self.file_history_checkbox.isChecked()
+        s['file_history_git'] = self.file_history_git_checkbox.isChecked()
+        s['file_history_keep_days'] = self.file_history_days_combo.currentData() or 14
 
-        # Save file-tools history options
-        self.controller.settings['file_history_enabled'] = \
-            self.file_history_checkbox.isChecked()
-        self.controller.settings['file_history_git'] = \
-            self.file_history_git_checkbox.isChecked()
-        self.controller.settings['file_history_keep_days'] = \
-            self.file_history_days_combo.currentData() or 14
+        # Voice toggles whose live pushes are queued when changed
+        s['voice_setup_prompt_enabled'] = self.voice_setup_prompt_checkbox.isChecked()
+        s['elevenlabs_enabled'] = self.elevenlabs_tags_checkbox.isChecked()
+        s['voice_fillers_enabled'] = self.voice_fillers_checkbox.isChecked()
 
-        # Save voice devices (input only; output uses the system default now)
-        input_device = self.input_device_combo.currentData()
-        self.controller.set_voice_input_device(input_device)
-
-        # Save the "show setup popup on enable" toggle
-        self.controller.settings['voice_setup_prompt_enabled'] = \
-            self.voice_setup_prompt_checkbox.isChecked()
-
-        # Save TTS provider / script
-        tts_data = self.tts_provider_combo.currentData() or 'edge-tts'
-        if tts_data == 'edge-tts':
-            self.controller.set_tts_provider('edge-tts')
-        else:
-            # tts_data is a script path
-            self.controller.set_tts_provider('custom_script')
-            self.controller.set_tts_script_path(tts_data)
-
-        # Save ElevenLabs speech tag toggle
-        elevenlabs_enabled = self.elevenlabs_tags_checkbox.isChecked()
-        self.controller.settings['elevenlabs_enabled'] = elevenlabs_enabled
-        self.controller.ai.update_voice_settings(self.controller.ai.voice_mode, elevenlabs_enabled)
-
-        # Save filler interjections toggle (push live to the running handler)
-        fillers_enabled = self.voice_fillers_checkbox.isChecked()
-        self.controller.settings['voice_fillers_enabled'] = fillers_enabled
-        try:
-            self.controller.voice_handler.fillers_enabled = fillers_enabled
-            if fillers_enabled and self.controller.voice_mode_active:
-                self.controller.voice_handler.ensure_fillers_async()
-        except Exception:
-            pass
-
-        # Save TTS voice (edge-tts only)
-        tts_voice = self.tts_voice_combo.currentData()
-        self.controller.set_tts_voice(tts_voice)
-
-        # Save VAD aggressiveness
-        vad_level = self.vad_combo.currentData()
-        self.controller.set_vad_aggressiveness(vad_level)
-
-        # Save interrupt mode
-        interrupt_mode = self.interrupt_mode_combo.currentData()
-        self.controller.set_voice_interrupt_mode(interrupt_mode)
-
-        # Save barge-in sensitivity
-        self.controller.set_voice_bargein_sensitivity(
-            self.bargein_sensitivity_combo.currentData())
-
-        # Save memory engine settings
-        self.controller.settings['prefilling_enabled'] = self.prefilling_checkbox.isChecked()
-        self.controller.settings['prefilling_mode'] = (
+        # Memory engine
+        s['prefilling_enabled'] = self.prefilling_checkbox.isChecked()
+        s['prefilling_mode'] = (
             'session' if self.pf_radio_session.isChecked() else 'premade')
-        self.controller.settings['prefilling_session_id'] = (
-                self.pf_session_combo.currentData() or '')
-        self.controller.settings['memory_enabled'] = self.memory_enabled_checkbox.isChecked()
-        self.controller.settings['memory_recall_mode'] = self.memory_recall_mode_combo.currentData()
-        self.controller.settings['memory_threshold'] = self.memory_threshold_combo.currentData()
-        self.controller.settings['memory_max_results'] = self.memory_max_combo.currentData()
+        s['prefilling_session_id'] = (self.pf_session_combo.currentData() or '')
+        s['memory_enabled'] = self.memory_enabled_checkbox.isChecked()
+        s['memory_recall_mode'] = self.memory_recall_mode_combo.currentData()
+        s['memory_threshold'] = self.memory_threshold_combo.currentData()
+        s['memory_max_results'] = self.memory_max_combo.currentData()
 
-        # Save selected theme (broadcast happens at the end, after all widget
-        # reads + persistence, so the live retint can't disturb this save).
-        theme = getattr(self, '_selected_theme', 'obsidian_blue')
-        self.controller.settings['chat_theme'] = theme
-
-        # Save chat bubble style (blend default | compact)
-        bubble_style = getattr(self, '_selected_bubble_style', 'blend')
-        self.controller.settings['chat_bubble_style'] = bubble_style
-
-        # Save typing-reveal toggle + speed
+        # Theme / bubble / typing reveal (the broadcast is change-gated in
+        # _on_settings_saved so an unrelated save never restyles everything).
+        s['chat_theme'] = getattr(self, '_selected_theme', 'obsidian_blue')
+        s['chat_bubble_style'] = getattr(self, '_selected_bubble_style', 'blend')
         if hasattr(self, 'text_reveal_checkbox'):
-            self.controller.settings['chat_text_reveal'] = \
-                self.text_reveal_checkbox.isChecked()
+            s['chat_text_reveal'] = self.text_reveal_checkbox.isChecked()
         if hasattr(self, 'text_reveal_speed_slider'):
-            self.controller.settings['chat_text_reveal_cps'] = \
-                int(self.text_reveal_speed_slider.value())
+            s['chat_text_reveal_cps'] = int(self.text_reveal_speed_slider.value())
 
-        # Save glass background settings
-        glass_enabled = self.glass_enabled_checkbox.isChecked()
-        glass_opacity = self.glass_opacity_slider.value() / 100.0
-        glass_windows = [
+        # Glass background (live apply queued when changed)
+        s['glass_background_enabled'] = self.glass_enabled_checkbox.isChecked()
+        s['glass_background_opacity'] = self.glass_opacity_slider.value() / 100.0
+        s['glass_windows'] = [
             _wkey for _wkey, _cb in getattr(self, 'glass_window_checkboxes', {}).items()
-            if _cb.isChecked()
-        ]
-        self.controller.settings['glass_background_enabled'] = glass_enabled
-        self.controller.settings['glass_background_opacity'] = glass_opacity
-        self.controller.settings['glass_windows'] = glass_windows
+            if _cb.isChecked()]
         if hasattr(self, 'glass_sidebar_checkbox'):
-            self.controller.settings['glass_chat_sidebar'] = self.glass_sidebar_checkbox.isChecked()
+            s['glass_chat_sidebar'] = self.glass_sidebar_checkbox.isChecked()
 
-        # Apply glass to the chat window immediately — gated by its checklist entry.
-        try:
-            if hasattr(self.controller, 'ui') and self.controller.ui:
-                chat_win = getattr(self.controller.ui, 'chat_window', None)
-                if chat_win and hasattr(chat_win, 'apply_glass_background'):
-                    chat_glass = glass_enabled and ('chat' in glass_windows)
-                    chat_win.apply_glass_background(chat_glass, glass_opacity)
-        except Exception as _ge:
-            pass
-
-        # Save VAD settings
-        webrtc_enabled = self.webrtc_vad_checkbox.isChecked()
-        silero_enabled = self.silero_vad_checkbox.isChecked()
-        vad_level = self.vad_combo.currentData()
-        silero_threshold = self.silero_threshold_combo.currentData()
-
-        self.controller.settings['vad_webrtc_enabled'] = webrtc_enabled
-        self.controller.settings['vad_silero_enabled'] = silero_enabled
-        self.controller.settings['vad_aggressiveness'] = vad_level
-        self.controller.settings['vad_silero_threshold'] = silero_threshold
-
-        # Apply to voice handler (its own save_settings() is suppressed by the
-        # batch flag — the single disk write happens on the worker thread).
-        self.controller.set_vad_aggressiveness(vad_level)
+        # VAD flags (webrtc/silero toggles are read at voice start; the live
+        # aggressiveness push is queued when changed)
+        s['vad_webrtc_enabled'] = self.webrtc_vad_checkbox.isChecked()
+        s['vad_silero_enabled'] = self.silero_vad_checkbox.isChecked()
+        s['vad_aggressiveness'] = self.vad_combo.currentData()
+        s['vad_silero_threshold'] = self.silero_threshold_combo.currentData()
         # Theme / bubble UI + baseline + "Settings saved" status are applied in
         # _on_settings_saved(), AFTER the off-thread disk write completes.
+
+    def _build_side_effect_queue(self, snap):
+        """[(label, fn)] of live set_*() side effects whose value actually
+        CHANGED vs the pre-save snapshot ``snap``. Unchanged settings queue
+        nothing — a routine save applies little or nothing, which is what keeps
+        Save from freezing the app."""
+        c = self.controller
+        s = c.settings
+        q = []
+
+        # AI provider script (module reload — historically the heavy one)
+        script_path = self.provider_script_combo.currentData() or ''
+        if not script_path:
+            if snap.get('ai_provider') != 'manual':
+                q.append(('ai_provider=manual', lambda: c.set_ai_provider('manual')))
+        else:
+            if snap.get('ai_provider') != 'custom_script':
+                q.append(('ai_provider=custom_script',
+                          lambda: c.set_ai_provider('custom_script')))
+            if snap.get('custom_script_path') != script_path:
+                q.append(('custom_script_path',
+                          lambda p=script_path: c.set_custom_script_path(p)))
+
+        # Debug mode (set_debug_mode is also change-gated internally)
+        dbg = self.debug_checkbox.isChecked()
+        if bool(snap.get('debug_mode', False)) != dbg:
+            q.append(('debug_mode', lambda v=dbg: c.set_debug_mode(v)))
+
+        # Tool lockout + system-prompt hijack/extras
+        lock = self.tool_exec_lockout_checkbox.isChecked()
+        if bool(snap.get('tool_execution_lockout', False)) != lock:
+            q.append(('tool_execution_lockout',
+                      lambda v=lock: c.set_tool_execution_lockout(v)))
+        hij = self.system_prompt_hijack_checkbox.isChecked()
+        hij_txt = self.system_prompt_hijack_input.toPlainText()
+        if (bool(snap.get('system_prompt_hijacked', False)) != hij
+                or snap.get('custom_system_prompt', '') != hij_txt):
+            q.append(('system_prompt_hijack',
+                      lambda e=hij, t=hij_txt: c.set_system_prompt_hijack(e, t)))
+        extras = (self.include_image_tools_checkbox.isChecked(),
+                  self.include_controller_ref_checkbox.isChecked(),
+                  self.include_notify_tool_checkbox.isChecked())
+        if (bool(snap.get('include_image_tools', False)),
+                bool(snap.get('include_controller_ref', False)),
+                bool(snap.get('include_notify_tool', False))) != extras:
+            q.append(('system_prompt_extras',
+                      lambda x=extras: c.set_system_prompt_extras(
+                          include_image_tools=x[0], include_controller_ref=x[1],
+                          include_notify_tool=x[2])))
+
+        # Voice input device (input only; output uses the system default now)
+        input_device = self.input_device_combo.currentData()
+        if snap.get('voice_input_device') != input_device:
+            q.append(('voice_input_device',
+                      lambda v=input_device: c.set_voice_input_device(v)))
+
+        # TTS provider / script
+        tts_data = self.tts_provider_combo.currentData() or 'edge-tts'
+        if tts_data == 'edge-tts':
+            if snap.get('tts_provider', 'edge-tts') != 'edge-tts':
+                q.append(('tts_provider=edge-tts',
+                          lambda: c.set_tts_provider('edge-tts')))
+        else:
+            # tts_data is a script path
+            if snap.get('tts_provider', 'edge-tts') != 'custom_script':
+                q.append(('tts_provider=custom_script',
+                          lambda: c.set_tts_provider('custom_script')))
+            if snap.get('tts_script_path') != tts_data:
+                q.append(('tts_script_path',
+                          lambda p=tts_data: c.set_tts_script_path(p)))
+
+        # ElevenLabs speech tags -> engine voice settings
+        el = self.elevenlabs_tags_checkbox.isChecked()
+        if bool(snap.get('elevenlabs_enabled', False)) != el:
+            q.append(('elevenlabs_tags',
+                      lambda v=el: c.ai.update_voice_settings(c.ai.voice_mode, v)))
+
+        # Filler interjections (push live to the running handler)
+        fill = self.voice_fillers_checkbox.isChecked()
+        if bool(snap.get('voice_fillers_enabled', False)) != fill:
+            def _apply_fillers(v=fill):
+                try:
+                    c.voice_handler.fillers_enabled = v
+                    if v and c.voice_mode_active:
+                        c.voice_handler.ensure_fillers_async()
+                except Exception:
+                    pass
+            q.append(('voice_fillers', _apply_fillers))
+
+        # TTS voice / VAD aggressiveness / interrupt mode / barge-in
+        tts_voice = self.tts_voice_combo.currentData()
+        if snap.get('tts_voice') != tts_voice:
+            q.append(('tts_voice', lambda v=tts_voice: c.set_tts_voice(v)))
+        vad_level = self.vad_combo.currentData()
+        if snap.get('vad_aggressiveness') != vad_level:
+            q.append(('vad_aggressiveness',
+                      lambda v=vad_level: c.set_vad_aggressiveness(v)))
+        imode = self.interrupt_mode_combo.currentData()
+        if snap.get('voice_interrupt_mode') != imode:
+            q.append(('voice_interrupt_mode',
+                      lambda v=imode: c.set_voice_interrupt_mode(v)))
+        bsen = self.bargein_sensitivity_combo.currentData()
+        if snap.get('voice_bargein_sensitivity') != bsen:
+            q.append(('voice_bargein_sensitivity',
+                      lambda v=bsen: c.set_voice_bargein_sensitivity(v)))
+
+        # Glass background — a GUI restyle, so only when its settings changed
+        glass_keys = ('glass_background_enabled', 'glass_background_opacity',
+                      'glass_windows', 'glass_chat_sidebar')
+        if any(snap.get(k) != s.get(k) for k in glass_keys):
+            def _apply_glass():
+                try:
+                    chat_win = getattr(getattr(c, 'ui', None), 'chat_window', None)
+                    if chat_win and hasattr(chat_win, 'apply_glass_background'):
+                        chat_glass = (s.get('glass_background_enabled')
+                                      and 'chat' in (s.get('glass_windows') or []))
+                        chat_win.apply_glass_background(
+                            bool(chat_glass), s.get('glass_background_opacity', 0.9))
+                except Exception:
+                    pass
+            q.append(('glass_background', _apply_glass))
+
+        return q
 
     def _set_tok_graph_mode(self, mode):
         """Switch the token graph time mode and refresh."""

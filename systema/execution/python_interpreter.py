@@ -26,10 +26,8 @@ log = _make_logger("PythonInterpreter") if _verbose else _NoOpLogger()
 def _wm_write_file(path, content, mode=None, encoding="utf-8"):
     """Write literal data to a file, creating parent directories as needed.
 
-    Always available inside python_interpreter as write_file().
-    Designed to pair with #@FILE … #@ENDFILE literal blocks: the block content
-    is bound to a variable WITHOUT passing through Python's parser, so source
-    text containing backslashes, quotes or triple-quotes survives intact.
+    Always available inside python_interpreter as write_file() — for data the
+    code itself produced. (Standalone file writes use the write_file TOOL.)
     Accepts str (text mode) or bytes (binary mode). Returns the path written."""
     p = os.fspath(path)
     parent = os.path.dirname(p)
@@ -565,18 +563,6 @@ class PythonInterpreter:
     def _install_helpers(self):
         """Inject always-available python interpreter helpers into the namespace."""
         self.namespace['write_file'] = _wm_write_file
-
-    def inject_vars(self, mapping):
-        """Bind variables directly into the interpreter namespace as live objects,
-        bypassing the Python parser. Used for literal #@FILE data blocks so file
-        content (backslashes, quotes, triple-quotes) is never compiled as code."""
-        if not mapping:
-            return
-        try:
-            self.namespace.update(mapping)
-            log.info(f"[PythonInterpreter.inject_vars] Injected {list(mapping.keys())} into namespace")
-        except Exception as e:
-            log.warning(f"[PythonInterpreter.inject_vars] Failed: {type(e).__name__}: {e}")
 
     def get_namespace_info(self):
         """Get information about current namespace"""

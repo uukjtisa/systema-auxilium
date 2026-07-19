@@ -17,6 +17,12 @@ class ThemingMixin:
         """Return the current message text font size, scaled by chat_zoom."""
         return max(9, int(13 * getattr(self, 'chat_zoom', 1.0)))
 
+    def _card_z(self, px: float) -> int:
+        """Scale a tool-card / system-note font size by the current chat zoom
+        (13px message base), so cards resize with Ctrl+scroll exactly like the
+        message text. Floors at 7px so tiny chips stay legible."""
+        return max(7, round(px * self._get_msg_font_size() / 13.0))
+
     def zoom_in(self):
         """Increase message font size one step and persist."""
         if getattr(self, 'chat_zoom', 1.0) < 1.8:
@@ -44,6 +50,14 @@ class ThemingMixin:
             for lbl in md.get('text_labels', []):
                 try:
                     lbl.setStyleSheet(style)
+                except RuntimeError:
+                    pass
+            # Tool/file/memory cards + system notes register a restyle closure
+            # that re-applies every font-bearing style at the current zoom.
+            rs = md.get('zoom_restyle')
+            if rs is not None:
+                try:
+                    rs()
                 except RuntimeError:
                     pass
         # Re-apply responsive bubble widths (the cap scales with zoom)
@@ -195,39 +209,17 @@ class ThemingMixin:
                 cw = md.get('content_wrapper')
                 if cw:
                     try:
-                        if role == 'system':
-                            # system messages use a QLabel as the styled surface
-                            cw.setStyleSheet(f"""
-                                QLabel {{
-                                    background-color: {t['elevated']};
-                                    border: 1px solid {t['border']};
-                                    border-radius: 8px;
-                                    padding: 10px 16px;
-                                    color: #9AA0A6;
-                                    font-size: 11px;
-                                    line-height: 1.4;
-                                }}
-                            """)
-                        elif role == 'memory_context':
-                            try:
-                                cw.setStyleSheet(f"""
-                                                                QFrame {{
-                                                                    background-color: {t['elevated']};
-                                                                    border: 1px solid {t['border']};
-                                                                    border-radius: 8px;
-                                                                }}
-                                                            """)
-                                tb = md.get('_toggle_btn')
-                                if tb:
-                                    tb.setStyleSheet(f"""
-                                                                    QPushButton {{
-                                                                        background: transparent; border: 1px solid {t['border']};
-                                                                        border-radius: 4px; font-size: 10px; color: #8B949E; padding: 0 6px;
-                                                                    }}
-                                                                    QPushButton:hover {{ color: {t['accent']}; border-color: {t['accent']}; }}
-                                                                """)
-                            except RuntimeError:
-                                pass
+                        if role in ('system', 'memory_context'):
+                            # Both register a zoom_restyle closure that reads
+                            # the LIVE theme + zoom — one call restyles fully.
+                            # (System notes are faint transparent text now —
+                            # no theme surface of their own.)
+                            rs = md.get('zoom_restyle')
+                            if rs is not None:
+                                try:
+                                    rs()
+                                except RuntimeError:
+                                    pass
                         # user/assistant bubbles are handled by
                         # apply_bubble_style() below (blend | compact).
                     except RuntimeError:

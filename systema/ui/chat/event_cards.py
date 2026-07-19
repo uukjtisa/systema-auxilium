@@ -425,6 +425,7 @@ class EventCardsMixin:
             code_edit = QTextEdit()
             code_edit.setPlainText(code)
             code_edit.setReadOnly(True)
+            code_edit.setAcceptDrops(False)   # let file drags fall through to the chat surface
             code_edit.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
             code_edit.setFont(mono_font)
             code_edit.setStyleSheet(f"QTextEdit {{ background: {_tc['base']}; color: #E6EDF3; border: none; padding: 8px 14px; }}")
@@ -445,6 +446,7 @@ class EventCardsMixin:
             out_edit = QTextEdit()
             out_edit.setPlainText(output)
             out_edit.setReadOnly(True)
+            out_edit.setAcceptDrops(False)   # let file drags fall through to the chat surface
             out_edit.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
             out_edit.setFont(mono_font)
             out_edit.setStyleSheet(f"QTextEdit {{ background: {_tc['deep']}; color: #8FBC8F; border: none; padding: 8px 14px; border-bottom-left-radius: 10px; border-bottom-right-radius: 10px; }}")
@@ -522,7 +524,8 @@ class EventCardsMixin:
             at_bottom = sb.value() >= sb.maximum() - 4
             out.setPlainText(text)
             _n = len(text.splitlines()) or 1
-            out.setFixedHeight(min(max(_n * 17 + 20, 44), 220))
+            _lh = max(12, round(17 * self._get_msg_font_size() / 13.0))
+            out.setFixedHeight(min(max(_n * _lh + 20, 44), 220))
             if at_bottom:
                 sb.setValue(sb.maximum())
         except RuntimeError:
@@ -573,7 +576,8 @@ class EventCardsMixin:
             if oe is not None:
                 oe.setPlainText(output if output.strip() else "(no output)")
                 _n = len(output.splitlines()) or 1
-                oe.setFixedHeight(min(max(_n * 17 + 20, 44), 130))
+                _lh = max(12, round(17 * self._get_msg_font_size() / 13.0))
+                oe.setFixedHeight(min(max(_n * _lh + 20, 44), 130))
             lc['out_ref']['v'] = output
             tl = lc.get('tok_lbl')
             if tl is not None:
@@ -651,10 +655,7 @@ class EventCardsMixin:
         header_lay.setContentsMargins(4, 2, 6, 2)
         header_lay.setSpacing(6)
 
-        icon_lbl = QLabel(">_")
-        icon_lbl.setStyleSheet(
-            "color: #6E7681; font-size: 10px; font-weight: bold; "
-            "font-family: Consolas, monospace; background: transparent; border: none;")
+        icon_lbl = QLabel(">_")   # styled by _restyle below (zoom-aware)
         header_lay.addWidget(icon_lbl)
 
         # Use the Working: annotation as the label if available
@@ -666,10 +667,7 @@ class EventCardsMixin:
         header_label = f"{annotation}" if annotation else "Code executed"
         first_line = (code.strip().splitlines()[0] if code.strip() else "no code")
         preview = first_line[:40] + ("…" if len(first_line) > 40 else "")
-        summary_lbl = QLabel(
-            f"<span style='color:#9AA0A6;font-size:11px;'>{header_label}</span>"
-            f"&nbsp;&nbsp;<span style='color:#5F6368;'>·</span>&nbsp;&nbsp;"
-            f"<span style='font-family:monospace;font-size:10px;color:#5F6368;'>{preview}</span>")
+        summary_lbl = QLabel()    # text + sizes set by _restyle (zoom-aware)
         summary_lbl.setTextFormat(Qt.TextFormat.RichText)
         summary_lbl.setStyleSheet("background: transparent; border: none;")
         header_lay.addWidget(summary_lbl)
@@ -677,13 +675,9 @@ class EventCardsMixin:
         # Output token estimate — the card wears its context cost.
         from systema.common.token_est import estimate_tokens
         tok_lbl = QLabel(f"~{_fmt_tok(estimate_tokens(output))} tok")
-        tok_lbl.setStyleSheet(
-            "background: transparent; border: none; font-size: 9px; color: #5F6368;")
         header_lay.addWidget(tok_lbl)
 
         toggle_btn = QLabel("▶")
-        toggle_btn.setStyleSheet(
-            "background: transparent; border: none; font-size: 8px; color: #5F6368;")
         header_lay.addWidget(toggle_btn)
         outer_lay.addWidget(header, alignment=Qt.AlignmentFlag.AlignLeft)
 
@@ -695,10 +689,14 @@ class EventCardsMixin:
         detail_lay.setContentsMargins(0, 4, 0, 0)
         detail_lay.setSpacing(4)
 
-        mono = QFont('Consolas', 9)
+        _zk = self._get_msg_font_size() / 13.0    # zoom scale for card chrome
+        _mono_pt = max(7, round(9 * _zk))
+        mono = QFont('Consolas', _mono_pt)
         if not mono.exactMatch():
-            mono = QFont('Courier New', 9)
+            mono = QFont('Courier New', _mono_pt)
+        _lh = max(12, round(17 * _zk))            # per-line height estimate
 
+        code_edit = None
         if code.strip():
             from PyQt6.QtWidgets import QTextEdit as _QTE
             from systema.ui.widgets.code_blocks import CodeSyntaxHighlighter
@@ -717,7 +715,7 @@ class EventCardsMixin:
             _n = len(code.strip().splitlines())
             # Compact default (was 260 cap); a drag grip below lets the user pull
             # it taller. Clamps keep the resize from glitching out.
-            code_edit.setFixedHeight(min(max(_n * 17 + 20, 44), 150))
+            code_edit.setFixedHeight(min(max(_n * _lh + 20, 44), 150))
             detail_lay.addWidget(code_edit)
             detail_lay.addWidget(_ResizeGrip(code_edit, min_h=44, max_h=680))
 
@@ -739,7 +737,7 @@ class EventCardsMixin:
                 out_edit.setPlaceholderText("Running…")
             _n = len(output.strip().splitlines()) or 1
             # Compact default (was 200 cap); drag grip below extends it.
-            out_edit.setFixedHeight(min(max(_n * 17 + 20, 44), 130))
+            out_edit.setFixedHeight(min(max(_n * _lh + 20, 44), 130))
             detail_lay.addWidget(out_edit)
             detail_lay.addWidget(_ResizeGrip(out_edit, min_h=44, max_h=680))
 
@@ -750,14 +748,7 @@ class EventCardsMixin:
                              or output.strip().startswith("[Compacted]"))
             clear_btn = QPushButton("Clear output")
             clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            clear_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: rgba(33, 38, 45, 0.78); color: #8B949E;
-                    font-size: 10px; padding: 2px 9px;
-                    border: 1px solid {_tc['border']}; border-radius: 4px;
-                }}
-                QPushButton:hover {{ color: #E06060; border-color: #E06060; }}
-            """)
+            # styled by _restyle below (zoom-aware)
             clear_btn.setToolTip(
                 "Replace this output with 'Output cleared by the user' in the\n"
                 "conversation history and session file — frees its tokens.")
@@ -788,6 +779,39 @@ class EventCardsMixin:
 
         outer_lay.addWidget(detail)
 
+        # ── Zoom-aware styling — SINGLE source for every font-bearing style on
+        #    this card; re-invoked by _apply_zoom_all on Ctrl+scroll ──────────
+        def _restyle():
+            z = self._card_z
+            icon_lbl.setStyleSheet(
+                f"color: #6E7681; font-size: {z(10)}px; font-weight: bold; "
+                f"font-family: Consolas, monospace; background: transparent; border: none;")
+            summary_lbl.setText(
+                f"<span style='color:#9AA0A6;font-size:{z(11)}px;'>{header_label}</span>"
+                f"&nbsp;&nbsp;<span style='color:#5F6368;'>·</span>&nbsp;&nbsp;"
+                f"<span style='font-family:monospace;font-size:{z(10)}px;color:#5F6368;'>{preview}</span>")
+            tok_lbl.setStyleSheet(
+                f"background: transparent; border: none; font-size: {z(9)}px; color: #5F6368;")
+            toggle_btn.setStyleSheet(
+                f"background: transparent; border: none; font-size: {z(8)}px; color: #5F6368;")
+            pt = max(7, round(9 * self._get_msg_font_size() / 13.0))
+            mf = QFont('Consolas', pt)
+            if not mf.exactMatch():
+                mf = QFont('Courier New', pt)
+            for ed in (code_edit, out_edit):
+                if ed is not None:
+                    ed.setFont(mf)
+            if clear_btn is not None:
+                clear_btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: rgba(33, 38, 45, 0.78); color: #8B949E;
+                        font-size: {z(10)}px; padding: 2px 9px;
+                        border: 1px solid {self._t()['border']}; border-radius: 4px;
+                    }}
+                    QPushButton:hover {{ color: #E06060; border-color: #E06060; }}
+                """)
+        _restyle()
+
         def _toggle():
             if detail.isHidden():
                 detail.show()
@@ -816,6 +840,7 @@ class EventCardsMixin:
             'role': 'code_exec',
             'content_wrapper': header,
             'group_row': g['row'],
+            'zoom_restyle': _restyle,
         })
 
         # ── Live: remember the streaming refs so update_live_output() can type
@@ -891,19 +916,13 @@ class EventCardsMixin:
         header_lay.setContentsMargins(4, 2, 6, 2)
         header_lay.setSpacing(6)
 
-        icon_lbl = QLabel(icon_map.get(tool, '±'))
-        icon_lbl.setStyleSheet(
-            "color: #6E7681; font-size: 12px; font-weight: 700;"
-            " background: transparent; border: none;")
-        icon_lbl.setFixedWidth(14)
+        icon_lbl = QLabel(icon_map.get(tool, '±'))   # styled by _restyle (zoom-aware)
         header_lay.addWidget(icon_lbl)
 
         # ── Path — its OWN elided label so it can shrink with the card without
         #    ever eating the diff stats. Middle-elide keeps the filename; the
         #    full path lives in the tooltip. ─────────────────────────────────
-        path_lbl = _ElidedLabel(display)
-        path_lbl.setStyleSheet(
-            "color:#9AA0A6; font-size:11px; background:transparent; border:none;")
+        path_lbl = _ElidedLabel(display)             # styled by _restyle (zoom-aware)
         path_lbl.setToolTip(info.get('path', '') or display)
         # No stretch: the header HUGS its content (like the >_ code-exec rows) so
         # the stats sit right beside the path instead of floating to the far
@@ -914,46 +933,45 @@ class EventCardsMixin:
         header_lay.addSpacing(12)
 
         # ── Stats cluster — a SEPARATE, never-wrapping label so +N −N net ±N
-        #    always renders regardless of how narrow the card gets. ─────────
-        if rejected:
-            stats_html = (f"<span style='color:{RED};font-size:10px;font-weight:600;'>"
-                          f"rejected</span>")
-        elif read_like:
-            stats_html = (f"<span style='color:#8B949E;font-size:10px;'>{read_range}</span>"
-                          if read_range else "")
-        else:
+        #    always renders regardless of how narrow the card gets. Built by a
+        #    function so _restyle can re-render it at the current zoom. ──────
+        def _stats_html():
+            z = self._card_z
+            if rejected:
+                return (f"<span style='color:{RED};font-size:{z(10)}px;font-weight:600;'>"
+                        f"rejected</span>")
+            if read_like:
+                return (f"<span style='color:#8B949E;font-size:{z(10)}px;'>{read_range}</span>"
+                        if read_range else "")
             net = (added or 0) - (removed or 0)
             net_color = GREEN if net >= 0 else RED
             net_txt = f"+{net}" if net >= 0 else str(net)
             bits = []
             if added is not None:
-                bits.append(f"<span style='color:{GREEN};font-size:11px;"
+                bits.append(f"<span style='color:{GREEN};font-size:{z(11)}px;"
                             f"font-weight:600;'>+{added}</span>")
             if removed is not None:
-                bits.append(f"<span style='color:{RED};font-size:11px;"
+                bits.append(f"<span style='color:{RED};font-size:{z(11)}px;"
                             f"font-weight:600;'>−{removed}</span>")
-            bits.append(f"<span style='color:#5F6368;font-size:11px;'>·</span>"
-                        f"<span style='color:{net_color};font-size:11px;'> net {net_txt}</span>")
+            bits.append(f"<span style='color:#5F6368;font-size:{z(11)}px;'>·</span>"
+                        f"<span style='color:{net_color};font-size:{z(11)}px;'> net {net_txt}</span>")
             if created:
-                bits.append(f"<span style='color:{GREEN};font-size:10px;'>&nbsp;new file</span>")
-            stats_html = "&nbsp;&nbsp;".join(bits)
+                bits.append(f"<span style='color:{GREEN};font-size:{z(10)}px;'>&nbsp;new file</span>")
+            return "&nbsp;&nbsp;".join(bits)
 
-        if stats_html:
-            stats_lbl = QLabel(stats_html)
+        stats_lbl = None
+        if _stats_html():
+            stats_lbl = QLabel()    # text set by _restyle (zoom-aware)
             stats_lbl.setTextFormat(Qt.TextFormat.RichText)
             stats_lbl.setStyleSheet("background: transparent; border: none;")
             stats_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
             header_lay.addWidget(stats_lbl)
 
-        tool_lbl = QLabel(tool)
-        tool_lbl.setStyleSheet(
-            "color:#5F6368; font-size:10px; background:transparent; border:none;")
+        tool_lbl = QLabel(tool)                      # styled by _restyle
         tool_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
         header_lay.addWidget(tool_lbl)
 
-        toggle_btn = QLabel("▶")
-        toggle_btn.setStyleSheet(
-            "background: transparent; border: none; font-size: 8px; color: #5F6368;")
+        toggle_btn = QLabel("▶")                     # styled by _restyle
         header_lay.addWidget(toggle_btn)
         # AlignLeft + the header's Maximum policy = hug-to-content, left-packed
         # (matches the code-exec rows; kills the far-right stats float).
@@ -961,15 +979,17 @@ class EventCardsMixin:
 
         body = QTextEdit()
         body.setReadOnly(True)
+        body.setAcceptDrops(False)   # let file drags fall through to the chat surface
         import html as _html
         _detail = detail or "(no detail)"
-        if read_like:
-            # Plain content (file window or search results) — no diff coloring.
-            body.setHtml(
-                f"<pre style=\"margin:0;font-family:{MONO};font-size:12px;"
-                f"line-height:1.4;color:{CTX};white-space:pre;\">"
-                f"{_html.escape(_detail)}</pre>")
-        else:
+
+        def _body_html():
+            z = self._card_z
+            if read_like:
+                # Plain content (file window / search results) — no diff coloring.
+                return (f"<pre style=\"margin:0;font-family:{MONO};font-size:{z(12)}px;"
+                        f"line-height:1.4;color:{CTX};white-space:pre;\">"
+                        f"{_html.escape(_detail)}</pre>")
             # Unified diff — colorize per line so it reads like a real diff.
             _rows = []
             for _ln in _detail.split('\n'):
@@ -985,13 +1005,15 @@ class EventCardsMixin:
                 else:
                     _c, _w = CTX, '400'
                 _rows.append(f"<span style=\"color:{_c};font-weight:{_w};\">{_e}</span>")
-            body.setHtml(
-                f"<pre style=\"margin:0;font-family:{MONO};font-size:12px;"
-                f"line-height:1.4;white-space:pre;\">" + "\n".join(_rows) + "</pre>")
+            return (f"<pre style=\"margin:0;font-family:{MONO};font-size:{z(12)}px;"
+                    f"line-height:1.4;white-space:pre;\">" + "\n".join(_rows) + "</pre>")
+
+        body.setHtml(_body_html())
         body.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         # Compact default; the drag grip below extends it (clamped).
         _bn = len(_detail.split('\n'))
-        body.setFixedHeight(min(max(_bn * 17 + 20, 44), 170))
+        _lh = max(12, round(17 * self._get_msg_font_size() / 13.0))
+        body.setFixedHeight(min(max(_bn * _lh + 20, 44), 170))
         body.setStyleSheet(f"""
                     QTextEdit {{
                         background: {_tc['base']}; border: 1px solid {_tc['border']};
@@ -1010,6 +1032,26 @@ class EventCardsMixin:
             toggle_btn.setText("▶" if showing else "▼")
         header.mousePressEvent = lambda e: _toggle()
 
+        # ── Zoom-aware styling — SINGLE source for every font-bearing style on
+        #    this card; re-invoked by _apply_zoom_all on Ctrl+scroll ──────────
+        def _restyle():
+            z = self._card_z
+            icon_lbl.setStyleSheet(
+                f"color: #6E7681; font-size: {z(12)}px; font-weight: 700;"
+                f" background: transparent; border: none;")
+            icon_lbl.setFixedWidth(max(14, round(14 * self._get_msg_font_size() / 13.0)))
+            path_lbl.setStyleSheet(
+                f"color:#9AA0A6; font-size:{z(11)}px; background:transparent; border:none;")
+            path_lbl._apply()      # re-elide with the new font metrics
+            if stats_lbl is not None:
+                stats_lbl.setText(_stats_html())
+            tool_lbl.setStyleSheet(
+                f"color:#5F6368; font-size:{z(10)}px; background:transparent; border:none;")
+            toggle_btn.setStyleSheet(
+                f"background: transparent; border: none; font-size: {z(8)}px; color: #5F6368;")
+            body.setHtml(_body_html())
+        _restyle()
+
         # Cap to the responsive bubble width so the card shrinks with the window
         # (and never overflows a narrow viewport); _reflow_bubbles keeps it synced.
         header.setMaximumWidth(self._bubble_max_width())
@@ -1023,6 +1065,7 @@ class EventCardsMixin:
             'content_wrapper': header,
             'main_container_widget': header,
             'group_row': g['row'],
+            'zoom_restyle': _restyle,
         })
 
         if save_to_history:
@@ -1088,10 +1131,7 @@ class EventCardsMixin:
         header_lay.setContentsMargins(12, 6, 10, 6)
         header_lay.setSpacing(8)
 
-        icon_lbl = QLabel("🧠")
-        icon_lbl.setStyleSheet(
-            "font-size: 13px; background: transparent; border: none;")
-        icon_lbl.setFixedWidth(18)
+        icon_lbl = QLabel("◈")   # monochrome glyph (no-emoji rule); styled by _restyle
         header_lay.addWidget(icon_lbl)
 
         # Preview: first memory title, trimmed
@@ -1099,42 +1139,21 @@ class EventCardsMixin:
             if memories else "Memory recalled"
         count_label = f" +{len(memories) - 1} more" if len(memories) > 1 else ""
 
-        summary_lbl = QLabel(
-            f"<span style='color:{_mem_accent};font-size:11px;font-weight:600;'>"
-            f"Memory recalled</span>"
-            f"&nbsp;&nbsp;<span style='color:#5F6368;'>·</span>&nbsp;&nbsp;"
-            f"<span style='font-size:10px;color:#8B949E;'>{preview_text}</span>"
-            f"<span style='font-size:10px;color:{_mem_accent};'>{count_label}</span>")
+        summary_lbl = QLabel()    # text + sizes set by _restyle (zoom-aware)
         summary_lbl.setTextFormat(Qt.TextFormat.RichText)
         summary_lbl.setStyleSheet("background: transparent; border: none;")
         header_lay.addWidget(summary_lbl, stretch=1)
 
         # ── Show / Hide toggle ─────────────────────────────────────────────
-        toggle_btn = QPushButton("▶ Show")
-        toggle_btn.setFixedSize(58, 20)
-        toggle_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent; border: 1px solid {_tc['border']};
-                border-radius: 4px; font-size: 10px; color: #8B949E; padding: 0 6px;
-            }}
-            QPushButton:hover {{ color: {_mem_accent}; border-color: {_mem_accent}; }}
-        """)
+        toggle_btn = QPushButton("▶ Show")           # styled by _restyle
         toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         header_lay.addWidget(toggle_btn)
 
         # ── Detach button ──────────────────────────────────────────────────
-        detach_btn = QPushButton("⊗ Detach")
-        detach_btn.setFixedSize(62, 20)
+        detach_btn = QPushButton("⊗ Detach")         # styled by _restyle
         detach_btn.setToolTip(
             "Remove this memory from the conversation context.\n"
             "The AI will no longer see it in this session.")
-        detach_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent; border: 1px solid #6B3030;
-                border-radius: 4px; font-size: 10px; color: #8B6060; padding: 0 6px;
-            }}
-            QPushButton:hover {{ color: #E06060; border-color: #E06060; }}
-        """)
         detach_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         header_lay.addWidget(detach_btn)
 
@@ -1148,6 +1167,7 @@ class EventCardsMixin:
         detail_lay.setContentsMargins(4, 4, 4, 0)
         detail_lay.setSpacing(4)
 
+        _row_lbls = []
         for mem_text in memories:
             row = QFrame()
             row.setStyleSheet(f"""
@@ -1162,12 +1182,58 @@ class EventCardsMixin:
             row_lay.setContentsMargins(10, 6, 10, 6)
             lbl = QLabel(mem_text)
             lbl.setWordWrap(True)
-            lbl.setStyleSheet(
-                f"font-size: 11px; color: {_mem_accent}; background: transparent; border: none;")
+            _row_lbls.append(lbl)    # styled by _restyle (zoom-aware)
             row_lay.addWidget(lbl)
             detail_lay.addWidget(row)
 
         outer_lay.addWidget(detail)
+
+        # ── Zoom + theme styling — SINGLE source for every font-bearing style
+        #    on this card; reads the LIVE theme so apply_theme and
+        #    _apply_zoom_all both just call it ─────────────────────────────
+        def _restyle():
+            z = self._card_z
+            t = self._t()
+            k = self._get_msg_font_size() / 13.0
+            accent = t['accent']
+            header.setStyleSheet(f"""
+                    QFrame {{
+                        background-color: {t['elevated']};
+                        border: 1px solid {t['border']};
+                        border-radius: 8px;
+                    }}
+                """)
+            icon_lbl.setStyleSheet(
+                f"font-size: {z(13)}px; color: {accent}; "
+                f"background: transparent; border: none;")
+            icon_lbl.setFixedWidth(max(18, round(18 * k)))
+            summary_lbl.setText(
+                f"<span style='color:{accent};font-size:{z(11)}px;font-weight:600;'>"
+                f"Memory recalled</span>"
+                f"&nbsp;&nbsp;<span style='color:#5F6368;'>·</span>&nbsp;&nbsp;"
+                f"<span style='font-size:{z(10)}px;color:#8B949E;'>{preview_text}</span>"
+                f"<span style='font-size:{z(10)}px;color:{accent};'>{count_label}</span>")
+            toggle_btn.setFixedSize(max(58, round(58 * k)), max(20, round(20 * k)))
+            toggle_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent; border: 1px solid {t['border']};
+                    border-radius: 4px; font-size: {z(10)}px; color: #8B949E; padding: 0 6px;
+                }}
+                QPushButton:hover {{ color: {accent}; border-color: {accent}; }}
+            """)
+            detach_btn.setFixedSize(max(62, round(62 * k)), max(20, round(20 * k)))
+            detach_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent; border: 1px solid #6B3030;
+                    border-radius: 4px; font-size: {z(10)}px; color: #8B6060; padding: 0 6px;
+                }}
+                QPushButton:hover {{ color: #E06060; border-color: #E06060; }}
+            """)
+            for _rl in _row_lbls:
+                _rl.setStyleSheet(
+                    f"font-size: {z(11)}px; color: {t['accent']}; "
+                    f"background: transparent; border: none;")
+        _restyle()
 
         # ── Toggle logic ───────────────────────────────────────────────────
         def _toggle():
@@ -1208,6 +1274,7 @@ class EventCardsMixin:
             'context_id': context_id,
             'content_wrapper': header,
             '_toggle_btn': toggle_btn,
+            'zoom_restyle': _restyle,
         })
 
         # ── Persist to history (only on first insertion, not on reload) ────

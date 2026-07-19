@@ -304,11 +304,13 @@ class InputDockMixin:
                 # keystrokes reuse the cached number.
                 if getattr(self, '_sys_tokens_dirty', True) or \
                         getattr(self, '_sys_tokens_cache', None) is None:
-                    try:
-                        _sys_prompt = ai._get_effective_system_prompt()
-                    except Exception:
-                        _sys_prompt = getattr(ai, 'system_prompt', '') or ''
-                    self._sys_tokens_cache = estimate_tokens(_sys_prompt)
+                    from systema.common.perf_monitor import span
+                    with span("token_estimate.sys_prompt_rebuild"):
+                        try:
+                            _sys_prompt = ai._get_effective_system_prompt()
+                        except Exception:
+                            _sys_prompt = getattr(ai, 'system_prompt', '') or ''
+                        self._sys_tokens_cache = estimate_tokens(_sys_prompt)
                     self._sys_tokens_dirty = False
                 sys_tokens = self._sys_tokens_cache or 0
             total = estimate_next_message_tokens(text, hist) + sys_tokens

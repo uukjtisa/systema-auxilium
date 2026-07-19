@@ -56,6 +56,30 @@ def make_circular_pixmap(src: QPixmap, size: int) -> QPixmap:
 
 BUBBLE_STYLE_DEFAULT = 'blend'   # 'blend' (borderless, default) | 'compact' (bordered, fits content)
 
+import re as _re
+# Colored emoji/pictographs stripped from SYSTEM notes at display time (clean
+# professional line, user request 2026-07-19). Monochrome glyphs (⚠ ✓ ⟳ …)
+# survive — only the emoji planes, colored BMP symbols, and the FE0F
+# emoji-presentation selector go. History keeps the original text.
+_EMOJI_RX = _re.compile(
+    '[\\U0001F000-\\U0001FBFF'          # emoji planes (pictographs, symbols)
+    '\\u231A\\u231B\\u23E9-\\u23FA'     # watches, media/clock symbols
+    '\\u2705\\u2728\\u274C\\u274E'      # colored checkmarks/crosses
+    '\\u2753-\\u2755\\u2757'            # colored question/exclamation marks
+    '\\u2B05-\\u2B07\\u2B1B\\u2B1C\\u2B50\\u2B55'  # colored arrows/stars/shapes
+    '\\uFE0F\\u200D]'                   # emoji presentation selector, ZWJ
+)
+
+
+def _strip_emoji(text: str) -> str:
+    """Display-side emoji removal for system notes; tidies leftover spacing."""
+    try:
+        s = _EMOJI_RX.sub('', text or '')
+        return '\n'.join(_re.sub(r' {2,}', ' ', ln).strip()
+                         for ln in s.split('\n'))
+    except Exception:
+        return text
+
 
 def bubble_wrapper_css(role: str, t: dict, style: str, glass: bool = False,
                        in_group: bool = False) -> str:
@@ -104,14 +128,16 @@ def bubble_wrapper_margins(role: str, style: str, glass: bool = False,
                            in_group: bool = False) -> tuple:
     """Content margins for the bubble wrapper, per role/style/glass.
     BLEND is deliberately TIGHT (boxless text needs no breathing room of its
-    own); compact keeps the roomier visible-bubble padding."""
+    own); compact keeps the roomier visible-bubble padding. USER bubbles pad
+    WhatsApp-tight and SYMMETRIC — the old 12-top/8-bottom read as off-center
+    text."""
     if role == 'assistant':
         if style == 'blend' and not glass:
             return (0, 2, 0, 2)      # boxless — hugs the flow
         if style == 'compact' and in_group:
             return (0, 4, 0, 4)      # the shell provides the padding
         return (10, 10, 10, 10)
-    return (12, 12, 12, 8)
+    return (11, 7, 11, 7)
 
 
 def group_body_spacing(style: str) -> int:
@@ -182,6 +208,9 @@ class BubblesMixin:
                             self._refit_turn_shell(shell)   # explicit hug width
                         else:
                             # blend fills the column — clear any fixed width
+                            # AND its stored hug width, or the _reflow_bubbles
+                            # call below immediately re-fixes the shell.
+                            shell._natural_w = None
                             shell.setMinimumWidth(0)
                             shell.setMaximumWidth(16777215)
                             shell.setSizePolicy(QSizePolicy.Policy.Preferred,
@@ -252,6 +281,7 @@ class BubblesMixin:
         if not hasattr(self, 'message_widgets'):
             return
         maxw = self._bubble_max_width()
+        style = self._bubble_style()
         for md in self.message_widgets:
             b = md.get('main_container_widget')
             if b is not None:
@@ -266,18 +296,21 @@ class BubblesMixin:
             if nat:
                 try:
                     cap = (self._user_bubble_cap() if md.get('role') == 'user'
-                           else maxw)
+                           else self._assistant_seg_cap())
                     cw.setFixedWidth(min(nat, cap))
                 except RuntimeError:
                     pass
             # Compact turn shells: same re-clamp (explicit hug width).
+            # COMPACT ONLY — blend shells fill the column; re-fixing one from
+            # a stale compact _natural_w after a live style toggle would clip
+            # the (wider-capped) blend wrappers inside it.
             grow = md.get('group_row')
-            if grow is not None:
+            if grow is not None and style == 'compact':
                 try:
                     shell = grow.findChild(QFrame, "turnShell")
                     snat = getattr(shell, '_natural_w', None) if shell else None
                     if snat:
-                        shell.setFixedWidth(max(120, min(snat, maxw)))
+                        shell.setFixedWidth(max(64, min(snat, maxw)))
                 except RuntimeError:
                     pass  # widget was deleted
             # Re-clamp any manually-resized code blocks so they can't stay wider
@@ -485,6 +518,23 @@ class BubblesMixin:
         ACTION_GUTTER = 34   # ⋯ button (22) + HBox spacing (6) + slack
         return max(160, min(self._bubble_max_width() - ACTION_GUTTER, vw - av - 96))
 
+    # ⋯ action row (22) + segment spacing (6) + slack — the fixed chrome that
+    # shares a shell row with an assistant text wrapper.
+    _SEG_CHROME = 30
+
+    def _assistant_seg_cap(self) -> int:
+        """Width cap for an in-group assistant TEXT wrapper. Compact shells
+        are fixed-width bordered cards: the wrapper shares the shell body with
+        the ⋯ action row, so it must stay `shell margins + chrome` narrower
+        than the shell's own cap — a wrapper capped at the full bubble max
+        overflowed the card and Qt CLIPPED the text's right edge. Blend keeps
+        the full bubble cap (that mode is untouched by design)."""
+        maxw = self._bubble_max_width()
+        if self._bubble_style() != 'compact':
+            return maxw
+        gm = group_shell_margins('compact')
+        return max(160, maxw - gm[0] - gm[2] - self._SEG_CHROME)
+
     def _break_unbreakable(self, text: str, chunk: int = 42) -> str:
         """Insert zero-width break opportunities into very long non-space runs
         (pasted hashes, keyboard-mashing, long tokens) so the bubble label can
@@ -512,17 +562,23 @@ class BubblesMixin:
         aligned wrapper is sized to a word-wrap label's heuristic sizeHint,
         which lies about height)."""
         try:
+            import math
             from PyQt6.QtGui import QTextDocument
             doc = QTextDocument()
+            # QLabel lays rich text out at documentMargin 0 — measuring at the
+            # QTextDocument default (4) plus the old +6 slack padded every
+            # bubble ~14px right of the text: the off-center, loose look.
+            doc.setDocumentMargin(0)
             f = text_label.font()
             f.setPixelSize(self._get_msg_font_size())
             doc.setDefaultFont(f)
             doc.setHtml(text_label.text())
             doc.setTextWidth(-1)
             m = content_wrapper.layout().contentsMargins()
-            w = int(doc.idealWidth()) + m.left() + m.right() + 6
-            w = max(48, extra_min, w)
+            w = math.ceil(doc.idealWidth()) + m.left() + m.right() + 2
+            w = max(36, extra_min, w)
             content_wrapper._natural_w = w          # reflow refits on resize
+            content_wrapper._fit_extra_min = extra_min   # image-row floor, survives refits
             content_wrapper.setFixedWidth(min(w, cap))
         except Exception:
             pass
@@ -740,7 +796,9 @@ class BubblesMixin:
             m = body.contentsMargins()
             w += m.left() + m.right()
             shell._natural_w = w
-            shell.setFixedWidth(max(120, min(w, self._bubble_max_width())))
+            # 64 floor (was 120): a one-word reply hugs WhatsApp-tight instead
+            # of sitting in a forced-wide card.
+            shell.setFixedWidth(max(64, min(w, self._bubble_max_width())))
         except RuntimeError:
             pass
 
@@ -919,6 +977,12 @@ class BubblesMixin:
                     lbl.setText(self.render_markdown(md['content']))
                 except Exception:
                     lbl.setText(md['content'])
+                # Re-hug: the appended line may be wider than the old fit.
+                cw = md.get('content_wrapper')
+                if cw is not None:
+                    self._fit_bubble_width(
+                        cw, lbl, self._user_bubble_cap(),
+                        extra_min=getattr(cw, '_fit_extra_min', 0))
             try:
                 self.scroll_to_widget(md.get('widget'))
             except Exception:
@@ -1046,7 +1110,9 @@ class BubblesMixin:
                 _doc.setTextWidth(-1)
                 _m = content_wrapper_layout.contentsMargins()
                 _text_ideal = int(_doc.idealWidth()) + _m.left() + _m.right()
-                message_widget._natural_w = _text_ideal + 60
+                # Segment footprint = text + the real ⋯-row chrome; the old
+                # +60 left ~30px of dead width on every compact shell.
+                message_widget._natural_w = _text_ideal + self._SEG_CHROME
             except Exception:
                 pass
 
@@ -1055,7 +1121,7 @@ class BubblesMixin:
             # reflow machinery, then let a trailing stretch pin the ⋯ close.
             content_wrapper._natural_w = _text_ideal
             content_wrapper.setFixedWidth(
-                min(_text_ideal, self._bubble_max_width()))
+                min(_text_ideal, self._assistant_seg_cap()))
             seg_layout.addWidget(content_wrapper)
         else:
             seg_layout.addWidget(content_wrapper, 1)
@@ -1142,7 +1208,7 @@ class BubblesMixin:
         message_widget.setStyleSheet("QFrame#sysRow { background-color: transparent; }")
 
         message_layout = QHBoxLayout(message_widget)
-        message_layout.setContentsMargins(16, 8, 16, 8)
+        message_layout.setContentsMargins(16, 4, 16, 4)
 
         text_label = QLabel()
         text_label.setWordWrap(True)
@@ -1153,26 +1219,26 @@ class BubblesMixin:
             Qt.TextInteractionFlag.TextSelectableByMouse |
             Qt.TextInteractionFlag.LinksAccessibleByMouse
         )
-        text_label.setText(self.render_markdown(message))
-        _tc = self._t()
-        text_label.setStyleSheet(f"""
-            QLabel {{
-                background-color: {_tc['elevated']};
-                border: 1px solid {_tc['border']};
-                border-radius: 8px;
-                padding: 10px 16px;
-                color: #9AA0A6;
-                font-size: 11px;
-                line-height: 1.4;
-            }}
-        """)
+        # Faint centered line (2026-07-19 redesign): no box, no border — a
+        # muted note that blends into the flow like the tool-card headers.
+        # Emoji stripped at display time (history keeps the original text).
+        text_label.setText(self.render_markdown(_strip_emoji(message)))
+
+        def _sys_restyle(lbl=text_label):
+            lbl.setStyleSheet(
+                f"QLabel {{ background: transparent; border: none; "
+                f"color: #8B949E; font-size: {self._card_z(11)}px; "
+                f"padding: 2px 8px; }}")
+        _sys_restyle()
         message_layout.addWidget(text_label)
 
-        # Track so apply_theme can restyle retroactively
+        # zoom_restyle keeps the note scaling with Ctrl+scroll (and is what
+        # apply_theme/_apply_zoom_all call — the look itself is theme-free).
         self.message_widgets.append({
             'widget': message_widget,
             'role': 'system',
             'content_wrapper': text_label,  # text_label IS the styled surface here
+            'zoom_restyle': _sys_restyle,
         })
 
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)

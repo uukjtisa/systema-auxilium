@@ -3,9 +3,10 @@ systema/execution/tool_manager.py
 Tool Manager — the python interpreter execution system and compat fence parser.
 
 python_interpreter is the ONLY code-execution tool (execute_code was retired in
-2026-07; see systema.execution.tool_registry.LEGACY_STRIP_KEYS). The code
-approval dialog runs on the main thread via Qt signals; a single-exec policy
-allows one code tool per AI turn (set_session_name exempt).
+2026-07, set_session_name in 2026-07-19 — see
+systema.execution.tool_registry.LEGACY_STRIP_KEYS). The code approval dialog
+runs on the main thread via Qt signals; the exec policy caps a turn at ONE
+python_interpreter call (other tools batch freely).
 """
 
 import json
@@ -45,14 +46,17 @@ class WorkState:
     read_file/edit_file/write_file, load_skill/unload_skill) drives it — the
     loop is not owned by any single tool. Owned by ToolManager as `.work`."""
     is_working: bool = False              # in the loop (any tool)
-    last_output: str | None = None        # the latest step's observation (feeds next ping)
-    last_tool: str | None = None          # what produced it: interpreter/read_file/edit_file/write_file/skill
+    last_output: str | None = None        # the latest turn's observation (feeds next ping);
+                                          # for a multi-call batch this is the COMBINED block
+    last_tool: str | None = None          # what produced it: interpreter/read_file/edit_file/write_file/skill/batch
+    batch_abort: bool = False             # user interrupt: skip the rest of the current batch
     interpreter: InterpreterState = field(default_factory=InterpreterState)
 
     def reset(self):
         self.is_working = False
         self.last_output = None
         self.last_tool = None
+        self.batch_abort = False
         self.interpreter = InterpreterState()
 
 
@@ -217,8 +221,8 @@ class ToolManager:
             pass
 
         # ── Violation tracking ────────────────────────────────────────────────
-        # Incremented each time the AI emits more than one code-execution tool
-        # call in a single response (set_session_name is exempt).
+        # Incremented each time the AI emits more than one python_interpreter
+        # call in a single response (the one hard cap under parallel calls).
         self._exec_violations_lock = threading.Lock()
         self.exec_violations = 0
         log.debug("[ToolManager.__init__] exec_violations counter initialised to 0")
@@ -275,8 +279,7 @@ class ToolManager:
                                   for k in tool_registry.LEGACY_STRIP_KEYS}
         log.debug(f"[ToolManager.__init__] Registered tool keys: {self._tool_keys}")
 
-        # ── Code-execution tools (subject to single-call policy) ──────────────
-        # set_session_name is NOT in this set — it may coexist with a code tool.
+        # ── Code-execution tools (the python_interpreter one-per-turn cap) ────
         self._exec_tool_keys = set(tool_registry.EXEC_TOOL_KEYS)
         log.debug(f"[ToolManager.__init__] Exec tool keys (policy-restricted): {self._exec_tool_keys}")
 
@@ -380,16 +383,13 @@ class ToolManager:
     # ─────────────────────────────────────────────────────────────────────────
     _CANONICAL_TOOLS = tool_registry.CANONICAL_TOOLS
 
-    def get_canonical_tools(self, include_session_naming: bool = False,
-                            include_skills: bool = True) -> list:
+    def get_canonical_tools(self, include_skills: bool = True) -> list:
         """Return the active tools as canonical schema dicts (name/description/
         parameters), gated by the same capability flags the prompt uses. Feed the
         result to systema.engine.native_adapters.to_<dialect>_tools() for native mode."""
         active = []
         if self.allow_workmode:
             active.append('python_interpreter')
-        if include_session_naming:
-            active.append('set_session_name')
         if include_skills:
             active += ['load_skill', 'unload_skill']
 
@@ -488,29 +488,8 @@ class ToolManager:
             # annotated fence form so the UI step title isn't a generic default.
             primary = self._code_fence(name, body, args.get('annotation', ''))
             parts.append(prefix + primary)
-
-            # ── Sub-tool chaining (FALLBACK path) ────────────────────────────
-            # Parallel tool calls are the primary way to name-and-act in one
-            # native turn (this method serializes every call in the list). For
-            # single-call dialects, set_session_name / load_skill also accept
-            # ONE chained code tool (then_tool + then_code); expand it into its
-            # own fence so the standard pipeline executes it in the same turn.
-            if name in ('set_session_name', 'load_skill'):
-                then_raw = args.get('then_tool', '')
-                then_name = self._tool_keys_norm.get(self._norm_key(str(then_raw))) if then_raw else None
-                if then_name in self._exec_tool_keys:
-                    then_code = args.get('then_code', '')
-                    if isinstance(then_code, str) and then_code.strip():
-                        parts.append(self._code_fence(then_name, then_code,
-                                                      args.get('then_annotation', '')))
-                        log.info(f"[ToolManager.tool_calls_to_fences] '{name}' chained a "
-                                 f"'{then_name}' sub-tool call")
-                    else:
-                        log.warning(f"[ToolManager.tool_calls_to_fences] '{name}' set then_tool="
-                                    f"'{then_raw}' but then_code was empty — chained call skipped")
-                elif then_raw:
-                    log.warning(f"[ToolManager.tool_calls_to_fences] '{name}' then_tool='{then_raw}' "
-                                f"is not a chainable code tool — ignored")
+            # (then_tool chaining RETIRED 2026-07-19 — parallel calls serialize
+            # every call in the list; stale then_* arguments are ignored.)
         return "\n\n".join(parts)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -647,36 +626,6 @@ class ToolManager:
         # requires the closing run to be >= the opener.
         return (text.rstrip() + "\n" + last.group(0)), canonical
 
-    # Literal data blocks: #@FILE <name> … #@ENDFILE  (content captured verbatim)
-    _FILE_BLOCK_RE = re.compile(
-        r'^[ \t]*#@FILE[ \t]+(\w+)[ \t]*\r?\n(.*?)\r?\n[ \t]*#@ENDFILE[ \t]*$',
-        re.DOTALL | re.MULTILINE
-    )
-
-    def _extract_file_blocks(self, code):
-        """Pull #@FILE <name> … #@ENDFILE literal blocks out of code BEFORE it is
-        compiled, so their content is never parsed as Python. Each block's raw
-        text is bound to a namespace string variable <name> (use it with
-        write_file(path, <name>)). This is the fix for embedding source that
-        contains backslashes, quotes or triple-quotes — which otherwise break the
-        outer interpreter's parser with 'unterminated string literal' etc.
-
-        Returns (stripped_code, {name: content})."""
-        blocks = {}
-
-        def _grab(m):
-            name = m.group(1)
-            if name.isidentifier():
-                blocks[name] = m.group(2)
-                return ''  # remove the literal block from the executed code
-            return m.group(0)  # invalid identifier — leave untouched
-
-        stripped = self._FILE_BLOCK_RE.sub(_grab, code)
-        if blocks:
-            log.info(f"[ToolManager._extract_file_blocks] Extracted {len(blocks)} literal "
-                     f"block(s): {list(blocks.keys())}")
-        return stripped, blocks
-
     def _flush_parse_corrections(self, tool_name):
         """Turn recorded parse auto-fixes into: a log warning, ONE chat NOTICE
         per session (weak models auto-fix often — no NOTICE bombing), and (for
@@ -727,18 +676,6 @@ class ToolManager:
         log.debug("[ToolManager.parse_python_interpreter] Not found")
         return None
 
-    def parse_set_session_name(self, text):
-            """Parse set_session_name fence from AI output. Returns (name, remaining_text) or None."""
-            log.debug(f"[ToolManager.parse_set_session_name] Parsing {len(text)} chars")
-            result = self._parse_fence(text, 'set_session_name', record=True)
-            if result:
-                name, remaining = result
-                log.info(f"[ToolManager.parse_set_session_name] ✓ Found | name='{name}'")
-                self._flush_parse_corrections('set_session_name')
-                return name, remaining
-            log.debug("[ToolManager.parse_set_session_name] Not found")
-            return None
-
     def parse_load_skill(self, text):
             """Parse load_skill fence from AI output. Returns (skill_name, remaining_text) or None."""
             log.debug(f"[ToolManager.parse_load_skill] Parsing {len(text)} chars")
@@ -762,6 +699,60 @@ class ToolManager:
                 return skill_name, remaining
             log.debug("[ToolManager.parse_unload_skill] Not found")
             return None
+
+    def parse_tool_batch(self, text):
+        """Parse ALL canonical tool fences from `text` in order of appearance
+        (2026-07 parallel revamp). Returns (batch, remaining_text): batch is an
+        ordered list of {'tool', 'spec', 'call_id': None} and remaining_text is
+        the free text with every parsed fence removed. ([], text) when none.
+
+        The single-exec policy has already dropped extra python_interpreter
+        fences before this runs, so at most one interpreter call survives.
+        Each tool's own tolerant parser does the extraction (annotations,
+        opener fixes); this method only decides the ORDER by scanning fence
+        tags left to right."""
+        parsers = {
+            'python_interpreter': self.parse_python_interpreter,
+            'read_file': self.parse_read_file,
+            'edit_file': self.parse_edit_file,
+            'write_file': self.parse_write_file,
+            'grep': self.parse_grep,
+            'load_skill': self.parse_load_skill,
+            'unload_skill': self.parse_unload_skill,
+        }
+        fence_rx = re.compile(r'(`{3,})[ \t]*([\w-]+)[^\n]*\n.*?\1`*', re.DOTALL)
+        batch = []
+        remaining = text
+        while True:
+            first = None
+            for m in fence_rx.finditer(remaining):
+                canonical, _exact = self._resolve_tool_tag(m.group(2))
+                if canonical in parsers:
+                    first = canonical
+                    break
+            if first is None:
+                break
+            parsed = parsers[first](remaining)
+            if not parsed:
+                # Tag resolved but the tolerant parser disagreed — stop so the
+                # caller's guard rails (malformed-step retry) can handle it.
+                break
+            spec, remaining = parsed
+            batch.append({'tool': first, 'spec': spec, 'call_id': None})
+        # Opener-tolerance sweep: a typo'd/bracketless python_interpreter fence
+        # the tag scan above could not resolve is still caught by its own
+        # tolerant parser (order is lost — it lands last, which is also its
+        # execution slot of least surprise).
+        if not any(c['tool'] == 'python_interpreter' for c in batch):
+            parsed = self.parse_python_interpreter(remaining)
+            if parsed:
+                spec, remaining = parsed
+                batch.append({'tool': 'python_interpreter', 'spec': spec,
+                              'call_id': None})
+        if batch:
+            log.info(f"[ToolManager.parse_tool_batch] ✓ {len(batch)} call(s): "
+                     f"{[c['tool'] for c in batch]}")
+        return batch, remaining
 
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1110,7 +1101,6 @@ class ToolManager:
 
         Returns:
           python_interpreter                  -> code (str)
-          set_session_name                    -> session name (str)
           load_skill / unload_skill           -> skill name (str)
           read_file/edit_file/write_file/grep -> spec (dict)
           anything else                       -> None
@@ -1125,9 +1115,6 @@ class ToolManager:
                 self.approval_signal.system_message.emit(
                     f"**Working:** ***{annotation}***")
             return str(args.get('code') or '')
-
-        if name == 'set_session_name':
-            return str(args.get('name') or '').strip()
 
         if name in ('load_skill', 'unload_skill'):
             return str(args.get('skill_name') or args.get('name') or '').strip()
@@ -1201,25 +1188,14 @@ class ToolManager:
             lines = lines[:limit] + [f"... ({len(lines) - limit} more diff lines)"]
         return "\n".join(lines)
 
-    def _global_bypass(self):
-        """True when the user has flipped the global 'Bypass all security' setting
-        (Settings > Security). Overrides the whole policy — every op auto-approves.
-        Distinct from self.bypass_security (a per-background-task opt-out)."""
-        try:
-            s = self.settings_callback() if self.settings_callback else {}
-            return bool((s or {}).get('security_bypass_all', False))
-        except Exception:
-            return False
-
     def _check_file_op_approval(self, path, old_text, new_text, tool):
         """The supervised-execution ladder for a FILE op (same order as
         _check_supervised_execution, with a synthesized file_create/file_edit
         finding and the per-hunk diff approval dialog).
 
         Returns (approved, final_new_text, reject_reason)."""
-        if self.bypass_security or self._global_bypass():
-            self._audit_decision(f"{tool}: {path}", tool, 'auto',
-                                 'task-bypass' if self.bypass_security else 'user-bypass')
+        if self.bypass_security:
+            self._audit_decision(f"{tool}: {path}", tool, 'auto', 'task-bypass')
             return True, new_text, ''
 
         # Background-task policy gate (non-interactive) — runs before the
@@ -1312,9 +1288,10 @@ class ToolManager:
 
     def enforce_single_exec_policy(self, text):
         """
-        Scan text for code-execution tool fences (python_interpreter). If more
-        than one is found, keep only the first and drop the rest.
-        set_session_name is intentionally EXEMPT from this policy.
+        Scan text for python_interpreter fences. If more than one is found,
+        keep only the first and drop the rest. This is the ONE hard cap under
+        parallel tool calls (2026-07 revamp) — every other tool fence may batch
+        freely and is untouched here.
 
         Returns:
             tuple: (cleaned_text, violation_bool, violation_msg)
@@ -1325,7 +1302,7 @@ class ToolManager:
         matches = []
         for match in re.finditer(pattern, text, re.DOTALL):
             canonical, _exact = self._resolve_tool_tag(match.group(2))
-            if canonical and canonical in self._exec_tool_keys:
+            if canonical == 'python_interpreter':
                 matches.append((match, canonical))
 
         if len(matches) <= 1:
@@ -1347,14 +1324,10 @@ class ToolManager:
 
         # Notify the user via chat window (signal is thread-safe)
         self.approval_signal.system_message.emit(
-            f"**NOTICE:** The model emitted {len(extras)} extra code-execution "
-            f"call(s) in one response ({', '.join(dropped_names)}). Only the first "
-            f"call was kept and executed — the rest were dropped so the observe/act "
-            f"loop stays one step at a time.\n"
-            f"To reduce how often this happens: use a more capable model, wire up a "
-            f"provider script (Settings ▸ Providers) so you can reach one, and turn "
-            f"on native tool-calling if your provider supports it — native mode makes "
-            f"the model call one tool per turn instead of emitting several at once.\n"
+            f"**NOTICE:** The model emitted {len(extras)} extra python_interpreter "
+            f"call(s) in one response. Only the first was kept and executed — code "
+            f"execution stays one step at a time (other tools may batch freely). "
+            f"The model has been reminded of the cap.\n"
             f"Total violations this session: {_v}"
         )
 
@@ -1368,14 +1341,15 @@ class ToolManager:
         """Structured counterpart of enforce_single_exec_policy for native mode:
         operates on the normalized tool_calls list itself — never on text. Also
         canonicalizes near-miss names (a native model can typo 'readfile' just
-        like a compat one), keeps the FIRST exec-tool call, passes every
-        non-exec call through, and drops extra exec calls. Same violation
-        counter + user NOTICE as the compat version.
+        like a compat one), keeps the FIRST python_interpreter call, passes
+        every other call through (parallel batching, 2026-07 revamp), and
+        drops extra interpreter calls. Same violation counter + user NOTICE
+        as the compat version.
 
         Returns (kept_calls, violation_bool, violation_msg).
         """
         kept, dropped_names = [], []
-        exec_taken = False
+        interp_taken = False
         for call in (tool_calls or []):
             name = str(call.get('name') or '')
             canonical, exact = self._resolve_tool_tag(name, include_legacy=True)
@@ -1383,11 +1357,11 @@ class ToolManager:
                 log.warning(f"[ToolManager.enforce_single_exec_policy_native] "
                             f"native tool name '{name}' corrected to '{canonical}'")
                 call = dict(call, name=canonical)
-            if canonical in self._exec_tool_keys:
-                if exec_taken:
+            if canonical == 'python_interpreter':
+                if interp_taken:
                     dropped_names.append(canonical)
                     continue
-                exec_taken = True
+                interp_taken = True
             kept.append(call)
 
         if not dropped_names:
@@ -1404,11 +1378,11 @@ class ToolManager:
         log.warning(f"[ToolManager.enforce_single_exec_policy_native] ✗ POLICY "
                     f"VIOLATION #{_v} — dropping {dropped_names}")
         self.approval_signal.system_message.emit(
-            f"**NOTICE:** The model made {len(dropped_names)} extra code-execution "
-            f"tool call(s) in one response ({', '.join(dropped_names)}). Only the "
-            f"first call was kept and executed — the rest were dropped so the "
-            f"observe/act loop stays one step at a time. The model has been "
-            f"reminded to make one action call per turn.\n"
+            f"**NOTICE:** The model made {len(dropped_names)} extra "
+            f"python_interpreter call(s) in one response. Only the first was "
+            f"kept and executed — code execution stays one step at a time "
+            f"(other tools may batch freely). The model has been reminded of "
+            f"the cap.\n"
             f"Total violations this session: {_v}"
         )
         return kept, True, violation_msg
@@ -1490,10 +1464,9 @@ class ToolManager:
 
         # Full bypass — a background task explicitly opted out of supervision AND
         # the security gate. Auto-approve, but still leave an audit trail.
-        if self.bypass_security or self._global_bypass():
-            _why = 'task-bypass' if self.bypass_security else 'user-bypass'
-            log.info(f"[ToolManager._check_supervised_execution] {_why} — auto-approving")
-            self._audit_decision(code, execution_type, 'auto', _why)
+        if self.bypass_security:
+            log.info("[ToolManager._check_supervised_execution] task-bypass — auto-approving")
+            self._audit_decision(code, execution_type, 'auto', 'task-bypass')
             return True, code
 
         # Background-task policy gate — runs BEFORE the interactive supervised
@@ -1911,6 +1884,10 @@ class ToolManager:
         normally, tearing down the live console.
 
         Returns True if an interrupt was delivered to a running execution."""
+        # Abort the rest of the current tool batch too — Stop means stop
+        # (2026-07 parallel revamp): not-yet-run calls are skipped with an
+        # explanatory observation. Reset by the batch loop at batch start.
+        self.work.batch_abort = True
         self._pending_interrupt_notice = notice
         interp = self.tools.get('python')
         if interp is not None and hasattr(interp, 'interrupt_current'):
@@ -1972,14 +1949,12 @@ class ToolManager:
             log.info("[ToolManager.run_python_interpreter] Code was modified by user in approval dialog")
         code = modified_code
 
-        # Pull literal #@FILE blocks out before execution so their content is
-        # never parsed as Python. work.interpreter.last_code keeps the full source
-        # (blocks included) for the UI note / history; only exec_code runs.
+        # (#@FILE literal-block extraction RETIRED 2026-07-19 — the write_file
+        # TOOL handles tricky-character content verbatim; code writes computed
+        # data with the in-namespace write_file() helper or plain open().)
         self.work.interpreter.last_code = code
         self.work.interpreter.step_seq += 1   # new execution — new dedup id
-        exec_code, _file_blocks = self._extract_file_blocks(code)
-        if _file_blocks:
-            self.tools['python'].inject_vars(_file_blocks)
+        exec_code = code
 
         # Execute Python code (with optional timeout)
         timeout = None

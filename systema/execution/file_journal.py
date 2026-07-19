@@ -170,6 +170,113 @@ def prune(keep_days=14):
         return 0
 
 
+# ── Persistent revert-state (Files-touched dialog cursors) ───────────────────
+# The dialog's per-file "steps back" cursor + the stashed live bytes survive a
+# dialog close AND an app restart. State lives beside the manifest:
+#   revert_state.json = {session_id: {path: {"cursor", "stash_id", "stash_existed"}}}
+# Stash objects use an "rs-" id prefix inside objects/ — prune() never touches
+# them (it only unlinks ids listed in dropped manifest entries).
+
+REVERT_STATE = HISTORY_DIR / "revert_state.json"
+_RS_PREFIX = "rs-"
+
+
+def _load_revert_state():
+    try:
+        if REVERT_STATE.is_file():
+            with open(REVERT_STATE, encoding="utf-8") as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                return d
+    except Exception as e:
+        log.error(f"[FileJournal._load_revert_state] {e}")
+    return {}
+
+
+def _save_revert_state(d):
+    try:
+        _ensure_dirs()
+        with _lock:
+            with open(REVERT_STATE, "w", encoding="utf-8", newline="") as f:
+                json.dump(d, f, indent=1)
+    except Exception as e:
+        log.error(f"[FileJournal._save_revert_state] {e}")
+
+
+def revert_state(session_id):
+    """{path: {"cursor": int, "stash_id": …, "stash_existed": bool}} for a session."""
+    return _load_revert_state().get(str(session_id or ""), {})
+
+
+def stash_current(session_id, path):
+    """Snapshot the LIVE bytes of ``path`` (called before the first step back)
+    into an rs- object so stepping forward can reach 'current' again after a
+    restart. Replaces any previous stash for the path. Returns True on success."""
+    sid = str(session_id or "")
+    if not sid:
+        return False
+    try:
+        _ensure_dirs()
+        p = Path(path)
+        existed = p.is_file()
+        rs_id = f"{_RS_PREFIX}{int(time.time() * 1000):x}-{uuid.uuid4().hex[:8]}"
+        if existed:
+            (OBJECTS_DIR / rs_id).write_bytes(p.read_bytes())
+        d = _load_revert_state()
+        ent = d.setdefault(sid, {}).setdefault(str(path), {})
+        old = ent.get("stash_id")
+        if old:
+            try:
+                (OBJECTS_DIR / old).unlink(missing_ok=True)
+            except Exception:
+                pass
+        ent.update({"stash_id": rs_id if existed else None,
+                    "stash_existed": existed})
+        _save_revert_state(d)
+        return True
+    except Exception as e:
+        log.error(f"[FileJournal.stash_current] {e}")
+        return False
+
+
+def stash_read(session_id, path):
+    """(found, bytes_or_None) — the stashed 'current' bytes for a reverted file.
+    found=True with None bytes means the current state was 'file absent'."""
+    ent = revert_state(session_id).get(str(path))
+    if not ent or "stash_existed" not in ent:
+        return False, None
+    if not ent.get("stash_existed"):
+        return True, None
+    obj = OBJECTS_DIR / (ent.get("stash_id") or "")
+    if obj.is_file():
+        return True, obj.read_bytes()
+    return False, None
+
+
+def set_revert_cursor(session_id, path, cursor):
+    """Persist a file's steps-back cursor. cursor <= 0 means the file is back at
+    'current': the entry AND its stash object are dropped."""
+    sid = str(session_id or "")
+    if not sid:
+        return
+    d = _load_revert_state()
+    sess = d.setdefault(sid, {})
+    key = str(path)
+    if cursor <= 0:
+        ent = sess.pop(key, None) or {}
+        rs_id = ent.get("stash_id")
+        if rs_id:
+            try:
+                (OBJECTS_DIR / rs_id).unlink(missing_ok=True)
+            except Exception:
+                pass
+        if not sess:
+            d.pop(sid, None)
+    else:
+        sess.setdefault(key, {})["cursor"] = int(cursor)
+    _save_revert_state(d)
+
+
 # ── Optional git shadow (deep history; never the restore path) ───────────────
 
 def _git_ok():

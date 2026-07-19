@@ -862,14 +862,24 @@ class DebugWindow(BaseWindow):
         from systema.common import terminal
         try:
             if sys.platform == 'win32':
+                # Trust the REAL window state, not the remembered flag — after
+                # an app restart the console exists but starts hidden, and on a
+                # fresh run.bat launch it starts visible; the guessed flag was
+                # wrong in both cases.
+                self.cmd_visible = terminal.console_visible()
                 if self.cmd_visible:
-                    terminal.hide_console()
-                    self.cmd_visible = False
-                    self.cmd_toggle_btn.setToolTip("Show console window")
+                    if terminal.hide_console():
+                        self.cmd_visible = False
+                        self.cmd_toggle_btn.setToolTip("Show console window")
                 else:
-                    terminal.show_console()
-                    self.cmd_visible = True
-                    self.cmd_toggle_btn.setToolTip("Hide console window")
+                    if terminal.show_console():
+                        self.cmd_visible = True
+                        self.cmd_toggle_btn.setToolTip("Hide console window")
+                    else:
+                        self.add_message(
+                            "system",
+                            "No console window exists in this launch mode — "
+                            "start the app from run.bat to get one.")
             else:
                 ok, now_open, msg = terminal.toggle_log_terminal()
                 self.cmd_toggle_btn.setToolTip(

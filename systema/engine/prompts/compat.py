@@ -18,18 +18,15 @@ INVOKE_HINT = "run this in a python_interpreter fence — its code being:"
 
 
 def tool_format_section(include_workmode: bool = True,
-                        include_session_naming: bool = False,
                         include_skills: bool = False) -> str:
     """The ONE compat format section: fence rule, tool table + examples from
-    the registry, the one-fence policy. (The finish rule is NOT here — the
+    the registry, the batch-fence policy. (The finish rule is NOT here — the
     work section owns it.)"""
     active = []
     if include_workmode:
         # The file subsystem rides with execution capability (default-on).
         active += ['python_interpreter', 'read_file', 'edit_file', 'write_file',
                    'grep']
-    if include_session_naming:
-        active.append('set_session_name')
     if include_skills:
         active += ['load_skill', 'unload_skill']
 
@@ -46,11 +43,15 @@ def tool_format_section(include_workmode: bool = True,
     if include_workmode:
         rules = """
 RULES:
-- ONE action fence per response — never two. python_interpreter, read_file,
-  edit_file and write_file all count as actions; each is one turn — wait for
-  its output.
-- Put the action fence at the END of your message.
-- Never roleplay: if you say you'll do it, put the fence in the SAME response.
+- You may emit SEVERAL tool fences in one response. They run one after another
+  in the order written, and ALL their results come back together in ONE
+  observation.
+- HARD CAP: at most ONE python_interpreter fence per response. read_file,
+  edit_file, write_file, grep and the skill fences combine freely alongside it.
+- Results arrive only after the WHOLE batch has run — if a later call needs an
+  earlier call's OUTPUT, stop after the producing fence and continue next turn.
+- Put tool fences at the END of your message, after your reply text.
+- Never roleplay: if you say you'll do it, put the fence(s) in the SAME response.
 """
 
     return f"""
@@ -66,11 +67,6 @@ AVAILABLE TOOLS
 
 {examples}
 {rules}"""
-
-
-# Naming moved to the background SessionNamerAgent — empty tail (referenced by
-# the prompt assembly + tests).
-SESSION_NAMING_TAIL = ""
 
 
 def skills_howto_tail() -> str:
@@ -101,10 +97,12 @@ MUST REMEMBER (quick recall of the rules above):
 - No tool needed? Just reply. Poems, explanations, chat, and anything you can
   answer from your own knowledge get a plain response — never run print() to
   "produce" text you could simply type.
-- Never roleplay: if you say you'll do it, emit the fence in the SAME response.
+- Never roleplay: if you say you'll do it, emit the fence(s) in the SAME response.
 - python_interpreter = your ONLY code tool; you SEE output; chain turns; print()
-  what you need. ONE python_interpreter fence per response, at the END, ALWAYS
-  with an annotation: `python_interpreter: [short label]`.
+  what you need. At most ONE python_interpreter fence per response, at the END,
+  ALWAYS with an annotation: `python_interpreter: [short label]`.
+- Several tool fences may share one response — they run in order and all
+  results return together; only python_interpreter is capped at one.
 - Tool calls are code fences (tool name = fence language, content inside).
 - Be friendly and descriptive.
 """
@@ -143,8 +141,10 @@ PREFILLING = {
                 "call — NEVER JSON. But do not call a tool when none is needed: "
                 "answer simple requests you can handle from your own knowledge or "
                 "creativity (writing, explaining, chat) with a normal reply. "
-                "NEVER roleplay execution. ONE code tool per response maximum. "
-                "If you say you will do something, do it in that SAME response."
+                "NEVER roleplay execution. Several tool fences may share one "
+                "response (they run in order); at most ONE python_interpreter "
+                "fence among them. If you say you will do something, do it in "
+                "that SAME response."
             ),
         },
         {
@@ -164,11 +164,12 @@ PREFILLING = {
                 "just reply to directly, with no fence. python_interpreter is my one "
                 "execution tool: I run code, see the output, and chain executions "
                 "until the task is fully complete, then finish with a normal reply "
-                "containing my full report. I emit at most ONE python_interpreter "
-                "fence per response, always with a short annotation label, and I "
-                "never roleplay execution — if I say I'll do something, I do it in "
-                "that same response with the actual fence. When the first request is "
-                "work, I name the session in that same response too."
+                "containing my full report. I may emit several tool fences in one "
+                "response — they run in the order written and I get all their "
+                "results together — but at most ONE python_interpreter fence among "
+                "them, always with a short annotation label. I never roleplay "
+                "execution — if I say I'll do something, I do it in that same "
+                "response with the actual fence."
             ),
         },
     ]
@@ -179,19 +180,20 @@ EXEC_CODE_TOOLCALL_VIOLATION_PROMPT = """<SYSTEM_MESSAGE>
 TOOL CALL POLICY VIOLATION DETECTED
 
 Your previous response contained MORE THAN ONE python_interpreter call. Only the
-FIRST call was executed. All subsequent code-execution calls were SILENTLY
-DISCARDED — they did NOT run.
+FIRST python_interpreter call was executed. The extra python_interpreter calls
+were SILENTLY DISCARDED — they did NOT run.
 
 RULE (absolute):
-  - You may emit AT MOST ONE python_interpreter call per response.
-  - set_session_name is exempt — it may coexist with the work call.
+  - At most ONE python_interpreter fence per response.
+  - Other tool fences (read_file / edit_file / write_file / grep / skills) may
+    freely accompany it — only python_interpreter is capped.
 
-WHY: multiple code blocks in a single turn create unpredictable state, confuse
-the approval workflow, and make the conversation log ambiguous. Always wait for
-the result of one execution before issuing the next.
+WHY: multiple code executions in a single turn create unpredictable state and
+make the conversation log ambiguous. Observe one execution's output before
+issuing the next.
 
 WHAT YOU MUST DO NOW: if you still need to run the discarded code, re-issue it
-in your next response — strictly one code-execution call per response.
+in your next response — one python_interpreter call at a time.
 
 Reminder of the correct format:
 ```python_interpreter: [Brief Description]

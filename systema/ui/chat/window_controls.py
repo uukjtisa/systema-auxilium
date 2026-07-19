@@ -299,34 +299,36 @@ class WindowControlsMixin:
             QMenu::separator {{ height: 1px; background: {_tc['border']}; margin: 4px 6px; }}
         """)
 
+        compaction_menu = menu.addMenu("Compaction")
         if self.controller.compaction_active():
             act_compact = QAction("Stop compacting", self)
             act_compact.triggered.connect(lambda: self.controller.stop_compaction())
         else:
-            act_compact = QAction("Compact all toolcalls…", self)
+            act_compact = QAction("Compact all toolcalls", self)
             act_compact.triggered.connect(
                 lambda: self.controller.compact_all_toolcalls())
-        menu.addAction(act_compact)
-
-        act_clear = QAction("Clear all tool outputs…", self)
-        act_clear.triggered.connect(self._clear_all_tool_outputs)
-        menu.addAction(act_clear)
+        compaction_menu.addAction(act_compact)
 
         act_restore = QAction("Restore all compacted toolcalls", self)
         act_restore.triggered.connect(lambda: self.controller.restore_all_compacted())
-        menu.addAction(act_restore)
+        compaction_menu.addAction(act_restore)
+
+        act_agents = QAction("Compaction agents", self)
+        act_agents.triggered.connect(lambda: self.controller.open_compaction_agents_dialog())
+        compaction_menu.addAction(act_agents)
+
+        outputs_menu = menu.addMenu("Tool outputs")
+        act_clear = QAction("Clear all tool outputs", self)
+        act_clear.triggered.connect(self._clear_all_tool_outputs)
+        outputs_menu.addAction(act_clear)
 
         act_revert = QAction("Revert cleared outputs", self)
         act_revert.triggered.connect(lambda: self.controller.revert_cleared_outputs())
-        menu.addAction(act_revert)
-
-        act_agents = QAction("Compaction agents…", self)
-        act_agents.triggered.connect(lambda: self.controller.open_compaction_agents_dialog())
-        menu.addAction(act_agents)
+        outputs_menu.addAction(act_revert)
 
         menu.addSeparator()
 
-        act_files = QAction("Files touched this session…", self)
+        act_files = QAction("Files touched this session", self)
         act_files.triggered.connect(self._open_session_files_dialog)
         menu.addAction(act_files)
 

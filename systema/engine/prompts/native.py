@@ -5,9 +5,9 @@ Native function-calling renderings. HARD RULE: nothing in this module may
 contain a code fence (three backticks) or the word "JSON" — weak native models
 echo any format they see as literal text. Verified by the prompt assertions.
 
-Session naming leads with PARALLEL tool calls (set_session_name alongside the
-work call in one response) — the then_tool chaining arguments are only the
-fallback for single-call dialects.
+Parallel tool calls are the norm (2026-07 revamp): a response may carry several
+tool calls, executed sequentially in emitted order with ONE batched result
+turn; only python_interpreter is capped at one call per response.
 '''
 
 from systema.execution.tool_registry import CANONICAL_TOOLS
@@ -16,8 +16,7 @@ from systema.execution.tool_registry import CANONICAL_TOOLS
 INVOKE_HINT = "make a python_interpreter tool call whose code argument is:"
 
 
-def native_header(include_session_naming: bool = False,
-                  include_skills: bool = True) -> str:
+def native_header(include_skills: bool = True) -> str:
     lines = [
         "  - python_interpreter(code, annotation)   run Python and SEE its output — your",
         "                                         code-execution tool. annotation = a",
@@ -34,9 +33,6 @@ def native_header(include_session_naming: bool = False,
         "                                         (default) / content / count. Regex,",
         "                                         context lines, skips build/VCS dirs.",
     ]
-    if include_session_naming:
-        lines.append(
-            "  - set_session_name(name, ...)          title the conversation.")
     if include_skills:
         lines.append(
             "  - load_skill(skill_name, ...)          load a skill's instructions.")
@@ -51,33 +47,28 @@ Your tools are provided to you as NATIVE function-calling tools:
 {tool_list}
   (each tool except unload_skill ALSO accepts an OPTIONAL message_to_user — see below.)
 
-TALKING TO THE USER: native providers let you write normal text AND make a tool
-call in the SAME turn. Just write your reply as normal text — it is shown to the
-user alongside the action. Do NOT narrate that you're "about to" name the
-session, load a skill, or run code — simply reply and make the call. Tools also
-accept an OPTIONAL message_to_user, but you normally do NOT need it; use it only
-as a fallback if you make a tool call while emitting no text at all. NEVER put
-the same words in both normal text and message_to_user — that shows your reply
+TALKING TO THE USER: native providers let you write normal text AND make tool
+calls in the SAME turn. Just write your reply as normal text — it is shown to
+the user alongside the actions. Do NOT narrate that you're "about to" load a
+skill or run code — simply reply and make the call. Tools also accept an
+OPTIONAL message_to_user, but you normally do NOT need it; use it only as a
+fallback if you make a tool call while emitting no text at all. NEVER put the
+same words in both normal text and message_to_user — that shows your reply
 twice.
 
-CALLING TWO TOOLS IN ONE RESPONSE: you may emit load_skill ALONGSIDE your
-python_interpreter call as PARALLEL tool calls in the same response. Only if your
-provider limits you to a single tool call per response, use the fallback chaining
-arguments on load_skill instead: set then_tool='python_interpreter', put the
-Python in then_code, and pass then_annotation (the short step label). Never emit
-two ACTION calls (python_interpreter / read_file / edit_file / write_file) in one
-response.
+CALLING SEVERAL TOOLS IN ONE RESPONSE: you may emit MULTIPLE tool calls in a
+single response. They run one after another in the order you emit them, and ALL
+their results come back together in one observation. Combine freely (read_file
++ edit_file + load_skill, several file ops, ...), with ONE hard cap: at most
+ONE python_interpreter call per response. Results arrive only after the WHOLE
+batch has run — if a later call depends on an earlier call's OUTPUT, stop after
+the producing call and continue next turn.
 
 Invoke every tool through your native function-calling mechanism. Everything
 below — WHEN and WHY to use each tool, staying in work mode, directory safety,
-memory rules, and session-naming timing — fully applies; only the invocation
-happens as a native tool call.
+and memory rules — fully applies; only the invocation happens as a native tool
+call.
 """
-
-
-# Naming moved to the background SessionNamerAgent — empty tail (referenced by
-# the prompt assembly + tests; must stay fence-free / JSON-free).
-SESSION_NAMING_TAIL = ""
 
 
 def skills_howto_tail() -> str:
@@ -87,9 +78,8 @@ def skills_howto_tail() -> str:
         "  Call the load_skill tool with the skill name, and just write your reply\n"
         "  as normal text this turn (message_to_user is an optional fallback for\n"
         "  when you emit no text).\n"
-        "  To also act this turn, prefer a PARALLEL python_interpreter call; the\n"
-        "  then_tool='python_interpreter' + then_code chaining arguments are the\n"
-        "  fallback for single-call providers.\n"
+        "  To also act this turn, emit a PARALLEL python_interpreter call alongside\n"
+        "  it in the same response — the skill loads before the code runs.\n"
         "  The skill's full instructions will be injected into your system context.\n"
         "  Works inside AND outside python_interpreter.\n"
         "  Do NOT load a skill that already shows [LOADED] — it's already active!\n"
@@ -109,10 +99,12 @@ MUST REMEMBER (quick recall of the rules above):
   "produce" text you could simply type.
 - Never roleplay: if you say you'll do it, MAKE THE TOOL CALL in the SAME response.
 - python_interpreter = your ONLY code tool; you SEE output; chain calls; print()
-  what you need. ONE python_interpreter call per response, ALWAYS with the
-  `annotation` argument (a short 3-6 word label shown to the user).
+  what you need. At most ONE python_interpreter call per response, ALWAYS with
+  the `annotation` argument (a short 3-6 word label shown to the user).
+- Several tool calls may share one response — they run in order and all results
+  return together; only python_interpreter is capped at one.
 - Invoke tools as native function calls; to speak in the same turn, just write
-  your reply as normal text alongside the call.
+  your reply as normal text alongside the calls.
 - Be friendly and descriptive.
 """
 
@@ -139,15 +131,16 @@ PREFILLING_NATIVE = {
             "role": "system",
             "content": (
                 "REMINDER: Invoke tools as NATIVE function calls (python_interpreter / "
-                "set_session_name / load_skill / unload_skill). NEVER write a tool "
-                "call as plain text — invoke it through your function-calling "
-                "mechanism. But do not call a tool when none is needed: answer "
-                "simple requests you can handle from your own knowledge or creativity "
-                "(writing, explaining, chat) with a normal reply and no tool call. "
-                "NEVER roleplay execution. ONE code tool call per response maximum; "
-                "set_session_name may be called alongside it. To say something while "
-                "calling a tool, just write it as normal text alongside the call. If "
-                "you say you will do something, do it in that SAME response."
+                "read_file / edit_file / write_file / grep / load_skill / "
+                "unload_skill). NEVER write a tool call as plain text — invoke it "
+                "through your function-calling mechanism. But do not call a tool "
+                "when none is needed: answer simple requests you can handle from "
+                "your own knowledge or creativity (writing, explaining, chat) with "
+                "a normal reply and no tool call. NEVER roleplay execution. You may "
+                "emit several tool calls per response (they run in order); at most "
+                "ONE python_interpreter call among them. To say something while "
+                "calling tools, just write it as normal text alongside the calls. "
+                "If you say you will do something, do it in that SAME response."
             ),
         },
         {
@@ -167,11 +160,11 @@ PREFILLING_NATIVE = {
                 "with no tool call. python_interpreter is my one execution tool: I run "
                 "code, see the output, and chain calls until the task is fully "
                 "complete, then finish with a normal reply containing my full "
-                "report. I make at most ONE python_interpreter call per response, "
-                "always with a short annotation label, and I may call "
-                "set_session_name alongside it in the same response — which I do "
-                "whenever the first request is work. I never roleplay execution; "
-                "when I want to speak while acting, I just write it as normal text."
+                "report. I may emit several tool calls in one response — they run "
+                "in the order emitted and I get all their results together — but "
+                "at most ONE python_interpreter call among them, always with a "
+                "short annotation label. I never roleplay execution; when I want "
+                "to speak while acting, I just write it as normal text."
             ),
         },
     ]
@@ -182,20 +175,20 @@ EXEC_CODE_TOOLCALL_VIOLATION_PROMPT_NATIVE = """<SYSTEM_MESSAGE>
 TOOL CALL POLICY VIOLATION DETECTED
 
 Your previous response contained MORE THAN ONE python_interpreter call. Only the
-FIRST call was executed. All subsequent code-execution calls were SILENTLY
-DISCARDED — they did NOT run.
+FIRST python_interpreter call was executed. The extra python_interpreter calls
+were SILENTLY DISCARDED — they did NOT run.
 
 RULE (absolute):
-  - You may make AT MOST ONE python_interpreter call per response.
-  - set_session_name is exempt — it may be called alongside the work call.
+  - At most ONE python_interpreter call per response.
+  - Other tools (read_file / edit_file / write_file / grep / skills) may freely
+    accompany it as parallel calls — only python_interpreter is capped.
 
-WHY: multiple code blocks in a single turn create unpredictable state, confuse
-the approval workflow, and make the conversation log ambiguous. Always wait for
-the result of one execution before issuing the next.
+WHY: multiple code executions in a single turn create unpredictable state and
+make the conversation log ambiguous. Observe one execution's output before
+issuing the next.
 
 WHAT YOU MUST DO NOW: if you still need to run the discarded code, make ONE
-python_interpreter call in your next response — strictly one code-execution call
-per response.
+python_interpreter call in your next response — one code execution at a time.
 </SYSTEM_MESSAGE>"""
 
 

@@ -139,17 +139,46 @@ class RenderingMixin:
         text = re.sub(r'^\[\s*(.+?)\s*\]\s*$', _bracket, text, flags=re.MULTILINE)
 
         # ── 6. Restore literal $ and masked code / tables ─────────────────────
+        # Loop until stable: a table row masked AFTER its inline-code spans holds
+        # nested \x00LXn\x00 sentinels in its stashed text, so a single re.sub
+        # pass would re-insert them verbatim (the rendered-\x00LXn\x00 bug).
         text = text.replace('\x00USD\x00', '$')
-        text = re.sub(r'\x00LX(\d+)\x00', lambda m: _stash[int(m.group(1))], text)
+        for _ in range(10):                     # bounded — nesting is ever ≤2 deep
+            if '\x00LX' not in text:
+                break
+            text = re.sub(r'\x00LX(\d+)\x00',
+                          lambda m: _stash[int(m.group(1))], text)
         return text
 
     def render_markdown(self, text):
         """Render markdown to HTML"""
         try:
             html = markdown2.markdown(text, extras=["fenced-code-blocks", "tables", "break-on-newline"])
-            return html
+            return self._cap_heading_sizes(html)
         except Exception:
             return text.replace('\n', '<br>')
+
+    def _cap_heading_sizes(self, html):
+        """Qt's rich-text engine renders <h1>-<h6> at its own large built-in
+        sizes — a message QLabel's internal document takes no stylesheet, so a
+        '# heading' line in a reply towers over the bubble text. Rewrite heading
+        tags into bold blocks sized relative to the chat font scale (still
+        bigger than body text, just proportionate). Code blocks are safe: their
+        literal '<h1>' is already HTML-escaped by markdown2."""
+        import re
+        try:
+            base = int(self._get_msg_font_size())
+        except Exception:
+            base = 13
+        _bump = {1: 5, 2: 3, 3: 2, 4: 1, 5: 0, 6: 0}
+
+        def _open(m):
+            lvl = int(m.group(1))
+            return (f'<div style="font-size:{base + _bump.get(lvl, 0)}px; '
+                    f'font-weight:700; margin-top:8px; margin-bottom:3px;">')
+        html = re.sub(r'<h([1-6])(?:\s[^>]*)?>', _open, html)
+        html = re.sub(r'</h[1-6]>', '</div>', html)
+        return html
 
     def render_markdown_with_code_blocks(self, text):
         """Render markdown with special handling for code blocks"""

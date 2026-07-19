@@ -29,7 +29,11 @@ def _forbid_parsing(eng, monkeypatch):
     monkeypatch.setattr(eng.tool_manager, "enforce_single_exec_policy", _boom)
 
 
-def test_native_naming_turn_needs_no_parser(eng, monkeypatch):
+def test_native_retired_naming_call_is_pruned(eng, monkeypatch):
+    # set_session_name was RETIRED (#31, 2026-07-19): a hallucinated naming
+    # call is dropped from the batch AND the stored metadata, and the turn
+    # falls through to a plain text turn — naming is the background
+    # SessionNamerAgent's job now.
     _forbid_parsing(eng, monkeypatch)
     eng.last_tool_transport = "native"
     eng._pending_native = {
@@ -39,14 +43,12 @@ def test_native_naming_turn_needs_no_parser(eng, monkeypatch):
     }
     ai_text = f"Hello there!\n\n{BT}set_session_name\nMy Chat\n{BT}"
     r = eng._process_ai_response(ai_text)
-    assert r["session_name"] == "My Chat"
+    assert r["session_name"] is None
     assert r["response"] == "Hello there!"
     assert r["is_working"] is False
     entry = eng.conversation_history[-1]
     assert entry["role"] == "assistant"
-    assert entry["_tool_calls"][0]["name"] == "set_session_name"
-    # the compat view (fences) is preserved for a cross-mode reload
-    assert entry["content"] == ai_text
+    assert not entry.get("_tool_calls")
 
 
 def test_native_read_file_dispatches_structurally(eng, monkeypatch, sample_tree):
@@ -96,6 +98,8 @@ def test_native_violation_prompt_precedes_assistant_turn(eng, monkeypatch, sampl
 
 
 def test_native_parallel_naming_plus_exec(eng, monkeypatch, sample_tree):
+    # A retired naming call arriving alongside a real tool is pruned from the
+    # batch and the stored metadata; the remaining read_file still executes.
     _forbid_parsing(eng, monkeypatch)
     eng.last_tool_transport = "native"
     target = sample_tree / "notes.txt"
@@ -107,12 +111,12 @@ def test_native_parallel_naming_plus_exec(eng, monkeypatch, sample_tree):
         ],
     }
     r = eng._process_ai_response("reconstructed-goes-here")
-    assert r["session_name"] == "Notes"
+    assert r["session_name"] is None
     assert r["is_working"] is True
     assert r["response"] == "Reading it now."
-    # both calls persisted in the native metadata for next-turn pairing
-    names = [c["name"] for c in eng.conversation_history[-1]["_tool_calls"]]
-    assert set(names) == {"set_session_name", "read_file"}
+    # only the surviving call persists in the native metadata
+    assistant = [m for m in eng.conversation_history if m.get("_tool_calls")][-1]
+    assert [c["name"] for c in assistant["_tool_calls"]] == ["read_file"]
 
 
 def test_build_native_convo_strips_dirty_history(eng):

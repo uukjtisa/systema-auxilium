@@ -26,7 +26,7 @@ def test_native_advertises_grep():
 
 def test_native_module_constants_fence_free():
     # The module docstring promises nothing in native carries a fence or "JSON".
-    for name in ("MUST_REMEMBER", "WORK_OPTIONS", "SESSION_NAMING_TAIL",
+    for name in ("MUST_REMEMBER", "WORK_OPTIONS",
                  "MALFORMED_WORK_STEP_PROMPT_NATIVE"):
         text = getattr(native, name)
         assert "```" not in text, f"{name} contains a code fence"

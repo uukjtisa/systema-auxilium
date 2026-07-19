@@ -59,10 +59,20 @@ def _spawn_relauncher(pid: int, root) -> bool:
             ps = (f"Wait-Process -Id {pid} -Timeout 30 -ErrorAction SilentlyContinue; "
                   f"Start-Sleep -Milliseconds 500; "
                   f"Set-Location -LiteralPath '{root}'; {launch}")
-            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            # A REAL console, born hidden — NOT CREATE_NO_WINDOW. CREATE_NO_WINDOW
+            # gave the whole relaunched chain (powershell -> cmd -> python) a
+            # windowless conhost, so after a restart GetConsoleWindow() returned
+            # NULL and the Debug window's console toggle silently did nothing.
+            # A new console started SW_HIDE keeps the relaunch just as invisible
+            # while giving the restarted app a toggleable console window.
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = subprocess.SW_HIDE
             subprocess.Popen(
                 ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
-                cwd=str(root), close_fds=True, creationflags=flags)
+                cwd=str(root), close_fds=True,
+                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+                startupinfo=si)
         else:
             script = root / "run.sh"
             launch = (f'exec sh "{script}"' if script.exists()
@@ -345,6 +355,14 @@ class AssistantController(QObject):
         self.updater_service = None  # will be set by _deferred_bg_init
         self._update_window = None   # lazily created by open_update_window()
         QTimer.singleShot(300, self._deferred_bg_init)
+        # GUI-thread hitch detector — logs a WARNING with the blocked duration
+        # whenever the event loop stalls (see common/perf_monitor.py). Always on.
+        try:
+            from systema.common.perf_monitor import HitchMonitor
+            self._hitch_monitor = HitchMonitor(self)
+            self._hitch_monitor.start()
+        except Exception as e:
+            log.warning(f"[AssistantController.__init__] HitchMonitor failed (non-fatal): {e}")
         self.log("System AI Assistant initialized", "SUCCESS")
         log.info(f"[AssistantController.__init__] ✓ AssistantController ready | "
                  f"session='{self.current_session_id}' ──")
@@ -722,7 +740,6 @@ class AssistantController(QObject):
             'vad_aggressiveness': 3,
             'vad_silero_threshold': 0.5,
             'supervised_execution': True,  # Default ON for safety
-            'security_bypass_all': False,  # master override — auto-approve everything
             'memory_enabled': True,
             'memory_recall_mode': 'inject_all',  # 'inject_all' or 'rag'
             'memory_threshold': 0.4,  # float 0.0–1.0
@@ -1194,7 +1211,6 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             voice_mode                 = False,   # tasks are silent — no voice
             elevenlabs_enabled         = False,
             skills                     = None,    # task skills injected separately below
-            include_session_naming     = False,   # tasks don't name sessions
             include_memory             = True,    # memorize is always useful for tasks
             include_execution_tools    = _any_code,     # python interpreter section
             include_fence_syntax       = _any_code,     # fence syntax guide
@@ -2221,7 +2237,12 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             self.open_compaction_agents_dialog()
 
     def compaction_active(self) -> bool:
-        return self.compaction_manager.is_active()
+        """True when the CURRENT session has a compaction job running (the menu
+        branches on this — a job in another session must not flip this menu).
+        A missing session id means "no job here" — is_active(None) would fall
+        back to the global any-session check and resurrect the old bug."""
+        sid = self.current_session_id
+        return bool(sid) and self.compaction_manager.is_active(sid)
 
     def stop_compaction(self):
         """Stop the CURRENT session's compaction job (progress is kept)."""
@@ -2366,7 +2387,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         # Refresh UI
         if self._chat:
             self._chat.refresh_session_list()
-            self._chat.add_system_message("🆕 **New Session Created**")
+            self._chat.add_system_message("**New Session Created**")
             self._chat.warn_loaded_skills_if_any()
         log.info(f"[AssistantController.create_new_session] ✓ New session ready: '{self.current_session_id}'")
         ab = getattr(getattr(self, 'ui', None), 'android_bridge', None)
@@ -2388,7 +2409,9 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             self.session_manager.delete_session(self.current_session_id)
 
         # Load session data
-        session_data = self.session_manager.load_session(session_id)
+        from systema.common.perf_monitor import span
+        with span(f"load_session.disk[{session_id}]"):
+            session_data = self.session_manager.load_session(session_id)
 
         if not session_data:
             log.error(f"[AssistantController.load_session] ✗ Failed to load session: '{session_id}'")
@@ -2878,4 +2901,3 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
 
         t = threading.Thread(target=_run, daemon=True, name="NotifPopup")
         t.start()
-

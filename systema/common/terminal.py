@@ -47,6 +47,20 @@ def console_supported() -> bool:
         return False
 
 
+def console_visible() -> bool:
+    """True when the Windows console window exists AND is currently visible.
+    The Debug toggle syncs from this instead of trusting a remembered flag —
+    after a restart the console exists but starts hidden."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        return bool(hwnd) and bool(ctypes.windll.user32.IsWindowVisible(hwnd))
+    except Exception:
+        return False
+
+
 def _win_show_console(show: bool) -> bool:
     import ctypes
     hwnd = ctypes.windll.kernel32.GetConsoleWindow()

@@ -397,11 +397,26 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         QTimer.singleShot(210, self.check_admin_mode)
 
         # Welcome message — deferred past theme init so _current_theme_key is set
-        QTimer.singleShot(220, lambda: self.add_system_message(
-            "👋 **Welcome to Systema Auxilium!**\n\n"
-            "I can execute Python code and control your system. "
-            "Click the 💬 icon to enforce tool usage."
-        ))
+        QTimer.singleShot(220, self._show_welcome_message)
+
+    def _show_welcome_message(self):
+        """Show a time-appropriate greeting with the user's name if available."""
+        from datetime import datetime
+        hour = datetime.now().hour
+        if hour < 12:
+            greeting = "Good morning"
+        elif hour < 18:
+            greeting = "Good afternoon"
+        else:
+            greeting = "Good evening"
+
+        user_name = self.controller.get_user_name()
+        if user_name:
+            msg = f"**{greeting}, {user_name}!** Welcome to Systema Auxilium."
+        else:
+            msg = f"**{greeting}!** Welcome to Systema Auxilium."
+
+        self.add_system_message(msg)
 
     # ═══════════════════════════════════════════════════════════
     # ANIMATION METHODS
@@ -1190,7 +1205,12 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
 
     def _refresh_msg_navigator(self):
         """Rebuild the message navigator from message_widgets (safe no-op
-        before init_ui / after teardown)."""
+        before init_ui / after teardown). Skipped during a bulk session replay
+        — every add_* calls this, which made loading N messages rebuild the
+        rail N times (O(n^2)); render_loaded_messages does ONE rebuild at the
+        end instead."""
+        if getattr(self, '_bulk_render', False):
+            return
         nav = getattr(self, '_msg_navigator', None)
         if nav is not None:
             was_visible = nav.isVisible()
@@ -1214,7 +1234,14 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         merged turn bubble — strip_tool_calls removes the code fences, and
         whatever text remains joins the turn like it did live. (The old
         behavior dropped every work-step assistant bubble on reload.)"""
-        self._bulk_render = True   # no typing-reveal / per-message anim on replay
+        from systema.common.perf_monitor import span
+        self._bulk_render = True   # no typing-reveal / per-message anim / nav rebuilds
+        # Batch repaints: without this every bubble insertion triggers its own
+        # layout+paint pass, which is most of the session-switch stall.
+        self.setUpdatesEnabled(False)
+        _n = len(self.controller.ai.conversation_history)
+        _sp = span(f"render_loaded_messages[{_n} msgs]")
+        _sp.__enter__()
         try:
             self.clear_chat_silent()
             tm = self.controller.ai.tool_manager
@@ -1260,11 +1287,14 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
                         self.add_user_message(content)
                     elif role == "assistant":
                         self.add_ai_message(content)
-            self._refresh_msg_navigator()
         except Exception as e:
             log.error(f"[ChatWindow.render_loaded_messages] render_loaded_messages error: {e}")
         finally:
             self._bulk_render = False
+            self.setUpdatesEnabled(True)
+            _sp.__exit__(None, None, None)
+        # ONE navigator rebuild for the whole replay (was once per message).
+        self._refresh_msg_navigator()
 
     def _remove_tool_usage_format(self, content):
         """Remove tool usage JSON blocks from AI message"""
@@ -2472,15 +2502,22 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
             self.add_system_message(f"⚠️ Could not open Memory window: {e}")
 
     def check_admin_mode(self):
-        """Check if running as admin and notify user"""
-        import ctypes
+        """Check if running as admin (Windows) / root (Linux) and notify user"""
+        is_elevated = False
         try:
-            is_admin = ctypes.windll.shell32.IsUserAnAdmin()
-            if is_admin:
-                self.add_system_message(
-                    "⚠️ **Administrator Privileges Granted**\n\n"
-                    "This Agent is now running with elevated system privileges and can perform high-level system "
-                    "changes and tasks."
-                )
+            if sys.platform == "win32":
+                import ctypes
+                is_elevated = bool(ctypes.windll.shell32.IsUserAnAdmin())
+            else:
+                is_elevated = (os.geteuid() == 0)
         except Exception:
-            log.warning("[ChatWindow.check_admin_mode] Admin check failed", exc_info=True)
+            log.warning("[ChatWindow.check_admin_mode] Elevated check failed", exc_info=True)
+            return
+
+        if is_elevated:
+            label = "**Administrator Privileges Granted**" if sys.platform == "win32" else "**Root Privileges Granted**"
+            self.add_system_message(
+                f"{label}\n\n"
+                "Systema Auxilium has been booted with elevated system privileges. "
+                "Operate with discretion."
+            )

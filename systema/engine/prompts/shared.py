@@ -84,13 +84,6 @@ def get_skill_path_rule() -> str:
     )
 
 
-# Invocation-agnostic naming rules. Each mode appends its HOW-TO tail.
-# Session naming is now handled by a background subagent (SessionNamerAgent) —
-# the model no longer names sessions. Kept as an empty constant so the prompt
-# assembly and tests that reference it stay valid.
-SESSION_NAMING_CORE = ""
-
-
 def memory_section(invoke_hint: str) -> str:
     return f"""
 MEMORY — PERSISTENT ACROSS SESSIONS
@@ -144,8 +137,9 @@ PYTHON_INTERPRETER_SECTION = """
 PYTHON INTERPRETER — YOUR EXECUTION TOOL
 
 python_interpreter is the ONLY way to run code. Calling it enters work mode:
-run code, SEE its output, decide, run more. ONE python_interpreter call per
-response (never two); each call is a separate turn — wait for its output.
+run code, SEE its output, decide, run more. At most ONE python_interpreter call
+per response (never two); other tools may accompany it as parallel calls, and
+the whole batch is answered by one combined observation.
 The CODE and raw OUTPUT stay behind a collapsed card, but any TEXT you write
 around the call is shown to the user as part of one flowing response.
 
@@ -227,57 +221,19 @@ RULES:
   range: `lines: A-B` plus the replacement text (no OLD/NEW block). Still
   read_file first so A-B are the lines you actually mean.
 - write_file is for NEW files or full rewrites; prefer edit_file for changes.
-- ONE file op per response, like any action call. Annotate every call.
+- File ops may be BATCHED: emit several in one response (alongside at most one
+  python_interpreter call) — they run in written order and all results return
+  together. Annotate every call.
+- Remember: results arrive only after the whole batch — an edit that depends on
+  a read's OUTPUT belongs in the NEXT response, after you see the read.
 - Edits and writes may need user approval (they see a diff). A rejection comes
   back as an ERROR with the user's reason — adapt to it, don't repeat blindly.
-- Inside Python code, the write_file(path, content) HELPER still exists for
-  data produced BY that code; standalone file work uses the write_file TOOL.
 """
 
 
-def file_write_guide(example_intro: str) -> str:
-    """#@FILE / write_file() guide. Tool-agnostic content (it is about code
-    CONTENT, not invocation) — appears in BOTH modes. `example_intro` frames
-    the example for the mode; the #@FILE markers stay at column 0 either way."""
-    return r'''
-WRITING FILES WHOSE CONTENT IS CODE OR HAS TRICKY CHARACTERS
-(backslashes, quotes, or triple-quotes — e.g. generating a .py script):
-
-Do NOT embed that content as a Python string literal. Your python_interpreter code
-is compiled as Python FIRST, so a backslash, a " or a """ inside a literal breaks
-it with "unterminated string literal". Instead put the literal content in a #@FILE
-block and write it with write_file(). Block content is captured VERBATIM and is
-never parsed as Python.
-
-You may define MULTIPLE #@FILE blocks in ONE python_interpreter call and write them
-all at once — each block becomes its own variable. ''' + example_intro + r'''
-
-write_file(r"D:\proj\downloader.py", downloader_src)
-write_file(r"D:\proj\handler.py", handler_src)
-print("wrote 2 files")
-
-#@FILE downloader_src
-import re
-URL_RE = r"https?://(?:www\.)\S+"
-TEMPLATE = """has "quotes", \ backslashes and triple-quotes — all fine"""
-#@ENDFILE
-
-#@FILE handler_src
-def handle(path):
-    with open(path, encoding="utf-8") as f:
-        return f.read()
-#@ENDFILE
-
-#@FILE rules:
-- A line `#@FILE <name>`, then the literal content, then a line `#@ENDFILE`.
-- <name> must be a valid Python identifier; it becomes a string variable you can
-  pass to write_file() or use directly (e.g. my_source_code).
-- Define as MANY #@FILE blocks as you need — one per file. Each <name> unique. No limit.
-- Content is taken EXACTLY as written — no escaping, no quoting, ever.
-- write_file(path, content, mode="w") creates parent folders; pass bytes for binary.
-- Put all #@FILE blocks at the END of your code, after the executable lines, with
-  every #@FILE / #@ENDFILE marker at column 0.
-'''
+# (#@FILE / file_write_guide RETIRED 2026-07-19: the write_file TOOL takes
+# content verbatim — no Python-literal escaping problem exists anymore, so the
+# whole instruction block was redundant prompt bloat.)
 
 
 def image_tools_section(task: bool, invoke_hint: str) -> str:
@@ -421,7 +377,8 @@ IF YOU NEED MORE INFO -> run more code (with a brief narration line)!
 IF TASK IS INCOMPLETE -> run more code (with a brief narration line)!
 IF YOU HAVE EVERYTHING -> finish with your full report.
 
-YOU CAN CHAIN TOOLS — one per turn, each keeps you in work mode and returns an observation:
+YOU CAN CHAIN TOOLS — batch several per turn (at most one python_interpreter);
+each turn keeps you in work mode and returns one combined observation:
 - python_interpreter — run logic/compute, gather data, launch apps
 - read_file -> edit_file — inspect a file, then surgically change it, then re-read to verify
 - write_file — create or fully rewrite a file

@@ -73,11 +73,9 @@ def get_system_prompt(
         skills=None,
         # ── Modular section flags — all True by default ──
         include_tool_format: bool = True,
-        include_session_naming: bool = False,   # naming is a background subagent now
         include_memory: bool = True,
         include_execution_tools: bool = True,
         include_fence_syntax: bool = True,
-        include_file_write: bool = True,
         include_interpreter_mode_rules: bool = True,
         include_must_remember: bool = True,
         # Optionals, off by default (token cost).
@@ -99,36 +97,17 @@ def get_system_prompt(
 
     body = []
     if native_tools:
-        body.append(native.native_header(
-            include_session_naming=include_session_naming,
-            include_skills=skills_present))
+        body.append(native.native_header(include_skills=skills_present))
     elif include_tool_format:
         body.append(compat.tool_format_section(
             include_workmode=include_interpreter_mode_rules and include_fence_syntax,
-            include_session_naming=include_session_naming,
             include_skills=skills_present))
 
-    if include_session_naming:
-        body.append(shared.SESSION_NAMING_CORE
-                    + (native.SESSION_NAMING_TAIL if native_tools
-                       else compat.SESSION_NAMING_TAIL))
     if include_memory:
         body.append(shared.memory_section(hint))
     if include_execution_tools and include_interpreter_mode_rules:
         body.append(shared.PYTHON_INTERPRETER_SECTION)
         body.append(shared.FILE_TOOLS_SECTION)
-    # The #@FILE / write_file() guide is tool-agnostic (about code CONTENT, not
-    # invocation) — it appears in BOTH modes when execution is available.
-    if include_file_write and include_interpreter_mode_rules:
-        if native_tools:
-            intro = ("Example: the `code` argument of a python_interpreter call is "
-                     "exactly the following (executable lines first, then the "
-                     "#@FILE blocks at the END):")
-        else:
-            intro = ("Example: the content of ONE python_interpreter fence is "
-                     "exactly the following (executable lines first, then the "
-                     "#@FILE blocks at the END):")
-        body.append(shared.file_write_guide(intro))
     if include_image_tools:
         body.append(shared.image_tools_section(
             task=is_task_session_prompt, invoke_hint=hint))

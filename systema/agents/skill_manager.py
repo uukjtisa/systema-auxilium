@@ -7,6 +7,7 @@ skills/skills_state.json.
 import json
 import re
 import shutil
+import threading
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
@@ -34,8 +35,16 @@ class SkillManager(QObject):
 
         self._snapshot: dict[str, float] = {}  # {folder_name: mtime}
         self._timer = QTimer(self)
-        self._timer.setInterval(500)
+        self._timer.setInterval(2000)
         self._timer.timeout.connect(self._poll)
+
+        # get_skills() cache — the recursive disk walk is expensive and was
+        # re-run on EVERY call (each prompt assembly, each sidebar refresh).
+        # Invalidated when the watcher sees a change or a skill is created or
+        # deleted; is_loaded is recomputed per call so load/unload needs none.
+        self._skills_cache: "list[dict] | None" = None
+        self._cache_lock = threading.Lock()
+        self._poll_inflight = False
 
         # Tracks which skills are currently loaded (name → content)
         self._loaded_skills: dict[str, str] = {}
@@ -91,7 +100,26 @@ class SkillManager(QObject):
         Return a list of skill dicts:
           {name, description, path, files, is_loaded}
         Skips folders without a SKILL.md.
+
+        CACHED — the recursive disk scan only re-runs after the watcher (or a
+        create/delete) invalidates it. is_loaded is recomputed on every call.
+        Returns per-call dict copies so callers can't mutate the cache.
         """
+        with self._cache_lock:
+            cache = self._skills_cache
+        if cache is None:
+            cache = self._scan_skills()
+            with self._cache_lock:
+                self._skills_cache = cache
+        return [{**s, 'is_loaded': s['name'] in self._loaded_skills}
+                for s in cache]
+
+    def _invalidate_skills_cache(self):
+        with self._cache_lock:
+            self._skills_cache = None
+
+    def _scan_skills(self) -> list[dict]:
+        """The actual disk walk behind get_skills() (frontmatter + file lists)."""
         skills = []
         seen_names: dict[str, str] = {}  # name → folder for duplicate detection
 
@@ -100,13 +128,13 @@ class SkillManager(QObject):
                 continue
             skill_md = folder / "SKILL.md"
             if not skill_md.exists():
-                log.debug(f"[SkillManager.get_skills] Skipping '{folder.name}' — no SKILL.md")
+                log.debug(f"[SkillManager._scan_skills] Skipping '{folder.name}' — no SKILL.md")
                 continue
             meta = self._parse_frontmatter(skill_md)
             name = meta['name']
             if name in seen_names:
                 log.warning(
-                    f"[SkillManager.get_skills] Duplicate skill name '{name}' "
+                    f"[SkillManager._scan_skills] Duplicate skill name '{name}' "
                     f"in '{folder.name}' and '{seen_names[name]}' — last wins"
                 )
             seen_names[name] = folder.name
@@ -122,9 +150,8 @@ class SkillManager(QObject):
                 'description': meta['description'],
                 'path': folder,
                 'files': files,
-                'is_loaded': name in self._loaded_skills,
             })
-        log.debug(f"[SkillManager.get_skills] Returning {len(skills)} skill(s)")
+        log.debug(f"[SkillManager._scan_skills] Scanned {len(skills)} skill(s) from disk")
         return skills
 
     def get_skill_content(self, name: str) -> str:
@@ -231,6 +258,7 @@ class SkillManager(QObject):
                 encoding='utf-8'
             )
         log.info(f"[SkillManager.create_skill_template] Created template for '{name}' at '{folder}'")
+        self._invalidate_skills_cache()
 
     def delete_skill(self, name: str):
         """Move the skill folder to OS trash (or a .trash sub-folder if send2trash unavailable)."""
@@ -247,18 +275,33 @@ class SkillManager(QObject):
                     dest = trash_dir / folder.name
                     shutil.move(str(folder), str(dest))
                     log.info(f"[SkillManager.delete_skill] '{name}' moved to .trash/")
+                self._invalidate_skills_cache()
                 return
         log.warning(f"[SkillManager.delete_skill] Skill '{name}' not found")
 
     # ── Internal ───────────────────────────────────────────────────────────────
 
     def _poll(self):
-        """Called every 500 ms. Compare snapshot; emit signal if anything changed."""
-        new_snapshot = self._build_snapshot()
-        if new_snapshot != self._snapshot:
-            log.debug(f"[SkillManager._poll] Change detected — emitting skills_changed")
-            self._snapshot = new_snapshot
-            self.skills_changed.emit()
+        """Every 2 s: rebuild the folder snapshot on a WORKER thread — the
+        recursive walk must never run on the GUI thread (a big skill folder
+        turned this into a periodic UI hitch at the old 500 ms cadence) — and
+        emit skills_changed (queued to the GUI thread) when it differs."""
+        if self._poll_inflight:
+            return
+        self._poll_inflight = True
+
+        def _scan():
+            try:
+                new_snapshot = self._build_snapshot()
+                if new_snapshot != self._snapshot:
+                    log.debug("[SkillManager._poll] Change detected — emitting skills_changed")
+                    self._snapshot = new_snapshot
+                    self._invalidate_skills_cache()
+                    self.skills_changed.emit()
+            finally:
+                self._poll_inflight = False
+
+        threading.Thread(target=_scan, daemon=True, name="skills-poll").start()
 
     def _build_snapshot(self) -> dict[str, float]:
         """Build {folder_name: latest_mtime} for all skill folders."""

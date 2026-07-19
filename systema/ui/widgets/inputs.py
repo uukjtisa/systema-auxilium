@@ -43,6 +43,14 @@ class MultiLineInput(QTextEdit):
         else:
             super().keyPressEvent(event)
 
+    def canInsertFromMimeData(self, source):
+        # OS file drags carry URLs but often no text, so the default QTextEdit
+        # check rejects them — Qt then shows the forbidden cursor over the input
+        # pill. Accepting URLs here routes the drop into insertFromMimeData
+        # below, which already inserts the cleaned/quoted path (or attaches an
+        # image via the dialog).
+        return source.hasUrls() or super().canInsertFromMimeData(source)
+
     def insertFromMimeData(self, source):
         """Override paste to handle file paths"""
         if source.hasUrls():

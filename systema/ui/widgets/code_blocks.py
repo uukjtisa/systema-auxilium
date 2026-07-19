@@ -321,6 +321,10 @@ class CodeBlockWidget(QWidget):
         self.code_editor.setObjectName("codeEditor")
         self.code_editor.setPlainText(code)
         self.code_editor.setReadOnly(True)
+        # Read-only viewer: never a drop target — without this a file dragged
+        # over it shows the forbidden cursor instead of falling through to the
+        # chat surface's drop handler.
+        self.code_editor.setAcceptDrops(False)
         self.code_editor.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         self.code_editor.setFrameShape(QTextEdit.Shape.NoFrame)
         # Disable the QTextEdit's own scrollbars — QScrollArea handles all scrolling
@@ -649,6 +653,7 @@ class TableBlockWidget(QWidget):
 
         self.view = QTextEdit()
         self.view.setReadOnly(True)
+        self.view.setAcceptDrops(False)   # let file drags fall through to the chat surface
         self.view.setHtml(styled)
         self.view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)  # wrap to fit by default
         self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)

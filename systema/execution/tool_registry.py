@@ -125,48 +125,11 @@ CANONICAL_TOOLS = {
             'usage': "Your one execution tool — run code, see output, chain turns.",
         },
     },
-    'set_session_name': {
-        'description': (
-            "Set a short, descriptive title for the current conversation. Emit it ALONGSIDE "
-            "your other tool call in the same response when your provider supports parallel "
-            "calls; use then_tool/then_code only if it does not."
-        ),
-        'param': ('name', 'A short title — just a few words.'),
-        'extra_params': [
-            ('message_to_user',
-             "Optional fallback. Just write your reply as normal text this turn — naming the "
-             "session runs quietly in the background. Only put words here if you won't emit any "
-             "text this turn.",
-             False),
-            ('then_tool',
-             "FALLBACK chaining, for providers that only permit a single tool call per "
-             "response: name the tool to also run this turn ('python_interpreter'). Prefer "
-             "emitting set_session_name and the work call as two parallel calls instead.",
-             False, ('python_interpreter',)),
-            ('then_code',
-             "The Python code for the tool named in then_tool. Required when then_tool is set.",
-             False),
-            ('then_annotation',
-             "For then_tool='python_interpreter': a short 3-6 word label of what the chained "
-             "code does (shown to the user as that step's title).",
-             False),
-        ],
-        'exec': False,
-        'compat': {
-            'table_row': "set_session_name: Short title for this conversation",
-            'fence_example': (
-                "```set_session_name\n"
-                "Chat About File Sorting\n"
-                "```"
-            ),
-            'usage': ("Name the session once, early. Exempt from the one-code-tool rule — "
-                      "it may accompany a python_interpreter fence in the same response."),
-        },
-    },
     'load_skill': {
         'description': (
             "Load a skill's full instructions into your context. Use when the task matches an "
-            "available skill that is not already loaded."
+            "available skill that is not already loaded. May be emitted alongside other tool "
+            "calls in the same response — the skill loads before they run."
         ),
         'param': ('skill_name', 'The exact name of the skill to load.'),
         'extra_params': [
@@ -174,17 +137,6 @@ CANONICAL_TOOLS = {
              "Optional fallback. Normally just write your reply as normal text alongside this "
              "call — it is shown to the user. Only put words here if you won't emit any text "
              "this turn.",
-             False),
-            ('then_tool',
-             "FALLBACK chaining, for providers that only permit a single tool call per "
-             "response: run ONE code tool right after the skill loads ('python_interpreter').",
-             False, ('python_interpreter',)),
-            ('then_code',
-             "The Python code for the tool named in then_tool. Required when then_tool is set.",
-             False),
-            ('then_annotation',
-             "For then_tool='python_interpreter': a short 3-6 word label of what the chained "
-             "code does (shown to the user as that step's title).",
              False),
         ],
         'exec': False,
@@ -372,4 +324,7 @@ EXEC_TOOL_KEYS = frozenset(k for k, v in CANONICAL_TOOLS.items() if v.get('exec'
 # Retired tools: strip-only. Old sessions containing these fences still render
 # cleanly, and an unclosed legacy fence still gets auto-closed — but they are
 # never advertised, dispatched, or schema'd.
-LEGACY_STRIP_KEYS = ('execute_code',)
+# set_session_name retired 2026-07-19 (#31): naming is the background
+# SessionNamerAgent's job now — controller.set_session_name() stays as the
+# rename primitive it (and the sidebar) calls.
+LEGACY_STRIP_KEYS = ('execute_code', 'set_session_name')

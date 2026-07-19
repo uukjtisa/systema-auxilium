@@ -78,20 +78,17 @@ def test_run_grep_reports_error_spec(tm):
     assert "boom" in obs
 
 
-# ── Cross-mode reconstruction round-trip (set_session_name / skills) ──────────
+# ── Cross-mode reconstruction round-trip (skills + retired tools) ─────────────
 # A native tool call is reconstructed to fence text (stored in `content` so
-# compat-mode replay can re-parse it) AND stripped for display. Before the fix a
-# name-only turn reconstructed to an EMPTY string, so the call was lost on a
-# cross-mode session reload. These lock the round-trip for all three tools.
+# compat-mode replay can re-parse it) AND stripped for display. Retired tools
+# (set_session_name, #31) reconstruct NAME-ONLY so the engine's retired-tool
+# handling fires instead of the call silently vanishing.
 
-def test_set_session_name_reconstructs_and_reparses(tm):
+def test_set_session_name_reconstructs_for_retired_handling(tm):
     fence = tm.tool_calls_to_fences(
         [{"name": "set_session_name", "arguments": {"name": "Deck Aesthetic Overhaul"}}])
+    # the fence names the retired tool (argument deliberately not carried)
     assert "set_session_name" in fence
-    assert "Deck Aesthetic Overhaul" in fence
-    # compat replay: the stored fence re-parses back to the same name
-    parsed = tm.parse_set_session_name(fence)
-    assert parsed is not None and parsed[0] == "Deck Aesthetic Overhaul"
     # display: the fence is stripped so the user never sees it
     assert tm.strip_tool_calls(fence).strip() == ""
 
@@ -179,16 +176,20 @@ def test_recover_unclosed_depth_aware(tm):
 # ── Native single-exec policy (structured calls, never text) ─────────────────
 
 def test_native_policy_keeps_first_exec_and_nonexec(tm):
+    # Interpreter-only cap (2026-07 parallel revamp): non-exec calls pass
+    # through freely (typos canonicalized); only EXTRA python_interpreter
+    # calls are dropped, and the first one is kept in place.
     calls = [
-        {"id": "1", "name": "set_session_name", "arguments": {"name": "T"}},
-        {"id": "2", "name": "read_file", "arguments": {"path": "a"}},
+        {"id": "1", "name": "read_file", "arguments": {"path": "a"}},
+        {"id": "2", "name": "python_interpreter", "arguments": {"code": "1"}},
         {"id": "3", "name": "readfile", "arguments": {"path": "b"}},
-        {"id": "4", "name": "python_interpreter", "arguments": {"code": "1"}},
+        {"id": "4", "name": "python_interpreter", "arguments": {"code": "2"}},
     ]
     kept, violated, msg = tm.enforce_single_exec_policy_native(calls)
     assert violated is True
-    assert [c["name"] for c in kept] == ["set_session_name", "read_file"]
-    assert "read_file" in msg and "python_interpreter" in msg
+    assert [c["name"] for c in kept] == ["read_file", "python_interpreter", "read_file"]
+    assert kept[1]["arguments"]["code"] == "1"
+    assert "python_interpreter" in msg
 
 
 def test_native_policy_canonicalizes_typo_names(tm):

@@ -5,8 +5,9 @@ Files touched this session — reversible state stepper (chat ⋯ menu).
 Lists every file the CURRENT session edited/wrote (from the file journal) and
 lets the user walk each file's state: ◀ steps back through the journaled
 pre-images, ▶ un-does the reversal (back toward the current state). The
-"current" bytes are stashed in-memory on the first step back, so a full
-round-trip is lossless. Dialog-lifetime cursors only — nothing persisted.
+"current" bytes are stashed ON DISK on the first step back (file_journal
+revert-state), so cursors survive dialog close/reopen AND app restart; a file
+parked in a stepped-back state shows a "reverted -N" badge.
 """
 from pathlib import Path
 
@@ -56,8 +57,13 @@ class SessionFilesDialog(QDialog):
                 continue
             by_path.setdefault(e.get("path", ""), []).append(e)  # newest → oldest
 
-        self._cursor = {}       # path -> steps back (0 = current)
-        self._redo_stash = {}   # path -> current bytes stashed on first ◀
+        # Cursors are PERSISTENT (file_journal revert-state): path -> steps back
+        # (0 = current). The 'current' bytes stash lives on disk too, so a file
+        # left stepped-back stays that way across reopen and app restart.
+        self._sid = sid
+        self._cursor = {p: int(e.get("cursor", 0))
+                        for p, e in file_journal.revert_state(sid).items()
+                        if int(e.get("cursor", 0)) > 0}
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -140,10 +146,23 @@ class SessionFilesDialog(QDialog):
         fwd_btn.setToolTip("Undo the reversal — step forward again")
         fwd_btn.setEnabled(False)
 
+        # A pruned journal can leave a saved cursor deeper than what remains.
+        if self._cursor.get(path, 0) > len(ents):
+            self._cursor[path] = len(ents)
+
         def _refresh():
             p = self._cursor.get(path, 0)
-            state_lbl.setText("current" if p == 0
-                              else f"{p} step{'s' if p > 1 else ''} back")
+            if p == 0:
+                state_lbl.setText("current")
+                state_lbl.setStyleSheet(
+                    f"background: transparent; border: none; color: {t['accent']}; "
+                    f"font-size: 10px; font-weight: 600;")
+            else:
+                # Actively-reverted badge — amber so a parked file stands out.
+                state_lbl.setText(f"reverted -{p}")
+                state_lbl.setStyleSheet(
+                    "background: transparent; border: none; color: #E3B341; "
+                    "font-size: 10px; font-weight: 700;")
             back_btn.setEnabled(p < len(ents))
             fwd_btn.setEnabled(p > 0)
 
@@ -152,16 +171,16 @@ class SessionFilesDialog(QDialog):
             if p >= len(ents):
                 return
             if p == 0:
-                # Stash the live bytes so ▶ can come all the way back.
-                try:
-                    f = Path(path)
-                    self._redo_stash[path] = f.read_bytes() if f.is_file() else None
-                except Exception as e:
-                    log.error(f"stash failed for {path}: {e}")
+                # Stash the live bytes ON DISK so ▶ can come all the way back
+                # even after a dialog close or app restart.
+                if not file_journal.stash_current(self._sid, path):
+                    state_lbl.setText("failed")
+                    log.error(f"stash failed for {path}")
                     return
             ok, msg = file_journal.restore(ents[p]["id"])
             if ok:
                 self._cursor[path] = p + 1
+                file_journal.set_revert_cursor(self._sid, path, p + 1)
             else:
                 state_lbl.setText("failed")
                 log.error(f"restore failed: {msg}")
@@ -172,7 +191,11 @@ class SessionFilesDialog(QDialog):
             if p <= 0:
                 return
             if p == 1:
-                data = self._redo_stash.get(path)
+                found, data = file_journal.stash_read(self._sid, path)
+                if not found:
+                    state_lbl.setText("failed")
+                    log.error(f"redo stash missing for {path}")
+                    return
                 try:
                     f = Path(path)
                     if data is None:
@@ -186,6 +209,7 @@ class SessionFilesDialog(QDialog):
                     state_lbl.setText("failed")
                     return
                 self._cursor[path] = 0
+                file_journal.set_revert_cursor(self._sid, path, 0)
             else:
                 ok, msg = file_journal.restore(ents[p - 2]["id"])
                 if not ok:
@@ -193,6 +217,7 @@ class SessionFilesDialog(QDialog):
                     log.error(f"redo restore failed: {msg}")
                     return
                 self._cursor[path] = p - 1
+                file_journal.set_revert_cursor(self._sid, path, p - 1)
             _refresh()
 
         back_btn.clicked.connect(_step_back)
