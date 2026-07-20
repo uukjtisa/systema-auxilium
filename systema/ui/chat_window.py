@@ -497,19 +497,6 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
                     pass
             QTimer.singleShot(0, _grab_focus)
 
-        # Elevated Windows runs: UIPI blocks drag-drop from a non-elevated
-        # Explorer (forbidden cursor before Qt sees anything). Opening the
-        # window's message filter lets the shell's drag messages through so
-        # Qt's own dropEvent fires. Purely additive + idempotent (no Qt-state
-        # surgery), so it's safe to re-run on every show and a hard no-op on
-        # other OSes / non-elevated runs, which keep the plain Qt drag path.
-        try:
-            from systema.ui import win_drop_bridge
-            win_drop_bridge.install(self)
-        except Exception:
-            log.warning("[ChatWindow.showEvent] drop-filter install failed",
-                        exc_info=True)
-
 
     # ── Sidebar right-edge resize ──────────────────────────────────────────────
     # These are distinct from the code-block handles (handle_vertical_press etc.)

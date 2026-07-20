@@ -1590,11 +1590,32 @@ class SettingsWindow(BaseWindow):
         _cap_row.addWidget(_label("Inject cap (approx tokens):"))
         self.memory_cap_combo = QComboBox()
         self.memory_cap_combo.setStyleSheet(_COMBO)
-        for n in [1000, 1500, 2000, 3000, 5000]:
-            self.memory_cap_combo.addItem(str(n), n)
+        for n in [5000, 9000, 12000]:
+            self.memory_cap_combo.addItem(f"{n:,}", n)
+        self.memory_cap_combo.addItem("Custom…", '__custom__')
         _cap_row.addWidget(self.memory_cap_combo)
         mg_lay.addWidget(_cap_roww)
         self._memory_cap_row = _cap_roww
+
+        # Custom cap entry — revealed only when 'Custom…' is selected
+        # (dependent-visibility rule, mirrors the custom embedding-model row).
+        from PyQt6.QtGui import QIntValidator
+        _capcustom_roww = QWidget()
+        _capcustom_row = QHBoxLayout(_capcustom_roww)
+        _capcustom_row.setContentsMargins(0, 0, 0, 0)
+        _capcustom_row.addWidget(_label("Custom cap (tokens):"))
+        self.memory_cap_custom_input = QLineEdit()
+        self.memory_cap_custom_input.setPlaceholderText("e.g. 20000")
+        self.memory_cap_custom_input.setValidator(QIntValidator(100, 200000, self))
+        self.memory_cap_custom_input.setStyleSheet(_INPUT)
+        _capcustom_row.addWidget(self.memory_cap_custom_input, stretch=1)
+        mg_lay.addWidget(_capcustom_roww)
+        self._memory_cap_custom_row = _capcustom_roww
+
+        # Live token-usage readout (inject-all only): what the current memory set
+        # costs vs. the selected cap. Kept in sync by _update_memory_rows_visibility.
+        self._memory_cap_readout = _label("", muted=True)
+        mg_lay.addWidget(self._memory_cap_readout)
 
         _model_roww = QWidget()
         _model_row = QHBoxLayout(_model_roww)
@@ -1653,6 +1674,10 @@ class SettingsWindow(BaseWindow):
         self.memory_recall_mode_combo.currentIndexChanged.connect(
             lambda _=None: self._update_memory_rows_visibility())
         self.memory_model_combo.currentIndexChanged.connect(
+            lambda _=None: self._update_memory_rows_visibility())
+        self.memory_cap_combo.currentIndexChanged.connect(
+            lambda _=None: self._update_memory_rows_visibility())
+        self.memory_cap_custom_input.textChanged.connect(
             lambda _=None: self._update_memory_rows_visibility())
 
         open_mem_btn = QPushButton("Open Memory Manager")
@@ -2307,6 +2332,11 @@ class SettingsWindow(BaseWindow):
         self._memory_threshold_row.setVisible(enabled and is_rag)
         self._memory_max_row.setVisible(enabled and is_rag)
         self._memory_cap_row.setVisible(enabled and not is_rag)
+        self._memory_cap_custom_row.setVisible(
+            enabled and not is_rag
+            and self.memory_cap_combo.currentData() == '__custom__')
+        self._memory_cap_readout.setVisible(enabled and not is_rag)
+        self._refresh_memory_cap_readout()
         # Embedding model only matters for RAG recall — inject-all never
         # embeds, so the whole model group hides with it (dependent-visibility
         # rule: hidden, never greyed out).
@@ -2327,6 +2357,48 @@ class SettingsWindow(BaseWindow):
             sel = self.memory_model_custom_input.text().strip()
         self._memory_model_restart_note.setVisible(
             bool(enabled and is_rag and live and sel and sel != live))
+
+    def _current_inject_cap(self) -> int:
+        """The inject cap the widgets currently express (preset or Custom…)."""
+        sel = self.memory_cap_combo.currentData()
+        if sel == '__custom__':
+            try:
+                return max(100, int(self.memory_cap_custom_input.text().strip()))
+            except (TypeError, ValueError):
+                return 5000
+        try:
+            return int(sel)
+        except (TypeError, ValueError):
+            return 5000
+
+    def _refresh_memory_cap_readout(self):
+        """Update the live 'N tokens / M memories / within cap' readout. Uses the
+        SAME summarize_memory_injection() the engine's cap logic uses, so the
+        displayed number can never drift from what actually gets injected."""
+        lbl = getattr(self, '_memory_cap_readout', None)
+        if lbl is None:
+            return
+        try:
+            mm = getattr(self.controller, 'memory_manager', None)
+            if mm is None or not getattr(mm, 'store_ready', False):
+                lbl.setText("memory initializing…")
+                return
+            mems = mm.get_all()
+            if not mems:
+                lbl.setText("no memories stored yet")
+                return
+            from systema.engine.ai_engine import summarize_memory_injection
+            cap = self._current_inject_cap()
+            s = summarize_memory_injection(mems, cap)
+            n = len(mems)
+            if s['omitted'] > 0:
+                lbl.setText(f"≈ {s['total_tokens']:,} tokens · {n} memories · "
+                            f"{s['omitted']} omitted (over {cap:,} cap)")
+            else:
+                lbl.setText(f"≈ {s['total_tokens']:,} tokens · {n} memories · within cap")
+        except Exception as e:
+            lbl.setText("")
+            log.debug(f"[SettingsWindow._refresh_memory_cap_readout] {e}")
 
     def _update_bargein_combo_enabled(self):
         """Barge-in sensitivity only matters in Automatic mode — hide it otherwise."""
@@ -2883,11 +2955,15 @@ class SettingsWindow(BaseWindow):
             if self.memory_recall_mode_combo.itemData(i) == recall_mode:
                 self.memory_recall_mode_combo.setCurrentIndex(i)
                 break
-        cap_tokens = self.controller.settings.get('memory_inject_cap_tokens', 2000)
-        for i in range(self.memory_cap_combo.count()):
-            if self.memory_cap_combo.itemData(i) == cap_tokens:
-                self.memory_cap_combo.setCurrentIndex(i)
-                break
+        cap_tokens = self.controller.settings.get('memory_inject_cap_tokens', 5000)
+        _cap_idx = self.memory_cap_combo.findData(cap_tokens)
+        if _cap_idx >= 0:
+            self.memory_cap_combo.setCurrentIndex(_cap_idx)
+        else:
+            _ci = self.memory_cap_combo.findData('__custom__')
+            if _ci >= 0:
+                self.memory_cap_combo.setCurrentIndex(_ci)
+            self.memory_cap_custom_input.setText(str(cap_tokens))
         embed_model = self.controller.settings.get(
             'memory_embed_model', 'sentence-transformers/all-MiniLM-L6-v2')
         _mi = self.memory_model_combo.findData(embed_model)
@@ -3418,7 +3494,14 @@ class SettingsWindow(BaseWindow):
         s['memory_recall_mode'] = self.memory_recall_mode_combo.currentData()
         s['memory_threshold'] = self.memory_threshold_combo.currentData()
         s['memory_max_results'] = self.memory_max_combo.currentData()
-        s['memory_inject_cap_tokens'] = self.memory_cap_combo.currentData()
+        _cap_sel = self.memory_cap_combo.currentData()
+        if _cap_sel == '__custom__':
+            try:
+                s['memory_inject_cap_tokens'] = max(100, int(self.memory_cap_custom_input.text().strip()))
+            except (TypeError, ValueError):
+                s['memory_inject_cap_tokens'] = 5000
+        else:
+            s['memory_inject_cap_tokens'] = _cap_sel
         _mm_sel = self.memory_model_combo.currentData()
         if _mm_sel == '__custom__':
             _mm_custom = self.memory_model_custom_input.text().strip()

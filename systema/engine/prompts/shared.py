@@ -84,7 +84,58 @@ def get_skill_path_rule() -> str:
     )
 
 
-def memory_section(invoke_hint: str) -> str:
+def memory_section(invoke_hint: str, inject_all: bool = False) -> str:
+    """Persistent-memory tool section.
+
+    inject_all=True renders the variant for 'Inject all into system prompt'
+    recall mode: every stored memory is already present verbatim in this prompt
+    (the SYSTEM MEMORY BLOCK), so search_memory is REMOVED — searching is
+    redundant when the full set is already in context. Only memorize / edit /
+    delete remain. The default variant (RAG or no injected block, incl. task
+    agents) keeps search_memory."""
+    if inject_all:
+        return f"""
+MEMORY — PERSISTENT ACROSS SESSIONS (inject-all mode)
+
+Every stored memory is ALREADY included verbatim in this system prompt — see
+the SYSTEM MEMORY BLOCK (each entry shows its title, body and tags). You have
+the complete set in front of you, so there is NO search tool in this mode and
+you must never look one up: to answer "do you remember X?" or "what do you know
+about me?", read the block directly.
+
+Three functions are available inside python_interpreter for managing memory:
+
+  memorize(title, body, tags="")   -> Save a NEW memory permanently
+  update_memory(title, new_title=None, new_body=None, new_tags=None)
+                                   -> Edit ONE memory by its EXACT title (copy
+                                      the title straight from the memory block);
+                                      unspecified parts are preserved
+  forget_memory(identifier)        -> Exact title match deletes that ONE
+                                      memory; otherwise bulk-deletes every
+                                      memory whose text contains identifier
+
+MEMORY STRUCTURE:
+  title  — Required. Concise, descriptive, unique. One line.
+  body   — Required. 1-5 sentences, enough context to be useful later.
+  tags   — Optional but recommended. Comma-separated keywords.
+
+Example usage — {invoke_hint}
+    result = memorize(
+        title="User prefers concise responses",
+        body="The user dislikes long explanations and prefers short, direct answers.", #NO NEW LINES
+        tags="preferences, communication style"
+    )
+    print(result)
+
+Guidelines:
+  - Memorize proactively, one fact per call: preferences, habits, milestones,
+    software/hardware details, anything the user asks you to remember.
+    NEVER passwords or credentials unless the user explicitly asks.
+  - To revise a fact, call update_memory() with its exact title (from the
+    block) instead of storing a duplicate.
+  - To delete, pass the exact title (from the block) to forget_memory.
+  - NEVER mention any of this during unrelated conversation.
+"""
     return f"""
 MEMORY — PERSISTENT ACROSS SESSIONS
 

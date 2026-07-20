@@ -744,7 +744,7 @@ class AssistantController(QObject):
             'memory_recall_mode': 'inject_all',  # 'inject_all' or 'rag'
             'memory_threshold': 0.4,  # float 0.0–1.0
             'memory_max_results': 3,
-            'memory_inject_cap_tokens': 2000,  # hard cap for inject_all mode
+            'memory_inject_cap_tokens': 5000,  # hard cap for inject_all mode (presets 5k/9k/12k + Custom)
             'memory_embed_model': 'sentence-transformers/all-MiniLM-L6-v2',
             'glass_background_enabled': False,
             'glass_background_opacity': 0.75,
@@ -1206,6 +1206,11 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         # native variant here, the agent gets a fence-heavy prompt that fights the
         # native channel (fence leaks). Build the matching prompt so both agree.
         _native = (self.settings.get('tool_calling_mode', 'compat') == 'native')
+        # Memory PARITY with the main session: inject-all recall mode drops
+        # search_memory (redundant) for taskers too and injects the full block
+        # below; RAG mode keeps search_memory and injects no block.
+        _mem_inject_all = (self.settings.get('memory_enabled', True)
+                           and self.settings.get('memory_recall_mode', 'inject_all') == 'inject_all')
 
         base_prompt = _gsp(
             is_task_session_prompt=True,
@@ -1214,6 +1219,7 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             elevenlabs_enabled         = False,
             skills                     = None,    # task skills injected separately below
             include_memory             = True,    # memorize is always useful for tasks
+            memory_inject_all          = _mem_inject_all,
             include_execution_tools    = _any_code,     # python interpreter section
             include_fence_syntax       = _any_code,     # fence syntax guide
             include_interpreter_mode_rules    = _allow_workmode,
@@ -1223,6 +1229,19 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             include_notify_tool        = perms.get('inject_notify_tool',    False),
             native_tools               = _native,       # native mode → fence-free prompt
         )
+
+        # ── Memory block (inject-all parity with the main session) ────────────
+        # The main engine grafts this same block at the tail of its effective
+        # prompt; reuse its builder so the tasker sees the identical memory set
+        # the inject-all memory section refers to. RAG mode → no block.
+        if _mem_inject_all and getattr(self, 'ai', None) is not None:
+            try:
+                _mem_block = self.ai._build_memory_block()
+                if _mem_block:
+                    base_prompt += _mem_block
+            except Exception as _e:
+                log.warning(f"[AssistantController.build_task_system_prompt] "
+                            f"memory block skipped: {type(_e).__name__}: {_e}")
 
         # ── Permissions block ─────────────────────────────────────────────────
         perm_lines = []

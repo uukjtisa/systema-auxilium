@@ -91,6 +91,7 @@ def test_recency_tiebreak_prefers_newer(tmp_path):
 
 def test_load_store_migrates_legacy_bare_list(tmp_path):
     mm = _mm(tmp_path)
+    mm._model = object()   # re-embed migration requires a loaded model (new contract)
     legacy = [_mem("Old memory\n\nBody.", "x")]
     legacy[0]["embedding"] = [9.9, 9.9, 9.9, 9.9]   # stale model's vectors
     mm.store_path.write_text(json.dumps(legacy), encoding="utf-8")
@@ -102,6 +103,22 @@ def test_load_store_migrates_legacy_bare_list(tmp_path):
     data = json.loads(mm.store_path.read_text(encoding="utf-8"))
     assert data["model_name"] == mm._model_name
     assert isinstance(data["memories"], list)
+
+
+def test_load_store_survives_without_model(tmp_path):
+    """Hardening: with no embedding model (missing/failed fastembed) the store
+    still loads and memories are preserved — re-embed is skipped, never crashes.
+    inject_all/get_all need no embeddings, so memory must not die with the model."""
+    mm = _mm(tmp_path)
+    mm._model = None
+    legacy = [_mem("Old memory\n\nBody.", "x")]
+    legacy[0]["embedding"] = [9.9, 9.9, 9.9, 9.9]   # stale vectors, different model
+    mm.store_path.write_text(json.dumps(legacy), encoding="utf-8")
+    calls = []
+    mm._embed = lambda t: calls.append(t) or _fake_embed(t)
+    mm._load_store()
+    assert len(mm._memories) == 1        # memories intact
+    assert not calls                     # no re-embed attempted without a model
 
 
 def test_load_store_same_model_skips_reembed(tmp_path):

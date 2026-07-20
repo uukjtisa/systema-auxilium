@@ -74,6 +74,7 @@ def get_system_prompt(
         # ── Modular section flags — all True by default ──
         include_tool_format: bool = True,
         include_memory: bool = True,
+        memory_inject_all: bool = False,   # inject-all recall mode → drop search_memory
         include_execution_tools: bool = True,
         include_fence_syntax: bool = True,
         include_interpreter_mode_rules: bool = True,
@@ -104,7 +105,7 @@ def get_system_prompt(
             include_skills=skills_present))
 
     if include_memory:
-        body.append(shared.memory_section(hint))
+        body.append(shared.memory_section(hint, inject_all=memory_inject_all))
     if include_execution_tools and include_interpreter_mode_rules:
         body.append(shared.PYTHON_INTERPRETER_SECTION)
         body.append(shared.FILE_TOOLS_SECTION)

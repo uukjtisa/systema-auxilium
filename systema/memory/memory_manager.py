@@ -74,7 +74,8 @@ class MemoryManager:
         self._model = None
         self._model_name = (model_name or DEFAULT_EMBED_MODEL).strip()
         self._memories = []   # list of dicts: {id, text, embedding, created_at, edited}
-        self._ready = False
+        self._ready = False         # embeddings usable (recall/RAG)
+        self._store_ready = False   # raw store loaded (get_all/count/inject_all — no embeddings needed)
         self._unavailable_reason: str = ""
 
         # Single worker thread — fastembed ONNX lives here forever
@@ -100,54 +101,64 @@ class MemoryManager:
         - A cache that exists but fails to load (partial download, e.g. the app
           was closed mid-fetch) is PURGED so the next attempt can re-download,
           and we fall back to the default model for this run."""
+        target = self._model_name   # the originally requested model (pre-fallback)
+        TextEmbedding = None
         try:
             from fastembed import TextEmbedding
         except ImportError as e:
             missing = str(e).split("'")[-2] if "'" in str(e) else str(e)
             _pip = {"fastembed": "fastembed", "numpy": "numpy"}.get(missing, missing)
             self._unavailable_reason = f"Missing package — run: pip install {_pip}"
-            log.error(f"[MemoryManager._init] ✗ Missing dependency: {e}")
-            return
+            log.error(f"[MemoryManager._init] ✗ Missing dependency: {e} "
+                      f"— recall disabled, but inject_all/get_all still work off the store")
 
-        target = self._model_name
         deferred_switch = False
-        if target != DEFAULT_EMBED_MODEL and not self._cache_looks_complete(target):
-            log.info(f"[MemoryManager._init] '{target}' not (fully) cached — starting on "
-                     f"'{DEFAULT_EMBED_MODEL}'; downloading '{target}' in the background")
-            self._purge_model_cache(target)   # clear partial leftovers first
-            self._model_name = DEFAULT_EMBED_MODEL
-            deferred_switch = True
-
-        try:
-            self._model = self._load_model(TextEmbedding, self._model_name)
-        except Exception as e:
-            log.error(f"[MemoryManager._init] ✗ '{self._model_name}' failed to load: "
-                      f"{type(e).__name__}: {e}")
-            self._purge_model_cache(self._model_name)
-            if self._model_name != DEFAULT_EMBED_MODEL:
-                deferred_switch = True   # retry the target via background fetch
+        if TextEmbedding is not None:
+            if target != DEFAULT_EMBED_MODEL and not self._cache_looks_complete(target):
+                log.info(f"[MemoryManager._init] '{target}' not (fully) cached — starting on "
+                         f"'{DEFAULT_EMBED_MODEL}'; downloading '{target}' in the background")
+                self._purge_model_cache(target)   # clear partial leftovers first
                 self._model_name = DEFAULT_EMBED_MODEL
-                try:
-                    self._model = self._load_model(TextEmbedding, DEFAULT_EMBED_MODEL)
-                except Exception as e2:
-                    self._unavailable_reason = f"{type(e2).__name__}: {e2}"
-                    log.error(f"[MemoryManager._init] ✗ Default model failed too: {e2}")
-                    return
-            else:
-                self._unavailable_reason = f"{type(e).__name__}: {e}"
-                return
+                deferred_switch = True
 
+            try:
+                self._model = self._load_model(TextEmbedding, self._model_name)
+            except Exception as e:
+                log.error(f"[MemoryManager._init] ✗ '{self._model_name}' failed to load: "
+                          f"{type(e).__name__}: {e}")
+                self._purge_model_cache(self._model_name)
+                if self._model_name != DEFAULT_EMBED_MODEL:
+                    deferred_switch = True   # retry the target via background fetch
+                    self._model_name = DEFAULT_EMBED_MODEL
+                    try:
+                        self._model = self._load_model(TextEmbedding, DEFAULT_EMBED_MODEL)
+                    except Exception as e2:
+                        self._unavailable_reason = f"{type(e2).__name__}: {e2}"
+                        log.error(f"[MemoryManager._init] ✗ Default model failed too: {e2}")
+                        self._model = None
+                else:
+                    self._unavailable_reason = f"{type(e).__name__}: {e}"
+                    self._model = None
+
+        # Load the raw store REGARDLESS of embedding availability. inject_all,
+        # get_all() and count() only need the JSON store — never embeddings — so
+        # a missing/failed fastembed must never take memory down (it only
+        # disables semantic recall). _load_store() skips its re-embed migration
+        # when no model is present (see the self._model guard there).
         try:
             self._load_store()
-            self._ready = True
-            log.info(f"[MemoryManager._init] ✓ Ready | {len(self._memories)} existing memories "
-                     f"| model='{self._model_name}'")
+            self._store_ready = True
+            self._ready = self._model is not None
+            log.info(f"[MemoryManager._init] "
+                     f"{'✓ Ready' if self._ready else '⚠ store-only (embeddings unavailable)'} | "
+                     f"{len(self._memories)} existing memories | "
+                     f"model='{self._model_name if self._model is not None else None}'")
         except Exception as e:
             self._unavailable_reason = f"{type(e).__name__}: {e}"
-            log.error(f"[MemoryManager._init] ✗ Failed: {type(e).__name__}: {e}")
+            log.error(f"[MemoryManager._init] ✗ Store load failed: {type(e).__name__}: {e}")
             return
 
-        if deferred_switch:
+        if deferred_switch and self._model is not None:
             threading.Thread(target=self._background_fetch_and_switch,
                              args=(target,), daemon=True).start()
 
@@ -243,9 +254,11 @@ class MemoryManager:
             self._memories = []
             return
 
-        if self._memories and stored_model != self._model_name:
+        if self._memories and stored_model != self._model_name and self._model is not None:
             # Migration failure must never wipe the store — keep stale
             # embeddings (degraded recall) rather than losing memories.
+            # Skipped entirely when no model is loaded (embeddings unavailable):
+            # inject_all/get_all don't need them, so the store still serves.
             try:
                 log.info(f"[MemoryManager._load_store] Embeddings from "
                          f"'{stored_model or 'legacy store'}' != '{self._model_name}' "
@@ -458,7 +471,9 @@ class MemoryManager:
         return self._worker.submit(self._do_recall, query, threshold, max_results).result()
 
     def get_all(self) -> list:
-        if not self._ready:
+        # store_ready (not _ready): inject_all/UI listing need the raw store,
+        # not embeddings — so this serves even when recall is unavailable.
+        if not self._store_ready:
             return []
         return self._worker.submit(self._do_get_all).result()
 
@@ -481,7 +496,7 @@ class MemoryManager:
         return self._worker.submit(self._do_clear).result()
 
     def count(self) -> int:
-        if not self._ready:
+        if not self._store_ready:
             return 0
         return self._worker.submit(self._do_count).result()
 
@@ -491,7 +506,14 @@ class MemoryManager:
 
     @property
     def is_ready(self) -> bool:
+        """Embeddings usable — semantic recall/RAG works."""
         return self._ready
+
+    @property
+    def store_ready(self) -> bool:
+        """Raw store loaded — get_all/count/inject_all work even if embeddings
+        are unavailable (missing/failed fastembed)."""
+        return self._store_ready
 
 
 # ─────────────────────────── Global Singleton ────────────────────────────────

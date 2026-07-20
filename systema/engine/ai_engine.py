@@ -13,6 +13,7 @@ from systema.common.logger import _make_logger, _NoOpLogger
 from systema.execution.tool_manager import ToolManager
 from systema.engine import native_adapters as na
 from systema.memory.memory_manager import get_memory_manager
+from systema.common.token_est import estimate_tokens
 from systema.engine.prompts.global_instructions import (
     get_system_prompt,
     EMPTY_EXIT_SUMMARY_PROMPT,
@@ -31,6 +32,38 @@ _ASSISTANT_PRIMING = (
     "I understand. I will use my Python Interpreter whenever a task needs code — "
     "chaining executions until it is complete, then finishing with a full report."
 )
+
+
+def summarize_memory_injection(memories: list, cap_tokens: int) -> dict:
+    """Pure helper — how the inject-all memory block fits inside a token cap.
+
+    `memories` is assumed newest-first (matching MemoryManager.get_all()). The
+    newest memory is always kept, even if it alone exceeds the cap; keeping is a
+    newest-first PREFIX cut (once the cap is hit, no further memories are added).
+    Token counts use the app-wide estimator (~4 chars/token) so the cap decision
+    and any UI readout can never drift apart.
+
+    Returns {total_tokens, used_tokens, kept, omitted, entries}.
+    """
+    entries = []
+    used = 0
+    total = 0
+    stop = False
+    for m in memories:
+        text = m.get('text', '') if isinstance(m, dict) else str(m)
+        _last = text.splitlines()[-1:] or ['']
+        entry = f"- {text}" + ("\n\n" if _last[0].startswith("Tags:") else "")
+        et = estimate_tokens(entry)
+        total += et
+        if not stop:
+            if entries and used + et > cap_tokens:
+                stop = True   # prefix cut — keep only the newest that fit
+            else:
+                entries.append(entry)
+                used += et
+    kept = len(entries)
+    return {"total_tokens": total, "used_tokens": used, "kept": kept,
+            "omitted": len(memories) - kept, "entries": entries}
 
 
 class AIEngine:
@@ -291,6 +324,14 @@ class AIEngine:
         the fence-format + fence-syntax sections are dropped (the tools travel
         through the provider's function-calling channel instead), trimming tokens."""
         native = self._tool_mode() == 'native'
+        # In inject-all recall mode the full memory set is grafted into this
+        # prompt, so the memory section drops search_memory (redundant). Only the
+        # MAIN chat engine injects the block — tasks keep the search variant.
+        inject_all = False
+        if self.settings_callback:
+            _s = self.settings_callback()
+            inject_all = (_s.get('memory_enabled', True)
+                          and _s.get('memory_recall_mode', 'inject_all') == 'inject_all')
         return get_system_prompt(
             system_info=self.system_info,
             voice_mode=self.voice_mode,
@@ -299,6 +340,7 @@ class AIEngine:
             include_image_tools=self.include_image_tools,
             include_controller_ref=self.include_controller_ref,
             include_notify_tool=self.include_notify_tool,
+            memory_inject_all=inject_all,
             # Native mode: drop fence sections + add the native-invocation override.
             native_tools=native,
         )
@@ -310,7 +352,12 @@ class AIEngine:
         else:
             # Rebuild fresh so a live Tool Calling Mode switch takes effect immediately.
             base = self._compose_system_prompt() + self._render_active_skills()
-        mem_block = self._get_memory_block(base)
+        # The memory block is maintained on self.system_prompt by
+        # _inject_memories_into_prompt() (refreshed on every memory/settings/
+        # skills change). base is a FRESH recompose that never carries it — read
+        # the block from self.system_prompt, not from base, or inject_all never
+        # ships (the send-path bug that made the toggle a silent no-op).
+        mem_block = self._get_memory_block(self.system_prompt)
         if mem_block:
             base = self._strip_memory_block(base) + f"\n\n{mem_block}"
         return base
@@ -1880,21 +1927,25 @@ class AIEngine:
     def _build_memory_block(self) -> str | None:
         """Build the memory block string from current memories, or None if not
         applicable. Newest memories first; total size is hard-capped by the
-        memory_inject_cap_tokens setting (approx 4 chars/token)."""
-        if not self.memory_manager or not self.memory_manager.is_ready:
+        memory_inject_cap_tokens setting (approx 4 chars/token).
+
+        NOTE: no embedding-readiness gate — inject_all needs zero embeddings, so
+        get_all() serving from the store (empty until the store loads) is the
+        only gate. A missing/failed fastembed must not silently kill inject_all."""
+        if not self.memory_manager:
             return None
 
         memory_enabled = True
         memory_recall_mode = 'inject_all'
-        cap_tokens = 2000
+        cap_tokens = 5000
         if self.settings_callback:
             settings = self.settings_callback()
             memory_enabled = settings.get('memory_enabled', True)
             memory_recall_mode = settings.get('memory_recall_mode', 'inject_all')
             try:
-                cap_tokens = int(settings.get('memory_inject_cap_tokens', 2000))
+                cap_tokens = int(settings.get('memory_inject_cap_tokens', 5000))
             except (TypeError, ValueError):
-                cap_tokens = 2000
+                cap_tokens = 5000
         if not memory_enabled or memory_recall_mode != 'inject_all':
             return None
 
@@ -1905,21 +1956,12 @@ class AIEngine:
 
         # get_all() is sorted newest-first — keep the newest within budget.
         # The newest memory is always included, even if it alone exceeds the cap.
-        lines = []
-        used_tokens = 0
-        for m in all_memories:
-            entry = (f"- {m['text']}"
-                     + ("\n\n" if m['text'].splitlines()[-1].startswith("Tags:") else ""))
-            entry_tokens = len(entry) // 4 + 1
-            if lines and used_tokens + entry_tokens > cap_tokens:
-                break
-            lines.append(entry)
-            used_tokens += entry_tokens
-        omitted = len(all_memories) - len(lines)
-        if omitted > 0:
-            lines.append(f"[{omitted} older memories omitted - use search_memory()]")
+        summary = summarize_memory_injection(all_memories, cap_tokens)
+        lines = list(summary['entries'])
+        if summary['omitted'] > 0:
+            lines.append(f"[{summary['omitted']} older memories omitted - use search_memory()]")
             log.info(f"[AIEngine._build_memory_block] Cap {cap_tokens} tokens reached — "
-                     f"{omitted} older memories omitted")
+                     f"{summary['omitted']} older memories omitted")
 
         joined = "\n".join(lines)
         return (
