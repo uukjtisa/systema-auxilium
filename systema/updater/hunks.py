@@ -235,7 +235,16 @@ class ReviewSession:
     files: dict[str, FileReview] = field(default_factory=dict)
 
     def add(self, path: str, tagged: list[tuple[str, str]], sensitive: bool = False):
-        self.files[path] = FileReview(path, build_segments(tagged), sensitive)
+        segments = build_segments(tagged)
+        # Foolproof default: conflicts TAKE the update everywhere EXCEPT in
+        # protected files (providers/skills), where taking upstream would wipe
+        # the user's live keys — those default to keeping local. Non-conflict
+        # hunks keep build_segments' defaults (update→update, local→local).
+        conflict_default = "local" if sensitive else "update"
+        for s in segments:
+            if s.kind == "hunk" and s.hunk is not None and s.hunk.kind == "conflict":
+                s.hunk.decision = conflict_default
+        self.files[path] = FileReview(path, segments, sensitive)
 
     def summary(self) -> dict:
         return {p: {"sensitive": fr.sensitive,

@@ -1,61 +1,208 @@
 """
 systema/ui/chat/rendering.py
 RenderingMixin — markdown / LaTeX / table rendering helpers for ChatWindow.
-Extracted verbatim from chat_window.py.
+
+LaTeX pipeline (2026-07-20 overhaul): hash-keyed memory + disk cache under
+data/latex_cache/ plus ONE background render worker. A cache miss never blocks
+the GUI thread — _preprocess_latex emits a small placeholder, the worker
+renders the PNG (paying the matplotlib import off-thread, once), and
+_on_latex_ready refreshes the affected message labels. Session reloads replay
+through the same cache, so previously rendered math loads instantly.
 """
+import base64
+import hashlib
+import html as _html_mod
+import queue
+import threading
+
 import markdown2
+from PyQt6.QtCore import QObject, pyqtSignal
+
+from systema.common.logger import _make_logger
+
+log = _make_logger("ChatWindow")
+
+
+class _LatexSignals(QObject):
+    """Worker → GUI bridge: emitted with the cache key once a PNG lands."""
+    ready = pyqtSignal(str)
+
+
+def _render_latex_png(latex_expr: str, display: bool, color: str) -> bytes:
+    """Blocking matplotlib mathtext render → tight transparent PNG bytes.
+    Runs on the render worker thread (or in tests) — never on the GUI thread."""
+    import io
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    fig = plt.figure(figsize=(0.01, 0.01))
+    fig.patch.set_alpha(0)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_axis_off()
+    ax.patch.set_alpha(0)
+    fontsize = 15 if display else 12
+    ax.text(0.5, 0.5, f'${latex_expr}$',
+            fontsize=fontsize, color=color,
+            ha='center', va='center', transform=ax.transAxes)
+    buf = io.BytesIO()
+    # High DPI + CSS max-height downscale = crisp on hi-dpi displays.
+    plt.savefig(buf, format='png', dpi=220, bbox_inches='tight',
+                transparent=True, pad_inches=0.06, facecolor='none')
+    plt.close(fig)
+    return buf.getvalue()
 
 
 class RenderingMixin:
     """Markdown, LaTeX, and table rendering helpers (mixed into ChatWindow)."""
 
-    def _latex_to_base64_img(self, latex_expr, display=True):
-        """Render a LaTeX expression to a tight, transparent base64 PNG via
-        matplotlib mathtext. Returns ONLY the <img> — no raw-source duplicate;
-        the LaTeX source rides along in title= so it stays copy-inspectable.
-        Glyph color matches body text (#E8EAED) so formulas read like prose."""
+    _LATEX_COLOR = '#E8EAED'   # glyph colour matches body text
+
+    # ── LaTeX cache + async worker ────────────────────────────────────────────
+
+    def _latex_init(self):
+        """Lazily create cache/worker state — the mixin has no __init__. Must
+        first run on the GUI thread (it does: _preprocess_latex call sites)."""
+        if not hasattr(self, '_latex_mem'):
+            self._latex_mem = {}          # key -> final html snippet
+            self._latex_pending = set()   # keys currently queued on the worker
+            self._latex_waiters = {}      # key -> [message_data, ...]
+            self._latex_misses = []       # keys missed during ONE preprocess run
+            self._latex_q = queue.Queue()
+            self._latex_thread = None
+            self._latex_sig = _LatexSignals()
+            self._latex_sig.ready.connect(self._on_latex_ready)
+
+    def _latex_cache_dir(self):
+        from pathlib import Path
+        from systema import APP_ROOT
+        d = Path(APP_ROOT) / 'data' / 'latex_cache'
         try:
-            import matplotlib
-            matplotlib.use('Agg')
-            import matplotlib.pyplot as plt
-            import io, base64, html as _html
-
-            fig = plt.figure(figsize=(0.01, 0.01))
-            fig.patch.set_alpha(0)
-            ax = fig.add_axes([0, 0, 1, 1])
-            ax.set_axis_off()
-            ax.patch.set_alpha(0)
-
-            fontsize = 15 if display else 12
-            ax.text(0.5, 0.5, f'${latex_expr}$',
-                    fontsize=fontsize, color='#E8EAED',
-                    ha='center', va='center',
-                    transform=ax.transAxes)
-
-            buf = io.BytesIO()
-            # High DPI + CSS max-height downscale = crisp on hi-dpi displays.
-            plt.savefig(buf, format='png', dpi=220, bbox_inches='tight',
-                        transparent=True, pad_inches=0.06, facecolor='none')
-            plt.close(fig)
-            buf.seek(0)
-            b64 = base64.b64encode(buf.read()).decode('utf-8')
-            title = _html.escape(latex_expr, quote=True)
-
-            if display:
-                return (
-                    f'<div style="text-align:center;margin:6px 0;">'
-                    f'<img src="data:image/png;base64,{b64}" '
-                    f'style="max-height:52px;" title="{title}">'
-                    f'</div>'
-                )
-            return (
-                f'<img src="data:image/png;base64,{b64}" '
-                f'style="vertical-align:middle;margin:0 1px;max-height:20px;" '
-                f'title="{title}">'
-            )
+            d.mkdir(parents=True, exist_ok=True)
         except Exception:
-            import html as _html
-            return f'<code>{_html.escape(latex_expr)}</code>'
+            pass
+        return d
+
+    def _latex_key(self, expr: str, display: bool) -> str:
+        raw = f"{expr}|{'d' if display else 'i'}|{self._LATEX_COLOR}"
+        return hashlib.sha1(raw.encode('utf-8')).hexdigest()
+
+    def _latex_html(self, b64: str, expr: str, display: bool) -> str:
+        """The <img> snippet — LaTeX source rides along in title= so it stays
+        copy-inspectable. Returns ONLY the img (no raw-source duplicate)."""
+        title = _html_mod.escape(expr, quote=True)
+        if display:
+            return (
+                f'<div style="text-align:center;margin:6px 0;">'
+                f'<img src="data:image/png;base64,{b64}" '
+                f'style="max-height:52px;" title="{title}">'
+                f'</div>'
+            )
+        return (
+            f'<img src="data:image/png;base64,{b64}" '
+            f'style="vertical-align:middle;margin:0 1px;max-height:20px;" '
+            f'title="{title}">'
+        )
+
+    def _latex_lookup(self, expr: str, display: bool):
+        """Memory → disk → None. No rendering here — GUI-thread safe."""
+        self._latex_init()
+        key = self._latex_key(expr, display)
+        hit = self._latex_mem.get(key)
+        if hit is not None:
+            return hit
+        png = self._latex_cache_dir() / f"{key}.png"
+        try:
+            if png.exists():
+                b64 = base64.b64encode(png.read_bytes()).decode('utf-8')
+                snip = self._latex_html(b64, expr, display)
+                self._latex_mem[key] = snip
+                return snip
+        except Exception:
+            pass   # corrupt/unreadable cache file → treat as a miss, re-render
+        return None
+
+    def _latex_render_and_store(self, expr: str, display: bool) -> str:
+        """Worker-side: render, write the PNG cache, fill the memory cache.
+        A failed render caches the escaped-source fallback so it never loops."""
+        key = self._latex_key(expr, display)
+        try:
+            data = _render_latex_png(expr, display, self._LATEX_COLOR)
+            try:
+                (self._latex_cache_dir() / f"{key}.png").write_bytes(data)
+            except Exception:
+                pass                        # disk cache is best-effort
+            b64 = base64.b64encode(data).decode('utf-8')
+            self._latex_mem[key] = self._latex_html(b64, expr, display)
+        except Exception:
+            log.warning(f"[RenderingMixin._latex_render_and_store] render failed "
+                        f"for {expr[:60]!r}", exc_info=True)
+            self._latex_mem[key] = f'<code>{_html_mod.escape(expr)}</code>'
+        return key
+
+    def _latex_worker_loop(self):
+        while True:
+            expr, display = self._latex_q.get()
+            key = self._latex_render_and_store(expr, display)
+            self._latex_pending.discard(key)
+            try:
+                self._latex_sig.ready.emit(key)   # queued back to the GUI thread
+            except RuntimeError:
+                return                            # window gone — thread exits
+
+    def _latex_img_or_placeholder(self, expr: str, display: bool) -> str:
+        """Cache hit → final snippet. Miss → placeholder now + background
+        render; _on_latex_ready refreshes the label. Never blocks the GUI."""
+        hit = self._latex_lookup(expr, display)
+        if hit is not None:
+            return hit
+        key = self._latex_key(expr, display)
+        self._latex_misses.append(key)
+        if key not in self._latex_pending:
+            self._latex_pending.add(key)
+            self._latex_q.put((expr, display))
+            if self._latex_thread is None or not self._latex_thread.is_alive():
+                self._latex_thread = threading.Thread(
+                    target=self._latex_worker_loop, name='latex-render', daemon=True)
+                self._latex_thread.start()
+        if display:
+            return ('<div style="text-align:center;margin:6px 0;color:#8B949E;">'
+                    '⟳ rendering math…</div>')
+        return '<span style="color:#8B949E;">⟳ math</span>'
+
+    def _latex_to_base64_img(self, latex_expr, display=True):
+        """SYNCHRONOUS render-through-cache. Kept for tests/tooling — the chat
+        path goes through _latex_img_or_placeholder (async on miss)."""
+        hit = self._latex_lookup(latex_expr, display)
+        if hit is not None:
+            return hit
+        key = self._latex_render_and_store(latex_expr, display)
+        return self._latex_mem[key]
+
+    def _take_latex_misses(self) -> list:
+        """Keys that MISSED during the last _preprocess_latex run (drained)."""
+        self._latex_init()
+        out = self._latex_misses
+        self._latex_misses = []
+        return out
+
+    def _register_latex_waiter(self, keys, message_data):
+        """Remember which message(s) are waiting on which pending renders."""
+        self._latex_init()
+        for k in keys:
+            self._latex_waiters.setdefault(k, []).append(message_data)
+
+    def _on_latex_ready(self, key: str):
+        """GUI thread: a math render landed in the cache — refresh waiters."""
+        mds = self._latex_waiters.pop(key, [])
+        for md in mds:
+            try:
+                self._refresh_message_latex(md)    # BubblesMixin
+            except Exception:
+                log.warning("[RenderingMixin._on_latex_ready] refresh failed",
+                            exc_info=True)
+
+    # ── LaTeX detection / preprocessing ──────────────────────────────────────
 
     def _looks_like_math(self, s):
         """Heuristic: does the text between single $…$ read as MATH (not money)?
@@ -92,7 +239,9 @@ class RenderingMixin:
           • \\(…\\) renders inline; $…$ renders inline ONLY when it actually looks
             like math — currency ($0.30, $3, $20 billion) stays literal text;
           • \\$ is a literal dollar sign.
-        Masks are restored verbatim before returning (they never reach markdown2)."""
+        Masks are restored verbatim before returning (they never reach markdown2).
+        Cache misses insert a placeholder and render in the background — collect
+        them via _take_latex_misses() right after calling this."""
         import re
 
         # ── 1. Mask code / tables so their $ can't be mistaken for math ────────
@@ -110,19 +259,19 @@ class RenderingMixin:
 
         # ── 3. Display math: $$…$$ and \[…\] ──────────────────────────────────
         def _display(m):
-            return self._latex_to_base64_img(m.group(1).strip(), display=True)
+            return self._latex_img_or_placeholder(m.group(1).strip(), True)
         text = re.sub(r'\$\$(.+?)\$\$', _display, text, flags=re.DOTALL)
         text = re.sub(r'\\\[(.+?)\\\]', _display, text, flags=re.DOTALL)
 
         # ── 4. Inline: \(…\) always; $…$ only when it looks like math ──────────
         def _inline(m):
-            return self._latex_to_base64_img(m.group(1).strip(), display=False)
+            return self._latex_img_or_placeholder(m.group(1).strip(), False)
         text = re.sub(r'\\\((.+?)\\\)', _inline, text, flags=re.DOTALL)
 
         def _inline_dollar(m):
             inner = m.group(1)
             if self._looks_like_math(inner):
-                return self._latex_to_base64_img(inner.strip(), display=False)
+                return self._latex_img_or_placeholder(inner.strip(), False)
             return m.group(0)   # currency / prose — leave untouched
         # Single $…$ on one line. Opening $ not preceded by a word char and not
         # followed by whitespace/digit (kills $0.30 / $3); closing $ not followed
@@ -134,7 +283,7 @@ class RenderingMixin:
         def _bracket(m):
             inner = m.group(1).strip()
             if re.search(r'\\[a-zA-Z]+|[_^{}]|\bfrac\b|\bsum\b|\bint\b', inner):
-                return self._latex_to_base64_img(inner, display=True)
+                return self._latex_img_or_placeholder(inner, True)
             return m.group(0)
         text = re.sub(r'^\[\s*(.+?)\s*\]\s*$', _bracket, text, flags=re.MULTILINE)
 
@@ -149,6 +298,8 @@ class RenderingMixin:
             text = re.sub(r'\x00LX(\d+)\x00',
                           lambda m: _stash[int(m.group(1))], text)
         return text
+
+    # ── Markdown ──────────────────────────────────────────────────────────────
 
     def render_markdown(self, text):
         """Render markdown to HTML"""
@@ -270,4 +421,3 @@ class RenderingMixin:
         if last_end < len(text):
             parts.extend(self._split_text_and_tables(text[last_end:]))
         return parts
-

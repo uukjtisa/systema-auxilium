@@ -361,24 +361,29 @@ class CodeBlockWidget(QWidget):
         #    tag bottom-left (always readable over code); Wrap/Copy/Hide/Resize
         #    = translucent chips bottom-right, floating over the frame. ──────
         display_lang = language.strip().upper() if language and language.strip().lower() not in ('', 'text') else 'TEXT'
+        # Chips are TRANSPARENT at rest — they used to sit on solid/dark pills
+        # that read as a bar blocking the content beneath. The translucent dark
+        # pill returns on hover (and hover-while-checked) so a pointed-at
+        # control is always readable over any code.
         self._lang_chip = QLabel(display_lang, self.main_container)
         self._lang_chip.setStyleSheet(
-            f"QLabel {{ background: {elevated}; color: {muted}; font-size: 10px; "
-            f"font-weight: 700; border: 1px solid {border}; border-radius: 4px; "
+            f"QLabel {{ background: transparent; color: {muted}; font-size: 10px; "
+            f"font-weight: 700; border: none; border-radius: 4px; "
             f"padding: 2px 8px; }}")
         self._lang_chip.adjustSize()
 
         self._chip_style = f"""
             QPushButton {{
-                background: rgba(33, 38, 45, 0.78);
+                background: transparent;
                 color: {accent};
                 font-size: 10px; font-weight: 600;
                 padding: 2px 9px;
-                border: 1px solid rgba(88, 166, 255, 0.30);
+                border: 1px solid transparent;
                 border-radius: 4px;
             }}
-            QPushButton:hover {{ border-color: {accent}; background: rgba(33, 38, 45, 0.95); }}
-            QPushButton:checked {{ border-color: {accent}; background: rgba(13, 17, 23, 0.9); }}
+            QPushButton:hover {{ border-color: {accent}; background: rgba(33, 38, 45, 0.92); }}
+            QPushButton:checked {{ border-color: {accent}; background: transparent; }}
+            QPushButton:checked:hover {{ background: rgba(33, 38, 45, 0.92); }}
         """
 
         self._controls_bar = QWidget(self.main_container)
@@ -414,14 +419,14 @@ class CodeBlockWidget(QWidget):
         self.corner_grip = QLabel("⤡  Resize")
         self.corner_grip.setStyleSheet(f"""
             QLabel {{
-                background: rgba(33, 38, 45, 0.78);
+                background: transparent;
                 color: {accent};
                 font-size: 10px; font-weight: 700;
                 padding: 2px 8px;
-                border: 1px solid rgba(88, 166, 255, 0.30);
+                border: 1px solid transparent;
                 border-radius: 4px;
             }}
-            QLabel:hover {{ border-color: {accent}; background: rgba(33, 38, 45, 0.95); }}
+            QLabel:hover {{ border-color: {accent}; background: rgba(33, 38, 45, 0.92); }}
         """)
         self.corner_grip.setCursor(Qt.CursorShape.SizeFDiagCursor)
         self.corner_grip.mousePressEvent   = self._corner_press
@@ -683,14 +688,14 @@ class TableBlockWidget(QWidget):
         self.corner_grip = QLabel("⤡  Resize", frame)
         self.corner_grip.setStyleSheet(f"""
             QLabel {{
-                background: rgba(33, 38, 45, 0.72);
+                background: transparent;
                 color: {accent};
                 font-size: 10px; font-weight: 700;
                 padding: 2px 8px;
-                border: 1px solid rgba(88, 166, 255, 0.35);
+                border: 1px solid transparent;
                 border-radius: 4px;
             }}
-            QLabel:hover {{ background: rgba(33, 38, 45, 0.95); border-color: {accent}; }}
+            QLabel:hover {{ background: rgba(33, 38, 45, 0.92); border-color: {accent}; }}
         """)
         self.corner_grip.setCursor(Qt.CursorShape.SizeFDiagCursor)
         self.corner_grip.mousePressEvent   = self._corner_press

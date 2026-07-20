@@ -465,14 +465,31 @@ class UpdaterService(QObject):
         return str(backup_dir)
 
     # ── apply ──────────────────────────────────────────────────────────────
-    def apply(self, only=None):
-        """Apply the checked plan. ``only`` restricts to a subset of paths."""
+    def apply(self, only=None, resolved=None):
+        """Apply the checked plan. ``only`` restricts to a subset of paths.
+
+        ``resolved`` (``{relpath: text}``) supplies user-resolved content for
+        conflicted files: the plan's write-op for each such path is rewritten
+        to that exact text BEFORE applying, so a resolved conflict goes through
+        the ONE normal apply path (backup, snapshot, rollback, deps) and — when
+        every change is applied — advances the version marker. This is what
+        makes a resolved conflict actually stick instead of being written as
+        markers and re-flagged on the next check.
+        """
         if self._updater is None or self._plan is None:
             self.apply_failed.emit("nothing to apply — run a check first")
             return
-        log.info(f"[UpdaterService.apply] applying update | only={None if only is None else len(only)} file(s)")
+        log.info(f"[UpdaterService.apply] applying update | only={None if only is None else len(only)} file(s)"
+                 f" | resolved={0 if not resolved else len(resolved)}")
         self.apply_started.emit()
         plan = self._plan
+        if resolved:
+            for op in getattr(plan, "_ops", []):
+                rp = getattr(op, "relpath", None)
+                if rp in resolved:
+                    op.kind = "write"
+                    op.text = resolved[rp]
+                    op.src = None
         branch = getattr(self, "_branch", None) or self.saved_branch
         # Capture the settle plan BEFORE threading (the plan is cleared on success):
         # a partial apply settles the changed files the user chose NOT to apply (so

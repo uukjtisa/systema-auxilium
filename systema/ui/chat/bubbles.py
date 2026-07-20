@@ -19,6 +19,58 @@ _verbose = True
 log = _make_logger("ChatWindow") if _verbose else _NoOpLogger()
 
 
+class _TypingDots(QWidget):
+    """Seamless in-turn 'thinking' indicator: three dots bobbing on offset
+    sine phases, painted on a transparent background so it blends into the
+    turn shell (no separate bubble). Sits at the bottom of the growing turn
+    and is removed the moment the reply finishes."""
+
+    def __init__(self, color: str = '#8B949E', dot_r: int = 3, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._color = QColor(color)
+        self._r = dot_r
+        self._phase = 0.0
+        gap = dot_r * 4
+        self.setFixedSize(gap * 3 + dot_r * 2, dot_r * 2 + 10)
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._advance)
+        self._timer.start(33)   # ~30 fps
+
+    def set_color(self, color: str):
+        self._color = QColor(color)
+        self.update()
+
+    def _advance(self):
+        self._phase += 0.22
+        self.update()
+
+    def stop(self):
+        try:
+            self._timer.stop()
+        except RuntimeError:
+            pass
+
+    def paintEvent(self, event):
+        import math
+        from PyQt6.QtGui import QPainter
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        gap = self._r * 4
+        cy = self.height() / 2
+        amp = 3.0
+        for i in range(3):
+            off = math.sin(self._phase - i * 0.9) * amp
+            c = QColor(self._color)
+            # Subtle brightness bob synced with the vertical bob.
+            c.setAlpha(int(150 + 90 * (0.5 + 0.5 * math.sin(self._phase - i * 0.9))))
+            p.setBrush(c)
+            cx = self._r + i * gap + self._r
+            p.drawEllipse(QPoint(int(cx), int(cy + off)), self._r, self._r)
+        p.end()
+
+
 def make_circular_pixmap(src: QPixmap, size: int) -> QPixmap:
     """Center-crop `src` (aspect-fill) and clip it to a crisp circle at `size`.
     The single source of truth for circular avatar rendering — always render
@@ -592,14 +644,49 @@ class BubblesMixin:
         except Exception:
             return True
 
+    @staticmethod
+    def _reveal_units(source_md: str):
+        """Split reveal source into units: injected HTML snippets (rendered
+        math images, placeholders) advance as ONE unit so the typewriter never
+        slices through a tag or crawls through base64 char-by-char; everything
+        else is per-character. Returns (units, offsets) where offsets[i] is the
+        char position in source_md right after unit i."""
+        import re
+        pat = re.compile(
+            r'(<div style="text-align:center.*?</div>'
+            r'|<img\b[^>]*>'
+            r'|<span\b[^>]*>[^<]*</span>)',
+            re.DOTALL)
+        units = []
+        pos = 0
+        for m in pat.finditer(source_md):
+            units.extend(source_md[pos:m.start()])
+            units.append(m.group(0))
+            pos = m.end()
+        units.extend(source_md[pos:])
+        offsets = []
+        total = 0
+        for u in units:
+            total += len(u)
+            offsets.append(total)
+        return units, offsets
+
     def _reveal_text_label(self, label, source_md: str, on_done=None):
         """Typewriter reveal: re-render growing slices of the markdown source
         into the label — looks like streaming without real streaming. The
-        sticky-bottom rangeChanged hook keeps the view pinned as it grows."""
+        sticky-bottom rangeChanged hook keeps the view pinned as it grows.
+
+        2026-07-20 rework (typing-lag fix): wall-clock pacing (a late/heavy
+        tick catches up instead of slowing the reveal), atomic HTML units
+        (math images pop in whole), and an adaptive render throttle — as the
+        document grows and each re-render gets pricier, renders space out (up
+        to ~300ms) while the cut keeps advancing, so per-frame cost stays
+        bounded and long replies no longer stutter cumulatively."""
         # Only ONE reveal at a time: a new segment starting to type snaps any
         # still-running previous reveal to its full text first.
         self._finish_active_reveals()
-        n = len(source_md)
+        units, offsets = self._reveal_units(source_md)
+        n = len(units)
         if n == 0:
             if on_done:
                 on_done()
@@ -611,8 +698,11 @@ class BubblesMixin:
             cps = 90
         cps = max(15, min(400, cps))
         interval = 30
-        per_tick = max(1, round(cps * interval / 1000))
-        state = {'cut': 0}
+        import time as _time
+        from PyQt6.QtCore import QElapsedTimer
+        clock = QElapsedTimer()
+        clock.start()
+        state = {'cut': 0, 'render_ms': 0.0, 'since_render': 1e9}
         timer = QTimer(label)
 
         # Track the job so a user send can snap it to the full text instantly.
@@ -629,22 +719,39 @@ class BubblesMixin:
                 pass
 
         def _tick():
-            state['cut'] += per_tick
-            if state['cut'] >= n:
+            target = min(n, int(cps * clock.elapsed() / 1000))
+            if target >= n:
                 timer.stop()
                 _forget()
                 try:
-                    label.setText(self.render_markdown(source_md))
+                    # A background LaTeX render may have updated this message
+                    # mid-reveal — the refresh parks the new source on the job.
+                    label.setText(self.render_markdown(
+                        job.get('post_refresh', source_md)))
                 except RuntimeError:
                     return
                 if on_done:
                     on_done()
                 return
+            if target <= state['cut']:
+                return
+            state['cut'] = target
+            # Adaptive throttle: while renders are expensive, skip re-renders;
+            # the cut keeps advancing so the next render catches up visually.
+            state['since_render'] += interval
+            gap = min(300.0, max(float(interval), state['render_ms'] * 2))
+            if state['since_render'] < gap:
+                return
+            state['since_render'] = 0.0
+            t0 = _time.perf_counter()
             try:
-                label.setText(self.render_markdown(source_md[:state['cut']] + " ▌"))
+                label.setText(self.render_markdown(
+                    source_md[:offsets[state['cut'] - 1]] + " ▌"))
             except RuntimeError:
                 timer.stop()
                 _forget()
+                return
+            state['render_ms'] = (_time.perf_counter() - t0) * 1000.0
 
         timer.timeout.connect(_tick)
         label._reveal_timer = timer   # keep alive with the label
@@ -661,7 +768,8 @@ class BubblesMixin:
             except (RuntimeError, TypeError):
                 pass
             try:
-                job['label'].setText(self.render_markdown(job['source']))
+                job['label'].setText(self.render_markdown(
+                    job.get('post_refresh', job['source'])))
             except RuntimeError:
                 continue
             if job.get('on_done'):
@@ -669,6 +777,35 @@ class BubblesMixin:
                     job['on_done']()
                 except Exception:
                     pass
+
+    def _refresh_message_latex(self, md):
+        """Re-render a message's text labels after a background LaTeX render
+        completed (the cache now hits). Labels with a reveal in flight defer
+        the refresh to the reveal's finish via job['post_refresh']."""
+        src = md.get('pre_latex_source')
+        if src is None:
+            return
+        display = self._preprocess_latex(src)
+        # Anything STILL missing re-registers this message for the next round.
+        keys = self._take_latex_misses()
+        if keys:
+            self._register_latex_waiter(keys, md)
+        md['display_content'] = display
+        parts = self._split_message_parts(display)
+        text_parts = [p[1] for p in parts if p and p[0] == 'text']
+        labels = md.get('text_labels') or ([md['text_label']] if md.get('text_label') else [])
+        active = {j['label']: j for j in getattr(self, '_reveal_jobs', [])}
+        for label, part_src in zip(labels, text_parts):
+            if label is None:
+                continue
+            job = active.get(label)
+            if job is not None:
+                job['post_refresh'] = part_src
+                continue
+            try:
+                label.setText(self.render_markdown(part_src))
+            except RuntimeError:
+                pass
 
     # ── Assistant turn grouping (claude.ai-style, 2026-07 redesign) ─────────
     # ONE avatar + ONE name per turn: every assistant text and tool/file card
@@ -742,13 +879,9 @@ class BubblesMixin:
              'col_widget': col_widget, 'name_label': name_label}
         self._ai_turn_group = g
 
-        # Same placement rule as all chat items: before the thinking bubble
-        # when it is showing, else just above the trailing stretch.
-        if self._thinking_bubble_widget is not None:
-            idx = self.chat_layout.indexOf(self._thinking_bubble_widget)
-            self.chat_layout.insertWidget(idx, row)
-        else:
-            self.chat_layout.insertWidget(self.chat_layout.count() - 1, row)
+        # The thinking dots now live INSIDE this shell (not as a separate row),
+        # so the group row always goes just above the trailing stretch.
+        self.chat_layout.insertWidget(self.chat_layout.count() - 1, row)
         return g
 
     def _insert_turn_segment(self, widget) -> dict:
@@ -773,6 +906,8 @@ class BubblesMixin:
         else:
             body.addWidget(widget)
         widget._group_row = g['row']    # for _detach_chat_widget pruning
+        # Keep the thinking dots riding the bottom of the growing turn.
+        self._move_thinking_dots_to_bottom()
         if self._bubble_style() == 'compact':
             self._refit_turn_shell(g['shell'])
         return g
@@ -1000,7 +1135,11 @@ class BubblesMixin:
         else:
             display_message = message
 
+        # Keep the pre-LaTeX source: background math renders re-run the
+        # preprocess from it (cache hits then) to swap placeholders for images.
+        _pre_latex_src = display_message
         display_message = self._preprocess_latex(display_message)
+        _latex_keys = self._take_latex_misses()
 
         message_widget = QFrame()
         message_widget.setObjectName("turnSeg")
@@ -1144,6 +1283,7 @@ class BubblesMixin:
             'role': 'assistant',
             'content': message,
             'display_content': display_message,
+            'pre_latex_source': _pre_latex_src,
             'index': message_index,
             'text_label': first_text_label,
             'text_labels': all_text_labels,
@@ -1153,6 +1293,10 @@ class BubblesMixin:
             'group_row': g['row'],
         }
         self.message_widgets.append(message_data)
+        if _latex_keys:
+            # Math is rendering in the background — refresh this message's
+            # labels when each expression lands in the cache.
+            self._register_latex_waiter(_latex_keys, message_data)
 
         menu_btn.clicked.connect(lambda: self._show_message_menu(message_data))
 

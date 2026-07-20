@@ -1,19 +1,31 @@
 """
 systema/ui/widgets/skills_sidebar.py
 Skills sidebar widgets — _SkillRow + SkillsSidebarSection.
-Extracted verbatim from chat_window.py.
+
+Theme-aware: every colour is pulled from the live chat palette (passed in as a
+resolved palette dict), so the block matches whatever theme is active instead
+of the old hard-coded GitHub-blue. Rows sort recently-used first; an Unload all
+control clears every loaded skill at once.
 """
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QLineEdit, QPushButton, QSizePolicy)
 from PyQt6.QtCore import Qt
 
 
-_SK_SURFACE  = "#161B22"
-_SK_SURFACE2 = "#21262D"
-_SK_BORDER   = "#30363D"
-_SK_ACCENT   = "#58A6FF"
-_SK_TEXT     = "#E6EDF3"
-_SK_MUTED    = "#8B949E"
+# Fallback palette (obsidian-blue-ish) for callers that pass none — keeps the
+# widget usable standalone / in tests. Real use always passes the live palette.
+_FALLBACK_PALETTE = {
+    'surface': "#161B22", 'surface2': "#21262D", 'border': "#30363D",
+    'accent': "#58A6FF", 'accent_lt': "#79b8ff", 'text': "#E6EDF3",
+    'muted': "#8B949E", 'green': "#3FB950", 'red': "#F85149",
+}
+
+
+def _pal(palette: dict | None) -> dict:
+    p = dict(_FALLBACK_PALETTE)
+    if palette:
+        p.update({k: v for k, v in palette.items() if v})
+    return p
 
 
 class _SkillRow(QWidget):
@@ -23,16 +35,18 @@ class _SkillRow(QWidget):
       Line 2 — badge  +  Load/Unload btn  +  delete btn  (right-aligned)
     """
 
-    def __init__(self, skill: dict, skill_manager, parent=None):
+    def __init__(self, skill: dict, skill_manager, palette: dict | None = None, parent=None):
         super().__init__(parent)
         self._skill = skill
         self._skill_manager = skill_manager
+        self._p = _pal(palette)
         self._expanded = False
         self._build_ui()
 
     def _build_ui(self):
+        p = self._p
         self.setStyleSheet(
-            f"QWidget {{ background-color: {_SK_SURFACE}; border-radius: 6px; }}")
+            f"QWidget {{ background-color: {p['surface']}; border-radius: 6px; }}")
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -41,8 +55,8 @@ class _SkillRow(QWidget):
         # ── clickable header ──────────────────────────────────────────────────
         hdr = QWidget()
         hdr.setStyleSheet(f"""
-            QWidget {{ background-color: {_SK_SURFACE}; border-radius: 6px; }}
-            QWidget:hover {{ background-color: #1E2530; }}
+            QWidget {{ background-color: {p['surface']}; border-radius: 6px; }}
+            QWidget:hover {{ background-color: {p['surface2']}; }}
         """)
         hdr_vl = QVBoxLayout(hdr)
         hdr_vl.setContentsMargins(8, 6, 8, 6)
@@ -59,19 +73,19 @@ class _SkillRow(QWidget):
         self._chevron.setFixedSize(14, 14)
         self._chevron.setStyleSheet(f"""
             QPushButton {{ background: transparent; border: none;
-                          color: {_SK_MUTED}; font-size: 8px; padding: 0; }}
-            QPushButton:hover {{ color: {_SK_TEXT}; }}
+                          color: {p['muted']}; font-size: 8px; padding: 0; }}
+            QPushButton:hover {{ color: {p['text']}; }}
         """)
         self._chevron.clicked.connect(self._toggle_expand)
         r1l.addWidget(self._chevron)
 
-        display_name = self._skill['name'].replace('_', '_\u200b')
+        display_name = self._skill['name'].replace('_', '_​')
         name_lbl = QLabel(display_name)
         name_lbl.setWordWrap(True)
         name_lbl.setMinimumWidth(0)
         name_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         name_lbl.setStyleSheet(
-            f"color: {_SK_TEXT}; font-size: 11px; font-weight: 500; background: transparent;")
+            f"color: {p['text']}; font-size: 11px; font-weight: 500; background: transparent;")
         r1l.addWidget(name_lbl, stretch=1)
         hdr_vl.addWidget(r1)
 
@@ -101,8 +115,9 @@ class _SkillRow(QWidget):
         del_btn.setToolTip(f"Delete '{self._skill['name']}'")
         del_btn.setStyleSheet(f"""
             QPushButton {{ background: transparent; border: none; font-size: 12px;
-                          color: {_SK_MUTED}; border-radius: 4px; }}
-            QPushButton:hover {{ background-color: #3C1A1A; color: #FF6B6B; }}
+                          color: {p['muted']}; border-radius: 4px; }}
+            QPushButton:hover {{ background-color: {self._tint(p['red'], 0.16)};
+                          color: {p['red']}; }}
         """)
         del_btn.clicked.connect(self._delete)
         r2l.addWidget(del_btn)
@@ -112,8 +127,7 @@ class _SkillRow(QWidget):
 
         # ── expandable detail ─────────────────────────────────────────────────
         self._detail = QWidget()
-        self._detail.setStyleSheet(
-            f"background-color: {_SK_SURFACE};")
+        self._detail.setStyleSheet(f"background-color: {p['surface']};")
         self._detail.hide()
         dl = QVBoxLayout(self._detail)
         dl.setContentsMargins(14, 2, 14, 8)
@@ -123,7 +137,7 @@ class _SkillRow(QWidget):
             d = QLabel(self._skill['description'])
             d.setWordWrap(True)
             d.setMinimumWidth(0)
-            d.setStyleSheet(f"color: {_SK_MUTED}; font-size: 10px; background-color: {_SK_SURFACE};")
+            d.setStyleSheet(f"color: {p['muted']}; font-size: 10px; background-color: {p['surface']};")
             dl.addWidget(d)
 
         if self._skill.get('files'):
@@ -131,28 +145,39 @@ class _SkillRow(QWidget):
             fl.setWordWrap(True)
             fl.setMinimumWidth(0)
             fl.setStyleSheet(
-                f"color: #5F6368; font-size: 9px; font-family: monospace; background-color: {_SK_SURFACE};")
+                f"color: {p['muted']}; font-size: 9px; font-family: monospace; background-color: {p['surface']};")
             dl.addWidget(fl)
 
         outer.addWidget(self._detail)
 
     # ── helpers ───────────────────────────────────────────────────────────────
+    @staticmethod
+    def _tint(hex_color: str, alpha: float) -> str:
+        """A translucent rgba() wash of a hex colour (for hover fills)."""
+        try:
+            h = hex_color.lstrip('#')
+            r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+            return f"rgba({r},{g},{b},{alpha:.2f})"
+        except Exception:
+            return f"rgba(88,166,255,{alpha:.2f})"
 
     def _badge_style(self, loaded):
+        p = self._p
         if loaded:
-            return ("QLabel { background-color: #1A2B1A; color: #4CAF50; "
-                    "border-radius: 4px; font-size: 9px; padding: 1px 5px; }")
-        return (f"QLabel {{ background-color: transparent; color: {_SK_MUTED}; "
-                "font-size: 9px; padding: 1px 3px; }")
+            return (f"QLabel {{ background-color: {self._tint(p['green'], 0.15)}; color: {p['green']}; "
+                    "border-radius: 4px; font-size: 9px; padding: 1px 5px; }}")
+        return (f"QLabel {{ background-color: transparent; color: {p['muted']}; "
+                "font-size: 9px; padding: 1px 3px; }}")
 
     def _load_btn_style(self, loaded):
+        p = self._p
         if loaded:
-            return ("QPushButton { background-color: #3C1A1A; color: #C0392B; "
-                    "border: 1px solid #C0392B; border-radius: 4px; font-size: 9px; padding: 0; }"
-                    "QPushButton:hover { background-color: #4A2020; }")
-        return ("QPushButton { background-color: #1A2B1A; color: #4CAF50; "
-                "border: 1px solid #4CAF50; border-radius: 4px; font-size: 9px; padding: 0; }"
-                "QPushButton:hover { background-color: #223322; }")
+            return (f"QPushButton {{ background-color: {self._tint(p['red'], 0.14)}; color: {p['red']}; "
+                    f"border: 1px solid {self._tint(p['red'], 0.55)}; border-radius: 4px; font-size: 9px; padding: 0; }}"
+                    f"QPushButton:hover {{ background-color: {self._tint(p['red'], 0.24)}; }}")
+        return (f"QPushButton {{ background-color: {self._tint(p['accent'], 0.14)}; color: {p['accent']}; "
+                f"border: 1px solid {self._tint(p['accent'], 0.55)}; border-radius: 4px; font-size: 9px; padding: 0; }}"
+                f"QPushButton:hover {{ background-color: {self._tint(p['accent'], 0.24)}; }}")
 
     def _toggle_expand(self):
         self._expanded = not self._expanded
@@ -180,69 +205,70 @@ class _SkillRow(QWidget):
 class SkillsSidebarSection(QWidget):
     """Collapsible ⚡ Skills block — lives inside the sidebar layout."""
 
-    def __init__(self, skill_manager, parent=None):
+    def __init__(self, skill_manager, palette: dict | None = None, parent=None):
         super().__init__(parent)
         self._skill_manager = skill_manager
+        self._p = _pal(palette)
         self._expanded = False          # default collapsed at startup
         self._build_ui()
         skill_manager.skills_changed.connect(self.refresh)
         skill_manager.loaded_skills_changed.connect(self.refresh)
         self.refresh()
 
+    def apply_palette(self, palette: dict):
+        """Re-theme to a new palette (called on a live theme switch)."""
+        self._p = _pal(palette)
+        self._restyle_chrome()
+        self.refresh()
+
     def _build_ui(self):
+        p = self._p
         self.setStyleSheet("background: transparent;")
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(4)
 
         # section header — click to expand/collapse
-        hdr = QWidget()
-        hdr.setStyleSheet("""
-            QWidget { background-color: transparent; border-radius: 4px; }
-            QWidget:hover { background-color: #222222; }
-        """)
-        hdr.setCursor(Qt.CursorShape.PointingHandCursor)
-        hl = QHBoxLayout(hdr)
+        self._hdr = QWidget()
+        self._hdr.setCursor(Qt.CursorShape.PointingHandCursor)
+        hl = QHBoxLayout(self._hdr)
         hl.setContentsMargins(4, 6, 4, 6)
         hl.setSpacing(6)
 
         self._sec_chevron = QLabel("▶")   # starts collapsed
-        self._sec_chevron.setStyleSheet(
-            f"color: {_SK_MUTED}; font-size: 9px; background: transparent;")
         hl.addWidget(self._sec_chevron)
-
-        sec_lbl = QLabel("⚡ Skills")
-        sec_lbl.setStyleSheet(
-            f"color: {_SK_TEXT}; font-size: 12px; font-weight: 600; background: transparent;")
-        hl.addWidget(sec_lbl, stretch=1)
-
+        self._sec_lbl = QLabel("⚡ Skills")
+        hl.addWidget(self._sec_lbl, stretch=1)
         self._count_lbl = QLabel("")
-        self._count_lbl.setStyleSheet(
-            f"color: {_SK_MUTED}; font-size: 9px; background: transparent;")
         hl.addWidget(self._count_lbl)
 
-        hdr.mousePressEvent = lambda e: self._toggle_section()
-        root.addWidget(hdr)
+        self._hdr.mousePressEvent = lambda e: self._toggle_section()
+        root.addWidget(self._hdr)
 
         # collapsible body — hidden by default
         self._body = QWidget()
         self._body.setStyleSheet("background: transparent;")
-        self._body.hide()      # starts hidden (collapsed)
+        self._body.hide()
         bl = QVBoxLayout(self._body)
         bl.setContentsMargins(0, 0, 0, 0)
         bl.setSpacing(4)
 
-        # ── Search box ────────────────────────────────────────────────────────
+        # ── Search + Unload-all row ─────────────────────────────────────────────
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(4)
         self._skill_search = QLineEdit()
         self._skill_search.setPlaceholderText("Search skills…")
         self._skill_search.setFixedHeight(26)
-        self._skill_search.setStyleSheet(f"""
-            QLineEdit {{ background-color: {_SK_SURFACE2}; border: 1px solid {_SK_BORDER};
-                        border-radius: 5px; color: {_SK_TEXT}; font-size: 10px; padding: 0 7px; }}
-            QLineEdit:focus {{ border-color: {_SK_ACCENT}; color: {_SK_TEXT}; }}
-        """)
         self._skill_search.textChanged.connect(self._on_skill_search_changed)
-        bl.addWidget(self._skill_search)
+        top_row.addWidget(self._skill_search, stretch=1)
+        self._unload_all_btn = QPushButton("Unload all")
+        self._unload_all_btn.setFixedHeight(26)
+        self._unload_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._unload_all_btn.setToolTip("Unload every currently-loaded skill.")
+        self._unload_all_btn.clicked.connect(self._unload_all)
+        top_row.addWidget(self._unload_all_btn)
+        bl.addLayout(top_row)
 
         self._rows_widget = QWidget()
         self._rows_widget.setStyleSheet("background: transparent;")
@@ -257,23 +283,15 @@ class SkillsSidebarSection(QWidget):
         _sf_lay = QHBoxLayout(self._sk_footer)
         _sf_lay.setContentsMargins(0, 2, 0, 0)
         _sf_lay.setSpacing(6)
-        _sk_btn_ss = f"""
-            QPushButton {{ background: transparent; border: none;
-                          color: {_SK_MUTED}; font-size: 9px; padding: 0; }}
-            QPushButton:hover {{ color: #E6EDF3; }}
-        """
         self._sk_show_more_btn = QPushButton("Show 10 more")
-        self._sk_show_more_btn.setStyleSheet(_sk_btn_ss)
         self._sk_show_more_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._sk_show_more_btn.clicked.connect(self._skill_show_more)
         self._sk_show_all_btn = QPushButton("Show all")
-        self._sk_show_all_btn.setStyleSheet(_sk_btn_ss)
         self._sk_show_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._sk_show_all_btn.clicked.connect(self._skill_show_all)
-        _sep = QLabel("·")
-        _sep.setStyleSheet("color: #333; background: transparent; font-size: 9px;")
+        self._sk_sep = QLabel("·")
         _sf_lay.addWidget(self._sk_show_more_btn)
-        _sf_lay.addWidget(_sep)
+        _sf_lay.addWidget(self._sk_sep)
         _sf_lay.addWidget(self._sk_show_all_btn)
         _sf_lay.addStretch()
         self._sk_footer.hide()
@@ -286,45 +304,68 @@ class SkillsSidebarSection(QWidget):
         al = QHBoxLayout(add_w)
         al.setContentsMargins(0, 2, 0, 0)
         al.setSpacing(4)
-
         self._name_input = QLineEdit()
         self._name_input.setPlaceholderText("New skill name…")
         self._name_input.setMinimumWidth(0)
-        self._name_input.setStyleSheet(f"""
-            QLineEdit {{ background-color: {_SK_SURFACE2}; border: 1px solid {_SK_BORDER};
-                        border-radius: 5px; color: {_SK_TEXT}; font-size: 10px; padding: 4px 7px; }}
-            QLineEdit:focus {{ border-color: {_SK_ACCENT}; }}
-        """)
         self._name_input.returnPressed.connect(self._create_skill)
         al.addWidget(self._name_input, stretch=1)
-
-        create_btn = QPushButton("＋")
-        create_btn.setFixedSize(26, 26)
-        create_btn.setStyleSheet(f"""
-            QPushButton {{ background-color: {_SK_ACCENT}; border: none; border-radius: 5px;
-                          color: white; font-size: 14px; }}
-            QPushButton:hover {{ background-color: #4752C4; }}
-        """)
-        create_btn.clicked.connect(self._create_skill)
-        al.addWidget(create_btn)
+        self._create_btn = QPushButton("＋")
+        self._create_btn.setFixedSize(26, 26)
+        self._create_btn.clicked.connect(self._create_skill)
+        al.addWidget(self._create_btn)
         bl.addWidget(add_w)
 
         from PyQt6.QtGui import QDesktopServices
         from PyQt6.QtCore import QUrl
-        open_btn = QPushButton("📁  Open skills folder")
-        open_btn.setMinimumWidth(0)
-        open_btn.setStyleSheet(f"""
-            QPushButton {{ background-color: transparent; border: 1px dashed {_SK_BORDER};
-                          border-radius: 5px; color: {_SK_MUTED}; font-size: 10px;
-                          padding: 5px; text-align: left; }}
-            QPushButton:hover {{ border-color: #5F6368; color: {_SK_TEXT}; }}
-        """)
-        open_btn.clicked.connect(
+        self._open_btn = QPushButton("📁  Open skills folder")
+        self._open_btn.setMinimumWidth(0)
+        self._open_btn.clicked.connect(
             lambda: QDesktopServices.openUrl(
                 QUrl.fromLocalFile(str(self._skill_manager.skills_dir))))
-        bl.addWidget(open_btn)
+        bl.addWidget(self._open_btn)
 
         root.addWidget(self._body)
+        self._restyle_chrome()
+
+    def _restyle_chrome(self):
+        """(Re)apply palette-driven styles to the fixed chrome (not the rows —
+        those are rebuilt by refresh())."""
+        p = self._p
+        self._hdr.setStyleSheet(f"""
+            QWidget {{ background-color: transparent; border-radius: 4px; }}
+            QWidget:hover {{ background-color: {p['surface2']}; }}
+        """)
+        self._sec_chevron.setStyleSheet(
+            f"color: {p['muted']}; font-size: 9px; background: transparent;")
+        self._sec_lbl.setStyleSheet(
+            f"color: {p['text']}; font-size: 12px; font-weight: 600; background: transparent;")
+        self._count_lbl.setStyleSheet(
+            f"color: {p['muted']}; font-size: 9px; background: transparent;")
+        _field = (f"QLineEdit {{ background-color: {p['surface2']}; border: 1px solid {p['border']};"
+                  f" border-radius: 5px; color: {p['text']}; font-size: 10px; padding: 0 7px; }}"
+                  f"QLineEdit:focus {{ border-color: {p['accent']}; color: {p['text']}; }}")
+        self._skill_search.setStyleSheet(_field)
+        self._name_input.setStyleSheet(_field.replace("padding: 0 7px", "padding: 4px 7px"))
+        _ghost = (f"QPushButton {{ background: transparent; border: none;"
+                  f" color: {p['muted']}; font-size: 9px; padding: 0; }}"
+                  f"QPushButton:hover {{ color: {p['text']}; }}")
+        self._sk_show_more_btn.setStyleSheet(_ghost)
+        self._sk_show_all_btn.setStyleSheet(_ghost)
+        self._sk_sep.setStyleSheet(f"color: {p['border']}; background: transparent; font-size: 9px;")
+        self._unload_all_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; border: 1px solid {p['border']};"
+            f" border-radius: 5px; color: {p['muted']}; font-size: 10px; padding: 0 8px; }}"
+            f"QPushButton:hover {{ border-color: {p['accent']}; color: {p['text']}; }}"
+            f"QPushButton:disabled {{ color: {p['border']}; border-color: {p['border']}; }}")
+        self._create_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {p['accent']}; border: none; border-radius: 5px;"
+            f" color: #05070a; font-size: 14px; font-weight: 700; }}"
+            f"QPushButton:hover {{ background-color: {p.get('accent_lt', p['accent'])}; }}")
+        self._open_btn.setStyleSheet(
+            f"QPushButton {{ background-color: transparent; border: 1px dashed {p['border']};"
+            f" border-radius: 5px; color: {p['muted']}; font-size: 10px;"
+            f" padding: 5px; text-align: left; }}"
+            f"QPushButton:hover {{ border-color: {p['accent']}; color: {p['text']}; }}")
 
     def _toggle_section(self):
         self._expanded = not self._expanded
@@ -332,6 +373,7 @@ class SkillsSidebarSection(QWidget):
         self._body.setVisible(self._expanded)
 
     def refresh(self):
+        p = self._p
         while self._rows_layout.count():
             item = self._rows_layout.takeAt(0)
             if item.widget():
@@ -340,8 +382,15 @@ class SkillsSidebarSection(QWidget):
         all_skills = self._skill_manager.get_skills()
         loaded_count = sum(1 for s in all_skills if s.get('is_loaded'))
         self._count_lbl.setText(f"{len(all_skills)} · {loaded_count} loaded")
+        if hasattr(self, '_unload_all_btn'):
+            self._unload_all_btn.setEnabled(loaded_count > 0)
 
-        # Filter by search query
+        # Default ordering = recently used first: the most recently loaded
+        # skills float to the top (loaded-but-never-timestamped next), then
+        # everything else alphabetically. Search still filters the same set.
+        all_skills.sort(key=lambda s: (-float(s.get('last_used', 0.0) or 0.0),
+                                       s['name'].lower()))
+
         q = ""
         if hasattr(self, '_skill_search'):
             q = self._skill_search.text().strip().lower()
@@ -355,7 +404,7 @@ class SkillsSidebarSection(QWidget):
             msg = "No matching skills." if q else "No skills installed.\nCreate one below ↓"
             empty = QLabel(msg)
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            empty.setStyleSheet(f"color: {_SK_MUTED}; font-size: 10px; padding: 12px;")
+            empty.setStyleSheet(f"color: {p['muted']}; font-size: 10px; padding: 12px;")
             self._rows_layout.addWidget(empty)
             if hasattr(self, '_sk_footer'):
                 self._sk_footer.hide()
@@ -363,7 +412,7 @@ class SkillsSidebarSection(QWidget):
 
         vis = getattr(self, '_sk_visible_count', 10)
         for skill in skills[:vis]:
-            self._rows_layout.addWidget(_SkillRow(skill, self._skill_manager))
+            self._rows_layout.addWidget(_SkillRow(skill, self._skill_manager, self._p))
 
         remaining = len(skills) - vis
         if hasattr(self, '_sk_footer') and hasattr(self, '_sk_show_more_btn'):
@@ -374,8 +423,13 @@ class SkillsSidebarSection(QWidget):
             else:
                 self._sk_footer.hide()
 
+    def _unload_all(self):
+        n = self._skill_manager.unload_all_skills()
+        if not n:
+            return
+        self.refresh()
+
     def _on_skill_search_changed(self):
-        """Reset pagination and refresh when the search query changes."""
         self._sk_visible_count = 10
         self.refresh()
 

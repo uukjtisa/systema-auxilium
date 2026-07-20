@@ -2307,10 +2307,14 @@ class SettingsWindow(BaseWindow):
         self._memory_threshold_row.setVisible(enabled and is_rag)
         self._memory_max_row.setVisible(enabled and is_rag)
         self._memory_cap_row.setVisible(enabled and not is_rag)
-        self._memory_model_row.setVisible(enabled)
+        # Embedding model only matters for RAG recall — inject-all never
+        # embeds, so the whole model group hides with it (dependent-visibility
+        # rule: hidden, never greyed out).
+        self._memory_model_row.setVisible(enabled and is_rag)
         self._memory_model_custom_row.setVisible(
-            enabled and self.memory_model_combo.currentData() == '__custom__')
-        self._memory_model_info.setVisible(enabled)
+            enabled and is_rag
+            and self.memory_model_combo.currentData() == '__custom__')
+        self._memory_model_info.setVisible(enabled and is_rag)
         # Restart note — only when the selection differs from the LIVE model.
         live = ''
         try:
@@ -2322,7 +2326,7 @@ class SettingsWindow(BaseWindow):
         if sel == '__custom__':
             sel = self.memory_model_custom_input.text().strip()
         self._memory_model_restart_note.setVisible(
-            bool(enabled and live and sel and sel != live))
+            bool(enabled and is_rag and live and sel and sel != live))
 
     def _update_bargein_combo_enabled(self):
         """Barge-in sensitivity only matters in Automatic mode — hide it otherwise."""

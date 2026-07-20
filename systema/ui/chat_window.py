@@ -35,7 +35,7 @@ from systema.ui.chat.theming import ThemingMixin
 from systema.ui.chat.constants import *
 from systema.ui.chat.sidebar import SidebarMixin
 from systema.ui.chat.input_dock import InputDockMixin, InlineStatus, _ChatBottomFade
-from systema.ui.chat.bubbles import BubblesMixin, make_circular_pixmap
+from systema.ui.chat.bubbles import BubblesMixin, make_circular_pixmap, _TypingDots
 from systema.ui.chat.event_cards import EventCardsMixin
 from systema.ui.chat.window_controls import WindowControlsMixin, PanelToggleButton
 
@@ -83,6 +83,7 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         self._thinking_bubble_label = None
         self._thinking_bubble_timer = None
         self._thinking_bubble_dots = 0
+        self._thinking_bubble_group = None
         self.sidebar_visible = False
         # Sidebar resize state (drag handle on right edge)
         self._sidebar_w = SIDEBAR_DEFAULT_W        # current width (persists across open/close)
@@ -184,7 +185,10 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         """)
         self.container.setObjectName("container")
         self.container.setCursor(Qt.CursorShape.ArrowCursor)
-        self.container.setAcceptDrops(True)
+        # NO setAcceptDrops here: Qt delivers a drag to the FIRST ancestor with
+        # acceptDrops=True and stops there — a plain QWidget acceptor with no
+        # dragEnterEvent silently ignores the drag (forbidden cursor) instead of
+        # letting it fall through to ChatWindow's real handlers below.
 
         self.init_ui()
 
@@ -215,6 +219,10 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
                     self._user_avatar_size = int(config.get('user_avatar_size', 32))
                     self._avatar_size_uniform = bool(config.get('avatar_size_uniform', False))
                     self._input_box_width = int(config.get('input_box_geometry', 640))
+                    for _t in ('bot', 'user'):
+                        setattr(self, f'_{_t}_avatar_zoom', float(config.get(f'{_t}_avatar_zoom', 1.0)))
+                        setattr(self, f'_{_t}_avatar_ox', float(config.get(f'{_t}_avatar_ox', 0.5)))
+                        setattr(self, f'_{_t}_avatar_oy', float(config.get(f'{_t}_avatar_oy', 0.5)))
             else:
                 self.bot_avatar = '🤖'
                 self.user_avatar = '👤'
@@ -237,6 +245,12 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
             self._input_box_width = 640
         if not hasattr(self, '_input_box_width'):
             self._input_box_width = 640
+        # Avatar crop transform defaults (unwritten configs / load failures).
+        for _t in ('bot', 'user'):
+            if not hasattr(self, f'_{_t}_avatar_zoom'):
+                setattr(self, f'_{_t}_avatar_zoom', 1.0)
+                setattr(self, f'_{_t}_avatar_ox', 0.5)
+                setattr(self, f'_{_t}_avatar_oy', 0.5)
         self._bot_avatar_pixmap  = None
         self._user_avatar_pixmap = None
         # Clamp zoom to safe range
@@ -247,6 +261,28 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         # Restore saved image avatars after UI is built
         QTimer.singleShot(200, self._restore_avatar_images)
 
+    def _avatar_crop_square(self, pixmap, zoom, ox, oy):
+        """Crop `pixmap` to a square using the same zoom + centre-fraction math
+        as the avatar editor — the ONE crop implementation shared by the editor
+        (Apply) and restore-on-startup, so a reloaded avatar is framed exactly
+        as saved. `zoom`>=1, `ox`/`oy` in 0..1 (centre of the visible window)."""
+        try:
+            z = max(1.0, float(zoom))
+            src_w = int(pixmap.width() / z)
+            src_h = int(pixmap.height() / z)
+            src_x = int((pixmap.width()  - src_w) * ox)
+            src_y = int((pixmap.height() - src_h) * oy)
+            src_x = max(0, min(src_x, pixmap.width()  - src_w))
+            src_y = max(0, min(src_y, pixmap.height() - src_h))
+            crop = pixmap.copy(src_x, src_y, src_w, src_h)
+            side = min(crop.width(), crop.height())
+            if side <= 0:
+                return pixmap
+            return crop.copy((crop.width() - side) // 2,
+                             (crop.height() - side) // 2, side, side)
+        except Exception:
+            return pixmap
+
     def _restore_avatar_images(self):
         """Load saved avatar image paths back into pixmaps after UI is ready.
 
@@ -255,16 +291,21 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         target size via make_circular_pixmap, so edges stay crisp at any size."""
         from PyQt6.QtGui import QPixmap
 
-        def _load_square(path):
+        def _load_square(path, target):
             px = QPixmap(path)
             if px.isNull():
                 return None
-            side = min(px.width(), px.height())
-            return px.copy((px.width() - side) // 2,
-                           (px.height() - side) // 2, side, side)
+            # Re-apply the SAVED crop transform (zoom + centre) so the framing
+            # the user chose survives restart, instead of a naive centre crop
+            # that dropped their zoom + horizontal position.
+            return self._avatar_crop_square(
+                px,
+                getattr(self, f'_{target}_avatar_zoom', 1.0),
+                getattr(self, f'_{target}_avatar_ox', 0.5),
+                getattr(self, f'_{target}_avatar_oy', 0.5))
 
         if self._bot_avatar_image_path:
-            pm = _load_square(self._bot_avatar_image_path)
+            pm = _load_square(self._bot_avatar_image_path, 'bot')
             if pm:
                 self._bot_avatar_pixmap = pm
                 self.bot_avatar = ''
@@ -275,7 +316,7 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
                     self.bot_avatar_display.setText('')
 
         if self._user_avatar_image_path:
-            pm = _load_square(self._user_avatar_image_path)
+            pm = _load_square(self._user_avatar_image_path, 'user')
             if pm:
                 self._user_avatar_pixmap = pm
                 self.user_avatar = ''
@@ -299,6 +340,13 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
             config['user_avatar_size'] = getattr(self, '_user_avatar_size', 32)
             config['avatar_size_uniform'] = getattr(self, '_avatar_size_uniform', False)
             config['input_box_geometry'] = int(getattr(self, '_input_box_width', 640))
+            # Avatar crop transform (zoom + centre fraction) — persisted so the
+            # framing survives restart instead of reverting to a naive centre
+            # crop (was: only the source path was saved, so zoom + X were lost).
+            for _t in ('bot', 'user'):
+                config[f'{_t}_avatar_zoom'] = float(getattr(self, f'_{_t}_avatar_zoom', 1.0))
+                config[f'{_t}_avatar_ox']   = float(getattr(self, f'_{_t}_avatar_ox', 0.5))
+                config[f'{_t}_avatar_oy']   = float(getattr(self, f'_{_t}_avatar_oy', 0.5))
             with open(self.config_file, 'w') as f:
                 json.dump(config, f, indent=2)
         except Exception as e:
@@ -352,7 +400,9 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
                 background-color: #161B22;
             }
         """)
-        self.chat_widget.setAcceptDrops(True)
+        # NO setAcceptDrops: it would intercept file drags over the whole chat
+        # surface and ignore them (no handler here) — drags must fall through to
+        # ChatWindow.dragEnterEvent/dropEvent (the window-level handlers).
         self.chat_layout = QVBoxLayout(self.chat_widget)
         # Top margin 50: with the title bar gone the first message needs
         # clearance under the floating toggle / minimize / close buttons.
@@ -446,6 +496,19 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
                 except Exception:
                     pass
             QTimer.singleShot(0, _grab_focus)
+
+        # Elevated Windows runs: UIPI blocks drag-drop from a non-elevated
+        # Explorer (forbidden cursor before Qt sees anything). Opening the
+        # window's message filter lets the shell's drag messages through so
+        # Qt's own dropEvent fires. Purely additive + idempotent (no Qt-state
+        # surgery), so it's safe to re-run on every show and a hard no-op on
+        # other OSes / non-elevated runs, which keep the plain Qt drag path.
+        try:
+            from systema.ui import win_drop_bridge
+            win_drop_bridge.install(self)
+        except Exception:
+            log.warning("[ChatWindow.showEvent] drop-filter install failed",
+                        exc_info=True)
 
 
     # ── Sidebar right-edge resize ──────────────────────────────────────────────
@@ -1130,20 +1193,11 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         result_pixmap = [None]
 
         def _final_square():
-            """Same crop math as _render, but at FULL resolution and without
-            the circular clip — the stored master stays square + sharp, and
-            every display site clips its own circle at the target size."""
-            z = state['zoom']
-            src_w = int(pixmap.width() / z)
-            src_h = int(pixmap.height() / z)
-            src_x = int((pixmap.width()  - src_w) * state['ox'])
-            src_y = int((pixmap.height() - src_h) * state['oy'])
-            src_x = max(0, min(src_x, pixmap.width()  - src_w))
-            src_y = max(0, min(src_y, pixmap.height() - src_h))
-            crop = pixmap.copy(src_x, src_y, src_w, src_h)
-            side = min(crop.width(), crop.height())
-            return crop.copy((crop.width() - side) // 2,
-                             (crop.height() - side) // 2, side, side)
+            """Full-resolution square crop from the current editor state — the
+            shared crop helper is also used on restore, so the saved framing is
+            reproduced exactly."""
+            return self._avatar_crop_square(
+                pixmap, state['zoom'], state['ox'], state['oy'])
 
         def _apply():
             result_pixmap[0] = _final_square()
@@ -1156,6 +1210,11 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
             return
 
         final = result_pixmap[0]
+
+        # Persist the crop transform so restart reproduces this exact framing.
+        setattr(self, f'_{target}_avatar_zoom', state['zoom'])
+        setattr(self, f'_{target}_avatar_ox', state['ox'])
+        setattr(self, f'_{target}_avatar_oy', state['oy'])
 
         if target == 'bot':
             self.bot_avatar = ''
@@ -2108,82 +2167,79 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
             self._work_banner.hide()
 
     def show_thinking_bubble(self):
-        """Show an animated three-dot typing indicator as an AI chat bubble."""
+        """Show the seamless in-turn typing indicator: three animated dots at
+        the BOTTOM of the current assistant turn shell — same avatar/name shell
+        the reply lands in, so there's no separate bubble and no layout jump.
+        The dots ride below whatever segments (text / tool / event cards) the
+        turn accumulates (see _insert_turn_segment) and vanish when it ends."""
         if self._thinking_bubble_widget is not None:
             return  # Already showing
-
-        bubble = QFrame()
-        bubble.setObjectName("thinkRow")
-        bubble.setStyleSheet("QFrame#thinkRow { background-color: transparent; }")
-
-        layout = QHBoxLayout(bubble)
-        layout.setContentsMargins(16, 10, 16, 10)
-        layout.setSpacing(12)
-
-        # Avatar — left side, same as AI messages
-        avatar = self._make_chat_avatar('bot', getattr(self, '_bot_avatar_size', 32))
-        layout.addWidget(avatar, alignment=Qt.AlignmentFlag.AlignTop)
-
-        # Dot bubble
-        _tc = self._t()
-        content = QFrame()
-        content.setStyleSheet(f"""
-                    QFrame {{
-                        background-color: {_tc['elevated']};
-                        border: 1px solid {_tc['border']};
-                        border-radius: 12px;
-                    }}
-                """)
-        content_layout = QHBoxLayout(content)
-        content_layout.setContentsMargins(16, 12, 16, 12)
-
-        dot_label = QLabel("● ○ ○")
-        dot_label.setStyleSheet(
-            "color: #8B949E; font-size: 15px; background: transparent; letter-spacing: 6px;"
-        )
-        content_layout.addWidget(dot_label)
-
-        layout.addWidget(content)
-        layout.addStretch()
-
-        self._thinking_bubble_widget = bubble
-        self._thinking_bubble_label = dot_label
-        self._thinking_bubble_dots = 0
-
-        self.chat_layout.insertWidget(self.chat_layout.count() - 1, bubble)
-        self.scroll_to_bottom()
-
-        # Animate
-        self._thinking_bubble_timer = QTimer()
-        self._thinking_bubble_timer.timeout.connect(self._update_thinking_bubble)
-        self._thinking_bubble_timer.start(420)
-
-    def _update_thinking_bubble(self):
-        """Cycle the three dots animation inside the typing bubble."""
-        if self._thinking_bubble_label is None:
-            return
-        self._thinking_bubble_dots = (self._thinking_bubble_dots + 1) % 4
-        states = ["● ○ ○", "● ● ○", "● ● ●", "○ ● ●"]
         try:
-            self._thinking_bubble_label.setText(states[self._thinking_bubble_dots])
+            g = self._ensure_ai_turn_group()
+            dots = _TypingDots(color='#8B949E', dot_r=3)
+            # Hosted in a thin left-aligned row so the dots hug the shell's
+            # left edge like the text does, not center.
+            host = QFrame()
+            host.setObjectName("thinkDotsHost")
+            host.setStyleSheet("QFrame#thinkDotsHost { background: transparent; }")
+            _hl = QHBoxLayout(host)
+            _hl.setContentsMargins(2, 2, 2, 2)
+            _hl.setSpacing(0)
+            _hl.addWidget(dots)
+            _hl.addStretch()
+            g['body_layout'].addWidget(host)
+            self._thinking_bubble_widget = host
+            self._thinking_bubble_label = dots
+            self._thinking_bubble_group = g
+            self.scroll_to_bottom()
+        except Exception:
+            log.warning("[ChatWindow.show_thinking_bubble] failed", exc_info=True)
+            self._thinking_bubble_widget = None
+            self._thinking_bubble_label = None
+
+    def _move_thinking_dots_to_bottom(self):
+        """Keep the dots at the END of the turn shell body as new segments are
+        appended, so the indicator always rides the bottom of the growing turn.
+        Called from _insert_turn_segment."""
+        host = self._thinking_bubble_widget
+        g = getattr(self, '_thinking_bubble_group', None)
+        if host is None or g is None:
+            return
+        try:
+            body = g['body_layout']
+            if body is None or host.parent() is None:
+                return
+            body.removeWidget(host)
+            body.addWidget(host)
         except RuntimeError:
             pass
 
     def hide_thinking_bubble(self):
-        """Remove the animated three-dot typing indicator bubble."""
-        if self._thinking_bubble_timer is not None:
-            self._thinking_bubble_timer.stop()
-            self._thinking_bubble_timer = None
-
+        """Remove the in-turn typing indicator. If the dots were the ONLY thing
+        in the turn shell (an empty response never produced a segment), prune
+        the husk so no avatar+name shell lingers."""
+        dots = self._thinking_bubble_label
+        if dots is not None:
+            try:
+                dots.stop()
+            except (RuntimeError, AttributeError):
+                pass
+        g = getattr(self, '_thinking_bubble_group', None)
         if self._thinking_bubble_widget is not None:
             widget = self._thinking_bubble_widget
             self._thinking_bubble_widget = None
             self._thinking_bubble_label = None
+            self._thinking_bubble_group = None
             try:
-                self.chat_layout.removeWidget(widget)
+                widget.setParent(None)
                 widget.deleteLater()
             except RuntimeError:
                 pass
+            if g is not None:
+                try:
+                    self._prune_empty_group(g['row'])
+                except Exception:
+                    pass
 
     def resizeEvent(self, event):
         """Handle window resize."""
@@ -2390,12 +2446,22 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
 
     def dragEnterEvent(self, event):
         """Handle drag enter"""
+        log.debug(f"[ChatWindow.dragEnterEvent] hasUrls={event.mimeData().hasUrls()} "
+                  f"formats={event.mimeData().formats()[:6]}")
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
 
     def dropEvent(self, event):
-        """Handle file drop — supports multiple files"""
+        """Handle file drop — supports multiple files."""
         raw_files = [u.toLocalFile() for u in event.mimeData().urls()]
+        log.debug(f"[ChatWindow.dropEvent] {len(raw_files)} file(s) dropped")
+        self._ingest_dropped_files(raw_files)
+
+    def _ingest_dropped_files(self, raw_files):
+        """Shared drop ingestion — the Qt dropEvent AND the elevated
+        WM_DROPFILES bridge both land here: images → attach prompt, other
+        files → quoted path into the input, multiple files supported."""
+        raw_files = [p for p in raw_files if p]
         if not raw_files:
             return
 
@@ -2421,14 +2487,19 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
                 self.input_field.text_input.setPlainText(file_path)
 
     def clean_file_path(self, path):
-        """Clean file path by removing file:/// prefix and normalizing"""
-        if path.startswith('file:///'):
-            path = path[8:]
-        elif path.startswith('file://'):
-            path = path[7:]
-
-        path = path.replace('/', '\\')
-
+        """Normalize a pasted/dropped path. Strips surrounding quotes (Windows
+        "Copy as path" wraps in them — they silently broke the os.path.exists
+        checks and killed the image-attach prompt), unwraps file:// URIs (KDE/
+        GNOME drops, %-decoded), and converts separators ONLY on Windows — the
+        old unconditional '/'→'\\' replace corrupted POSIX paths."""
+        path = path.strip().strip('"').strip("'")
+        if path.startswith('file://'):
+            from urllib.parse import unquote
+            path = unquote(path)
+            # file:///C:/x → C:/x on Windows; file:///home/x → /home/x on POSIX.
+            path = path[8:] if sys.platform == 'win32' else path[7:]
+        if sys.platform == 'win32':
+            path = path.replace('/', '\\')
         return path
 
     def should_quote_path(self, path):

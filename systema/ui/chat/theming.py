@@ -274,6 +274,15 @@ class ThemingMixin:
                 """)
             except RuntimeError:
                 pass
+        # Re-theme the Skills block so it follows the active palette (it draws
+        # its own accent/surfaces rather than inheriting the sidebar sheet).
+        sk = getattr(self, '_skills_section', None)
+        if sk is not None:
+            try:
+                from systema.ui.theme import resolve_palette
+                sk.apply_palette(resolve_palette(t))
+            except (RuntimeError, AttributeError):
+                pass
 
     def apply_glass_background(self, enabled: bool, opacity: float = 0.75):
         """Apply or remove the glass (frosted-translucent) theme.

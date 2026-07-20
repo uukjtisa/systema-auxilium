@@ -70,11 +70,6 @@ block bound to a variable **without** passing through the Python parser:
 The block content is injected into the interpreter namespace as the variable
 `my_data`, which the code passes to `write_file(...)`.
 
-## Where generated files go
-
-Ad-hoc generated artifacts land in a `.generated/` folder next to the app's
-working directory unless the code writes elsewhere explicitly.
-
 ## Relationship to tool-calling mode
 
 Whether these tools are invoked natively or via fenced blocks depends on your

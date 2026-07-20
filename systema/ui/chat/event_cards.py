@@ -802,13 +802,16 @@ class EventCardsMixin:
                 if ed is not None:
                     ed.setFont(mf)
             if clear_btn is not None:
+                # Transparent at rest (matches the code-block chip rework);
+                # translucent pill returns on hover for readability.
                 clear_btn.setStyleSheet(f"""
                     QPushButton {{
-                        background: rgba(33, 38, 45, 0.78); color: #8B949E;
+                        background: transparent; color: #8B949E;
                         font-size: {z(10)}px; padding: 2px 9px;
-                        border: 1px solid {self._t()['border']}; border-radius: 4px;
+                        border: 1px solid transparent; border-radius: 4px;
                     }}
-                    QPushButton:hover {{ color: #E06060; border-color: #E06060; }}
+                    QPushButton:hover {{ color: #E06060; border-color: #E06060;
+                        background: rgba(33, 38, 45, 0.92); }}
                 """)
         _restyle()
 

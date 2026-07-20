@@ -48,6 +48,9 @@ class SkillManager(QObject):
 
         # Tracks which skills are currently loaded (name → content)
         self._loaded_skills: dict[str, str] = {}
+        # Last-used (last-loaded) epoch seconds per skill name — drives the
+        # sidebar's "recently used" ordering; persisted across restarts.
+        self._last_used: dict[str, float] = {}
 
         # Load persisted state from disk
         self._load_state()
@@ -65,6 +68,9 @@ class SkillManager(QObject):
             return
         try:
             data = json.loads(self._state_path.read_text(encoding='utf-8'))
+            lu = data.get('last_used', {})
+            disk_last_used = {k: float(v) for k, v in lu.items()} if isinstance(lu, dict) else {}
+            self._last_used = dict(disk_last_used)
             loaded_names: list[str] = data.get('loaded', [])
             log.info(f"[SkillManager._load_state] Restoring {len(loaded_names)} skill(s): {loaded_names}")
             for name in loaded_names:
@@ -73,13 +79,19 @@ class SkillManager(QObject):
                 ok, _ = self.load_skill(name)
                 if not ok:
                     log.warning(f"[SkillManager._load_state] Could not restore '{name}' — skipping")
+            # load_skill re-stamps last_used to "now"; restore the PERSISTED
+            # timestamps so recency ordering survives a restart instead of every
+            # restored skill collapsing to the same launch time.
+            for k, v in disk_last_used.items():
+                self._last_used[k] = v
         except Exception as exc:
             log.warning(f"[SkillManager._load_state] Failed to read state: {exc}")
 
     def _save_state(self):
         """Write currently loaded skill names to skills_state.json."""
         try:
-            data = {'loaded': list(self._loaded_skills.keys())}
+            data = {'loaded': list(self._loaded_skills.keys()),
+                    'last_used': self._last_used}
             self._state_path.write_text(json.dumps(data, indent=2), encoding='utf-8')
             log.debug(f"[SkillManager._save_state] Saved state: {data['loaded']}")
         except Exception as exc:
@@ -111,7 +123,8 @@ class SkillManager(QObject):
             cache = self._scan_skills()
             with self._cache_lock:
                 self._skills_cache = cache
-        return [{**s, 'is_loaded': s['name'] in self._loaded_skills}
+        return [{**s, 'is_loaded': s['name'] in self._loaded_skills,
+                 'last_used': self._last_used.get(s['name'], 0.0)}
                 for s in cache]
 
     def _invalidate_skills_cache(self):
@@ -186,6 +199,8 @@ class SkillManager(QObject):
                     return False, f"Skill '{canonical}' is already loaded."
                 content = (skill['path'] / 'SKILL.md').read_text(encoding='utf-8')
                 self._loaded_skills[canonical] = content
+                import time as _time
+                self._last_used[canonical] = _time.time()
                 log.info(f"[SkillManager.load_skill] Loaded '{canonical}' | "
                          f"total loaded: {list(self._loaded_skills.keys())}")
                 self._save_state()
@@ -226,6 +241,14 @@ class SkillManager(QObject):
             log.info("[SkillManager.clear_loaded_skills] All skills cleared")
             self._save_state()
             self.loaded_skills_changed.emit()
+
+    def unload_all_skills(self) -> int:
+        """Unload every loaded skill. Returns how many were unloaded (0 = none,
+        so the caller can skip a needless refresh/toast)."""
+        n = len(self._loaded_skills)
+        if n:
+            self.clear_loaded_skills()
+        return n
 
     def create_skill_template(self, name: str):
         """Create a new skill folder with placeholder files."""

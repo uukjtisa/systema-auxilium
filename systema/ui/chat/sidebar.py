@@ -741,7 +741,9 @@ class SidebarMixin:
             sb_lay = QVBoxLayout(skills_body)
             sb_lay.setContentsMargins(8, 4, 8, 8)
             sb_lay.setSpacing(4)
-            self._skills_section = SkillsSidebarSection(skill_manager)
+            from systema.ui.theme import resolve_palette
+            self._skills_section = SkillsSidebarSection(
+                skill_manager, palette=resolve_palette(self._t()))
             # Hide the SkillsSidebarSection's own header — we have our own
             self._skills_section.layout().itemAt(0).widget().hide()
             # Force-show the internal body (our outer skills_body handles hide/show)

@@ -6,22 +6,28 @@ Built on BaseWindow's shared shell (custom title bar + button styles). Talks to
 controller.updater_service (UpdaterService) purely over Qt signals so all
 network/disk work stays off the GUI thread. Flow:
 
-    Check  ->  review the file list + per-file diff  ->  tick the files to
-    update  ->  Apply Selected (with confirmation + backup).
+    Check  ->  review the file list + per-file diff  ->  resolve conflicts
+    inline (take/keep per hunk, Confirm the file)  ->  Apply.
 
-No emojis anywhere - clean monochrome glyphs / text only.
+Conflicts are resolved IN THIS WINDOW (no separate Manage dialog): clicking a
+CONFLICT file turns the right pane into a hunk editor; Confirm flips the row to
+DECIDED and stores the resolved text; Apply passes those resolutions straight
+into the one apply path (so a resolved conflict actually applies and never
+re-appears). No emojis anywhere - clean monochrome glyphs / text only.
 """
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import (QCheckBox, QComboBox, QHBoxLayout, QLabel, QListWidget,
-                             QListWidgetItem, QMessageBox, QSplitter, QTextEdit,
+from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QHBoxLayout, QLabel,
+                             QListWidget, QListWidgetItem, QMessageBox, QPushButton,
+                             QRadioButton, QSplitter, QStackedWidget, QTextEdit,
                              QVBoxLayout, QWidget)
 
 from systema.ui import theme as _theme
 from systema.ui.base_window import BaseWindow
+from systema.updater.hunks import ReviewSession, FileReview
 
 # Per-change-type accent colours + a short tag shown in the list.
 _CHANGE_STYLE = {
@@ -30,6 +36,7 @@ _CHANGE_STYLE = {
     "merged":   ("#5fb0e6", "MERGE"),
     "conflict": ("#e0655a", "CONFLICT"),
     "deleted":  ("#d98b3f", "DEL"),
+    "decided":  ("#7bd88f", "DECIDED"),   # a conflict the user has resolved
 }
 
 # Change types that carry a reviewable TEXTUAL difference (auto-selected on
@@ -37,11 +44,7 @@ _CHANGE_STYLE = {
 _TEXTDIFF_CHANGES = ("added", "modified", "merged")
 
 # Origin colours for the 3-way review. Four distinct hues so you can tell, at a
-# glance, what the UPDATE changed vs what YOU changed locally:
-#   green  = added by the update       red    = removed by the update
-#   cyan   = added by your local edits purple = removed by your local edits
-# (fg, bg, gutter). Conflict blocks reuse the local/update hues with a neutral
-# base band between them.
+# glance, what the UPDATE changed vs what YOU changed locally.
 _REVIEW_STYLE = {
     "same":            ("text",             "transparent",             " "),
     "update_add":      ("#c6ecc6",          "rgba(80,200,120,0.17)",   "+"),
@@ -56,7 +59,6 @@ _REVIEW_STYLE = {
     "header":          ("muted",            "transparent",             " "),
 }
 
-# Which tags to advertise in the legend (label + swatch colour key).
 _LEGEND = [
     ("update_add", "added by update"),
     ("update_del", "removed by update"),
@@ -64,23 +66,383 @@ _LEGEND = [
     ("local_del",  "removed locally"),
 ]
 
-# Height (px) of the Files / Review header rows. Pinned equal on both panes so
-# the two content boxes line up — the right row holds 34px-tall buttons.
+# Height (px) of the Files / Review header rows. Pinned equal on both panes.
 _HDR_HEIGHT = 36
 
 # Extra item roles.
 _ROLE_PATH = Qt.ItemDataRole.UserRole
 _ROLE_IS_CHANGE = Qt.ItemDataRole.UserRole + 1   # True => textual-diff file
 _ROLE_SENSITIVE = Qt.ItemDataRole.UserRole + 2   # True => in a user-owned data folder
-_ROLE_PROTECTED_RISKY = Qt.ItemDataRole.UserRole + 3  # True => protected AND overwrites/deletes (MOD/DEL) — manual-only
-_ROLE_SETTLED = Qt.ItemDataRole.UserRole + 4     # True => user settled this file (decided; won't notify)
+_ROLE_PROTECTED_RISKY = Qt.ItemDataRole.UserRole + 3  # True => protected AND overwrites/deletes
+_ROLE_SETTLED = Qt.ItemDataRole.UserRole + 4     # True => user settled this file
+_ROLE_CHANGE = Qt.ItemDataRole.UserRole + 5      # the change value string (e.g. "conflict")
+_ROLE_DECIDED = Qt.ItemDataRole.UserRole + 6     # True => a conflict the user has Confirmed
 
-# Warning colour for protected (sensitive) files in the list.
 _SENSITIVE_COLOUR = "#e0a24e"
+
+# File-list filter modes.
+_FILTERS = [
+    ("All changes",          "all"),
+    ("Unresolved conflicts", "unresolved"),
+    ("Conflicts",            "conflict"),
+    ("Decided",              "decided"),
+    ("Protected",            "protected"),
+    ("Settled",              "settled"),
+]
 
 
 def _esc(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+class ReviewPane(QWidget):
+    """Right-hand review surface with two modes over the SAME file:
+      * diff mode  — read-only coloured 3-way diff (non-conflict / decided);
+      * editor mode — per-hunk Take update / Keep mine (+ free-text Edit),
+        whole-file quick actions, and Confirm, for an unresolved conflict.
+    Embeddable both in the main window and the Expand pop-out; both share the
+    same FileReview objects so edits stay in sync."""
+
+    confirmed = pyqtSignal(str)   # emits the path when a file is Confirmed
+
+    _DECISION_LABEL = {"local": "Keep mine", "update": "Take update", "edited": "Edited"}
+
+    def __init__(self, palette: dict, resolve_colour, parent=None):
+        super().__init__(parent)
+        self.p = palette
+        self._resolve_colour = resolve_colour
+        self._path = None
+        self._review: FileReview | None = None
+        self._tagged = None
+        self._wrap = False
+        self._hunk_i = 0
+        self._editing = False
+        self._build()
+
+    # ── layout ────────────────────────────────────────────────────────────
+    def _build(self):
+        p = self.p
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+
+        hdr = QWidget()
+        hdr.setStyleSheet("background: transparent;")
+        hdr.setFixedHeight(_HDR_HEIGHT)
+        h = QHBoxLayout(hdr)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(8)
+        self.title_lbl = QLabel("Review")
+        self.title_lbl.setStyleSheet(f"color: {p['text']}; font-size: 12px; background: transparent;")
+        h.addWidget(self.title_lbl)
+
+        # Hunk navigation (editor mode only).
+        self.prev_btn = QPushButton("‹")
+        self.next_btn = QPushButton("›")
+        for b in (self.prev_btn, self.next_btn):
+            b.setFixedWidth(26)
+            b.setStyleSheet(self._btn())
+            b.setVisible(False)
+        self.prev_btn.clicked.connect(lambda: self._step_hunk(-1))
+        self.next_btn.clicked.connect(lambda: self._step_hunk(+1))
+        self.hunk_lbl = QLabel("")
+        self.hunk_lbl.setStyleSheet(f"color: {p['muted']}; font-size: 11px; background: transparent;")
+        h.addStretch()
+        h.addWidget(self.prev_btn)
+        h.addWidget(self.hunk_lbl)
+        h.addWidget(self.next_btn)
+        self.wrap_check = QCheckBox("Wrap text")
+        self.wrap_check.setStyleSheet(
+            f"QCheckBox {{ color: {p['muted']}; font-size: 11px; background: transparent; }}")
+        self.wrap_check.toggled.connect(self._on_wrap)
+        h.addWidget(self.wrap_check)
+        lay.addWidget(hdr)
+
+        # Diff view (read-only) OR editor stack.
+        self.stack = QStackedWidget()
+
+        self.diff_view = QTextEdit()
+        self.diff_view.setReadOnly(True)
+        self.diff_view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.diff_view.setPlaceholderText("Select a file to review the exact changes.")
+        self.diff_view.setStyleSheet(self._edit_style())
+        self.stack.addWidget(self.diff_view)                     # index 0 = diff
+
+        self._editor_widget = self._build_editor()
+        self.stack.addWidget(self._editor_widget)                # index 1 = editor
+        lay.addWidget(self.stack, stretch=1)
+
+    def _build_editor(self) -> QWidget:
+        p = self.p
+        w = QWidget()
+        w.setStyleSheet("background: transparent;")
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+
+        # Whole-file quick actions.
+        wf = QHBoxLayout()
+        wf.setSpacing(6)
+        self.take_all_btn = QPushButton("Take all update")
+        self.take_all_btn.setStyleSheet(self._btn())
+        self.take_all_btn.clicked.connect(lambda: self._set_all("update"))
+        self.keep_all_btn = QPushButton("Keep all mine")
+        self.keep_all_btn.setStyleSheet(self._btn())
+        self.keep_all_btn.clicked.connect(lambda: self._set_all("local"))
+        wf.addWidget(self.take_all_btn)
+        wf.addWidget(self.keep_all_btn)
+        wf.addStretch()
+        lay.addLayout(wf)
+
+        # Per-hunk YOURS / UPDATE detail.
+        self.detail = QTextEdit()
+        self.detail.setReadOnly(True)
+        self.detail.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.detail.setStyleSheet(self._edit_style())
+        lay.addWidget(self.detail, stretch=1)
+
+        # Free-text editor (Edit mode).
+        self.free_editor = QTextEdit()
+        self.free_editor.setStyleSheet(self._edit_style())
+        self.free_editor.hide()
+        self.free_editor.textChanged.connect(self._on_free_edit)
+        lay.addWidget(self.free_editor, stretch=1)
+
+        # Per-hunk decision row.
+        dr = QHBoxLayout()
+        dr.setSpacing(8)
+        self.take_radio = QRadioButton("Take update")
+        self.keep_radio = QRadioButton("Keep mine")
+        self._radio_group = QButtonGroup(w)
+        self._radio_group.addButton(self.take_radio)
+        self._radio_group.addButton(self.keep_radio)
+        for r in (self.take_radio, self.keep_radio):
+            r.setStyleSheet(f"QRadioButton {{ color: {self.p['text']}; font-size: 11px; }}")
+        self.take_radio.toggled.connect(self._on_radio)
+        self.edit_btn = QPushButton("Edit")
+        self.edit_btn.setCheckable(True)
+        self.edit_btn.setStyleSheet(self._btn())
+        self.edit_btn.toggled.connect(self._on_edit_toggle)
+        dr.addWidget(self.take_radio)
+        dr.addWidget(self.keep_radio)
+        dr.addWidget(self.edit_btn)
+        dr.addStretch()
+        self.confirm_btn = QPushButton("✓ Confirm file")
+        self.confirm_btn.setStyleSheet(self._btn(primary=True))
+        self.confirm_btn.clicked.connect(self._on_confirm)
+        dr.addWidget(self.confirm_btn)
+        lay.addLayout(dr)
+        return w
+
+    # ── public API ──────────────────────────────────────────────────────────
+    def show_diff(self, path: str, tagged):
+        """Read-only coloured diff (non-conflict files, and decided previews)."""
+        self._path = path
+        self._review = None
+        self._tagged = tagged
+        self.prev_btn.setVisible(False)
+        self.next_btn.setVisible(False)
+        self.hunk_lbl.setText("")
+        self.stack.setCurrentIndex(0)
+        self._render_diff()
+
+    def edit_conflict(self, path: str, review: FileReview):
+        """Editor mode over a conflict's FileReview (live — Confirm reads it)."""
+        self._path = path
+        self._review = review
+        self._tagged = None
+        self._hunk_i = 0
+        self._editing = False
+        self.edit_btn.setChecked(False)
+        self.prev_btn.setVisible(True)
+        self.next_btn.setVisible(True)
+        self.stack.setCurrentIndex(1)
+        self._render_hunk()
+
+    def clear(self):
+        self._path = None
+        self._review = None
+        self._tagged = None
+        self.diff_view.clear()
+        self.stack.setCurrentIndex(0)
+
+    def set_wrap(self, on: bool):
+        self.wrap_check.setChecked(on)
+
+    # ── hunk navigation / decisions ──────────────────────────────────────────
+    def _conflict_hunks(self):
+        if self._review is None:
+            return []
+        return [h for h in self._review.hunks if h.kind == "conflict"]
+
+    def _cur_hunk(self):
+        hs = self._conflict_hunks()
+        if not hs:
+            return None
+        self._hunk_i = max(0, min(self._hunk_i, len(hs) - 1))
+        return hs[self._hunk_i]
+
+    def _step_hunk(self, d):
+        hs = self._conflict_hunks()
+        if not hs:
+            return
+        self._hunk_i = (self._hunk_i + d) % len(hs)
+        self.edit_btn.setChecked(False)
+        self._render_hunk()
+
+    def _set_all(self, decision):
+        for h in self._conflict_hunks():
+            h.decision = decision
+            h.edited_text = None
+        self.edit_btn.setChecked(False)
+        self._render_hunk()
+
+    def _on_radio(self, _checked=False):
+        h = self._cur_hunk()
+        if h is None or self._editing:
+            return
+        h.decision = "update" if self.take_radio.isChecked() else "local"
+
+    def _on_edit_toggle(self, on):
+        h = self._cur_hunk()
+        if h is None:
+            return
+        self._editing = on
+        if on:
+            if h.edited_text is None:
+                # Seed the editor from the current non-edited resolution.
+                base = "".join(h.update_lines if h.decision == "update" else h.local_lines)
+                h.edited_text = base
+            h.decision = "edited"
+            self.free_editor.blockSignals(True)
+            self.free_editor.setPlainText(h.edited_text)
+            self.free_editor.blockSignals(False)
+            self.free_editor.show()
+            self.detail.hide()
+        else:
+            if h.decision == "edited":
+                h.decision = "update"
+            self.free_editor.hide()
+            self.detail.show()
+        self.take_radio.setEnabled(not on)
+        self.keep_radio.setEnabled(not on)
+        if not on:
+            self._render_hunk()
+
+    def _on_free_edit(self):
+        h = self._cur_hunk()
+        if h is not None and self._editing:
+            h.edited_text = self.free_editor.toPlainText()
+
+    def _on_confirm(self):
+        if self._path:
+            self.confirmed.emit(self._path)
+
+    # ── rendering ─────────────────────────────────────────────────────────────
+    def _render_hunk(self):
+        h = self._cur_hunk()
+        hs = self._conflict_hunks()
+        n = len(hs)
+        self.hunk_lbl.setText(f"Hunk {self._hunk_i + 1} of {n}" if n else "")
+        if h is None:
+            self.detail.setHtml("")
+            return
+        self.take_radio.blockSignals(True)
+        self.keep_radio.blockSignals(True)
+        self.take_radio.setChecked(h.decision in ("update", "edited"))
+        self.keep_radio.setChecked(h.decision == "local")
+        self.take_radio.blockSignals(False)
+        self.keep_radio.blockSignals(False)
+        editing = h.decision == "edited"
+        self.edit_btn.blockSignals(True)
+        self.edit_btn.setChecked(editing)
+        self.edit_btn.blockSignals(False)
+        self._editing = editing
+        self.take_radio.setEnabled(not editing)
+        self.keep_radio.setEnabled(not editing)
+        self.free_editor.setVisible(editing)
+        self.detail.setVisible(not editing)
+        if editing:
+            self.free_editor.blockSignals(True)
+            self.free_editor.setPlainText(h.edited_text or "")
+            self.free_editor.blockSignals(False)
+            return
+        p = self.p
+        rows = []
+        def block(title, text, fg, bg):
+            rows.append(f'<div style="color:{p["muted"]};font-size:10px;padding:4px 0 2px">{title}</div>')
+            for ln in (text.splitlines() or [""]):
+                rows.append(f'<div style="background:{bg};color:{fg};white-space:pre;'
+                            f'font-family:Consolas,monospace;padding:1px 8px">{_esc(ln) or "&nbsp;"}</div>')
+        block("YOURS (on disk)", "".join(h.local_lines), "#bfe0ff", "rgba(90,160,230,0.14)")
+        block("UPDATE (upstream)", "".join(h.update_lines), "#c6ecc6", "rgba(80,200,120,0.14)")
+        self.detail.setHtml("".join(rows))
+
+    def _on_wrap(self, on):
+        self._wrap = on
+        mode = (QTextEdit.LineWrapMode.WidgetWidth if on else QTextEdit.LineWrapMode.NoWrap)
+        self.diff_view.setLineWrapMode(mode)
+        self.detail.setLineWrapMode(mode)
+        if self._tagged is not None:
+            self._render_diff()
+
+    def _legend_html(self, tags: set) -> str:
+        chips = []
+        for tag, label in _LEGEND:
+            if tag not in tags:
+                continue
+            _, bg, _g = _REVIEW_STYLE[tag]
+            fg = self._resolve_colour(_REVIEW_STYLE[tag][0])
+            chips.append(f'<span style="background:{bg};color:{fg};padding:1px 7px;'
+                         f'border-radius:4px;margin-right:6px">{_esc(label)}</span>')
+        if not chips:
+            return ""
+        return ('<div style="font-family:Consolas,monospace;font-size:10px;'
+                'padding:2px 8px 8px">' + "".join(chips) + "</div>")
+
+    def _render_diff(self):
+        tagged = self._tagged
+        p = self.p
+        if tagged and len(tagged) == 1 and tagged[0][0] == "info":
+            self.diff_view.setHtml(
+                f'<div style="color:{p["muted"]};font-family:Consolas,monospace;'
+                f'font-size:11px;padding:14px 10px">{_esc(tagged[0][1])}</div>')
+            return
+        ws = "pre-wrap" if self._wrap else "pre"
+        present = {t for t, _ in (tagged or [])}
+        rows = []
+        for tag, line in (tagged or []):
+            fg_key, bg, gutter = _REVIEW_STYLE.get(tag, ("text", "transparent", " "))
+            fg = self._resolve_colour(fg_key)
+            bold = ";font-weight:600" if tag == "conflict_marker" else ""
+            safe = _esc(line.rstrip("\n")) or "&nbsp;"
+            rows.append(
+                f'<tr><td style="background:{bg};color:{fg};white-space:pre;'
+                f'padding:1px 4px;text-align:center;width:14px;opacity:0.7">{gutter}</td>'
+                f'<td style="background:{bg};color:{fg};white-space:{ws};word-break:break-all;'
+                f'padding:1px 8px{bold}">{safe}</td></tr>')
+        self.diff_view.setHtml(
+            self._legend_html(present)
+            + '<table width="100%" cellspacing="0" cellpadding="0" '
+            'style="font-family:Consolas,monospace;font-size:11px">'
+            + "".join(rows) + "</table>")
+
+    # ── styling helpers ──────────────────────────────────────────────────────
+    def _btn(self, primary=False):
+        p = self.p
+        bg = p["accent"] if primary else p["surface2"]
+        fg = "#05070a" if primary else p["text"]
+        return (f"QPushButton {{ background: {bg}; color: {fg}; border: 1px solid {p['border']};"
+                f" border-radius: 6px; padding: 5px 10px; font-size: 11px; }}"
+                f"QPushButton:hover {{ border: 1px solid {p['accent']}; }}"
+                f"QPushButton:checked {{ background: {p['accent']}; color: #05070a; }}"
+                f"QPushButton:disabled {{ color: {p['muted']}; }}")
+
+    def _edit_style(self):
+        p = self.p
+        return (f"QTextEdit {{ background-color: {p['surface']}; border: 1px solid {p['border']};"
+                f" border-radius: 8px; padding: 8px; font-family: Consolas, monospace;"
+                f" font-size: 11px; color: {p['text']}; }}")
 
 
 class UpdateWindow(BaseWindow):
@@ -92,19 +454,20 @@ class UpdateWindow(BaseWindow):
         self.service = controller.updater_service
         self._plan = None
         self._busy = False
-        self._loading_item = None      # spinner placeholder row in the file list
+        self._loading_item = None
         self._spin_timer = None
         self._spin_i = 0
-        self._diff_html = ""
-        self._tagged = None
         self._expanded_dlg = None
-        self._expanded_view = None
+        self._expanded_pane = None
+        # Conflict-resolution state.
+        self._reviews: dict[str, FileReview] = {}   # path -> live FileReview
+        self._resolved: dict[str, str] = {}         # path -> confirmed text
         self._p = _theme.current_palette(controller)
 
         body = self.build_shell(self._p, "Software Updates",
-                                min_size=(680, 520), buttons=("minimize", "close"))
+                                min_size=(720, 540), buttons=("minimize", "close"))
         self.setWindowTitle("Software Updates")
-        self.resize(860, 620)
+        self.resize(900, 640)
         self._build_body(body)
         self._wire_service()
         self._refresh_version_label()
@@ -121,7 +484,6 @@ class UpdateWindow(BaseWindow):
             f"color: {p['muted']}; font-size: 11px; background: transparent;")
         body.addWidget(self.version_lbl)
 
-        # Developer-mode banner (shown when this copy is a dev / ahead-of-repo copy).
         self.banner_lbl = QLabel("")
         self.banner_lbl.setWordWrap(True)
         self.banner_lbl.setVisible(False)
@@ -131,7 +493,6 @@ class UpdateWindow(BaseWindow):
             f" background: rgba(224,160,80,0.14);")
         body.addWidget(self.banner_lbl)
 
-        # Developer-mode toggle
         self.dev_check = QCheckBox("Developer mode - I edit these files; don't auto-update or notify")
         self.dev_check.setStyleSheet(
             f"QCheckBox {{ color: {p['muted']}; font-size: 11px; background: transparent; }}")
@@ -149,13 +510,7 @@ class UpdateWindow(BaseWindow):
         self.branch_combo.setCurrentText(self.service.saved_branch)
         self.branch_combo.currentTextChanged.connect(self._on_branch_changed)
         self.branch_combo.setFixedWidth(150)
-        self.branch_combo.setStyleSheet(
-            f"QComboBox {{ background-color: {p['surface2']}; border: 1px solid {p['border']};"
-            f" border-radius: 6px; padding: 6px 10px; font-size: 11px; color: {p['text']}; }}"
-            f"QComboBox::drop-down {{ border: none; }}"
-            f"QComboBox QAbstractItemView {{ background-color: {p['surface2']};"
-            f" border: 1px solid {p['border']}; color: {p['text']};"
-            f" selection-background-color: {p['accent']}; selection-color: #05070a; }}")
+        self.branch_combo.setStyleSheet(self._combo_style())
         row.addWidget(self.branch_combo)
         row.addStretch()
         self.check_btn = self.make_button("Check for Updates", p, kind="primary")
@@ -163,17 +518,12 @@ class UpdateWindow(BaseWindow):
         row.addWidget(self.check_btn)
         body.addLayout(row)
 
-        # Summary line
         self.summary_lbl = QLabel("Run a check to see available updates.")
         self.summary_lbl.setWordWrap(True)
         self.summary_lbl.setStyleSheet(
             f"color: {p['text']}; font-size: 12px; background: transparent;")
         body.addWidget(self.summary_lbl)
 
-        # Stacked commit messages ("what's changed since your version"). This lives
-        # in the top (collapsible) pane of the outer vertical splitter assembled
-        # below — no fixed max height, so it can be dragged smaller or collapsed to
-        # give the diff preview room (it was "almost unseen" on small changes).
         self.commits_view = QTextEdit()
         self.commits_view.setReadOnly(True)
         self.commits_view.setMinimumHeight(0)
@@ -182,20 +532,28 @@ class UpdateWindow(BaseWindow):
             f"QTextEdit {{ background-color: {p['surface']}; border: 1px solid {p['border']};"
             f" border-radius: 8px; padding: 6px 8px; font-size: 11px; color: {p['text']}; }}")
 
-        # Select all / none row
+        # Filter + select row
         sel_row = QHBoxLayout()
         sel_row.setSpacing(6)
-        self.select_changes_btn = self.make_button("Select files with changes", p, kind="ghost")
+        _flt_lbl = QLabel("Filter")
+        _flt_lbl.setStyleSheet(f"color: {p['muted']}; font-size: 11px; background: transparent;")
+        sel_row.addWidget(_flt_lbl)
+        self.filter_combo = QComboBox()
+        self.filter_combo.setFixedWidth(160)
+        self.filter_combo.setStyleSheet(self._combo_style())
+        for lbl, val in _FILTERS:
+            self.filter_combo.addItem(lbl, val)
+        self.filter_combo.currentIndexChanged.connect(lambda *_: self._apply_filter())
+        sel_row.addWidget(self.filter_combo)
+        self.select_changes_btn = self.make_button("Select changes", p, kind="ghost")
         self.select_changes_btn.clicked.connect(self._select_changes)
-        self.select_all_btn = self.make_button("Select all", p, kind="ghost")
+        self.select_all_btn = self.make_button("All", p, kind="ghost")
         self.select_all_btn.clicked.connect(lambda: self._set_all_checked(True))
-        self.select_none_btn = self.make_button("Select none", p, kind="ghost")
+        self.select_none_btn = self.make_button("None", p, kind="ghost")
         self.select_none_btn.clicked.connect(lambda: self._set_all_checked(False))
         self.dismiss_btn = self.make_button("Ignore rest (settle)", p, kind="ghost")
         self.dismiss_btn.setToolTip(
-            "Mark the changes you're NOT applying as 'settled' without applying them — "
-            "they stop showing as pending and won't trigger update notifications, until "
-            "a new commit changes one of them upstream.")
+            "Mark the changes you're NOT applying as 'settled' without applying them.")
         self.dismiss_btn.clicked.connect(self._dismiss_settle)
         sel_row.addWidget(self.select_changes_btn)
         sel_row.addWidget(self.select_all_btn)
@@ -206,18 +564,12 @@ class UpdateWindow(BaseWindow):
         self.sel_count_lbl.setStyleSheet(
             f"color: {p['muted']}; font-size: 11px; background: transparent;")
         sel_row.addWidget(self.sel_count_lbl)
-        # sel_row is added into the review container below (kept attached to the list).
 
-        # Split: file list (left) + diff review (right)
+        # Split: file list (left, roomier) + review pane (right)
         split = QSplitter(Qt.Orientation.Horizontal)
         split.setChildrenCollapsible(False)
-        split.setStyleSheet(
-            f"QSplitter::handle {{ background: {p['border']}; width: 2px; }}")
+        split.setStyleSheet(f"QSplitter::handle {{ background: {p['border']}; width: 2px; }}")
 
-        # Left pane: a header row PINNED to the exact same height as the review
-        # toolbar (which is as tall as its buttons), so both panes' content areas
-        # line up vertically. Without the fixed height the bare "Files" label is
-        # shorter than the button row on the right and the two boxes misalign.
         list_pane = QWidget()
         list_pane.setStyleSheet("background: transparent;")
         lp = QVBoxLayout(list_pane)
@@ -235,6 +587,7 @@ class UpdateWindow(BaseWindow):
         lp.addWidget(list_hdr)
 
         self.file_list = QListWidget()
+        self.file_list.setMinimumWidth(320)
         self.file_list.setStyleSheet(
             f"QListWidget {{ background-color: {p['surface']}; border: 1px solid {p['border']};"
             f" border-radius: 8px; padding: 4px; font-family: Consolas, monospace;"
@@ -246,57 +599,24 @@ class UpdateWindow(BaseWindow):
         lp.addWidget(self.file_list, stretch=1)
         split.addWidget(list_pane)
 
-        # Right pane: a small toolbar (wrap toggle + expand) above the diff view,
-        # in a container fixed to the same height as the Files header so the two
-        # content boxes line up.
-        diff_pane = QWidget()
-        diff_pane.setStyleSheet("background: transparent;")
-        dp = QVBoxLayout(diff_pane)
-        dp.setContentsMargins(0, 0, 0, 0)
-        dp.setSpacing(6)
-
-        tools_hdr = QWidget()
-        tools_hdr.setStyleSheet("background: transparent;")
-        tools_hdr.setFixedHeight(_HDR_HEIGHT)
-        tools = QHBoxLayout(tools_hdr)
-        tools.setContentsMargins(0, 0, 0, 0)
-        tools.setSpacing(8)
-        review_lbl = QLabel("Review")
-        review_lbl.setStyleSheet(f"color: {p['text']}; font-size: 12px; background: transparent;")
-        tools.addWidget(review_lbl)
-        tools.addStretch()
-        self.wrap_check = QCheckBox("Wrap text")
-        self.wrap_check.setStyleSheet(
-            f"QCheckBox {{ color: {p['muted']}; font-size: 11px; background: transparent; }}")
-        self.wrap_check.toggled.connect(self._on_wrap_toggled)
-        tools.addWidget(self.wrap_check)
-        self.manage_btn = self.make_button("Manage", p, kind="ghost")
-        self.manage_btn.setToolTip(
-            "Resolve changes hunk-by-hunk (or line-by-line) yourself — the safe way "
-            "to handle PROTECTED files (your providers / skills) without losing your work. "
-            "Includes the current file and every protected file.")
-        self.manage_btn.clicked.connect(self._open_manage)
-        tools.addWidget(self.manage_btn)
+        # Right pane: the ReviewPane, with an Expand button in its own header row
+        # sitting beside the pane's built-in Review/Wrap header.
+        right = QWidget()
+        right.setStyleSheet("background: transparent;")
+        rl = QVBoxLayout(right)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(0)
+        self.review_pane = ReviewPane(p, self._resolve_colour)
+        self.review_pane.confirmed.connect(self._on_file_confirmed)
+        # Slip an Expand button into the pane header.
         self.expand_btn = self.make_button("Expand", p, kind="ghost")
         self.expand_btn.setToolTip("Open this review in a larger, resizable window.")
         self.expand_btn.clicked.connect(self._open_expanded)
-        tools.addWidget(self.expand_btn)
-        dp.addWidget(tools_hdr)
+        self.review_pane.layout().itemAt(0).widget().layout().addWidget(self.expand_btn)
+        rl.addWidget(self.review_pane)
+        split.addWidget(right)
+        split.setSizes([360, 520])
 
-        self.diff_view = QTextEdit()
-        self.diff_view.setReadOnly(True)
-        self.diff_view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
-        self.diff_view.setPlaceholderText("Select a file to review the exact changes.")
-        self.diff_view.setStyleSheet(
-            f"QTextEdit {{ background-color: {p['surface']}; border: 1px solid {p['border']};"
-            f" border-radius: 8px; padding: 8px; font-family: Consolas, monospace;"
-            f" font-size: 11px; color: {p['text']}; }}")
-        dp.addWidget(self.diff_view, stretch=1)
-        split.addWidget(diff_pane)
-        split.setSizes([330, 520])
-
-        # Bottom pane of the outer splitter: the file-selection row + the files|diff
-        # splitter, grouped so the row stays attached to the list.
         review_container = QWidget()
         review_container.setStyleSheet("background: transparent;")
         rc = QVBoxLayout(review_container)
@@ -304,24 +624,19 @@ class UpdateWindow(BaseWindow):
         rc.setSpacing(6)
         rc.addLayout(sel_row)
         rc.addWidget(split, stretch=1)
-        review_container.setMinimumHeight(220)
+        review_container.setMinimumHeight(240)
 
-        # Outer VERTICAL splitter: drag to trade height between the commit-messages
-        # box (collapsible — shrink it to nothing so the diff preview isn't
-        # "almost unseen" on small changes) and the review block below.
         outer_split = QSplitter(Qt.Orientation.Vertical)
-        outer_split.setStyleSheet(
-            f"QSplitter::handle {{ background: {p['border']}; height: 2px; }}")
+        outer_split.setStyleSheet(f"QSplitter::handle {{ background: {p['border']}; height: 2px; }}")
         outer_split.addWidget(self.commits_view)
         outer_split.addWidget(review_container)
-        outer_split.setCollapsible(0, True)     # commits box can collapse fully
-        outer_split.setCollapsible(1, False)    # review block always visible
+        outer_split.setCollapsible(0, True)
+        outer_split.setCollapsible(1, False)
         outer_split.setStretchFactor(0, 0)
         outer_split.setStretchFactor(1, 1)
-        outer_split.setSizes([90, 470])         # small commits, large review by default
+        outer_split.setSizes([70, 500])
         body.addWidget(outer_split, stretch=1)
 
-        # Dependencies + status line
         self.deps_lbl = QLabel("")
         self.deps_lbl.setWordWrap(True)
         self.deps_lbl.setStyleSheet(
@@ -334,7 +649,6 @@ class UpdateWindow(BaseWindow):
             f"color: {p['muted']}; font-size: 11px; background: transparent;")
         body.addWidget(self.status_lbl)
 
-        # Footer
         foot = QHBoxLayout()
         self.revert_btn = self.make_button("Revert Last Update", p, kind="secondary")
         self.revert_btn.setEnabled(False)
@@ -342,14 +656,12 @@ class UpdateWindow(BaseWindow):
         foot.addWidget(self.revert_btn)
         self.baseline_btn = self.make_button("Establish Baseline", p, kind="secondary")
         self.baseline_btn.setToolTip(
-            "Record the current upstream as the merge base — without changing any "
-            "files — so future updates can show YOUR local edits separately from "
-            "the update's (the coloured 3-way review). Runs automatically on normal "
-            "installs; use this to set it up now.")
+            "Record the current upstream as the merge base so future updates can show "
+            "YOUR local edits separately from the update's.")
         self.baseline_btn.clicked.connect(self._on_baseline_clicked)
         foot.addWidget(self.baseline_btn)
         foot.addStretch()
-        self.apply_btn = self.make_button("Apply Selected", p, kind="primary")
+        self.apply_btn = self.make_button("Apply update", p, kind="primary")
         self.apply_btn.setEnabled(False)
         self.apply_btn.clicked.connect(self._on_apply_clicked)
         foot.addWidget(self.apply_btn)
@@ -358,6 +670,15 @@ class UpdateWindow(BaseWindow):
         foot.addWidget(close_btn)
         body.addLayout(foot)
         self._refresh_revert()
+
+    def _combo_style(self):
+        p = self._p
+        return (f"QComboBox {{ background-color: {p['surface2']}; border: 1px solid {p['border']};"
+                f" border-radius: 6px; padding: 6px 10px; font-size: 11px; color: {p['text']}; }}"
+                f"QComboBox::drop-down {{ border: none; }}"
+                f"QComboBox QAbstractItemView {{ background-color: {p['surface2']};"
+                f" border: 1px solid {p['border']}; color: {p['text']};"
+                f" selection-background-color: {p['accent']}; selection-color: #05070a; }}")
 
     # ── service wiring ────────────────────────────────────────────────────────
     def _wire_service(self):
@@ -384,7 +705,7 @@ class UpdateWindow(BaseWindow):
         auto = self.service.auto_dev_detected
         self.dev_check.blockSignals(True)
         self.dev_check.setChecked(self.service.is_dev_environment)
-        self.dev_check.setEnabled(not auto)   # can't disable in an auto-detected dev dir
+        self.dev_check.setEnabled(not auto)
         self.dev_check.blockSignals(False)
         if auto:
             self._banner("Developer working copy detected (.dev-copy present). Auto-update is "
@@ -400,7 +721,6 @@ class UpdateWindow(BaseWindow):
 
     # ── branch / revert ───────────────────────────────────────────────────────
     def _on_branch_changed(self, branch: str):
-        # Persist as the subscribed branch and refresh version + revert state.
         self.service.set_saved_branch(branch)
         self._refresh_version_label()
         self._refresh_revert()
@@ -488,29 +808,29 @@ class UpdateWindow(BaseWindow):
             self._status(result.message + "  |  Restart Systema Auxilium to run the reverted version.")
             self.summary_lbl.setText("Reverted to the previous version.")
             self.file_list.clear()
-            self.diff_view.clear()
+            self.review_pane.clear()
         else:
             self._status(f"Revert failed: {result.message}")
         self._refresh_version_label()
         self._refresh_revert()
 
-    # ── actions ───────────────────────────────────────────────────────────────
+    # ── check / plan ────────────────────────────────────────────────────────────
     def _on_check_clicked(self):
         if self._busy:
             return
         self._plan = None
+        self._reviews.clear()
+        self._resolved.clear()
         self.file_list.clear()
-        self.diff_view.clear()
+        self.review_pane.clear()
         self.deps_lbl.clear()
         self.commits_view.setVisible(False)
         self.apply_btn.setEnabled(False)
         self._set_busy(True)
         self.service.check(self.branch_combo.currentText())
-        # Fetch the stacked commit messages in parallel (best-effort).
         self.service.fetch_pending_commits(self.branch_combo.currentText())
 
     def _on_commits(self, commits):
-        """Render the stacked commit messages (newest first) above the file list."""
         if not commits:
             self.commits_view.setVisible(False)
             return
@@ -541,122 +861,64 @@ class UpdateWindow(BaseWindow):
             self._update_sel_count()
             return
 
-        p = self._p
-        from PyQt6.QtGui import QColor
         from systema.updater.service import is_sensitive_path
-        self.file_list.clear()   # safe re-render (e.g. after Dismiss / settle)
+        self.file_list.clear()
         branch = self.branch_combo.currentText()
-        # Reconcile the settled store with THIS plan: survivors are files the user
-        # already decided on and whose upstream content hasn't changed since.
         settled = self.service.prune_settled_against_plan(branch, plan)
         risky_count = 0
         settled_count = 0
+        conflict_count = 0
         for fc in plan.file_changes:
             if fc.change.value == "unchanged":
                 continue
-            colour, tag = _CHANGE_STYLE.get(fc.change.value, (None, fc.change.value.upper()))
             is_text = getattr(fc, "is_text", True)
-            # A file has a reviewable textual difference if it's a text file with
-            # a content change (added / modified / merged).
             is_change = is_text and fc.change.value in _TEXTDIFF_CHANGES
-            # In a user-owned data folder (providers/skills)?
             sensitive = is_sensitive_path(fc.path)
-            # Risky-protected = a protected file that would OVERWRITE or DELETE the
-            # user's local version (MOD / DEL / MERGE / CONFLICT). A protected NEW
-            # only creates a file, so it can't cause data loss and is treated as a
-            # normal addition (auto-selectable).
             risky_protected = sensitive and fc.change.value != "added"
-            # Settled = the user already decided on this file (applied the rest /
-            # kept theirs) at a commit, and upstream hasn't changed it since.
             is_settled = fc.path in settled
+            is_conflict = fc.change.value == "conflict"
+            if is_conflict and not is_settled:
+                conflict_count += 1
             if is_settled:
-                settled_count += 1            # settled wins visually + in the count,
-            elif risky_protected:             # but risky_protected stays accurate so a
-                risky_count += 1              # manual re-tick still gets the warning
+                settled_count += 1
+            elif risky_protected:
+                risky_count += 1
 
-            # Aligned columns: the change tag (or SETTLED), then a PROT marker for
-            # anything in a protected folder — both dimensions visible at a glance.
-            prot = "PROT" if sensitive else "    "
-            if is_settled:
-                short = (settled.get(fc.path, {}).get("commit", "") or "").split("+")[-1][:7] or "?"
-                label = f"{'SETTLED':8} {prot}  {fc.path}   (from {short})"
-            else:
-                label = f"{tag:8} {prot}  {fc.path}" + ("" if is_text else "   [binary]")
-            item = QListWidgetItem(label)
+            item = QListWidgetItem()
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            # Settled files are never auto-ticked and are excluded from the "changes"
-            # set, so Select-changes and the actionable count skip them. Otherwise
-            # auto-check textual-diff files, but NEVER a risky-protected one.
             eff_is_change = is_change and not is_settled
-            auto = eff_is_change and not risky_protected
+            # Auto-check textual-diff files, never a risky-protected one; a
+            # conflict stays UNCHECKED until the user resolves + Confirms it.
+            auto = eff_is_change and not risky_protected and not is_conflict
             item.setCheckState(Qt.CheckState.Checked if auto else Qt.CheckState.Unchecked)
             item.setData(_ROLE_PATH, fc.path)
             item.setData(_ROLE_IS_CHANGE, eff_is_change)
             item.setData(_ROLE_SENSITIVE, sensitive)
             item.setData(_ROLE_PROTECTED_RISKY, risky_protected)
             item.setData(_ROLE_SETTLED, is_settled)
-            if is_settled:
-                item.setForeground(QColor(self._p["muted"]))   # muted; decided
-            elif risky_protected:
-                # Red warning — this is where silent overwrite / data loss lives.
-                item.setForeground(QColor(_SENSITIVE_COLOUR))
-                hl = QColor(_SENSITIVE_COLOUR)
-                hl.setAlpha(40)
-                item.setBackground(hl)
-            else:
-                if colour:
-                    item.setForeground(QColor(colour))
-                # Highlight the textual-diff files so they stand out in the list.
-                if is_change:
-                    hl = QColor(self._p["accent"])
-                    hl.setAlpha(55)
-                    item.setBackground(hl)
-            tip = fc.note or ""
-            if is_settled:
-                short = (settled.get(fc.path, {}).get("commit", "") or "").split("+")[-1][:7] or "?"
-                tip = (f"SETTLED — you decided on this file at commit {short}. It is "
-                       "unchanged upstream since, so it won't trigger update "
-                       "notifications; it re-appears as a normal change only if a new "
-                       "commit modifies it. " + (tip if tip else "")).strip()
-            elif risky_protected:
-                verb = "delete" if fc.change.value == "deleted" else "overwrite"
-                tip = (f"PROTECTED — this file lives in a folder you own "
-                       f"(providers / skills). Applying will {verb} your local "
-                       "version (possible data loss). It is unticked; review the "
-                       "diff and use Manage to resolve it hunk-by-hunk, or tick it "
-                       "only if you really want the upstream version. "
-                       + (tip if tip else "")).strip()
-            elif sensitive:  # protected NEW — additive, safe
-                tip = ("New file in a folder you own (providers / skills). It only "
-                       "adds a file — nothing of yours is overwritten or deleted. "
-                       + (tip if tip else "")).strip()
-            if fc.change.value == "conflict":
-                tip = ("CONFLICT — you and upstream changed the SAME lines. Applying "
-                       "only writes <<<<<<< markers and leaves the file conflicted; it "
-                       "does NOT resolve it. Use Manage to fix it hunk-by-hunk, then "
-                       "restart. " + (tip if tip else "")).strip()
-            if not is_text:
-                tip = (tip + "  " if tip else "") + "binary file - no text diff to review"
-            if tip:
-                item.setToolTip(tip)
+            item.setData(_ROLE_CHANGE, fc.change.value)
+            item.setData(_ROLE_DECIDED, False)
+            item.setData(Qt.ItemDataRole.UserRole + 7,
+                         "" if is_text else "   [binary]")   # suffix
+            self._style_row(item, settled)
             self.file_list.addItem(item)
 
         if risky_count:
             self._banner(
                 f"{risky_count} PROTECTED change(s) would overwrite or delete files "
                 "in folders you own (providers / skills). They are unticked and "
-                "highlighted — an update won't touch them unless you tick them "
-                "yourself, or resolve them hunk-by-hunk via Manage.")
-
+                "highlighted — resolve them or tick them yourself.")
         if settled_count:
             self.summary_lbl.setText(
                 self.summary_lbl.text()
                 + f"   ·   {settled_count} settled (won't notify until changed upstream)")
+        if conflict_count:
+            self._status(
+                f"{conflict_count} conflict(s): you and upstream changed the same lines. "
+                "Click each CONFLICT file, resolve it hunk-by-hunk (default: take the "
+                "update), and Confirm — then Apply.")
 
         if plan.dependency_changes:
-            # requirements.txt diff (gitplucker >= 0.7): show added / changed /
-            # removed distinctly. Older lib versions lack these helpers, so fall
-            # back to a flat requirement list.
             try:
                 summ = plan.dependency_summary()
                 rows = "   ".join(d.describe() for d in plan.dependency_changes)
@@ -668,34 +930,128 @@ class UpdateWindow(BaseWindow):
                 names = ", ".join(d.requirement for d in plan.dependency_changes)
                 txt = f"Dependencies to install for selected files: {names}"
             self.deps_lbl.setText(txt)
-        if plan.conflicts:
-            self._status(
-                f"{len(plan.conflicts)} conflict(s): you and upstream edited the same lines. "
-                "Resolve these with Manage (hunk-by-hunk) — applying alone only writes "
-                "<<<<<<< markers and leaves the file conflicted until you fix it by hand.")
 
-        # Heuristic: if the local tree diverges a lot from the repo and we're not
-        # already in dev mode, the user may be running an ahead-of-repo dev copy.
         if not self.service.is_dev_environment:
             modified = sum(1 for fc in plan.file_changes if fc.change.value == "modified")
             if modified >= 15:
                 self._banner(f"Heads up: {modified} files differ from the repo. If your local "
-                             "copy is ahead (a development copy), enable Developer mode above so "
-                             "the updater stops offering to overwrite your files.")
+                             "copy is ahead (a development copy), enable Developer mode above.")
 
+        self._apply_filter()
         if self.file_list.count():
-            self.file_list.setCurrentRow(0)
+            for i in range(self.file_list.count()):
+                if not self.file_list.item(i).isHidden():
+                    self.file_list.setCurrentRow(i)
+                    break
         self._update_sel_count()
+
+    # ── row rendering / state ─────────────────────────────────────────────────
+    def _style_row(self, item, settled):
+        """(Re)build a row's label, colour, and check-state affordance from its
+        current state — the single place row visuals are decided, so a state
+        change (e.g. CONFLICT -> DECIDED) always re-renders truthfully."""
+        path = item.data(_ROLE_PATH)
+        change = item.data(_ROLE_CHANGE)
+        sensitive = item.data(_ROLE_SENSITIVE)
+        risky = item.data(_ROLE_PROTECTED_RISKY)
+        is_settled = item.data(_ROLE_SETTLED)
+        decided = item.data(_ROLE_DECIDED)
+        suffix = item.data(Qt.ItemDataRole.UserRole + 7) or ""
+        prot = "PROT" if sensitive else "    "
+
+        if is_settled:
+            short = (settled.get(path, {}).get("commit", "") or "").split("+")[-1][:7] or "?"
+            item.setText(f"{'SETTLED':8} {prot}  {path}   (from {short})")
+            item.setForeground(QColor(self._p["muted"]))
+            item.setBackground(QColor(0, 0, 0, 0))
+            item.setToolTip(f"SETTLED — you decided on this at commit {short}; unchanged upstream since.")
+            return
+
+        if decided:
+            colour, tag = _CHANGE_STYLE["decided"]
+            item.setText(f"{tag:8} {prot}  {path}")
+            item.setForeground(QColor(colour))
+            hl = QColor(colour); hl.setAlpha(45); item.setBackground(hl)
+            item.setToolTip("DECIDED — you resolved this conflict; it will be applied. "
+                            "Click to review or Reopen.")
+            return
+
+        colour, tag = _CHANGE_STYLE.get(change, (None, str(change).upper()))
+        item.setText(f"{tag:8} {prot}  {path}{suffix}")
+        if risky:
+            item.setForeground(QColor(_SENSITIVE_COLOUR))
+            hl = QColor(_SENSITIVE_COLOUR); hl.setAlpha(40); item.setBackground(hl)
+            verb = "delete" if change == "deleted" else "overwrite"
+            item.setToolTip(f"PROTECTED — applying will {verb} your local version (providers/skills). "
+                            "Resolve it or tick it only if you really want the upstream version.")
+        elif change == "conflict":
+            item.setForeground(QColor(colour))
+            hl = QColor(colour); hl.setAlpha(48); item.setBackground(hl)
+            item.setToolTip("CONFLICT — you and upstream changed the same lines. Click to resolve "
+                            "hunk-by-hunk, then Confirm. Applying without resolving is blocked.")
+        else:
+            if colour:
+                item.setForeground(QColor(colour))
+            if item.data(_ROLE_IS_CHANGE):
+                hl = QColor(self._p["accent"]); hl.setAlpha(55); item.setBackground(hl)
+
+    def _item_for_path(self, path):
+        for i in range(self.file_list.count()):
+            it = self.file_list.item(i)
+            if it.data(_ROLE_PATH) == path:
+                return it
+        return None
 
     def _on_row_changed(self, current, _previous):
         if current is None or self._plan is None:
             return
         path = current.data(_ROLE_PATH)
+        is_conflict = current.data(_ROLE_CHANGE) == "conflict"
+        decided = current.data(_ROLE_DECIDED)
+        settled = current.data(_ROLE_SETTLED)
+        # An unresolved conflict opens the inline editor; everything else (incl.
+        # a decided conflict and settled files) shows the read-only diff.
+        if is_conflict and not decided and not settled:
+            review = self._ensure_review(path)
+            if review is not None and any(h.kind == "conflict" for h in review.hunks):
+                self.review_pane.edit_conflict(path, review)
+                return
+        self.review_pane.show_diff(path, self.service.review(path))
+
+    def _ensure_review(self, path) -> FileReview | None:
+        """Build (once) and cache the live FileReview for a conflict path."""
+        if path in self._reviews:
+            return self._reviews[path]
+        from systema.updater.service import is_sensitive_path
         tagged = self.service.review(path)
-        self._render_review(tagged)
+        if len(tagged) == 1 and tagged[0][0] == "info":
+            return None
+        session = ReviewSession()
+        session.add(path, tagged, sensitive=is_sensitive_path(path))
+        fr = session.files.get(path)
+        self._reviews[path] = fr
+        return fr
+
+    def _on_file_confirmed(self, path):
+        """User Confirmed a conflict resolution: assemble + store, flip the row
+        to DECIDED, auto-tick it for apply."""
+        fr = self._reviews.get(path)
+        if fr is None:
+            return
+        self._resolved[path] = fr.assembled()
+        it = self._item_for_path(path)
+        if it is not None:
+            it.setData(_ROLE_DECIDED, True)
+            it.setData(_ROLE_IS_CHANGE, True)
+            it.setCheckState(Qt.CheckState.Checked)
+            self._style_row(it, {})
+        self._status(f"Resolved {path}. It will be applied with the update.")
+        # Re-show it as a decided diff preview (of the resolved text is overkill;
+        # show the normal 3-way so they can still eyeball it).
+        self.review_pane.show_diff(path, self.service.review(path))
+        self._update_sel_count()
 
     def _resolve_colour(self, key: str) -> str:
-        """Map a style token to a concrete colour (palette keys stay live)."""
         if key == "text":
             return self._p["text"]
         if key == "muted":
@@ -704,164 +1060,74 @@ class UpdateWindow(BaseWindow):
             return self._p["accent"]
         return key
 
-    def _legend_html(self, tags: set[str]) -> str:
-        """Compact colour legend, only for origins actually present."""
-        chips = []
-        for tag, label in _LEGEND:
-            if tag not in tags:
-                continue
-            _, bg, _g = _REVIEW_STYLE[tag]
-            fg = self._resolve_colour(_REVIEW_STYLE[tag][0])
-            chips.append(
-                f'<span style="background:{bg};color:{fg};padding:1px 7px;'
-                f'border-radius:4px;margin-right:6px">{_esc(label)}</span>')
-        if not chips:
-            return ""
-        return ('<div style="font-family:Consolas,monospace;font-size:10px;'
-                'padding:2px 8px 8px">' + "".join(chips) + "</div>")
-
-    def _render_review(self, tagged: list[tuple[str, str]]):
-        p = self._p
-        self._tagged = tagged   # remembered so the wrap toggle can re-render
-        # Single info note (binary / no textual difference / no plan) -> centered.
-        if len(tagged) == 1 and tagged[0][0] == "info":
-            self._diff_html = (
-                f'<div style="color:{p["muted"]};font-family:Consolas,monospace;'
-                f'font-size:11px;padding:14px 10px">{_esc(tagged[0][1])}</div>')
-            self.diff_view.setHtml(self._diff_html)
-            self._sync_expanded()
-            return
-
-        # QTextEdit's line-wrap mode alone can't wrap cells styled white-space:pre,
-        # so the wrap actually comes from pre-wrap here (kept in sync below).
-        ws = "pre-wrap" if self.wrap_check.isChecked() else "pre"
-        present = {t for t, _ in tagged}
-        rows = []
-        for tag, line in tagged:
-            fg_key, bg, gutter = _REVIEW_STYLE.get(tag, ("text", "transparent", " "))
-            fg = self._resolve_colour(fg_key)
-            bold = ";font-weight:600" if tag == "conflict_marker" else ""
-            safe = _esc(line.rstrip("\n")) or "&nbsp;"
-            rows.append(
-                f'<tr><td style="background:{bg};color:{fg};white-space:pre;'
-                f'padding:1px 4px;text-align:center;width:14px;opacity:0.7">{gutter}</td>'
-                f'<td style="background:{bg};color:{fg};white-space:{ws};word-break:break-all;'
-                f'padding:1px 8px{bold}">{safe}</td></tr>')
-        self._diff_html = (
-            self._legend_html(present)
-            + '<table width="100%" cellspacing="0" cellpadding="0" '
-            'style="font-family:Consolas,monospace;font-size:11px">'
-            + "".join(rows) + "</table>")
-        self.diff_view.setHtml(self._diff_html)
-        self._sync_expanded()
-
-    # ── manage (line-level review of protected files) ──────────────────────────
-    def _open_manage(self):
-        if self._plan is None:
-            self._status("Run a check first.")
-            return
-        from systema.updater.service import is_sensitive_path
-        # Target files: the currently-selected one + every protected file in the plan.
-        paths = []
-        cur = self.file_list.currentItem()
-        if cur is not None:
-            paths.append(cur.data(_ROLE_PATH))
+    # ── filter ────────────────────────────────────────────────────────────────
+    def _apply_filter(self):
+        mode = self.filter_combo.currentData() or "all"
         for i in range(self.file_list.count()):
-            pth = self.file_list.item(i).data(_ROLE_PATH)
-            if is_sensitive_path(pth) and pth not in paths:
-                paths.append(pth)
+            it = self.file_list.item(i)
+            change = it.data(_ROLE_CHANGE)
+            decided = it.data(_ROLE_DECIDED)
+            settled = it.data(_ROLE_SETTLED)
+            sensitive = it.data(_ROLE_SENSITIVE)
+            if mode == "all":
+                show = True
+            elif mode == "unresolved":
+                show = change == "conflict" and not decided and not settled
+            elif mode == "conflict":
+                show = change == "conflict"
+            elif mode == "decided":
+                show = bool(decided)
+            elif mode == "protected":
+                show = bool(sensitive)
+            elif mode == "settled":
+                show = bool(settled)
+            else:
+                show = True
+            it.setHidden(not show)
 
-        from systema.updater.hunks import ReviewSession
-        session = ReviewSession()
-        for pth in paths:
-            tagged = self.service.review(pth)
-            if len(tagged) == 1 and tagged[0][0] == "info":
-                continue    # binary / no textual diff — nothing to manage
-            session.add(pth, tagged, sensitive=is_sensitive_path(pth))
-        if not session.files:
-            self._status("No text changes to manage for the selected/protected files.")
-            return
-
-        from systema.ui.dialogs.update_manage_dialog import UpdateManageDialog
-        dlg = UpdateManageDialog(self.controller, session, self._p,
-                                 on_save=self._on_managed_save, parent=self)
-        self._pending_restart_offer = False
-        dlg.exec()
-        # Offer the restart AFTER the modal Manage dialog has fully closed. Offering
-        # it from inside the dialog's exec() loop (the on_save callback) leaves the
-        # app in a nested-modal state where restart_app() can't cleanly close it —
-        # which is why the Manage restart didn't behave like the main apply restart.
-        if getattr(self, "_pending_restart_offer", False):
-            self._pending_restart_offer = False
-            self._offer_restart()
-
-    def _on_managed_save(self, resolved: dict):
-        """Persist the hand-resolved files and drop them from the plan list."""
-        written, last_backup = [], ""
-        for path, text in resolved.items():
-            last_backup = self.service.write_managed_file(path, text)
-            written.append(path)
-            # Untick + relabel the row so it isn't re-applied by gitplucker.
-            for i in range(self.file_list.count()):
-                it = self.file_list.item(i)
-                if it.data(_ROLE_PATH) == path:
-                    it.setCheckState(Qt.CheckState.Unchecked)
-                    it.setData(_ROLE_IS_CHANGE, False)
-        self._update_sel_count()
-        self._status(f"Saved your resolved version of {len(written)} file(s). "
-                     f"Backup: {last_backup}. Restart to run them.")
-        # Defer to _open_manage (after the modal dialog closes) — see note there.
-        self._pending_restart_offer = True
-
-    # ── viewer: wrap toggle + expand pop-out ───────────────────────────────────
-    def _on_wrap_toggled(self, on: bool):
-        mode = (QTextEdit.LineWrapMode.WidgetWidth if on
-                else QTextEdit.LineWrapMode.NoWrap)
-        self.diff_view.setLineWrapMode(mode)
-        if getattr(self, "_expanded_view", None) is not None:
-            self._expanded_view.setLineWrapMode(mode)
-        # Re-render so the HTML white-space matches (pre-wrap vs pre).
-        if getattr(self, "_tagged", None):
-            self._render_review(self._tagged)
-
-    def _sync_expanded(self):
-        """Keep a live pop-out window mirroring the main review."""
-        if getattr(self, "_expanded_view", None) is not None:
-            self._expanded_view.setHtml(self._diff_html)
-
+    # ── expand pop-out ──────────────────────────────────────────────────────────
     def _open_expanded(self):
         from PyQt6.QtWidgets import QDialog
-        if getattr(self, "_expanded_dlg", None) is not None:
+        if self._expanded_dlg is not None:
             self._expanded_dlg.raise_()
             self._expanded_dlg.activateWindow()
+            return
+        cur = self.file_list.currentItem()
+        if cur is None:
+            self._status("Select a file to expand.")
             return
         p = self._p
         dlg = QDialog(self)
         dlg.setWindowTitle("Review changes")
-        dlg.resize(900, 680)
+        dlg.resize(940, 700)
         dlg.setStyleSheet(f"QDialog {{ background-color: {p['bg']}; }}")
         lay = QVBoxLayout(dlg)
         lay.setContentsMargins(10, 10, 10, 10)
-        view = QTextEdit()
-        view.setReadOnly(True)
-        view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth
-                             if self.wrap_check.isChecked()
-                             else QTextEdit.LineWrapMode.NoWrap)
-        view.setStyleSheet(
-            f"QTextEdit {{ background-color: {p['surface']}; border: 1px solid {p['border']};"
-            f" border-radius: 8px; padding: 8px; font-family: Consolas, monospace;"
-            f" font-size: 12px; color: {p['text']}; }}")
-        view.setHtml(getattr(self, "_diff_html", "") or "")
-        lay.addWidget(view, stretch=1)
+        pane = ReviewPane(p, self._resolve_colour)
+        pane.confirmed.connect(self._on_file_confirmed)
+        lay.addWidget(pane, stretch=1)
         self._expanded_dlg = dlg
-        self._expanded_view = view
+        self._expanded_pane = pane
+
+        # Mirror the current selection into the pop-out (shares FileReview objects).
+        path = cur.data(_ROLE_PATH)
+        if (cur.data(_ROLE_CHANGE) == "conflict" and not cur.data(_ROLE_DECIDED)
+                and not cur.data(_ROLE_SETTLED)):
+            review = self._ensure_review(path)
+            if review is not None:
+                pane.edit_conflict(path, review)
+            else:
+                pane.show_diff(path, self.service.review(path))
+        else:
+            pane.show_diff(path, self.service.review(path))
 
         def _clear():
             self._expanded_dlg = None
-            self._expanded_view = None
+            self._expanded_pane = None
         dlg.finished.connect(lambda *_: _clear())
         dlg.show()
 
+    # ── selection ────────────────────────────────────────────────────────────
     def _checked_paths(self) -> list[str]:
         out = []
         for i in range(self.file_list.count()):
@@ -871,32 +1137,28 @@ class UpdateWindow(BaseWindow):
         return out
 
     def _set_all_checked(self, checked: bool):
-        # "Select all" never auto-ticks a risky-protected file (a MOD/DEL of a
-        # providers/skills file) — those stay manual-only. A protected NEW is
-        # additive and ticks like any other addition.
         for i in range(self.file_list.count()):
             it = self.file_list.item(i)
-            # Never auto-tick a risky-protected OR a settled (already-decided) file.
+            if it.isHidden():
+                continue
             if checked and (it.data(_ROLE_PROTECTED_RISKY) or it.data(_ROLE_SETTLED)):
                 it.setCheckState(Qt.CheckState.Unchecked)
+            elif checked and it.data(_ROLE_CHANGE) == "conflict" and not it.data(_ROLE_DECIDED):
+                it.setCheckState(Qt.CheckState.Unchecked)   # unresolved conflict never auto-ticks
             else:
                 it.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
         self._update_sel_count()
 
     def _select_changes(self):
-        """Tick only the files that have a textual difference (the highlighted ones).
-        Risky-protected files (a MOD/DEL of a providers/skills file) are skipped —
-        they must be approved by hand — but a protected NEW is additive and ticks."""
         for i in range(self.file_list.count()):
             it = self.file_list.item(i)
-            pick = it.data(_ROLE_IS_CHANGE) and not it.data(_ROLE_PROTECTED_RISKY)
+            unresolved_conflict = it.data(_ROLE_CHANGE) == "conflict" and not it.data(_ROLE_DECIDED)
+            pick = (it.data(_ROLE_IS_CHANGE) and not it.data(_ROLE_PROTECTED_RISKY)
+                    and not unresolved_conflict)
             it.setCheckState(Qt.CheckState.Checked if pick else Qt.CheckState.Unchecked)
         self._update_sel_count()
 
     def _dismiss_settle(self):
-        """Mark every still-actionable change shown as 'settled' WITHOUT applying —
-        stops them showing as pending and stops the startup nag until a new commit
-        changes one of them upstream."""
         if self._plan is None or self._busy:
             self._status("Run a check first.")
             return
@@ -914,22 +1176,17 @@ class UpdateWindow(BaseWindow):
         box.setText(
             f"Mark {len(items)} shown change(s) as settled WITHOUT applying them?\n\n"
             "They stop appearing as pending and won't trigger update notifications, "
-            "until a NEW commit changes one of them upstream (then it re-appears as a "
-            "normal change).")
+            "until a NEW commit changes one of them upstream.")
         box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         box.setDefaultButton(QMessageBox.StandardButton.No)
         if box.exec() != QMessageBox.StandardButton.Yes:
             return
         n = self.service.settle_files(branch, items, self._plan.target_version)
         self.service.set_acknowledged(branch, self._plan.target_version)
-        self._on_plan(self._plan)   # re-render — they now show as SETTLED
-        self._status(f"Settled {n} change(s). You won't be notified until a new commit "
-                     "changes them.")
+        self._on_plan(self._plan)
+        self._status(f"Settled {n} change(s). You won't be notified until a new commit changes them.")
 
     def _checked_risky_protected_paths(self) -> list[str]:
-        """Selected protected files whose change would overwrite/delete local work
-        (MOD/DEL). A protected NEW is additive and is deliberately excluded — it
-        needs no scary confirmation."""
         out = []
         for i in range(self.file_list.count()):
             it = self.file_list.item(i)
@@ -937,12 +1194,23 @@ class UpdateWindow(BaseWindow):
                 out.append(it.data(_ROLE_PATH))
         return out
 
+    def _unresolved_conflicts(self) -> list[str]:
+        """Conflict rows that are neither Confirmed nor settled — Apply is
+        blocked while any of these remain."""
+        out = []
+        for i in range(self.file_list.count()):
+            it = self.file_list.item(i)
+            if (it.data(_ROLE_CHANGE) == "conflict" and not it.data(_ROLE_DECIDED)
+                    and not it.data(_ROLE_SETTLED)):
+                out.append(it.data(_ROLE_PATH))
+        return out
+
     def _update_sel_count(self):
-        total = self.file_list.count()
+        total = sum(1 for i in range(self.file_list.count())
+                    if not self.file_list.item(i).isHidden())
         n = len(self._checked_paths())
-        self.sel_count_lbl.setText(f"{n} of {total} selected")
+        self.sel_count_lbl.setText(f"{n} of {total} shown selected")
         self.apply_btn.setEnabled(n > 0 and not self._busy)
-        self.apply_btn.setText("Apply Selected" if n != total or total == 0 else "Apply All")
 
     def _on_apply_clicked(self):
         if self._busy or self._plan is None:
@@ -951,8 +1219,25 @@ class UpdateWindow(BaseWindow):
         if not selected:
             return
 
-        # Warn if the agent is mid-task — applying rewrites source files the
-        # running assistant may be relying on.
+        # Gate: unresolved conflicts must be resolved first. Prompt, then focus
+        # the list on exactly those so the user can knock them out.
+        unresolved = [p for p in self._unresolved_conflicts()]
+        if unresolved:
+            box = QMessageBox(self)
+            box.setWindowTitle("Resolve conflicts first")
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setText(
+                f"{len(unresolved)} conflict(s) aren't resolved yet. Applying now would "
+                "leave them conflicted.\n\nResolve each CONFLICT file (take/keep per hunk, "
+                "then Confirm) — press OK to filter the list to just those.")
+            box.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
+            box.setDefaultButton(QMessageBox.StandardButton.Ok)
+            if box.exec() == QMessageBox.StandardButton.Ok:
+                self.filter_combo.setCurrentIndex(
+                    next(i for i, (_, v) in enumerate(_FILTERS) if v == "unresolved"))
+                self._apply_filter()
+            return
+
         try:
             busy, reason = self.controller.agent_activity()
         except Exception:
@@ -973,9 +1258,6 @@ class UpdateWindow(BaseWindow):
             if warn.clickedButton() is wait_btn:
                 return
 
-        # Strong, explicit confirmation when a risky-protected file (a MOD/DEL of a
-        # providers/skills file) is selected — this is where silent data loss would
-        # happen. Protected NEW files are additive and skip this warning.
         sens = self._checked_risky_protected_paths()
         if sens:
             listing = "\n".join(f"  • {s}" for s in sens[:12])
@@ -988,9 +1270,8 @@ class UpdateWindow(BaseWindow):
                 "you own (provider scripts with your accounts/keys, or your skills):\n\n"
                 f"{listing}{more}\n\n"
                 "Applying the upstream version will OVERWRITE or DELETE your local "
-                "copy — the account or skill you set up can be lost. A backup is "
-                "still written to data/updates/, but this is not reversible from "
-                "inside the app beyond that snapshot.\n\n"
+                "copy. A backup is written to data/updates/, but this is not "
+                "reversible from inside the app beyond that snapshot.\n\n"
                 "Overwrite these anyway?")
             sbox.addButton("Overwrite them", QMessageBox.ButtonRole.DestructiveRole)
             keep_btn = sbox.addButton("Keep mine", QMessageBox.ButtonRole.RejectRole)
@@ -999,23 +1280,23 @@ class UpdateWindow(BaseWindow):
             if sbox.clickedButton() is keep_btn:
                 return
 
-        total = self.file_list.count()
-        only = None if len(selected) == total else selected
-        conflicts = [fc.path for fc in self._plan.conflicts if fc.path in selected]
+        # Count every actionable change: a FULL apply (advances the version
+        # marker + snapshots the baseline) only happens when nothing is left
+        # behind — which is what makes a resolved conflict stick permanently.
+        actionable = [fc.path for fc in self._plan.file_changes
+                      if fc.change.value != "unchanged"
+                      and fc.path not in self.service.settled_files(self.branch_combo.currentText())]
+        full = set(selected) >= set(actionable)
+        only = None if full else selected
+        resolved = {p: t for p, t in self._resolved.items() if p in selected}
 
-        msg = (f"Update {len(selected)} of {total} changed file(s) "
-               f"to {self._plan.target_version}?\n\n"
+        msg = (f"Update {len(selected)} changed file(s) to {self._plan.target_version}?\n\n"
                "A backup is written to data/updates/ before anything changes.\n"
                "Restart Systema Auxilium afterwards.")
-        if conflicts:
-            msg += (f"\n\nNote: {len(conflicts)} selected file(s) have CONFLICTS. Applying only "
-                    "writes <<<<<<< markers and leaves them conflicted — it will NOT resolve "
-                    "them. Cancel and use Manage to resolve conflicts hunk-by-hunk instead.")
-        if only is None:
-            msg += "\n\n(Applying ALL changes advances the version marker.)"
-        else:
-            msg += "\n\n(Partial update - version marker stays unchanged.)"
-
+        if resolved:
+            msg += f"\n\n{len(resolved)} resolved conflict(s) will be applied with your chosen merge."
+        msg += ("\n\n(Applying ALL changes advances the version marker.)" if full
+                else "\n\n(Partial update - version marker stays unchanged.)")
         box = QMessageBox(self)
         box.setWindowTitle("Apply update?")
         box.setIcon(QMessageBox.Icon.Warning)
@@ -1025,7 +1306,7 @@ class UpdateWindow(BaseWindow):
         if box.exec() != QMessageBox.StandardButton.Yes:
             return
         self._set_busy(True)
-        self.service.apply(only=only)
+        self.service.apply(only=only, resolved=resolved)
 
     def _on_applied(self, result):
         self._set_busy(False)
@@ -1040,7 +1321,9 @@ class UpdateWindow(BaseWindow):
             self._status("  |  ".join(parts))
             self.summary_lbl.setText("Update applied.")
             self.file_list.clear()
-            self.diff_view.clear()
+            self.review_pane.clear()
+            self._reviews.clear()
+            self._resolved.clear()
             self.apply_btn.setEnabled(False)
             self._offer_restart()
         else:
@@ -1050,7 +1333,6 @@ class UpdateWindow(BaseWindow):
         self._refresh_revert()
 
     def _offer_restart(self):
-        """After a successful apply, offer to restart now (auto-reopens) or later."""
         box = QMessageBox(self)
         box.setWindowTitle("Restart to finish updating")
         box.setIcon(QMessageBox.Icon.Information)
@@ -1107,15 +1389,13 @@ class UpdateWindow(BaseWindow):
             self._refresh_revert()
             self._refresh_baseline()
 
-    # ── loading spinner (shown in the file list while a check runs) ──────────
     _SPIN = ("◐", "◓", "◑", "◒")
 
     def _start_spinner(self):
-        """Show an animated placeholder row so an empty list never looks stuck."""
         self._stop_spinner()
         self._spin_i = 0
         self._loading_item = QListWidgetItem(f"{self._SPIN[0]}   Loading changes…")
-        self._loading_item.setFlags(Qt.ItemFlag.NoItemFlags)  # non-selectable
+        self._loading_item.setFlags(Qt.ItemFlag.NoItemFlags)
         self._loading_item.setForeground(QColor(self._p["muted"]))
         self.file_list.addItem(self._loading_item)
         if self._spin_timer is None:
