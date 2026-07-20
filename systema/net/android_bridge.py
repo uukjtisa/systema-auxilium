@@ -812,10 +812,14 @@ class AndroidBridge:
                 content = tm.strip_tool_calls(raw)
                 if role == "ui_event":
                     if msg.get("_type") == "memory_context":
+                        # Phone app expects plain strings — flatten the PC-side
+                        # dict payloads ({text, created_at, similarity}) here.
+                        _mems = [m.get('text', '') if isinstance(m, dict) else str(m)
+                                 for m in msg.get("_memories_preview", [])]
                         self._dispatch({
                             "cmd": "add_memory_context",
                             "context_id": msg.get("_memory_context_id", ""),
-                            "memories": msg.get("_memories_preview", []),
+                            "memories": _mems,
                         })
                     elif msg.get("_type") == "file_op":
                         self.add_file_op(msg.get("_file_op") or {})

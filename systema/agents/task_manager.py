@@ -224,9 +224,8 @@ class TaskAIEngine:
         ns['notify'] = getattr(self._controller, 'notify', None)
         ns['memorize'] = self._controller.memorize
         ns['search_memory'] = self._controller.search_memory
-        ns['view_all_memory'] = self._controller.view_all_memory
+        ns['update_memory'] = self._controller.update_memory
         ns['forget_memory'] = self._controller.forget_memory
-        ns['delete_memory'] = self._controller.delete_memory
         ns['app_root'] = str(_APP_ROOT)
         ns['skills_path'] = str(_APP_ROOT / "skills")
 

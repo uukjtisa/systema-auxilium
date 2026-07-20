@@ -660,8 +660,12 @@ class SettingsWindow(BaseWindow):
         self.pf_source_group.addButton(self.pf_radio_premade, 0)
         self.pf_source_group.addButton(self.pf_radio_session, 1)
         self.pf_radio_premade.setChecked(True)
-        pf_lay.addWidget(self.pf_radio_premade)
-        pf_lay.addWidget(self.pf_radio_session)
+
+        # Radios + session picker live in one container so the whole option set
+        # HIDES while prefilling is disabled (useless when off).
+        self.pf_options_widget = QWidget()
+        _pf_opts_lay = QVBoxLayout(self.pf_options_widget)
+        _pf_opts_lay.setContentsMargins(0, 0, 0, 0)
 
         # Session picker (visible only when session radio is selected)
         self.pf_session_widget = QWidget()
@@ -681,15 +685,14 @@ class SettingsWindow(BaseWindow):
         _pf_sess_row.addWidget(_pf_refresh_btn)
         _pf_sess_row.addStretch()
         self.pf_session_widget.setVisible(False)
-        pf_lay.addWidget(self.pf_session_widget)
+        _pf_opts_lay.addWidget(self.pf_radio_premade)
+        _pf_opts_lay.addWidget(self.pf_radio_session)
+        _pf_opts_lay.addWidget(self.pf_session_widget)
+        pf_lay.addWidget(self.pf_options_widget)
 
-        # Wire visibility + enable/disable
+        # Wire visibility — sub-options hide entirely while prefilling is off
         self.pf_radio_session.toggled.connect(self.pf_session_widget.setVisible)
-        self.prefilling_checkbox.toggled.connect(self.pf_radio_premade.setEnabled)
-        self.prefilling_checkbox.toggled.connect(self.pf_radio_session.setEnabled)
-        self.prefilling_checkbox.toggled.connect(
-            lambda checked: self.pf_session_widget.setVisible(
-                checked and self.pf_radio_session.isChecked()))
+        self.prefilling_checkbox.toggled.connect(self.pf_options_widget.setVisible)
 
         pf_lay.addWidget(_label(
             "Premade: edit PREFILLING in engine/prompts/compat.py (or PREFILLING_NATIVE "
@@ -1071,13 +1074,18 @@ class SettingsWindow(BaseWindow):
         int_lay.addWidget(_label(
             "Manual: click mute in chat  ·  Automatic: TTS ducks when you speak "
             "and stops once real words are heard", muted=True))
-        int_lay.addWidget(_label("Barge-in sensitivity (Automatic mode):"))
+        # Wrapped so the whole row can be HIDDEN in Manual mode (useless there).
+        self.bargein_widget = QWidget()
+        _bg_lay = QVBoxLayout(self.bargein_widget)
+        _bg_lay.setContentsMargins(0, 0, 0, 0)
+        _bg_lay.addWidget(_label("Barge-in sensitivity (Automatic mode):"))
         self.bargein_sensitivity_combo = QComboBox()
         self.bargein_sensitivity_combo.addItem("Relaxed - fewest false interrupts", "relaxed")
         self.bargein_sensitivity_combo.addItem("Balanced (default)", "balanced")
         self.bargein_sensitivity_combo.addItem("Eager - fastest reaction", "eager")
         self.bargein_sensitivity_combo.setStyleSheet(_COMBO)
-        int_lay.addWidget(self.bargein_sensitivity_combo)
+        _bg_lay.addWidget(self.bargein_sensitivity_combo)
+        int_lay.addWidget(self.bargein_widget)
         self.interrupt_mode_combo.currentIndexChanged.connect(
             self._update_bargein_combo_enabled)
         voice_lay.addWidget(int_group)
@@ -1448,8 +1456,12 @@ class SettingsWindow(BaseWindow):
         self.glass_enabled_checkbox.setStyleSheet(_CHECK)
         gl_lay.addWidget(self.glass_enabled_checkbox)
 
-        # ── Per-window checklist ──────────────────────────────────────────────
-        gl_lay.addWidget(_label("Apply glass to these windows:", muted=True, top_margin=6))
+        # ── Per-window checklist + opacity — one container so everything HIDES
+        #    while the master glass toggle is off (useless options rule) ───────
+        self.glass_options_widget = QWidget()
+        glo_lay = QVBoxLayout(self.glass_options_widget)
+        glo_lay.setContentsMargins(0, 0, 0, 0)
+        glo_lay.addWidget(_label("Apply glass to these windows:", muted=True, top_margin=6))
         self.glass_window_checkboxes = {}
         for _wkey in _theme.GLASS_WINDOWS:
             _cb = QCheckBox(_theme.GLASS_WINDOW_LABELS.get(_wkey, _wkey))
@@ -1466,19 +1478,18 @@ class SettingsWindow(BaseWindow):
                 self.glass_sidebar_checkbox.setStyleSheet(_CHECK)
                 _row.addWidget(self.glass_sidebar_checkbox)
                 _row.addStretch()
-                gl_lay.addLayout(_row)
+                glo_lay.addLayout(_row)
             else:
-                gl_lay.addWidget(_cb)
+                glo_lay.addWidget(_cb)
 
-        # Disable the checklist when the master glass toggle is off; the sidebar
-        # sub-toggle additionally requires the Chat window to be checked.
+        # Hide the whole option set when the master glass toggle is off; the
+        # sidebar sub-toggle additionally requires the Chat window to be checked.
         def _sync_glass_checklist_enabled():
             on = self.glass_enabled_checkbox.isChecked()
-            for _cb in self.glass_window_checkboxes.values():
-                _cb.setEnabled(on)
+            self.glass_options_widget.setVisible(on)
             if hasattr(self, 'glass_sidebar_checkbox'):
-                self.glass_sidebar_checkbox.setEnabled(
-                    on and self.glass_window_checkboxes['chat'].isChecked())
+                self.glass_sidebar_checkbox.setVisible(
+                    self.glass_window_checkboxes['chat'].isChecked())
         self.glass_enabled_checkbox.toggled.connect(lambda _=None: _sync_glass_checklist_enabled())
         self.glass_window_checkboxes['chat'].toggled.connect(
             lambda _=None: _sync_glass_checklist_enabled())
@@ -1505,9 +1516,10 @@ class SettingsWindow(BaseWindow):
         self.glass_opacity_value_label.setFixedWidth(38)
         self.glass_opacity_value_label.setStyleSheet(f"color:{_MUTED}; font-size:11px;")
         _op_row.addWidget(self.glass_opacity_value_label)
-        gl_lay.addLayout(_op_row)
+        glo_lay.addLayout(_op_row)
         self.glass_opacity_slider.valueChanged.connect(
             lambda v: self.glass_opacity_value_label.setText(f"{v}%"))
+        gl_lay.addWidget(self.glass_options_widget)
 
         ui_lay.addWidget(glass_group)
         ui_lay.addStretch()
@@ -1528,7 +1540,23 @@ class SettingsWindow(BaseWindow):
         self.memory_enabled_checkbox.setStyleSheet(_CHECK)
         mg_lay.addWidget(self.memory_enabled_checkbox)
 
-        _thr_row = QHBoxLayout()
+        # Each row lives in a QWidget wrapper so dependent rows can be HIDDEN
+        # outright (mode/enable gating), not just greyed out.
+        _recall_roww = QWidget()
+        _recall_row = QHBoxLayout(_recall_roww)
+        _recall_row.setContentsMargins(0, 0, 0, 0)
+        _recall_row.addWidget(_label("Memory recall mode:"))
+        self.memory_recall_mode_combo = QComboBox()
+        self.memory_recall_mode_combo.setStyleSheet(_COMBO)
+        self.memory_recall_mode_combo.addItem("Inject all into system prompt", 'inject_all')
+        self.memory_recall_mode_combo.addItem("RAG semantic recall", 'rag')
+        _recall_row.addWidget(self.memory_recall_mode_combo)
+        mg_lay.addWidget(_recall_roww)
+        self._memory_recall_mode_row = _recall_roww
+
+        _thr_roww = QWidget()
+        _thr_row = QHBoxLayout(_thr_roww)
+        _thr_row.setContentsMargins(0, 0, 0, 0)
         _thr_row.addWidget(_label("Similarity threshold:"))
         self.memory_threshold_combo = QComboBox()
         self.memory_threshold_combo.setStyleSheet(_COMBO)
@@ -1541,25 +1569,91 @@ class SettingsWindow(BaseWindow):
         ]:
             self.memory_threshold_combo.addItem(lbl, val)
         _thr_row.addWidget(self.memory_threshold_combo)
-        mg_lay.addLayout(_thr_row)
+        mg_lay.addWidget(_thr_roww)
+        self._memory_threshold_row = _thr_roww
 
-        _max_row = QHBoxLayout()
+        _max_roww = QWidget()
+        _max_row = QHBoxLayout(_max_roww)
+        _max_row.setContentsMargins(0, 0, 0, 0)
         _max_row.addWidget(_label("Max memories per message:"))
         self.memory_max_combo = QComboBox()
         self.memory_max_combo.setStyleSheet(_COMBO)
         for n in [3, 5, 8, 10, 15]:
             self.memory_max_combo.addItem(str(n), n)
         _max_row.addWidget(self.memory_max_combo)
-        mg_lay.addLayout(_max_row)
+        mg_lay.addWidget(_max_roww)
+        self._memory_max_row = _max_roww
 
-        _recall_row = QHBoxLayout()
-        _recall_row.addWidget(_label("Memory recall mode:"))
-        self.memory_recall_mode_combo = QComboBox()
-        self.memory_recall_mode_combo.setStyleSheet(_COMBO)
-        self.memory_recall_mode_combo.addItem("Inject all into system prompt", 'inject_all')
-        self.memory_recall_mode_combo.addItem("RAG semantic recall", 'rag')
-        _recall_row.addWidget(self.memory_recall_mode_combo)
-        mg_lay.addLayout(_recall_row)
+        _cap_roww = QWidget()
+        _cap_row = QHBoxLayout(_cap_roww)
+        _cap_row.setContentsMargins(0, 0, 0, 0)
+        _cap_row.addWidget(_label("Inject cap (approx tokens):"))
+        self.memory_cap_combo = QComboBox()
+        self.memory_cap_combo.setStyleSheet(_COMBO)
+        for n in [1000, 1500, 2000, 3000, 5000]:
+            self.memory_cap_combo.addItem(str(n), n)
+        _cap_row.addWidget(self.memory_cap_combo)
+        mg_lay.addWidget(_cap_roww)
+        self._memory_cap_row = _cap_roww
+
+        _model_roww = QWidget()
+        _model_row = QHBoxLayout(_model_roww)
+        _model_row.setContentsMargins(0, 0, 0, 0)
+        _model_row.addWidget(_label("Embedding model:"))
+        self.memory_model_combo = QComboBox()
+        self.memory_model_combo.setStyleSheet(_COMBO)
+        for lbl, val in [
+            ("MiniLM-L6-v2 - fastest, default (~90 MB)",
+             "sentence-transformers/all-MiniLM-L6-v2"),
+            ("bge-small-en-v1.5 - better retrieval, same size (~70 MB)",
+             "BAAI/bge-small-en-v1.5"),
+            ("bge-base-en-v1.5 - strongest of the small models (~210 MB)",
+             "BAAI/bge-base-en-v1.5"),
+            ("arctic-embed-s - Snowflake small retriever (~130 MB)",
+             "snowflake/snowflake-arctic-embed-s"),
+            ("jina-v2-small-en - long-context small (~120 MB)",
+             "jinaai/jina-embeddings-v2-small-en"),
+            ("Custom fastembed model...", "__custom__"),
+        ]:
+            self.memory_model_combo.addItem(lbl, val)
+        _model_row.addWidget(self.memory_model_combo, stretch=1)
+        mg_lay.addWidget(_model_roww)
+        self._memory_model_row = _model_roww
+
+        _mcustom_roww = QWidget()
+        _mcustom_row = QHBoxLayout(_mcustom_roww)
+        _mcustom_row.setContentsMargins(0, 0, 0, 0)
+        _mcustom_row.addWidget(_label("Custom model name:"))
+        self.memory_model_custom_input = QLineEdit()
+        self.memory_model_custom_input.setPlaceholderText("e.g. mixedbread-ai/mxbai-embed-large-v1")
+        self.memory_model_custom_input.setStyleSheet(_INPUT)
+        _mcustom_row.addWidget(self.memory_model_custom_input, stretch=1)
+        mg_lay.addWidget(_mcustom_roww)
+        self._memory_model_custom_row = _mcustom_roww
+
+        self._memory_model_info = _info_box(
+            "Model names come from fastembed's supported list — see\n"
+            "https://qdrant.github.io/fastembed/examples/Supported_Models/\n"
+            "or run  TextEmbedding.list_supported_models()  in Python.\n"
+            "Changes take effect on the next app start: a not-yet-downloaded "
+            "model is fetched in the background after startup, then memories "
+            "re-embed automatically; a broken download falls back to the "
+            "default model.")
+        mg_lay.addWidget(self._memory_model_info)
+
+        self._memory_model_restart_note = _label(
+            "Model change takes effect after an app restart.", muted=True)
+        mg_lay.addWidget(self._memory_model_restart_note)
+        self._memory_model_restart_note.setVisible(False)
+        self.memory_model_custom_input.textChanged.connect(
+            lambda _=None: self._update_memory_rows_visibility())
+
+        self.memory_enabled_checkbox.toggled.connect(
+            lambda _=None: self._update_memory_rows_visibility())
+        self.memory_recall_mode_combo.currentIndexChanged.connect(
+            lambda _=None: self._update_memory_rows_visibility())
+        self.memory_model_combo.currentIndexChanged.connect(
+            lambda _=None: self._update_memory_rows_visibility())
 
         open_mem_btn = QPushButton("Open Memory Manager")
         open_mem_btn.setStyleSheet(f"""
@@ -1715,22 +1809,27 @@ class SettingsWindow(BaseWindow):
             "words act on it: deny words reject instantly; approve words must be the "
             "whole utterance. Approving code with danger findings asks you to say "
             "\"confirm\" first."))
+        # Sub-options wrapped so they can be HIDDEN while voice approval is off.
+        self.va_opts_widget = QWidget()
+        vao_lay = QVBoxLayout(self.va_opts_widget)
+        vao_lay.setContentsMargins(0, 0, 0, 0)
         self.voice_approval_mode_combo = QComboBox()
         self.voice_approval_mode_combo.addItem(
             "Basic - command words only", "basic")
         self.voice_approval_mode_combo.addItem(
             "Advanced - other speech goes to the Code Reviewer", "advanced")
         self.voice_approval_mode_combo.setStyleSheet(_COMBO)
-        va_lay.addWidget(_label("Mode:"))
-        va_lay.addWidget(self.voice_approval_mode_combo)
+        vao_lay.addWidget(_label("Mode:"))
+        vao_lay.addWidget(self.voice_approval_mode_combo)
         self.voice_approval_confirm_checkbox = QCheckBox(
             "Require a spoken \"confirm\" before executing code with danger findings")
         self.voice_approval_confirm_checkbox.setStyleSheet(_CHECK)
-        va_lay.addWidget(self.voice_approval_confirm_checkbox)
+        vao_lay.addWidget(self.voice_approval_confirm_checkbox)
         self.voice_approval_announce_checkbox = QCheckBox(
             "Announce the approval window by voice when it opens")
         self.voice_approval_announce_checkbox.setStyleSheet(_CHECK)
-        va_lay.addWidget(self.voice_approval_announce_checkbox)
+        vao_lay.addWidget(self.voice_approval_announce_checkbox)
+        va_lay.addWidget(self.va_opts_widget)
         self.approval_mini_checkbox = QCheckBox(
             "Compact approval notification when the chat window is closed")
         self.approval_mini_checkbox.setStyleSheet(_CHECK)
@@ -1741,7 +1840,11 @@ class SettingsWindow(BaseWindow):
             "Approve. Code with danger findings always requires expanding to review. "
             "Opening the chat window expands to the full approval automatically."))
 
-        va_lay.addWidget(_label("Custom command words:"))
+        # Custom-word editor wrapped for the same hide gating.
+        self.va_words_widget = QWidget()
+        vaw_lay = QVBoxLayout(self.va_words_widget)
+        vaw_lay.setContentsMargins(0, 0, 0, 0)
+        vaw_lay.addWidget(_label("Custom command words:"))
         from PyQt6.QtWidgets import QListWidget
         self.voice_approval_words_list = QListWidget()
         self.voice_approval_words_list.setStyleSheet(
@@ -1750,7 +1853,7 @@ class SettingsWindow(BaseWindow):
             f" font-size:10px; color:{_TEXT}; outline:none; }}"
             f"QListWidget::item {{ padding:2px 4px; }}")
         self.voice_approval_words_list.setMaximumHeight(96)
-        va_lay.addWidget(self.voice_approval_words_list)
+        vaw_lay.addWidget(self.voice_approval_words_list)
         _va_row = QHBoxLayout()
         self.voice_approval_word_input = QLineEdit()
         self.voice_approval_word_input.setPlaceholderText("Word or phrase")
@@ -1769,7 +1872,8 @@ class SettingsWindow(BaseWindow):
         _va_remove.setStyleSheet(_BTN)
         _va_remove.clicked.connect(self._remove_voice_approval_word)
         _va_row.addWidget(_va_remove)
-        va_lay.addLayout(_va_row)
+        vaw_lay.addLayout(_va_row)
+        va_lay.addWidget(self.va_words_widget)
         self.voice_approval_checkbox.toggled.connect(
             self._update_voice_approval_enabled)
         # 'Expand' is only meaningful while the compact card can appear.
@@ -1818,6 +1922,10 @@ class SettingsWindow(BaseWindow):
         self.system_prompt_hijack_input.setFixedHeight(120)
         self.system_prompt_hijack_input.setStyleSheet(_INPUT)
         sp_lay.addWidget(self.system_prompt_hijack_input)
+        # The prompt editor is useless while the hijack is off — hide it.
+        self.system_prompt_hijack_checkbox.toggled.connect(
+            self.system_prompt_hijack_input.setVisible)
+        self.system_prompt_hijack_input.setVisible(False)
         sys_lay.addWidget(sp_group)
 
         sp_extras_group = QGroupBox("Optional System Prompt Sections (Main AI Engine)")
@@ -1865,12 +1973,18 @@ class SettingsWindow(BaseWindow):
             "data/file_history/shadow — full change history beyond the last undo point.")
         fh_lay.addWidget(self.file_history_git_checkbox)
         prune_row = QHBoxLayout()
-        prune_row.addWidget(_label("Prune undo history after"))
+        # Prune label+combo wrapped so they HIDE while history is off; the
+        # "View file changes…" button stays — browsing past history is always valid.
+        self._fh_prune_widget = QWidget()
+        _fhp_lay = QHBoxLayout(self._fh_prune_widget)
+        _fhp_lay.setContentsMargins(0, 0, 0, 0)
+        _fhp_lay.addWidget(_label("Prune undo history after"))
         self.file_history_days_combo = QComboBox()
         for d in (7, 14, 30, 90):
             self.file_history_days_combo.addItem(f"{d} days", d)
         self.file_history_days_combo.setStyleSheet(_COMBO)
-        prune_row.addWidget(self.file_history_days_combo)
+        _fhp_lay.addWidget(self.file_history_days_combo)
+        prune_row.addWidget(self._fh_prune_widget)
         prune_row.addStretch()
         self.view_file_history_btn = QPushButton("View file changes…")
         self.view_file_history_btn.setStyleSheet(_BTN)
@@ -1880,8 +1994,8 @@ class SettingsWindow(BaseWindow):
 
         def _update_fh_enabled():
             on = self.file_history_checkbox.isChecked()
-            self.file_history_git_checkbox.setEnabled(on)
-            self.file_history_days_combo.setEnabled(on)
+            self.file_history_git_checkbox.setVisible(on)
+            self._fh_prune_widget.setVisible(on)
         self.file_history_checkbox.stateChanged.connect(lambda _s: _update_fh_enabled())
         self._update_fh_enabled = _update_fh_enabled
         sys_lay.addWidget(fh_group)
@@ -2123,12 +2237,14 @@ class SettingsWindow(BaseWindow):
         self.manual_group.setVisible(is_manual)
 
     def on_tts_provider_changed(self, index):
-        """Show Edge TTS voice dropdown only when Edge TTS is selected."""
+        """Show Edge TTS voice dropdown only when Edge TTS is selected; the
+        ElevenLabs speech-tag toggle only matters for custom TTS scripts."""
         provider_data = self.tts_provider_combo.currentData()
         if provider_data == 'edge-tts':
             self.edge_tts_group.show()
         else:
             self.edge_tts_group.hide()
+        self.elevenlabs_tags_checkbox.setVisible(provider_data != 'edge-tts')
 
     def _refresh_prefilling_sessions(self):
         """Populate the prefilling session combo with all saved sessions.
@@ -2181,9 +2297,36 @@ class SettingsWindow(BaseWindow):
         self.tts_provider_combo.blockSignals(False)
         self.on_tts_provider_changed(self.tts_provider_combo.currentIndex())
 
+    def _update_memory_rows_visibility(self):
+        """Show only the memory rows that matter right now: nothing while memory
+        is disabled; threshold+max in RAG mode; the inject cap in inject_all;
+        the custom-model input only when 'Custom' is picked."""
+        enabled = self.memory_enabled_checkbox.isChecked()
+        is_rag = self.memory_recall_mode_combo.currentData() == 'rag'
+        self._memory_recall_mode_row.setVisible(enabled)
+        self._memory_threshold_row.setVisible(enabled and is_rag)
+        self._memory_max_row.setVisible(enabled and is_rag)
+        self._memory_cap_row.setVisible(enabled and not is_rag)
+        self._memory_model_row.setVisible(enabled)
+        self._memory_model_custom_row.setVisible(
+            enabled and self.memory_model_combo.currentData() == '__custom__')
+        self._memory_model_info.setVisible(enabled)
+        # Restart note — only when the selection differs from the LIVE model.
+        live = ''
+        try:
+            mm = getattr(self.controller, 'memory_manager', None)
+            live = mm.model_name if (mm and mm.is_ready) else ''
+        except Exception:
+            live = ''
+        sel = self.memory_model_combo.currentData()
+        if sel == '__custom__':
+            sel = self.memory_model_custom_input.text().strip()
+        self._memory_model_restart_note.setVisible(
+            bool(enabled and live and sel and sel != live))
+
     def _update_bargein_combo_enabled(self):
-        """Barge-in sensitivity only applies to automatic interruption."""
-        self.bargein_sensitivity_combo.setEnabled(
+        """Barge-in sensitivity only matters in Automatic mode — hide it otherwise."""
+        self.bargein_widget.setVisible(
             self.interrupt_mode_combo.currentData() == 'auto')
 
     # ── Voice mode approval helpers ──────────────────────────────────────────
@@ -2197,14 +2340,10 @@ class SettingsWindow(BaseWindow):
             log.error(f"[SettingsWindow._open_file_history] {e}")
 
     def _update_voice_approval_enabled(self):
+        """Voice-approval sub-options are useless while the feature is off — hide them."""
         on = self.voice_approval_checkbox.isChecked()
-        for w in (self.voice_approval_mode_combo,
-                  self.voice_approval_confirm_checkbox,
-                  self.voice_approval_announce_checkbox,
-                  self.voice_approval_words_list,
-                  self.voice_approval_word_input,
-                  self.voice_approval_word_action):
-            w.setEnabled(on)
+        self.va_opts_widget.setVisible(on)
+        self.va_words_widget.setVisible(on)
 
     def _update_voice_approval_expand_action(self):
         """The 'Expand' custom-word action only exists while the compact
@@ -2730,7 +2869,7 @@ class SettingsWindow(BaseWindow):
             if self.memory_threshold_combo.itemData(i) == threshold:
                 self.memory_threshold_combo.setCurrentIndex(i)
                 break
-        max_results = self.controller.settings.get('memory_max_results', 5)
+        max_results = self.controller.settings.get('memory_max_results', 3)
         for i in range(self.memory_max_combo.count()):
             if self.memory_max_combo.itemData(i) == max_results:
                 self.memory_max_combo.setCurrentIndex(i)
@@ -2740,6 +2879,22 @@ class SettingsWindow(BaseWindow):
             if self.memory_recall_mode_combo.itemData(i) == recall_mode:
                 self.memory_recall_mode_combo.setCurrentIndex(i)
                 break
+        cap_tokens = self.controller.settings.get('memory_inject_cap_tokens', 2000)
+        for i in range(self.memory_cap_combo.count()):
+            if self.memory_cap_combo.itemData(i) == cap_tokens:
+                self.memory_cap_combo.setCurrentIndex(i)
+                break
+        embed_model = self.controller.settings.get(
+            'memory_embed_model', 'sentence-transformers/all-MiniLM-L6-v2')
+        _mi = self.memory_model_combo.findData(embed_model)
+        if _mi >= 0:
+            self.memory_model_combo.setCurrentIndex(_mi)
+            self.memory_model_custom_input.setText("")
+        else:
+            self.memory_model_combo.setCurrentIndex(
+                self.memory_model_combo.findData('__custom__'))
+            self.memory_model_custom_input.setText(embed_model)
+        self._update_memory_rows_visibility()
 
         # Load selected theme
         saved_theme = self.controller.settings.get('chat_theme', 'obsidian_blue')
@@ -3259,6 +3414,14 @@ class SettingsWindow(BaseWindow):
         s['memory_recall_mode'] = self.memory_recall_mode_combo.currentData()
         s['memory_threshold'] = self.memory_threshold_combo.currentData()
         s['memory_max_results'] = self.memory_max_combo.currentData()
+        s['memory_inject_cap_tokens'] = self.memory_cap_combo.currentData()
+        _mm_sel = self.memory_model_combo.currentData()
+        if _mm_sel == '__custom__':
+            _mm_custom = self.memory_model_custom_input.text().strip()
+            s['memory_embed_model'] = _mm_custom or s.get(
+                'memory_embed_model', 'sentence-transformers/all-MiniLM-L6-v2')
+        else:
+            s['memory_embed_model'] = _mm_sel
 
         # Theme / bubble / typing reveal (the broadcast is change-gated in
         # _on_settings_saved so an unrelated save never restyles everything).
@@ -3407,6 +3570,15 @@ class SettingsWindow(BaseWindow):
                 except Exception:
                     pass
             q.append(('glass_background', _apply_glass))
+
+        # Memory settings — re-inject (or strip) the system-prompt memory block.
+        # Cheap no-op when the assembled block is unchanged.
+        mem_keys = ('memory_enabled', 'memory_recall_mode', 'memory_inject_cap_tokens')
+        if any(snap.get(k) != s.get(k) for k in mem_keys):
+            q.append(('memory_settings', lambda: c.refresh_memory_block()))
+
+        # (memory_embed_model has NO live side effect by design — it applies on
+        #  the next app start; the Memory tab shows a restart note instead.)
 
         return q
 

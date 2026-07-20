@@ -1083,17 +1083,20 @@ class EventCardsMixin:
 
     def add_memory_context_widget(self, context_id: str, memories: list,
                                    save_to_history: bool = True):
-        """Render a memory-context card with a Detach button.
+        """Render a recalled-memories card embedded in the AI turn group.
 
-        Visually distinct from code execution notes — uses a brain icon and
-        amber/gold accent so users know it's memory, not code.
-        When Detach is clicked the widget animates out AND the corresponding
-        ui_event is removed from conversation_history via the controller.
+        Flat-row layout: a collapsed header line (count + first title) that
+        expands to one row per memory — bold title, short body preview and a
+        muted meta line (date · tags · similarity). When Detach is clicked the
+        widget animates out AND the corresponding ui_event is removed from
+        conversation_history via the controller.
 
         Parameters
         ----------
         context_id  : short UUID-derived string stored on the ui_event
-        memories    : list of raw memory strings shown in the card
+        memories    : list of dicts {text, created_at, similarity}; plain
+                      strings (old sessions) are accepted and rendered
+                      without date/score metadata
         save_to_history : False when replaying from a loaded session (entry
                           already exists in conversation_history)
         """
@@ -1102,89 +1105,125 @@ class EventCardsMixin:
 
         from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QVBoxLayout,
                                      QPushButton, QLabel)
+        from datetime import datetime as _dt
 
-        _tc = self._t()
+        MUTED, DIM, CTX = "#8B949E", "#5F6368", "#C9D1D9"   # shared card grays
 
-        # Follow the active theme
-        _mem_accent = _tc['accent']
-        _mem_bg = _tc['elevated']
-        _mem_border = _tc['border']
+        def _parse_mem(m):
+            """Normalize one memory (dict or legacy string) into display parts."""
+            if isinstance(m, dict):
+                text = str(m.get('text', ''))
+                created = m.get('created_at') or ''
+                sim = m.get('similarity') or 0.0
+            else:
+                text, created, sim = str(m), '', 0.0
+            lines = text.split('\n')
+            title = lines[0].strip() if lines and lines[0].strip() else '(untitled)'
+            tags = ''
+            body_parts = []
+            for ln in lines[1:]:
+                s = ln.strip()
+                if s.lower().startswith('tags:'):
+                    tags = s[5:].strip()
+                elif s:
+                    body_parts.append(s)
+            body = ' '.join(body_parts)
+            date = ''
+            if created:
+                try:
+                    date = _dt.fromisoformat(created).strftime('%Y-%m-%d')
+                except Exception:
+                    date = ''
+            try:
+                sim = float(sim)
+            except (TypeError, ValueError):
+                sim = 0.0
+            return {'title': title, 'body': body, 'tags': tags,
+                    'date': date, 'sim': sim}
+
+        mems = [_parse_mem(m) for m in (memories or [])]
 
         # ── Outer wrapper ──────────────────────────────────────────────────
         message_widget = QFrame()
         message_widget.setStyleSheet(
-            "QFrame { background-color: transparent; padding: 4px 16px; }")
+            "QFrame { background-color: transparent; padding: 0px; }")
         outer_lay = QVBoxLayout(message_widget)
         outer_lay.setContentsMargins(0, 0, 0, 0)
         outer_lay.setSpacing(0)
 
-        # ── Header row (always visible) ────────────────────────────────────
+        # ── Header — BORDERLESS faint line (matches code-exec/file-op cards):
+        #    blends into the turn shell until expanded; the whole line toggles ─
         header = QFrame()
-        header.setStyleSheet(f"""
-                    QFrame {{
-                        background-color: {_mem_bg};
-                        border: 1px solid {_mem_border};
-                        border-radius: 8px;
-                    }}
-                """)
+        header.setObjectName("memHeader")
+        header.setCursor(Qt.CursorShape.PointingHandCursor)
+        header.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
         header_lay = QHBoxLayout(header)
-        header_lay.setContentsMargins(12, 6, 10, 6)
-        header_lay.setSpacing(8)
+        header_lay.setContentsMargins(4, 2, 6, 2)
+        header_lay.setSpacing(6)
 
         icon_lbl = QLabel("◈")   # monochrome glyph (no-emoji rule); styled by _restyle
         header_lay.addWidget(icon_lbl)
 
-        # Preview: first memory title, trimmed
-        preview_text = memories[0][:72] + ("…" if memories and len(memories[0]) > 72 else "") \
-            if memories else "Memory recalled"
-        count_label = f" +{len(memories) - 1} more" if len(memories) > 1 else ""
+        _first_title = mems[0]['title'] if mems else "Memory recalled"
+        preview_text = _first_title[:64] + ("…" if len(_first_title) > 64 else "")
 
         summary_lbl = QLabel()    # text + sizes set by _restyle (zoom-aware)
         summary_lbl.setTextFormat(Qt.TextFormat.RichText)
         summary_lbl.setStyleSheet("background: transparent; border: none;")
         header_lay.addWidget(summary_lbl, stretch=1)
 
-        # ── Show / Hide toggle ─────────────────────────────────────────────
-        toggle_btn = QPushButton("▶ Show")           # styled by _restyle
-        toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        header_lay.addWidget(toggle_btn)
-
-        # ── Detach button ──────────────────────────────────────────────────
-        detach_btn = QPushButton("⊗ Detach")         # styled by _restyle
+        # ── Detach — small flat glyph; the button consumes its own clicks so
+        #    detaching never fires the header's expand toggle ────────────────
+        detach_btn = QPushButton("⊗")                # styled by _restyle
         detach_btn.setToolTip(
             "Remove this memory from the conversation context.\n"
             "The AI will no longer see it in this session.")
         detach_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         header_lay.addWidget(detach_btn)
 
-        outer_lay.addWidget(header)
+        toggle_lbl = QLabel("▶")                     # styled by _restyle
+        header_lay.addWidget(toggle_lbl)
 
-        # ── Expandable memory list ─────────────────────────────────────────
+        # AlignLeft + Maximum policy = hug-to-content like the code-exec rows.
+        outer_lay.addWidget(header, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        # ── Expandable flat-row list ───────────────────────────────────────
         detail = QFrame()
-        detail.setStyleSheet("background: transparent; border: none;")
+        detail.setObjectName("memDetail")
         detail.hide()
         detail_lay = QVBoxLayout(detail)
-        detail_lay.setContentsMargins(4, 4, 4, 0)
-        detail_lay.setSpacing(4)
+        detail_lay.setContentsMargins(12, 8, 12, 8)
+        detail_lay.setSpacing(6)
 
-        _row_lbls = []
-        for mem_text in memories:
-            row = QFrame()
-            row.setStyleSheet(f"""
-                QFrame {{
-                    background: {_mem_bg};
-                    border: 1px solid {_mem_accent}33;
-                    border-radius: 6px;
-                    padding: 0px;
-                }}
-            """)
-            row_lay = QHBoxLayout(row)
-            row_lay.setContentsMargins(10, 6, 10, 6)
-            lbl = QLabel(mem_text)
-            lbl.setWordWrap(True)
-            _row_lbls.append(lbl)    # styled by _restyle (zoom-aware)
-            row_lay.addWidget(lbl)
-            detail_lay.addWidget(row)
+        _titles, _bodies, _metas, _seps = [], [], [], []
+        for i, pm in enumerate(mems):
+            if i:
+                sep = QFrame()
+                sep.setFixedHeight(1)
+                _seps.append(sep)
+                detail_lay.addWidget(sep)
+            t_lbl = QLabel(pm['title'])
+            t_lbl.setWordWrap(True)
+            _titles.append(t_lbl)
+            detail_lay.addWidget(t_lbl)
+            if pm['body']:
+                b_prev = pm['body'][:220] + ("…" if len(pm['body']) > 220 else "")
+                b_lbl = QLabel(b_prev)
+                b_lbl.setWordWrap(True)
+                _bodies.append(b_lbl)
+                detail_lay.addWidget(b_lbl)
+            meta_bits = []
+            if pm['date']:
+                meta_bits.append(pm['date'])
+            if pm['tags']:
+                meta_bits.append(f"tags: {pm['tags']}")
+            if pm['sim'] > 0:
+                meta_bits.append(f"sim: {pm['sim']:.2f}")
+            if meta_bits:
+                m_lbl = QLabel("  ·  ".join(meta_bits))
+                m_lbl.setWordWrap(True)
+                _metas.append(m_lbl)
+                detail_lay.addWidget(m_lbl)
 
         outer_lay.addWidget(detail)
 
@@ -1196,55 +1235,60 @@ class EventCardsMixin:
             t = self._t()
             k = self._get_msg_font_size() / 13.0
             accent = t['accent']
-            header.setStyleSheet(f"""
-                    QFrame {{
-                        background-color: {t['elevated']};
-                        border: 1px solid {t['border']};
-                        border-radius: 8px;
-                    }}
+            # objectName-scoped rules: an unscoped "QFrame {...}" here would
+            # cascade into the separator QFrames inside the detail pane.
+            header.setStyleSheet("""
+                    QFrame#memHeader { background: transparent; border: none; border-radius: 6px; }
+                    QFrame#memHeader:hover { background: rgba(255,255,255,0.05); }
                 """)
             icon_lbl.setStyleSheet(
-                f"font-size: {z(13)}px; color: {accent}; "
+                f"font-size: {z(12)}px; color: #6E7681; font-weight: 700; "
                 f"background: transparent; border: none;")
-            icon_lbl.setFixedWidth(max(18, round(18 * k)))
+            icon_lbl.setFixedWidth(max(14, round(14 * k)))
+            count_word = "memory" if len(mems) == 1 else "memories"
             summary_lbl.setText(
-                f"<span style='color:{accent};font-size:{z(11)}px;font-weight:600;'>"
-                f"Memory recalled</span>"
-                f"&nbsp;&nbsp;<span style='color:#5F6368;'>·</span>&nbsp;&nbsp;"
-                f"<span style='font-size:{z(10)}px;color:#8B949E;'>{preview_text}</span>"
-                f"<span style='font-size:{z(10)}px;color:{accent};'>{count_label}</span>")
-            toggle_btn.setFixedSize(max(58, round(58 * k)), max(20, round(20 * k)))
-            toggle_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: transparent; border: 1px solid {t['border']};
-                    border-radius: 4px; font-size: {z(10)}px; color: #8B949E; padding: 0 6px;
-                }}
-                QPushButton:hover {{ color: {accent}; border-color: {accent}; }}
-            """)
-            detach_btn.setFixedSize(max(62, round(62 * k)), max(20, round(20 * k)))
+                f"<span style='color:#9AA0A6;font-size:{z(11)}px;'>"
+                f"{len(mems)} {count_word} recalled</span>"
+                f"&nbsp;&nbsp;<span style='color:{DIM};font-size:{z(10)}px;'>{preview_text}</span>")
+            detach_btn.setFixedSize(max(18, round(18 * k)), max(18, round(18 * k)))
             detach_btn.setStyleSheet(f"""
                 QPushButton {{
-                    background: transparent; border: 1px solid #6B3030;
-                    border-radius: 4px; font-size: {z(10)}px; color: #8B6060; padding: 0 6px;
+                    background: transparent; border: none;
+                    font-size: {z(11)}px; color: {DIM}; padding: 0;
                 }}
-                QPushButton:hover {{ color: #E06060; border-color: #E06060; }}
+                QPushButton:hover {{ color: #E06060; }}
             """)
-            for _rl in _row_lbls:
-                _rl.setStyleSheet(
-                    f"font-size: {z(11)}px; color: {t['accent']}; "
+            toggle_lbl.setStyleSheet(
+                f"background: transparent; border: none; font-size: {z(8)}px; color: {DIM};")
+            detail.setStyleSheet(f"""
+                QFrame#memDetail {{
+                    background: {t['base']}; border: 1px solid {t['border']};
+                    border-radius: 8px; margin-top: 4px;
+                }}
+            """)
+            for sep in _seps:
+                sep.setStyleSheet(f"background: {t['border']}; border: none;")
+            for lbl in _titles:
+                lbl.setStyleSheet(
+                    f"font-size: {z(11)}px; font-weight: 600; color: {accent}; "
+                    f"background: transparent; border: none;")
+            for lbl in _bodies:
+                lbl.setStyleSheet(
+                    f"font-size: {z(10)}px; color: {CTX}; "
+                    f"background: transparent; border: none;")
+            for lbl in _metas:
+                lbl.setStyleSheet(
+                    f"font-size: {z(9)}px; color: {MUTED}; "
                     f"background: transparent; border: none;")
         _restyle()
 
-        # ── Toggle logic ───────────────────────────────────────────────────
+        # ── Toggle logic — whole header line toggles, like the file-op card ─
         def _toggle():
-            if detail.isHidden():
-                detail.show()
-                toggle_btn.setText("▼ Hide")
-            else:
-                detail.hide()
-                toggle_btn.setText("▶ Show")
+            showing = detail.isVisible()
+            detail.setVisible(not showing)
+            toggle_lbl.setText("▶" if showing else "▼")
 
-        toggle_btn.clicked.connect(_toggle)
+        header.mousePressEvent = lambda e: _toggle()
 
         # ── Detach logic ───────────────────────────────────────────────────
         def _detach(_cid=context_id, _w=message_widget):
@@ -1256,13 +1300,19 @@ class EventCardsMixin:
             self.message_widgets[:] = [
                 mw for mw in self.message_widgets if mw.get('widget') is not _w
             ]
-            # Animate out and destroy
-            self._animate_message_out(_w, callback=_w.deleteLater)
+            # Animate out, then destroy via the shared path so an empty turn
+            # shell (avatar husk) gets pruned too.
+            self._animate_message_out(
+                _w, callback=lambda: self._detach_chat_widget(_w))
 
         detach_btn.clicked.connect(lambda: _detach())
 
-        # ── Insert before the trailing spacer ─────────────────────────────
-        self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
+        # Cap to the responsive bubble width so the card shrinks with the window.
+        header.setMaximumWidth(self._bubble_max_width())
+        detail.setMaximumWidth(self._bubble_max_width())
+
+        # Memory cards belong to the AI's turn — stack inside the shared shell.
+        g = self._insert_turn_segment(message_widget)
         self._animate_message_in(
             message_widget,
             on_settled=lambda: self.scroll_to_widget(message_widget))
@@ -1273,14 +1323,14 @@ class EventCardsMixin:
             'role': 'memory_context',
             'context_id': context_id,
             'content_wrapper': header,
-            '_toggle_btn': toggle_btn,
+            'group_row': g['row'],
+            '_toggle_btn': toggle_lbl,
             'zoom_restyle': _restyle,
         })
 
         # ── Persist to history (only on first insertion, not on reload) ────
         if save_to_history:
             try:
-                import uuid as _uuid
                 self.controller.ai.conversation_history.append({
                     'role': 'ui_event',
                     '_type': 'memory_context',

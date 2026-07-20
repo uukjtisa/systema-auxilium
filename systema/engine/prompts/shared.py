@@ -88,47 +88,43 @@ def memory_section(invoke_hint: str) -> str:
     return f"""
 MEMORY — PERSISTENT ACROSS SESSIONS
 
-Five functions are available inside python_interpreter for managing memory:
+Four functions are available inside python_interpreter for managing memory:
 
-  memorize(title, body, tags="")          -> Save a memory permanently
-  search_memory(query)                    -> Search memories by topic
-                                            Optional: threshold (float), max_results (int)
-  view_all_memory(titles_only=False)      -> List memories (use titles_only=True to avoid context bloat)
-  forget_memory(search_text)              -> Delete ALL memories whose text contains search_text
-  delete_memory(title)                    -> Delete exactly ONE memory by its exact title
+  memorize(title, body, tags="")   -> Save a memory permanently
+  search_memory(query="")          -> Semantic search by topic;
+                                      empty/no query lists ALL memory titles
+  update_memory(title, new_title=None, new_body=None, new_tags=None)
+                                   -> Edit ONE memory found by title;
+                                      unspecified parts are preserved
+  forget_memory(identifier)        -> Exact title match deletes that ONE
+                                      memory; otherwise bulk-deletes every
+                                      memory whose text contains identifier
 
 MEMORY STRUCTURE:
-  title  — Required. Concise, descriptive, unique. One line. (e.g. "User prefers dark mode")
-  body   — Required. 1-5 sentences, max one paragraph, enough context to be useful later.
-  tags   — Optional but recommended. Comma-separated keywords a future query might contain.
+  title  — Required. Concise, descriptive, unique. One line.
+  body   — Required. 1-5 sentences, enough context to be useful later.
+  tags   — Optional but recommended. Comma-separated keywords a future
+           query might contain.
 
 Example usage — {invoke_hint}
     result = memorize(
         title="User prefers concise responses",
-        body="The user explicitly stated they dislike long explanations and prefer short, direct answers. Apply this to all responses.", #NO NEW LINES
-        tags="preferences, communication style, response format"
+        body="The user dislikes long explanations and prefers short, direct answers.", #NO NEW LINES
+        tags="preferences, communication style"
     )
     print(result)
 
-When to memorize (proactively, one fact per call — never bundle):
-  - User preferences, habits, working style, milestones, key personal facts
-  - Software/hardware details that affect how you help
-  - Anything the user explicitly asks you to remember
-  - NEVER passwords or credentials unless the user explicitly asks
-  - Skip session-specific or temporary info; search_memory() first if unsure
-    whether it is already stored
-
-When to delete/forget:
-  - "forget about X" / "delete that memory" -> search first, then delete
-  - forget_memory(word) bulk-removes matching entries; delete_memory(title)
-    removes exactly one — prefer it when you know the exact title
-  - Always search_memory() or view_all_memory(titles_only=True) first to
-    confirm what you are deleting
-
-If the user asks a memory question ("do you remember X?", "what do you know
-about me?"): take initiative — run search_memory() or
-view_all_memory(titles_only=True) in python_interpreter and report what you
-found. NEVER mention any of this during unrelated conversation.
+Guidelines:
+  - Memorize proactively, one fact per call: preferences, habits, milestones,
+    software/hardware details, anything the user asks you to remember.
+    NEVER passwords or credentials unless the user explicitly asks.
+  - search_memory() first if unsure whether a fact is already stored; use
+    update_memory() to revise a fact instead of storing a duplicate.
+  - Before deleting, confirm with search_memory(); pass the exact title to
+    forget_memory to remove a single memory.
+  - Memory questions ("do you remember X?", "what do you know about me?"):
+    take initiative — run search_memory() and report what you found.
+    NEVER mention any of this during unrelated conversation.
 """
 
 

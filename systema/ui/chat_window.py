@@ -1246,7 +1246,23 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
             self.clear_chat_silent()
             tm = self.controller.ai.tool_manager
             history = self.controller.ai.conversation_history
-            for msg in history:
+
+            # Pre-2026-07-20 sessions stored the memory ui_event BEFORE its user
+            # message; rendered in place, the recall card lands in the PREVIOUS
+            # turn's bubble. Defer those cards and flush them right after the
+            # user message so they open the following AI turn, like live.
+            _deferred_mem = []
+
+            def _flush_deferred_mem():
+                for _m in _deferred_mem:
+                    self.add_memory_context_widget(
+                        context_id=_m.get("_memory_context_id", ""),
+                        memories=_m.get("_memories_preview", []),
+                        save_to_history=False,
+                    )
+                _deferred_mem.clear()
+
+            for _i, msg in enumerate(history):
                 role = msg.get("role", "")
                 raw = msg.get("content", "")
                 if isinstance(raw, list):
@@ -1264,6 +1280,9 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
                         if not _ctx_id or not isinstance(_ctx_id, str):
                             log.warning(
                                 f"[ChatWindow.render_loaded_messages] Skipping memory_context with invalid id: {_ctx_id!r}")
+                        elif (_i + 1 < len(history)
+                                and history[_i + 1].get("role") == "user"):
+                            _deferred_mem.append(msg)   # old ordering — defer
                         else:
                             self.add_memory_context_widget(
                                 context_id=_ctx_id,
@@ -1285,8 +1304,10 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
                 elif content:
                     if role == "user":
                         self.add_user_message(content)
+                        _flush_deferred_mem()
                     elif role == "assistant":
                         self.add_ai_message(content)
+            _flush_deferred_mem()   # safety net: never drop a card
         except Exception as e:
             log.error(f"[ChatWindow.render_loaded_messages] render_loaded_messages error: {e}")
         finally:

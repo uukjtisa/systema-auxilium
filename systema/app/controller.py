@@ -743,7 +743,9 @@ class AssistantController(QObject):
             'memory_enabled': True,
             'memory_recall_mode': 'inject_all',  # 'inject_all' or 'rag'
             'memory_threshold': 0.4,  # float 0.0–1.0
-            'memory_max_results': 5,
+            'memory_max_results': 3,
+            'memory_inject_cap_tokens': 2000,  # hard cap for inject_all mode
+            'memory_embed_model': 'sentence-transformers/all-MiniLM-L6-v2',
             'glass_background_enabled': False,
             'glass_background_opacity': 0.75,
             'custom_script_path': '',
@@ -2629,9 +2631,8 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         ns['notify'] = self.notify
         ns['memorize'] = self.memorize
         ns['search_memory'] = self.search_memory
-        ns['view_all_memory'] = self.view_all_memory
+        ns['update_memory'] = self.update_memory
         ns['forget_memory'] = self.forget_memory
-        ns['delete_memory'] = self.delete_memory
         ns['app_root'] = str(_APP_ROOT)
         ns['skills_path'] = str(_APP_ROOT / "skills")
 
@@ -2649,6 +2650,22 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             self.ai.refresh_memory_block()
 
     # ── Memory namespace helpers ──────────────────────────────────────────────
+
+    @staticmethod
+    def _split_memory_blob(text: str):
+        """Split a stored memory blob into (title, body, tags).
+        Blob format: title line, body paragraphs, optional trailing 'Tags: ...'."""
+        lines = text.split('\n')
+        title = lines[0].strip()
+        rest = lines[1:]
+        while rest and not rest[-1].strip():
+            rest = rest[:-1]
+        tags = ""
+        if rest and rest[-1].strip().lower().startswith("tags:"):
+            tags = rest[-1].strip()[5:].strip()
+            rest = rest[:-1]
+        body = "\n".join(rest).strip()
+        return title, body, tags
 
     def memorize(self, title: str, body: str, tags: str = "") -> str:
         """Store a structured memory. Call from python_interpreter:
@@ -2673,10 +2690,22 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             return f"[memorize] ✓ Stored: \"{title}\""
         return "[memorize] ✗ Failed to store memory."
 
-    def search_memory(self, query: str, threshold: float = 0.4, max_results: int = 5) -> str:
-        """Search memories by query. Call from python_interpreter: search_memory('query')"""
+    def search_memory(self, query: str = "", threshold: float = 0.4, max_results: int = 3) -> str:
+        """Search memories by topic. Empty query lists ALL memory titles.
+           Call from python_interpreter: search_memory('query') or search_memory()"""
         if not self.memory_manager or not self.memory_manager.is_ready:
             return "[search_memory] Memory manager not ready."
+        query = str(query).strip()
+        if not query:
+            memories = self.memory_manager.get_all()
+            if not memories:
+                return "[search_memory] No memories stored yet."
+            lines = [f"[search_memory] All {len(memories)} memory title(s):"]
+            for i, m in enumerate(memories, 1):
+                title = m['text'].split('\n')[0].strip()
+                edited = " [edited]" if m.get('edited') else ""
+                lines.append(f"  {i}. {title}{edited}")
+            return "\n".join(lines)
         results = self.memory_manager.recall(query, threshold=threshold, max_results=max_results)
         if not results:
             return f"[search_memory] No memories found for query: \"{query}\""
@@ -2685,67 +2714,79 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             lines.append(f"  {i}. (score={m['similarity']}) {m['text']}")
         return "\n".join(lines)
 
-    def view_all_memory(self, titles_only: bool = False) -> str:
-        """List all stored memories. Call from python_interpreter:
-           view_all_memory()              → full entries
-           view_all_memory(titles_only=True) → titles only (lighter)"""
+    def update_memory(self, title: str, new_title: str = None, new_body: str = None,
+                      new_tags: str = None) -> str:
+        """Update ONE memory found by its title (case-insensitive substring).
+        Unspecified parts are preserved; new_tags="" clears the tags.
+        Ambiguous matches change nothing and return the candidate titles.
+        Call from python_interpreter: update_memory('Old title', new_body='...')"""
         if not self.memory_manager or not self.memory_manager.is_ready:
-            return "[view_all_memory] Memory manager not ready."
-        memories = self.memory_manager.get_all()
-        if not memories:
-            return "[view_all_memory] No memories stored yet."
-        mode = "titles only" if titles_only else "full"
-        lines = [f"[view_all_memory] {len(memories)} memory/memories ({mode}):"]
-        for i, m in enumerate(memories, 1):
-            edited = " [edited]" if m.get('edited') else ""
-            if titles_only:
-                title = m['text'].split('\n')[0]
-                lines.append(f"  {i}. {title}{edited}")
-            else:
-                lines.append(f"  {i}. {m['text']}{edited}")
-        return "\n".join(lines)
-
-    def forget_memory(self, search_text: str) -> str:
-        """Delete ALL memories whose text contains search_text.
-        Call from python_interpreter: forget_memory('text to find')"""
-        if not self.memory_manager or not self.memory_manager.is_ready:
-            return "[forget_memory] Memory manager not ready."
-        search_text = str(search_text).strip()
-        if not search_text:
-            return "[forget_memory] search_text is required."
-        all_memories = self.memory_manager.get_all()
-        matches = [m for m in all_memories if search_text.lower() in m['text'].lower()]
-        if not matches:
-            return f"[forget_memory] No memories found matching '{search_text}'"
-        deleted = 0
-        for m in matches:
-            self.memory_manager.delete(m['id'])
-            deleted += 1
-        self.refresh_memory_block()
-        log.info(f"[AssistantController.forget_memory] ✓ Deleted {deleted} memory/memories matching '{search_text}'")
-        return f"[forget_memory] ✓ Deleted {deleted} memory/memories matching '{search_text}'"
-
-    def delete_memory(self, title: str) -> str:
-        """Delete exactly ONE memory by its exact title.
-        Call from python_interpreter: delete_memory('Exact Title')"""
-        if not self.memory_manager or not self.memory_manager.is_ready:
-            return "[delete_memory] Memory manager not ready."
+            return "[update_memory] Memory manager not ready."
         title = str(title).strip()
         if not title:
-            return "[delete_memory] title is required."
+            return "[update_memory] title is required."
+        if new_title is None and new_body is None and new_tags is None:
+            return "[update_memory] Nothing to change — pass new_title, new_body and/or new_tags."
         all_memories = self.memory_manager.get_all()
-        match = None
+        matches = [m for m in all_memories
+                   if title.lower() in m['text'].split('\n')[0].strip().lower()]
+        if not matches:
+            return f"[update_memory] No memory found with title matching '{title}'"
+        if len(matches) > 1:
+            lines = [f"[update_memory] Ambiguous — {len(matches)} titles match "
+                     f"'{title}'; nothing changed:"]
+            for m in matches:
+                t = m['text'].split('\n')[0].strip()
+                lines.append(f"  - {t}")
+            lines.append("Call again with a more specific title.")
+            return "\n".join(lines)
+        target = matches[0]
+        old_title, old_body, old_tags = self._split_memory_blob(target['text'])
+        final_title = str(new_title).strip() if new_title is not None and str(new_title).strip() else old_title
+        final_body = str(new_body).strip() if new_body is not None and str(new_body).strip() else old_body
+        final_tags = str(new_tags).strip() if new_tags is not None else old_tags
+        parts = [final_title, final_body] if final_body else [final_title]
+        if final_tags:
+            parts.append(f"Tags: {final_tags}")
+        success = self.memory_manager.update(target['id'], "\n\n".join(parts))
+        if success:
+            self.refresh_memory_block()
+            log.info(f"[AssistantController.update_memory] ✓ Updated: '{final_title}'")
+            return f"[update_memory] ✓ Updated: \"{final_title}\""
+        return "[update_memory] ✗ Failed to update memory."
+
+    def forget_memory(self, identifier: str) -> str:
+        """Delete memory. An exact title match (case-insensitive) deletes that
+        ONE memory; otherwise EVERY memory whose text contains identifier is
+        deleted. Call from python_interpreter: forget_memory('title or text')"""
+        if not self.memory_manager or not self.memory_manager.is_ready:
+            return "[forget_memory] Memory manager not ready."
+        identifier = str(identifier).strip()
+        if not identifier:
+            return "[forget_memory] identifier is required."
+        all_memories = self.memory_manager.get_all()
+        # Strategy 1 — exact full-title match: delete exactly one
         for m in all_memories:
             stored_title = m['text'].split('\n')[0].strip()
-            if title.lower() in stored_title.lower():
-                match = m
-                break
-        if not match:
-            return f"[delete_memory] No memory found with title '{title}'"
-        self.memory_manager.delete(match['id'])
+            if stored_title.lower() == identifier.lower():
+                self.memory_manager.delete(m['id'])
+                self.refresh_memory_block()
+                log.info(f"[AssistantController.forget_memory] ✓ Deleted by exact title: '{stored_title}'")
+                return f"[forget_memory] ✓ Deleted 1 memory by exact title: \"{stored_title}\""
+        # Strategy 2 — substring match on full text: bulk delete
+        matches = [m for m in all_memories if identifier.lower() in m['text'].lower()]
+        if not matches:
+            return f"[forget_memory] No memories found matching '{identifier}'"
+        deleted_titles = []
+        for m in matches:
+            self.memory_manager.delete(m['id'])
+            deleted_titles.append(m['text'].split('\n')[0].strip())
         self.refresh_memory_block()
-        log.info(f"[AssistantController.delete_memory] ✓ Deleted: '{title}'")
-        return f"[delete_memory] ✓ Deleted: \"{title}\""
+        log.info(f"[AssistantController.forget_memory] ✓ Bulk-deleted {len(deleted_titles)} "
+                 f"memory/memories matching '{identifier}'")
+        titles = "; ".join(f'"{t}"' for t in deleted_titles)
+        return (f"[forget_memory] ✓ Bulk-deleted {len(deleted_titles)} memory/memories "
+                f"matching '{identifier}': {titles}")
 
     def detach_memory_context(self, context_id: str):
         """Remove a memory context ui_event from history, save session, and sync Android."""

@@ -73,7 +73,13 @@ class AIEngine:
         )
         log.info("[AIEngine.__init__] ToolManager created and attached")
 
-        self.memory_manager = get_memory_manager()
+        _embed_model = None
+        if settings_callback:
+            try:
+                _embed_model = settings_callback().get('memory_embed_model')
+            except Exception:
+                _embed_model = None
+        self.memory_manager = get_memory_manager(_embed_model)
         self._pending_memory_context = ""
         self._pending_exec_violation_prompt = None
         log.info(f"[AIEngine.__init__] MemoryManager attached | ready={self.memory_manager.is_ready}")
@@ -157,17 +163,25 @@ class AIEngine:
     # VOICE / VOICE-SETTINGS METHODS
     # ═══════════════════════════════════════════════════════════════════════════
 
-    def set_voice_mode(self, enabled):
-        """Enable/disable voice mode flag"""
-        log.info(f"[AIEngine.set_voice_mode] voice_mode → {enabled} | regenerating system prompt")
-        self.voice_mode = enabled
+    def _rebuild_system_prompt(self):
+        """Regenerate self.system_prompt from the current flags, then re-inject
+        the memory block. EVERY prompt rebuild must go through here — assigning
+        get_system_prompt() directly loses the injected memories."""
         self.system_prompt = get_system_prompt(
-            system_info=self.system_info, voice_mode=self.voice_mode, elevenlabs_enabled=self.elevenlabs_enabled,
+            system_info=self.system_info, voice_mode=self.voice_mode,
+            elevenlabs_enabled=self.elevenlabs_enabled,
             skills=self.skill_manager.get_skills() if self.skill_manager else [],
             include_image_tools=self.include_image_tools,
             include_controller_ref=self.include_controller_ref,
             include_notify_tool=self.include_notify_tool,
         )
+        self._inject_memories_into_prompt()
+
+    def set_voice_mode(self, enabled):
+        """Enable/disable voice mode flag"""
+        log.info(f"[AIEngine.set_voice_mode] voice_mode → {enabled} | regenerating system prompt")
+        self.voice_mode = enabled
+        self._rebuild_system_prompt()
         log.debug(f"[AIEngine.set_voice_mode] System prompt regenerated | "
                   f"length={len(self.system_prompt)} chars")
         if enabled:
@@ -181,13 +195,7 @@ class AIEngine:
                  f"elevenlabs_enabled={elevenlabs_enabled} | regenerating prompt")
         self.voice_mode = voice_mode
         self.elevenlabs_enabled = elevenlabs_enabled
-        self.system_prompt = get_system_prompt(
-            system_info=self.system_info, voice_mode=voice_mode, elevenlabs_enabled=elevenlabs_enabled,
-            skills=self.skill_manager.get_skills() if self.skill_manager else [],
-            include_image_tools=self.include_image_tools,
-            include_controller_ref=self.include_controller_ref,
-            include_notify_tool=self.include_notify_tool,
-        )
+        self._rebuild_system_prompt()
         log.debug(f"[AIEngine.update_voice_settings] Prompt regenerated | "
                   f"length={len(self.system_prompt)} chars")
         self.log(f"Voice settings updated: voice_mode={voice_mode}, elevenlabs={elevenlabs_enabled}")
@@ -199,15 +207,7 @@ class AIEngine:
     def _on_skills_changed(self):
         """Regenerate system prompt when the skills folder changes."""
         log.info("[AIEngine._on_skills_changed] Skills changed — regenerating system prompt")
-        self.system_prompt = get_system_prompt(
-            system_info=self.system_info,
-            voice_mode=self.voice_mode,
-            elevenlabs_enabled=self.elevenlabs_enabled,
-            skills=self.skill_manager.get_skills() if self.skill_manager else [],
-            include_image_tools=self.include_image_tools,
-            include_controller_ref=self.include_controller_ref,
-            include_notify_tool=self.include_notify_tool,
-        )
+        self._rebuild_system_prompt()
         log.info(f"[AIEngine._on_skills_changed] System prompt regenerated | "
                  f"length={len(self.system_prompt)} chars")
 
@@ -337,15 +337,7 @@ class AIEngine:
         self.include_image_tools = include_image_tools
         self.include_controller_ref = include_controller_ref
         self.include_notify_tool = include_notify_tool
-        self.system_prompt = get_system_prompt(
-            system_info=self.system_info,
-            voice_mode=self.voice_mode,
-            elevenlabs_enabled=self.elevenlabs_enabled,
-            skills=self.skill_manager.get_skills() if self.skill_manager else [],
-            include_image_tools=self.include_image_tools,
-            include_controller_ref=self.include_controller_ref,
-            include_notify_tool=self.include_notify_tool,
-        )
+        self._rebuild_system_prompt()
 
     def set_custom_script_path(self, path):
         log.info(f"[AIEngine.set_custom_script_path] path → '{path}'")
@@ -999,8 +991,12 @@ class AIEngine:
         log.info(f"[AIEngine.generate_response] ── New request | provider='{self.ai_provider}' | "
                  f"history_len={len(self.conversation_history)} | msg='{msg_preview}' ──")
 
-        self._inject_memories(user_message)
+        # User message FIRST, then the memory ui_event — replay renders history
+        # in order, and the recall card belongs to the AI turn that FOLLOWS the
+        # user message (storing it before the user message parked the card in
+        # the previous turn's bubble on session reload).
         self.conversation_history.append({'role': 'user', 'content': user_message})
+        self._inject_memories(user_message)
         log.debug(f"[AIEngine.generate_response] User message appended | "
                   f"total history entries={len(self.conversation_history)}")
 
@@ -1026,8 +1022,10 @@ class AIEngine:
         log.info(f"[AIEngine.generate_response_with_image] provider='{self.ai_provider}' | "
                  f"images={len(image_paths)} | msg_len={len(user_message)}")
 
-        self._inject_memories(user_message)
+        # Same ordering rule as generate_response: user message first, then the
+        # memory ui_event, so reload puts the recall card in the right turn.
         self.conversation_history.append({'role': 'user', 'content': user_message})
+        self._inject_memories(user_message)
         log.debug(f"[AIEngine.generate_response_with_image] User message appended | "
                   f"history_len={len(self.conversation_history)}")
 
@@ -1880,16 +1878,23 @@ class AIEngine:
         return text[start:end + len(self._MEM_BLOCK_END)]
 
     def _build_memory_block(self) -> str | None:
-        """Build the memory block string from current memories, or None if not applicable."""
+        """Build the memory block string from current memories, or None if not
+        applicable. Newest memories first; total size is hard-capped by the
+        memory_inject_cap_tokens setting (approx 4 chars/token)."""
         if not self.memory_manager or not self.memory_manager.is_ready:
             return None
 
         memory_enabled = True
         memory_recall_mode = 'inject_all'
+        cap_tokens = 2000
         if self.settings_callback:
             settings = self.settings_callback()
             memory_enabled = settings.get('memory_enabled', True)
             memory_recall_mode = settings.get('memory_recall_mode', 'inject_all')
+            try:
+                cap_tokens = int(settings.get('memory_inject_cap_tokens', 2000))
+            except (TypeError, ValueError):
+                cap_tokens = 2000
         if not memory_enabled or memory_recall_mode != 'inject_all':
             return None
 
@@ -1898,14 +1903,29 @@ class AIEngine:
             log.debug("[AIEngine._build_memory_block] No memories to inject")
             return None
 
-        lines = "\n".join(
-            f"- {m['text']}" + ("\n\n" if m['text'].splitlines()[-1].startswith("Tags:") else "")
-            for m in all_memories
-        )
+        # get_all() is sorted newest-first — keep the newest within budget.
+        # The newest memory is always included, even if it alone exceeds the cap.
+        lines = []
+        used_tokens = 0
+        for m in all_memories:
+            entry = (f"- {m['text']}"
+                     + ("\n\n" if m['text'].splitlines()[-1].startswith("Tags:") else ""))
+            entry_tokens = len(entry) // 4 + 1
+            if lines and used_tokens + entry_tokens > cap_tokens:
+                break
+            lines.append(entry)
+            used_tokens += entry_tokens
+        omitted = len(all_memories) - len(lines)
+        if omitted > 0:
+            lines.append(f"[{omitted} older memories omitted - use search_memory()]")
+            log.info(f"[AIEngine._build_memory_block] Cap {cap_tokens} tokens reached — "
+                     f"{omitted} older memories omitted")
+
+        joined = "\n".join(lines)
         return (
             f"\n\n{self._MEM_BLOCK_START}\n\n"
             f"ALL MEMORIES:\n"
-            f"{lines}\n"
+            f"{joined}\n"
             f"{self._MEM_BLOCK_END}"
         )
 
@@ -1944,14 +1964,14 @@ class AIEngine:
         memory_enabled = True
         memory_recall_mode = 'inject_all'
         memory_threshold = 0.4
-        memory_max = 5
+        memory_max = 3
 
         if self.settings_callback:
             settings = self.settings_callback()
             memory_enabled = settings.get('memory_enabled', True)
             memory_recall_mode = settings.get('memory_recall_mode', 'inject_all')
             memory_threshold = float(settings.get('memory_threshold', 0.4))
-            memory_max = int(settings.get('memory_max_results', 5))
+            memory_max = int(settings.get('memory_max_results', 3))
 
         if not memory_enabled:
             return
@@ -1979,6 +1999,14 @@ class AIEngine:
                 f"<SYSTEM_MEM_RECALL/>"
             )
             context_id = str(_uuid.uuid4())[:8]
+            # Dicts carry the card's metadata (date + score); the card also
+            # accepts plain strings so pre-upgrade sessions still replay fine.
+            mem_dicts = [
+                {'text': m['text'],
+                 'created_at': m.get('created_at', ''),
+                 'similarity': m.get('similarity', 0.0)}
+                for m in recalled
+            ]
             # Append as a persistent ui_event — saved with session, filtered from API
             # by _get_history_with_memory which promotes it to a system message inline
             self.conversation_history.append({
@@ -1986,12 +2014,12 @@ class AIEngine:
                 '_type': 'memory_context',
                 '_memory_context_id': context_id,
                 'content': context_text,
-                '_memories_preview': [m['text'] for m in recalled],
+                '_memories_preview': mem_dicts,
             })
             log.info(f"[AIEngine._inject_memories] Stored {len(recalled)} memories as "
                      f"persistent ui_event | id={context_id}")
             # Store for result dict so controller can show the widget on the main thread
-            self._pending_memory_widget = (context_id, [m['text'] for m in recalled])
+            self._pending_memory_widget = (context_id, mem_dicts)
             # Notify Android bridge if a phone is connected (thread-safe via _dispatch lock)
             try:
                 ab = getattr(getattr(getattr(self, 'controller', None), 'ui', None),
