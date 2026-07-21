@@ -1442,12 +1442,18 @@ class SettingsWindow(BaseWindow):
 
         bs_lay.addWidget(bubbles_grid)
 
-        # Typing reveal — fake-streaming typewriter animation on AI replies
+        # Typing reveal — fake-streaming typewriter animation on AI replies.
+        # Pointless while real streaming is active (the stream IS the reveal),
+        # so the whole block hides then — dependent-visibility rule.
+        self._typing_reveal_widget = QWidget()
+        _typing_lay = QVBoxLayout(self._typing_reveal_widget)
+        _typing_lay.setContentsMargins(0, 0, 0, 0)
+        _typing_lay.setSpacing(6)
         self.text_reveal_checkbox = QCheckBox("Typing reveal animation for AI replies")
         self.text_reveal_checkbox.setStyleSheet(_CHECK)
         self.text_reveal_checkbox.setChecked(
             bool(self.controller.settings.get('chat_text_reveal', True)))
-        bs_lay.addWidget(self.text_reveal_checkbox)
+        _typing_lay.addWidget(self.text_reveal_checkbox)
 
         # Typing speed (characters per second)
         _tr_row = QHBoxLayout()
@@ -1477,7 +1483,14 @@ class SettingsWindow(BaseWindow):
         _tr_row.addWidget(self.text_reveal_speed_label)
         self.text_reveal_speed_slider.valueChanged.connect(
             lambda v: self.text_reveal_speed_label.setText(f"{v} ch/s"))
-        bs_lay.addLayout(_tr_row)
+        _typing_lay.addLayout(_tr_row)
+        bs_lay.addWidget(self._typing_reveal_widget)
+
+        # Shown INSTEAD of the typing block while streaming is live.
+        self._typing_streaming_note = _info_box(
+            "Replies stream in live from the provider, so the typing animation "
+            "is not used. Turn streaming off (System ▸ AI Response) to use it.")
+        bs_lay.addWidget(self._typing_streaming_note)
 
         ui_lay.addWidget(bubble_group)
 
@@ -2151,14 +2164,26 @@ class SettingsWindow(BaseWindow):
             "While streaming, this bounds the wait for the FIRST piece of the "
             "reply — once text starts arriving, a long answer is never cut off."))
 
+        # Streaming — hidden entirely when the selected provider script can't
+        # stream (dependent-visibility rule), replaced by a note saying so.
+        self._streaming_widget = QWidget()
+        _stream_lay = QVBoxLayout(self._streaming_widget)
+        _stream_lay.setContentsMargins(0, 0, 0, 0)
+        _stream_lay.setSpacing(6)
         self.streaming_checkbox = QCheckBox("Stream replies as they are generated")
         self.streaming_checkbox.setStyleSheet(_CHECK)
         self.streaming_checkbox.setChecked(True)
-        rp_lay.addWidget(self.streaming_checkbox)
-        rp_lay.addWidget(_info_box(
-            "Show the reply word-by-word instead of waiting for the whole "
-            "response. Requires a provider script that supports streaming; "
-            "others simply appear all at once."))
+        _stream_lay.addWidget(self.streaming_checkbox)
+        _stream_lay.addWidget(_info_box(
+            "Show the reply word-by-word as the model writes it, instead of "
+            "waiting for the whole response."))
+        rp_lay.addWidget(self._streaming_widget)
+
+        self._streaming_unsupported_note = _info_box(
+            "This provider script does not support streaming, so replies "
+            "arrive all at once. Scripts using the current provider contract "
+            "(see providers/large-language-models/_template.py) can stream.")
+        rp_lay.addWidget(self._streaming_unsupported_note)
         sys_lay.addWidget(resp_group)
 
         # ── Android Bridge / Packet ─────────────────────────────────────────
@@ -2347,6 +2372,41 @@ class SettingsWindow(BaseWindow):
         is_manual = self.provider_script_combo.currentData() == ""
         self.manual_group.setVisible(is_manual)
         self._rebuild_provider_display_form()
+        # Streaming support is a property of the selected script.
+        if hasattr(self, '_streaming_widget'):
+            self._update_streaming_visibility()
+
+    def _active_provider_streams(self) -> bool:
+        """True when the selected provider script can stream (contract v2).
+        Legacy scripts and the Manual provider cannot."""
+        from systema.engine import provider_contract as pc
+        path = self.provider_script_combo.currentData()
+        if not path:
+            return False                      # Manual Response
+        cached = getattr(self, '_stream_support_cache', {})
+        if path in cached:
+            return cached[path]
+        ok = pc.is_v2(pc.load_module(path))
+        cached[path] = ok
+        self._stream_support_cache = cached
+        return ok
+
+    def _update_streaming_visibility(self):
+        """Dependent visibility for streaming:
+          - the streaming toggle hides (note instead) when the provider can't
+            stream;
+          - the typing-reveal block hides while streaming is actually live,
+            because the stream itself IS the reveal.
+        Hidden, never greyed out (house rule)."""
+        try:
+            supported = self._active_provider_streams()
+            self._streaming_widget.setVisible(supported)
+            self._streaming_unsupported_note.setVisible(not supported)
+            streaming_live = supported and self.streaming_checkbox.isChecked()
+            self._typing_reveal_widget.setVisible(not streaming_live)
+            self._typing_streaming_note.setVisible(streaming_live)
+        except Exception:
+            log.warning("[settings] streaming visibility sync failed", exc_info=True)
 
     def _rebuild_provider_display_form(self):
         """(Re)build the dynamic settings form from the selected script's
@@ -3094,6 +3154,11 @@ class SettingsWindow(BaseWindow):
         self.streaming_checkbox.setChecked(
             self.controller.settings.get('streaming_enabled', True)
         )
+        # Sync AFTER values are loaded (house pattern), and keep the typing
+        # block in step whenever the toggle changes.
+        self.streaming_checkbox.toggled.connect(
+            lambda _: self._update_streaming_visibility())
+        self._update_streaming_visibility()
         self.packet_port_spin.setValue(
             self.controller.settings.get('packet_port', 1111)
         )

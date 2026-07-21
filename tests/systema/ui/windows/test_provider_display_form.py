@@ -211,3 +211,48 @@ def test_collect_returns_typed_values(host):
 def test_collect_skips_blank_number(host):
     host.build("MAX_TOKENS", "Max tokens", "number", None, {}, "")
     assert "MAX_TOKENS" not in host.collect()
+
+
+# ── streaming dependent-visibility (System ▸ AI Response × UI ▸ typing) ───────
+
+class _VisStub:
+    """Stand-in for the settings window's visibility-driven widgets."""
+    class _W:
+        def __init__(self): self.visible = None
+        def setVisible(self, b): self.visible = b
+
+    class _Chk(_W):
+        def __init__(self, on): super().__init__(); self._on = on
+        def isChecked(self): return self._on
+
+    def __init__(self, supported, enabled):
+        self._streaming_widget = self._W()
+        self._streaming_unsupported_note = self._W()
+        self._typing_reveal_widget = self._W()
+        self._typing_streaming_note = self._W()
+        self.streaming_checkbox = self._Chk(enabled)
+        self._active_provider_streams = lambda: supported
+        SettingsWindow._update_streaming_visibility(self)
+
+
+def test_streaming_toggle_hidden_when_provider_cannot_stream(qapp):
+    s = _VisStub(supported=False, enabled=True)
+    assert s._streaming_widget.visible is False        # hidden, not greyed
+    assert s._streaming_unsupported_note.visible is True
+    # typing reveal is still the only animation available → stays visible
+    assert s._typing_reveal_widget.visible is True
+    assert s._typing_streaming_note.visible is False
+
+
+def test_typing_reveal_hidden_while_streaming_is_live(qapp):
+    s = _VisStub(supported=True, enabled=True)
+    assert s._streaming_widget.visible is True
+    assert s._typing_reveal_widget.visible is False    # the stream IS the reveal
+    assert s._typing_streaming_note.visible is True
+
+
+def test_typing_reveal_returns_when_streaming_is_switched_off(qapp):
+    s = _VisStub(supported=True, enabled=False)
+    assert s._streaming_widget.visible is True
+    assert s._typing_reveal_widget.visible is True
+    assert s._typing_streaming_note.visible is False
