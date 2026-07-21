@@ -111,6 +111,7 @@ class HitboxPreview(QWidget):
         self.hitbox_oy = 0
 
         self.icon_text = "🤖"
+        self.app_mark = False
         self.font_family = "Segoe UI Emoji"
         self.setMouseTracking(True)
 
@@ -141,6 +142,11 @@ class HitboxPreview(QWidget):
 
     def set_icon_text(self, text):
         self.icon_text = text
+        self.update()
+
+    def set_app_mark(self, on: bool):
+        """Draw the painted app mark instead of a text glyph."""
+        self.app_mark = bool(on)
         self.update()
 
     def set_font_family(self, font_family):
@@ -187,7 +193,12 @@ class HitboxPreview(QWidget):
         font.setPixelSize(max(8, int(min(self.icon_w, self.icon_h) * 0.6)))
         painter.setFont(font)
         painter.setPen(QPen(QColor(230, 230, 230)))
-        painter.drawText(ir, Qt.AlignmentFlag.AlignCenter, self.icon_text)
+        if getattr(self, 'app_mark', False):
+            from systema.ui.widgets.painted_icons import draw_app_mark
+            from PyQt6.QtCore import QRectF as _QRectF
+            draw_app_mark(painter, _QRectF(ir))
+        else:
+            painter.drawText(ir, Qt.AlignmentFlag.AlignCenter, self.icon_text)
 
         # Hitbox overlay
         hr = self._hitbox_rect()
@@ -321,6 +332,7 @@ class BackgroundPreview(QWidget):
         self.bg_w = 50
         self.bg_h = 50
         self.icon_text = "🤖"
+        self.app_mark = False
         self.font_family = "Segoe UI Emoji"
         self.shape = 'circle'
         self.setMouseTracking(True)
@@ -337,6 +349,11 @@ class BackgroundPreview(QWidget):
 
     def set_icon_text(self, t):
         self.icon_text = t
+        self.update()
+
+    def set_app_mark(self, on: bool):
+        """Draw the painted app mark instead of a text glyph."""
+        self.app_mark = bool(on)
         self.update()
 
     def set_font_family(self, f):
@@ -397,7 +414,12 @@ class BackgroundPreview(QWidget):
         font.setPixelSize(max(8, int(min(self.bg_w, self.bg_h) * 0.5)))
         painter.setFont(font)
         painter.setPen(QPen(QColor(230, 230, 230)))
-        painter.drawText(br, Qt.AlignmentFlag.AlignCenter, self.icon_text)
+        if getattr(self, 'app_mark', False):
+            from systema.ui.widgets.painted_icons import draw_app_mark
+            from PyQt6.QtCore import QRectF as _QRectF
+            draw_app_mark(painter, _QRectF(br))
+        else:
+            painter.drawText(br, Qt.AlignmentFlag.AlignCenter, self.icon_text)
 
         # resize handles (corners only, simpler)
         hs = 8
@@ -971,20 +993,25 @@ class AppearanceSettingsWindow(BaseWindow):
         # ── Icon type ──
         vbox.addWidget(self._section_label("Icon type"))
         self.icon_type_group = QButtonGroup()
+        self.app_radio = QRadioButton("App icon")
+        self.app_radio.setToolTip("The Systema Auxilium mark — painted, so it "
+                                  "stays sharp at any size")
         self.emoji_radio = QRadioButton("Emoji")
         self.letter_radio = QRadioButton("Letter")
-        self.icon_type_group.addButton(self.emoji_radio, 0)
-        self.icon_type_group.addButton(self.letter_radio, 1)
+        self.icon_type_group.addButton(self.app_radio, 0)
+        self.icon_type_group.addButton(self.emoji_radio, 1)
+        self.icon_type_group.addButton(self.letter_radio, 2)
 
-        if self.settings['icon_type'] == 'emoji':
-            self.emoji_radio.setChecked(True)
-        else:
-            self.letter_radio.setChecked(True)
+        _it = self.settings.get('icon_type', 'app')
+        {'emoji': self.emoji_radio, 'letter': self.letter_radio}.get(
+            _it, self.app_radio).setChecked(True)
 
-        self.emoji_radio.toggled.connect(self.on_icon_type_changed)
+        for _r in (self.app_radio, self.emoji_radio, self.letter_radio):
+            _r.toggled.connect(self.on_icon_type_changed)
 
         type_row = QHBoxLayout()
         type_row.setSpacing(8)
+        type_row.addWidget(self.app_radio)
         type_row.addWidget(self.emoji_radio)
         type_row.addWidget(self.letter_radio)
         type_row.addStretch()
@@ -1379,9 +1406,20 @@ class AppearanceSettingsWindow(BaseWindow):
         self.icon_input.setText(emoji)
 
     def on_icon_type_changed(self):
-        is_emoji = self.emoji_radio.isChecked()
-        self.emoji_container.setVisible(is_emoji)
-        self.letter_color_group.setVisible(not is_emoji)
+        """Dependent visibility: the emoji grid and the letter colour only
+        matter for their own icon type; the app mark needs neither."""
+        self.emoji_container.setVisible(self.emoji_radio.isChecked())
+        self.letter_color_group.setVisible(self.letter_radio.isChecked())
+        try:
+            self._sync_previews_icon_type()
+        except Exception:
+            pass
+
+    def _sync_previews_icon_type(self):
+        """Keep both live previews showing whatever icon type is selected."""
+        on = self.app_radio.isChecked()
+        self.hitbox_preview.set_app_mark(on)
+        self.bg_preview.set_app_mark(on)
 
     def on_icon_text_changed(self):
         txt = self.icon_input.text()
@@ -1488,7 +1526,9 @@ class AppearanceSettingsWindow(BaseWindow):
         c2_a = self.grad_opacity_slider.value()
 
         settings = {
-            'icon_type': 'emoji' if self.emoji_radio.isChecked() else 'letter',
+            'icon_type': ('emoji' if self.emoji_radio.isChecked()
+                          else 'letter' if self.letter_radio.isChecked()
+                          else 'app'),
             'icon_text': self.icon_input.text(),
             'font_family': self.font_combo.currentFont().family(),
             'letter_color': self.letter_color_picker.get_rgb(),
@@ -1527,10 +1567,8 @@ class AppearanceSettingsWindow(BaseWindow):
     def reset_to_defaults(self):
         defaults = self.floating_window.DEFAULT_SETTINGS
 
-        if defaults['icon_type'] == 'emoji':
-            self.emoji_radio.setChecked(True)
-        else:
-            self.letter_radio.setChecked(True)
+        {'emoji': self.emoji_radio, 'letter': self.letter_radio}.get(
+            defaults.get('icon_type', 'app'), self.app_radio).setChecked(True)
 
         self.icon_input.setText(defaults['icon_text'])
 

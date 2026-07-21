@@ -21,6 +21,8 @@ Design rules (user-approved):
 Adding a new icon = subclass GlyphButton and implement draw_glyph().
 """
 
+import math
+
 from PyQt6.QtWidgets import QComboBox, QPushButton, QWidget
 from PyQt6.QtCore import Qt, QRectF, QPointF, QVariantAnimation, QEasingCurve
 from PyQt6.QtGui import QPainter, QPen, QColor, QPainterPath
@@ -478,6 +480,61 @@ class TerminalButton(GlyphButton):
         # caret _
         p.drawLine(QPointF(cx + 1.2 * u, cy + 4.2 * u),
                    QPointF(cx + 6.2 * u, cy + 4.2 * u))
+
+
+def draw_app_mark(p: QPainter, rect: QRectF, detail: bool = True,
+                  star: str = '#88DCC7', ring: str = '#34685F',
+                  companion: str = '#ECF0F3'):
+    """Paint the Systema Auxilium mark — the north star on its orbit.
+
+    Vector twin of assets/systema_auxilium.ico, so anywhere the app shows its
+    own mark it scales cleanly instead of blitting a fixed-size bitmap.
+    `detail=False` drops the ring/companion for small sizes (the same tiering
+    the .ico frames use).
+    """
+    cx, cy = rect.center().x(), rect.center().y()
+    R = min(rect.width(), rect.height()) / 2.0
+    rot = math.radians(-24)
+
+    def astroid(ox, oy, r, sharp=3.0, n=96):
+        path = QPainterPath()
+        for i in range(n + 1):
+            t = 2 * math.pi * i / n
+            ct, st = math.cos(t), math.sin(t)
+            x = r * (abs(ct) ** sharp) * (1 if ct >= 0 else -1)
+            y = (r * 1.06) * (abs(st) ** sharp) * (1 if st >= 0 else -1)
+            pt = QPointF(ox + x, oy + y)
+            path.moveTo(pt) if i == 0 else path.lineTo(pt)
+        path.closeSubpath()
+        return path
+
+    p.save()
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    if detail:
+        # orbit path, behind the star
+        rx, ry = R * 0.92, R * 0.45
+        p.save()
+        p.translate(cx, cy)
+        p.rotate(-24)
+        pen = QPen(QColor(ring), max(1.0, R * 0.045))
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(QRectF(-rx, -ry, rx * 2, ry * 2))
+        p.restore()
+
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(star))
+    p.drawPath(astroid(cx, cy, R * 0.64))
+
+    if detail:
+        rx, ry = R * 0.92, R * 0.45
+        a = math.radians(8)
+        x, y = rx * math.cos(a), ry * math.sin(a)
+        sx = cx + x * math.cos(rot) - y * math.sin(rot)
+        sy = cy + x * math.sin(rot) + y * math.cos(rot)
+        p.setBrush(QColor(companion))
+        p.drawPath(astroid(sx, sy, R * 0.22))
+    p.restore()
 
 
 class EyeButton(GlyphButton):

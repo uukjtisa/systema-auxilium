@@ -862,17 +862,25 @@ class SettingsWindow(BaseWindow):
         # UI=3, Memory=4, Security=5, System=6) OR the string "updates" to open the
         # updater. anchor = a substring of the destination QGroupBox title (emoji /
         # spacing ignored); the jump scrolls to it and blink-highlights it.
+        # Keep this list EVEN — the grid is two columns, so an odd count
+        # leaves a ragged hole in the last row.
         _gen_shortcuts = [
-            ("Check for Updates",       "updates", None),
-            ("Tool Calling Mode",       6, "Tool Calling Mode"),
-            ("Code Execution",          6, "Code Execution"),
-            ("Android Packet Port",     6, "Android Packet"),
-            ("AI Provider & Model",     1, "AI Provider"),
-            ("Conversation Prefilling", 1, "Conversation Prefilling"),
-            ("Voice & Speech (TTS)",    2, "Text-to-Speech"),
-            ("Theme & Appearance",      3, "Main Theme"),
-            ("Memory",                  4, "Memory"),
-            ("Security & Approvals",    5, "Code Execution Safety"),
+            ("Check for Updates",         "updates", None),
+            ("AI Provider & Model",       1, "AI Provider"),
+            ("Streaming & Response Wait", 6, "AI Response"),
+            ("Tool Calling Mode",         6, "Tool Calling Mode"),
+            ("Code Execution",            6, "Code Execution"),
+            ("Security & Approvals",      5, "Execution Policy"),
+            ("File Edits — history/undo", 6, "File Tools"),
+            ("Memory",                    4, "Memory"),
+            ("Conversation Prefilling",   1, "Conversation Prefilling"),
+            ("Token Usage",               1, "Token Usage"),
+            ("Voice & Speech (TTS)",      2, "Text-to-Speech"),
+            ("Theme & Appearance",        3, "Main Theme"),
+            ("Chat Bubbles & Typing",     3, "Chat Bubbles"),
+            ("Glass Overlay",             3, "Glass Overlay"),
+            ("Android Packet Port",       6, "Android Packet"),
+            ("Start at Login",            0, "Start at Login"),
         ]
 
         def _make_jump(target, anchor):
@@ -1491,6 +1499,14 @@ class SettingsWindow(BaseWindow):
             "Replies stream in live from the provider, so the typing animation "
             "is not used. Turn streaming off (System ▸ AI Response) to use it.")
         bs_lay.addWidget(self._typing_streaming_note)
+
+        # Shown ALONGSIDE the typing block when streaming is switched on but
+        # the active provider script can't actually stream.
+        self._typing_fallback_note = _info_box(
+            "Streaming is enabled (System ▸ AI Response), but the active "
+            "provider script does not support it — replies arrive whole, so "
+            "the typing animation below is what you will see.")
+        bs_lay.addWidget(self._typing_fallback_note)
 
         ui_lay.addWidget(bubble_group)
 
@@ -2396,15 +2412,20 @@ class SettingsWindow(BaseWindow):
           - the streaming toggle hides (note instead) when the provider can't
             stream;
           - the typing-reveal block hides while streaming is actually live,
-            because the stream itself IS the reveal.
+            because the stream itself IS the reveal;
+          - if streaming is ON but the provider can't stream, the typing block
+            STAYS and says why (that combination is exactly when a user would
+            otherwise wonder which animation they are getting).
         Hidden, never greyed out (house rule)."""
         try:
             supported = self._active_provider_streams()
+            enabled = self.streaming_checkbox.isChecked()
             self._streaming_widget.setVisible(supported)
             self._streaming_unsupported_note.setVisible(not supported)
-            streaming_live = supported and self.streaming_checkbox.isChecked()
+            streaming_live = supported and enabled
             self._typing_reveal_widget.setVisible(not streaming_live)
             self._typing_streaming_note.setVisible(streaming_live)
+            self._typing_fallback_note.setVisible(enabled and not supported)
         except Exception:
             log.warning("[settings] streaming visibility sync failed", exc_info=True)
 

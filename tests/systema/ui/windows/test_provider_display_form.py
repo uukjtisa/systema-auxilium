@@ -230,6 +230,7 @@ class _VisStub:
         self._streaming_unsupported_note = self._W()
         self._typing_reveal_widget = self._W()
         self._typing_streaming_note = self._W()
+        self._typing_fallback_note = self._W()
         self.streaming_checkbox = self._Chk(enabled)
         self._active_provider_streams = lambda: supported
         SettingsWindow._update_streaming_visibility(self)
@@ -239,8 +240,17 @@ def test_streaming_toggle_hidden_when_provider_cannot_stream(qapp):
     s = _VisStub(supported=False, enabled=True)
     assert s._streaming_widget.visible is False        # hidden, not greyed
     assert s._streaming_unsupported_note.visible is True
-    # typing reveal is still the only animation available → stays visible
+    # typing reveal is still the only animation available → stays visible,
+    # and says WHY (streaming is on, but this provider can't do it)
     assert s._typing_reveal_widget.visible is True
+    assert s._typing_streaming_note.visible is False
+    assert s._typing_fallback_note.visible is True
+
+
+def test_no_fallback_note_when_streaming_is_off_and_unsupported(qapp):
+    s = _VisStub(supported=False, enabled=False)
+    assert s._typing_reveal_widget.visible is True
+    assert s._typing_fallback_note.visible is False
     assert s._typing_streaming_note.visible is False
 
 
@@ -249,6 +259,7 @@ def test_typing_reveal_hidden_while_streaming_is_live(qapp):
     assert s._streaming_widget.visible is True
     assert s._typing_reveal_widget.visible is False    # the stream IS the reveal
     assert s._typing_streaming_note.visible is True
+    assert s._typing_fallback_note.visible is False
 
 
 def test_typing_reveal_returns_when_streaming_is_switched_off(qapp):

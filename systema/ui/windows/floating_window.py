@@ -33,7 +33,9 @@ class FloatingWindow(QWidget):
 
     # Default settings
     DEFAULT_SETTINGS = {
-        'icon_type': 'emoji',  # 'emoji' or 'letter'
+        # 'app' = the painted Systema Auxilium mark (default), 'emoji', 'letter'.
+        # Everything here stays user-configurable in the Appearance window.
+        'icon_type': 'app',
         'icon_text': '🤖',
         'font_family': 'Segoe UI Emoji',  # Default font for icon
         'background_color': (100, 100, 255, 200),
@@ -236,6 +238,9 @@ class FloatingWindow(QWidget):
             color_style = f'color: rgb({letter_color[0]}, {letter_color[1]}, {letter_color[2]});'
         else:
             color_style = ''
+        # 'app' mode has no glyph text — paintEvent draws the mark instead.
+        self.button.setText('' if self.settings['icon_type'] == 'app'
+                            else self.settings['icon_text'])
 
         self.button.setStyleSheet(f"""
             QPushButton {{
@@ -317,6 +322,16 @@ class FloatingWindow(QWidget):
         elif shape == 'star':
             poly = self._star_polygon(bg_rect)
             painter.drawPolygon(poly)
+
+        # ── app mark (default icon) ──────────────────────────────────────────
+        # Painted, not blitted, so it stays crisp at any size the user picks.
+        if self.settings.get('icon_type') == 'app':
+            from systema.ui.widgets.painted_icons import draw_app_mark
+            span = float(self.settings.get('icon_font_size', 32)) * 1.55
+            span = max(12.0, min(span, min(bg_rect.width(), bg_rect.height()) * 1.4))
+            c = bg_rect.center()
+            mark = QRectF(c.x() - span / 2, c.y() - span / 2, span, span)
+            draw_app_mark(painter, mark, detail=span >= 26)
 
         # ── hover highlight (subtle white overlay on hover) ──
         # We rely on mouseMoveEvent + a flag if needed; skip for simplicity,

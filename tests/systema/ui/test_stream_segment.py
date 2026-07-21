@@ -101,6 +101,7 @@ def test_text_deltas_accumulate_into_the_live_label(host):
     host.on_stream_started()
     for delta in ("Hel", "lo ", "world"):
         host.on_stream_text(delta)
+    host._flush_stream()                     # painting is coalesced onto a timer
     assert host._stream_seg['text'] == "Hello world"
     assert "Hello world" in host._stream_seg['label'].text()
 
@@ -108,12 +109,14 @@ def test_text_deltas_accumulate_into_the_live_label(host):
 def test_text_delta_without_started_opens_the_segment(host):
     host.on_stream_text("implicit")
     assert host._stream_seg is not None
+    host._flush_stream()
     assert host._stream_seg['text'] == "implicit"
 
 
 def test_markup_in_deltas_is_escaped_not_interpreted(host):
     host.on_stream_started()
     host.on_stream_text("<b>not bold</b> & co")
+    host._flush_stream()
     rendered = host._stream_seg['label'].text()
     assert "&lt;b&gt;" in rendered and "<b>not bold" not in rendered
 
@@ -121,6 +124,7 @@ def test_markup_in_deltas_is_escaped_not_interpreted(host):
 def test_newlines_become_line_breaks_while_streaming(host):
     host.on_stream_started()
     host.on_stream_text("line1\nline2")
+    host._flush_stream()
     assert "<br>" in host._stream_seg['label'].text()
 
 
@@ -194,3 +198,50 @@ def test_stale_stub_dropped_only_when_stream_is_no_longer_active(host):
     host._stream_active = False
     host._drop_stale_stream_segment()
     assert host._stream_seg is None
+
+
+# ── coalescing / no quadratic repaint (the big-reply freeze) ─────────────────
+
+def test_deltas_do_not_touch_the_widget_until_flushed(host):
+    """Painting per delta meant a full rich-text relayout per token."""
+    host.on_stream_started()
+    for _ in range(50):
+        host.on_stream_text("token ")
+    assert host._stream_seg['label'].text() == ""     # nothing painted yet
+    assert len(host._stream_seg['pending']) == 50
+    host._flush_stream()
+    assert host._stream_seg['label'].text().count("token") == 50
+    assert host._stream_seg['pending'] == []
+
+
+def test_flush_escapes_only_the_new_chunk(host):
+    """The old code re-escaped the WHOLE reply on every delta (O(n^2)). The
+    rendered html must be built incrementally from the previous html."""
+    import unittest.mock as mock
+    host.on_stream_started()
+    host.on_stream_text("a" * 100)
+    host._flush_stream()
+    first = host._stream_seg['html']
+
+    host.on_stream_text("<b>")
+    with mock.patch("html.escape", side_effect=lambda s, *a, **k: s.replace("<", "&lt;")) as esc:
+        host._flush_stream()
+        # exactly one escape call, and it saw ONLY the new chunk
+        assert esc.call_count == 1
+        assert esc.call_args[0][0] == "<b>"
+    assert host._stream_seg['html'].startswith(first)
+
+
+def test_flush_is_a_no_op_when_nothing_is_buffered(host):
+    host.on_stream_started()
+    host._flush_stream()
+    painted = host._stream_seg['label'].text()
+    host._flush_stream()
+    assert host._stream_seg['label'].text() == painted
+
+
+def test_finish_paints_everything_still_buffered(host):
+    host.on_stream_started()
+    host.on_stream_text("tail end of the report")
+    host.on_stream_finished()                 # must not lose the buffer
+    assert "tail end of the report" in host._stream_seg['label'].text()

@@ -1169,29 +1169,82 @@ class BubblesMixin:
             lay.setSpacing(8)
             lay.addWidget(label)
             self._insert_turn_segment(holder)
-            self._stream_seg = {'widget': holder, 'label': label, 'text': ''}
+            # `pending` = deltas not yet painted; `html` = already-escaped
+            # markup, so a flush only ever escapes the NEW chunk.
+            self._stream_seg = {'widget': holder, 'label': label, 'text': '',
+                                'html': '', 'pending': []}
             self._stream_active = True
         except Exception:
             log.warning("[ChatWindow.on_stream_started] failed", exc_info=True)
             self._stream_seg = None
 
+    # Deltas arrive far faster than a human reads and far faster than Qt can
+    # re-lay-out a growing document, so widget updates are COALESCED onto this
+    # interval instead of running per delta.
+    STREAM_FLUSH_MS = 70
+
     def on_stream_text(self, delta: str):
-        """Append a reply delta to the live segment (plain text while
-        streaming — the final markdown render happens at hand-off)."""
+        """Queue a reply delta for the live segment. Nothing touches a widget
+        here — `_flush_stream` does, at most ~14x/second.
+
+        History: this used to re-escape the WHOLE accumulated reply and
+        setText() it on every delta — O(n) work and a full rich-text relayout
+        per token, i.e. O(n^2) over a reply. A long report (with the thinking
+        card doing the same thing simultaneously) froze the UI near the end."""
         seg = getattr(self, '_stream_seg', None)
         if seg is None:
             self.on_stream_started()
             seg = getattr(self, '_stream_seg', None)
             if seg is None:
                 return
-        try:
-            seg['text'] += delta
-            import html as _html
-            seg['label'].setText(
-                _html.escape(seg['text']).replace('\n', '<br>'))
+        seg['pending'].append(delta)
+        self._schedule_stream_flush()
+
+    def _schedule_stream_flush(self):
+        t = getattr(self, '_stream_flush_timer', None)
+        if t is None:
+            t = QTimer(self)
+            t.setSingleShot(True)
+            t.timeout.connect(self._flush_stream)
+            self._stream_flush_timer = t
+        if not t.isActive():
+            t.start(self.STREAM_FLUSH_MS)
+
+    def _flush_stream(self):
+        """Apply everything buffered since the last flush — ONE escape of the
+        new chunk, ONE setText, ONE scroll, for both the reply and the card."""
+        import html as _html
+        seg = getattr(self, '_stream_seg', None)
+        painted = False
+        if seg is not None and seg['pending']:
+            chunk = ''.join(seg['pending'])
+            seg['pending'].clear()
+            seg['text'] += chunk
+            # Escape ONLY the new chunk and append to the rendered html.
+            seg['html'] += _html.escape(chunk).replace('\n', '<br>')
+            try:
+                seg['label'].setText(seg['html'])
+                painted = True
+            except RuntimeError:
+                self._stream_seg = None
+
+        card = getattr(self, '_stream_think_card', None)
+        if card is not None and card.get('flush'):
+            try:
+                painted = card['flush']() or painted
+            except RuntimeError:
+                self._stream_think_card = None
+
+        if painted:
             self._stream_autoscroll()
-        except RuntimeError:
-            self._stream_seg = None      # widget went away mid-stream
+
+    def _stop_stream_flush(self):
+        t = getattr(self, '_stream_flush_timer', None)
+        if t is not None:
+            try:
+                t.stop()
+            except RuntimeError:
+                pass
 
     def on_stream_thinking(self, delta: str):
         """Append a reasoning delta to THIS TURN's thinking card (created on
@@ -1212,8 +1265,8 @@ class BubblesMixin:
             if card is None:
                 return
         try:
-            card['append'](delta)
-            self._stream_autoscroll()
+            card['append'](delta)          # buffers only; painted on flush
+            self._schedule_stream_flush()
         except RuntimeError:
             self._stream_think_card = None
 
@@ -1222,6 +1275,13 @@ class BubblesMixin:
         response's reasoning (the card may hold several responses' worth; each
         is saved as its own ui_event so reload replays them in order and the
         per-turn card re-merges them)."""
+        # Paint whatever is still buffered before tearing anything down.
+        self._stop_stream_flush()
+        try:
+            self._flush_stream()
+        except RuntimeError:
+            pass
+
         card = getattr(self, '_stream_think_card', None)
         if card is not None:
             try:
@@ -1243,6 +1303,7 @@ class BubblesMixin:
 
     def _clear_stream_segment(self):
         """Remove the live streaming segment (hand-off or abandonment)."""
+        self._stop_stream_flush()
         seg = getattr(self, '_stream_seg', None)
         self._stream_seg = None
         if seg is None:

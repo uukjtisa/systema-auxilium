@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                              QGraphicsOpacityEffect, QSizePolicy)
 from PyQt6.QtCore import Qt, QTimer, QPoint, pyqtSignal, QRect, QRectF, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup
 from PyQt6.QtGui import QAction, QCursor, QRegion, QPixmap, QPainter
-from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QFont
+from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QFont, QTextCursor
 from systema.common.logger import _make_logger, _NoOpLogger
 from systema.ui.chat.constants import *
 from systema import APP_ROOT as _APP_ROOT
@@ -1532,7 +1532,8 @@ class EventCardsMixin:
         detail_lay.addWidget(viewer)
         detail_lay.addWidget(_ResizeGrip(viewer, min_h=44, max_h=680))
 
-        state = {'text': text, 'done': not live}
+        state = {'text': text, 'done': not live, 'pending': [],
+                 'lines': text.count("\n") + 1, 'words': len(text.split())}
 
         def _restyle():
             z, t = self._card_z, self._t()
@@ -1543,7 +1544,7 @@ class EventCardsMixin:
                 "QFrame#webHeader { background: transparent; border: none; border-radius: 6px; }"
                 "QFrame#webHeader:hover { background: rgba(255,255,255,0.05); }")
             icon_lbl.setStyleSheet(f"color: {dim}; font-size: {z(12)}px; background: transparent;")
-            _words = len(state['text'].split())
+            _words = state['words']        # running count — never re-split the text
             _label = "Thinking" if state['done'] else "Thinking…"
             _count = (f'<span style="color:{dim}; font-size:{z(10)}px;">  {_words} words</span>'
                       if _words and state['done'] else '')
@@ -1553,7 +1554,7 @@ class EventCardsMixin:
             detail.setStyleSheet(
                 f"QFrame#webDetail {{ background: {t['base']}; border: 1px solid {t['border']};"
                 f" border-radius: 8px; margin-top: 4px; }}")
-            _n = len(state['text'].splitlines())
+            _n = state['lines']            # running count — never re-split the text
             _lh = max(12, round(17 * k))
             viewer.setFixedHeight(min(max(_n * _lh + 20, 44), 220))
             # Flat inside the card: the detail frame IS the box. A second
@@ -1566,18 +1567,40 @@ class EventCardsMixin:
                                      icon_lbl, toggle_lbl, _restyle)
 
         def _append(delta: str):
-            state['text'] += delta
-            viewer.setPlainText(state['text'])
-            viewer.verticalScrollBar().setValue(
-                viewer.verticalScrollBar().maximum())
+            """Buffer a reasoning delta. Painting happens in _flush() — see
+            the note there; this used to setPlainText() the WHOLE reasoning
+            and restyle on every single delta."""
+            state['pending'].append(delta)
+
+        def _flush() -> bool:
+            """Paint buffered deltas. Returns True if anything was drawn.
+
+            Appends via the text cursor (costs the chunk, not the document)
+            and restyles ONCE per flush — setPlainText re-parsed the entire
+            document per token, and _restyle re-split it for the word/line
+            counts, so a long reasoning block became quadratic."""
+            if not state['pending']:
+                return False
+            chunk = ''.join(state['pending'])
+            state['pending'].clear()
+            state['text'] += chunk
+            state['lines'] += chunk.count("\n")
+            state['words'] += len(chunk.split())
+            cur = viewer.textCursor()
+            cur.movePosition(QTextCursor.MoveOperation.End)
+            cur.insertText(chunk)
+            sb = viewer.verticalScrollBar()
+            sb.setValue(sb.maximum())
             _restyle()
+            return True
 
         def _finish():
+            _flush()
             state['done'] = True
             _restyle()
             return state['text']
 
-        card = {'widget': message_widget, 'append': _append,
+        card = {'widget': message_widget, 'append': _append, 'flush': _flush,
                 'finish': _finish, 'state': state}
         # Remember it for the rest of this turn so later responses merge in.
         self._turn_thinking_card = card
