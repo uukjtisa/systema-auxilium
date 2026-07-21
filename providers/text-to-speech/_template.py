@@ -116,7 +116,7 @@ me BEFORE writing code. Otherwise output the whole file in one code block.
 ────────────────────────────────────────────────────────────────────────────────
 
 ════════════════════════════════════════════════════════════════════════════════
-CONTRACT SPECIFICATION  (paste this into whichever prompt you chose)
+CONTRACT SPECIFICATION  (paste this along with this _tempalte.py into whichever prompt you chose and send it to an AI agent)
 ════════════════════════════════════════════════════════════════════════════════
 
 The script is a single self-contained .py file. The app imports it fresh on
