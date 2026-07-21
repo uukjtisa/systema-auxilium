@@ -17,6 +17,11 @@ from systema.common.logger import _make_logger
 
 log = _make_logger("SettingsWindow")
 
+# itemData marking the "Custom…" entry of a provider Display list_dropdown —
+# selecting it reveals a free-text input (house dependent-visibility pattern,
+# same as the memory embed-model / inject-cap rows).
+_CUSTOM_SENTINEL = '__custom__'
+
 
 class _Spinner(QWidget):
     """Minimal painted loading spinner — a rotating arc. No emoji, no image."""
@@ -57,8 +62,8 @@ class _Spinner(QWidget):
 
 
 class _SettingsSaveWorker(QThread):
-    """Persists settings to disk (json.dump + memory-block rebuild) off the GUI
-    thread so clicking Save can't freeze the UI."""
+    """Persists settings to disk (json write + memory-block rebuild) off the
+    GUI thread so clicking Save can't freeze the UI."""
     done = pyqtSignal()
 
     def __init__(self, controller, parent=None):
@@ -550,17 +555,14 @@ class SettingsWindow(BaseWindow):
         header_layout.addWidget(title_lbl)
         header_layout.addStretch()
 
-        for text, slot, danger in [("−", self.showMinimized, False), ("×", self.hide, True)]:
-            btn = QPushButton(text)
-            btn.setFixedSize(32, 32)
-            hover_bg = "#EA4335" if danger else _ELEV
-            btn.setStyleSheet(f"""
-                QPushButton {{ background:transparent; border:none; border-radius:6px;
-                               font-size:{"20" if danger else "18"}px; color:{_MUTED}; }}
-                QPushButton:hover {{ background:{hover_bg}; color:white; }}
-            """)
-            btn.clicked.connect(slot)
-            header_layout.addWidget(btn)
+        # Painted chrome (icon overhaul): − / × text glyphs → glyph buttons
+        from systema.ui.widgets.painted_icons import MinimizeButton, CloseButton
+        _min_btn = MinimizeButton(32, tooltip="Minimize")
+        _min_btn.clicked.connect(self.showMinimized)
+        header_layout.addWidget(_min_btn)
+        _close_btn = CloseButton(32, tooltip="Close", pill=True)
+        _close_btn.clicked.connect(self.hide)
+        header_layout.addWidget(_close_btn)
 
         main_layout.addWidget(header_bar)
 
@@ -608,6 +610,46 @@ class SettingsWindow(BaseWindow):
 
         _open_prov_btn.clicked.connect(_open_llm_providers_folder)
         pg_lay.addWidget(_open_prov_btn)
+
+        # ── Dynamic per-provider settings form (Display contract) ────────────
+        # Rendered from the selected script's Display dict; values persist per
+        # script in settings['provider_display_values'] and are setattr()'d
+        # onto the module before every request (engine _load_provider_module).
+        # Editable combos embed a QLineEdit; the plain _INPUT rule would give
+        # that child its own border/background and the row would read as a
+        # text box instead of a dropdown. Style the inner editor flat and keep
+        # the arrow region explicit.
+        _COMBO_EDIT = _COMBO + f"""
+            QComboBox {{ padding-right: 26px; }}
+            QComboBox:editable {{ background-color: {_ELEV}; }}
+            QComboBox:focus {{ border-color: {_ACCENT}; }}
+            QComboBox QLineEdit {{
+                background: transparent;
+                border: none;
+                padding: 0;
+                margin: 0;
+                font-size: 11px;
+                color: {_TEXT};
+                selection-background-color: {_ACCENT};
+                selection-color: #000;
+            }}
+            QComboBox::drop-down {{ width: 0; border: none; }}
+        """
+        self._prov_form_styles = {'input': _INPUT, 'combo': _COMBO,
+                                  'combo_edit': _COMBO_EDIT, 'btn': _BTN,
+                                  'check': _CHECK, 'text': _TEXT, 'muted': _MUTED,
+                                  'border': _BORDER, 'accent': _ACCENT,
+                                  'elev': _ELEV}
+        self._prov_display_cache = {}    # script_key → unsaved form edits
+        self._prov_display_widgets = {}  # var → (ftype, widget, extra)
+        self._prov_display_script_key = None
+        self._prov_display_container = QWidget()
+        _pdc_lay = QVBoxLayout(self._prov_display_container)
+        _pdc_lay.setContentsMargins(0, 8, 0, 0)
+        _pdc_lay.setSpacing(6)
+        self._prov_display_container.setVisible(False)
+        pg_lay.addWidget(self._prov_display_container)
+
         self._refresh_llm_provider_scripts()
         self.provider_script_combo.currentIndexChanged.connect(self._on_llm_provider_changed)
         ai_lay.addWidget(provider_group)
@@ -1989,13 +2031,13 @@ class SettingsWindow(BaseWindow):
         self.file_history_checkbox.setStyleSheet(_CHECK)
         self.file_history_checkbox.setToolTip(
             "Before every tool edit/write, save the file's previous content to "
-            "data/file_history so the change can be reverted.")
+            "data/cache/file_history so the change can be reverted.")
         fh_lay.addWidget(self.file_history_checkbox)
         self.file_history_git_checkbox = QCheckBox("Deep history via git (when installed)")
         self.file_history_git_checkbox.setStyleSheet(_CHECK)
         self.file_history_git_checkbox.setToolTip(
             "Additionally commit every change to a local shadow git repository in "
-            "data/file_history/shadow — full change history beyond the last undo point.")
+            "data/cache/file_history/shadow — full change history beyond the last undo point.")
         fh_lay.addWidget(self.file_history_git_checkbox)
         prune_row = QHBoxLayout()
         # Prune label+combo wrapped so they HIDE while history is off; the
@@ -2075,6 +2117,49 @@ class SettingsWindow(BaseWindow):
             "When code execution runs longer than this, you'll be asked "
             "whether to extend the timeout or kill the operation."))
         sys_lay.addWidget(exec_group)
+
+        # ── AI Response timeout (E3) ─────────────────────────────────────────
+        resp_group = QGroupBox("AI Response")
+        resp_group.setStyleSheet(_GROUP)
+        rp_lay = QVBoxLayout(resp_group)
+        _resp_row = QHBoxLayout()
+        _resp_row.addWidget(_label("Response wait timeout (seconds):"))
+        self.response_timeout_spin = QSpinBox()
+        self.response_timeout_spin.setRange(0, 3600)
+        self.response_timeout_spin.setValue(0)
+        self.response_timeout_spin.setSingleStep(10)
+        self.response_timeout_spin.setSuffix(" s")
+        self.response_timeout_spin.setSpecialValueText("Unlimited")
+        self.response_timeout_spin.setFixedWidth(120)
+        self.response_timeout_spin.setStyleSheet(f"""
+            QSpinBox {{
+                background-color: {_ELEV};
+                border: 1px solid {_BORDER};
+                border-radius: 6px;
+                padding: 6px 10px;
+                font-size: 11px;
+                color: {_TEXT};
+            }}
+            QSpinBox:focus {{ border-color: {_ACCENT}; }}
+        """)
+        _resp_row.addWidget(self.response_timeout_spin)
+        _resp_row.addStretch()
+        rp_lay.addLayout(_resp_row)
+        rp_lay.addWidget(_info_box(
+            "How long to wait for the AI provider to respond before giving up. "
+            "Set to Unlimited (0) to wait forever.\n"
+            "While streaming, this bounds the wait for the FIRST piece of the "
+            "reply — once text starts arriving, a long answer is never cut off."))
+
+        self.streaming_checkbox = QCheckBox("Stream replies as they are generated")
+        self.streaming_checkbox.setStyleSheet(_CHECK)
+        self.streaming_checkbox.setChecked(True)
+        rp_lay.addWidget(self.streaming_checkbox)
+        rp_lay.addWidget(_info_box(
+            "Show the reply word-by-word instead of waiting for the whole "
+            "response. Requires a provider script that supports streaming; "
+            "others simply appear all at once."))
+        sys_lay.addWidget(resp_group)
 
         # ── Android Bridge / Packet ─────────────────────────────────────────
         packet_group = QGroupBox("Android Packet")
@@ -2257,9 +2342,226 @@ class SettingsWindow(BaseWindow):
         self._memory_window.refresh_memories()
 
     def _on_llm_provider_changed(self, index):
-        """Show the Manual Provider Helper only when Manual Response is selected."""
+        """Show the Manual Provider Helper only when Manual Response is selected,
+        and rebuild the per-provider Display settings form."""
         is_manual = self.provider_script_combo.currentData() == ""
         self.manual_group.setVisible(is_manual)
+        self._rebuild_provider_display_form()
+
+    def _rebuild_provider_display_form(self):
+        """(Re)build the dynamic settings form from the selected script's
+        Display dict. Unsaved edits are cached per script so switching the
+        combo back keeps them; values persist only on Save."""
+        from systema.engine import provider_contract as pc
+        cont = getattr(self, '_prov_display_container', None)
+        if cont is None:
+            return
+        self._stash_provider_display_cache()
+        lay = cont.layout()
+        while lay.count():
+            item = lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._prov_display_widgets = {}
+        self._prov_display_script_key = None
+
+        path = self.provider_script_combo.currentData()
+        if not path:
+            cont.setVisible(False)
+            return
+        module = pc.load_module(path)
+        display = pc.validate_display(module) if module else {}
+        if not display:
+            cont.setVisible(False)
+            return
+
+        import os as _os
+        key = _os.path.basename(path)
+        self._prov_display_script_key = key
+        saved = (self.controller.settings.get('provider_display_values') or {}).get(key, {})
+        cached = self._prov_display_cache.get(key, {})
+
+        from PyQt6.QtWidgets import QLabel
+        st = self._prov_form_styles
+        header = QLabel("Provider Settings")
+        header.setStyleSheet(f"color:{st['muted']}; font-size:10px; font-weight:600; "
+                             f"border-top:1px solid {st['border']}; padding-top:8px;")
+        lay.addWidget(header)
+        for var, (label, ftype, extra, dopts) in display.items():
+            current = cached.get(var, saved.get(var, getattr(module, var, '')))
+            lay.addWidget(self._build_display_row(var, label, ftype, extra, dopts, current))
+        cont.setVisible(True)
+
+    def _build_display_row(self, var, label, ftype, extra, dopts, current):
+        """One form row for a Display entry. Registers the editor widget in
+        self._prov_display_widgets for collection on Save. `dopts` is the
+        optional per-entry dict: tooltip / placeholder / item_tooltips."""
+        from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLineEdit,
+                                     QPlainTextEdit, QComboBox, QCheckBox,
+                                     QPushButton, QLabel, QFileDialog)
+        from PyQt6.QtCore import Qt as _Qt
+        from systema.engine import provider_contract as pc
+        st = self._prov_form_styles
+        dopts = dopts or {}
+        tooltip = dopts.get('tooltip') or ''
+        placeholder = dopts.get('placeholder') or ''
+
+        # info_box: read-only note — no input, nothing registered/persisted.
+        if ftype == 'info_box':
+            note = QLabel(label)
+            note.setWordWrap(True)
+            note.setStyleSheet(
+                f"color:{st['muted']}; font-size:10px; background:transparent; "
+                f"border:1px solid {st['border']}; border-radius:6px; padding:8px;")
+            if tooltip:
+                note.setToolTip(tooltip)
+            return note
+
+        row = QWidget()
+        lay = QHBoxLayout(row) if ftype != 'textarea' else QVBoxLayout(row)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        lbl = QLabel(label)
+        lbl.setStyleSheet(f"color:{st['text']}; font-size:11px;")
+        if ftype != 'textarea':
+            lbl.setFixedWidth(120)
+        if tooltip:
+            lbl.setToolTip(tooltip)
+        lay.addWidget(lbl)
+
+        if ftype == 'checkbox':
+            w = QCheckBox()
+            w.setStyleSheet(st['check'])
+            w.setChecked(bool(current))
+            lay.addWidget(w, stretch=1)
+        elif ftype == 'list_dropdown':
+            from systema.ui.widgets.painted_icons import ChevronCombo
+            # A REAL dropdown (never editable — clicking must open the list,
+            # not drop a text cursor). Values outside the presets go through
+            # the house "Custom…" pattern: a hidden input revealed only when
+            # Custom… is picked (see the memory embed-model rows).
+            w = ChevronCombo()
+            w.setStyleSheet(st.get('combo_edit') or st['combo'])
+            opts = [str(o) for o in (extra or [])]
+            for opt in opts:
+                w.addItem(opt, opt)
+            w.addItem("Custom…", _CUSTOM_SENTINEL)
+            item_tips = dopts.get('item_tooltips') or []
+            for i, tip in enumerate(item_tips[:len(opts)]):
+                if tip:
+                    w.setItemData(i, str(tip), _Qt.ItemDataRole.ToolTipRole)
+            w.setItemData(w.count() - 1,
+                          "Type any value the provider accepts",
+                          _Qt.ItemDataRole.ToolTipRole)
+            lay.addWidget(w, stretch=1)
+
+            custom = QLineEdit()
+            custom.setStyleSheet(st['input'])
+            custom.setPlaceholderText(placeholder or "Type a custom value")
+            lay.addWidget(custom, stretch=1)
+
+            def _sync_custom(_=None, _w=w, _c=custom):
+                is_custom = _w.currentData() == _CUSTOM_SENTINEL
+                _c.setVisible(is_custom)
+
+            cur = '' if current is None else str(current)
+            if cur and cur in opts:
+                w.setCurrentIndex(opts.index(cur))
+            elif cur:
+                w.setCurrentIndex(w.count() - 1)      # Custom…
+                custom.setText(cur)
+            w.currentIndexChanged.connect(_sync_custom)
+            _sync_custom()
+            self._prov_display_widgets[var] = (ftype, w, custom)
+            return row
+        elif ftype == 'textarea':
+            w = QPlainTextEdit()
+            w.setStyleSheet(st['input'].replace('QLineEdit, QTextEdit', 'QPlainTextEdit'))
+            w.setFixedHeight(72)
+            w.setPlainText('' if current is None else str(current))
+            if placeholder:
+                w.setPlaceholderText(placeholder)
+            lay.addWidget(w)
+        else:  # input / secure_input / number / file_path
+            w = QLineEdit()
+            w.setStyleSheet(st['input'])
+            w.setText('' if current is None else str(current))
+            if placeholder:
+                w.setPlaceholderText(placeholder)
+            lay.addWidget(w, stretch=1)
+            if pc.is_secret_type(ftype):
+                from systema.ui.widgets.painted_icons import EyeButton
+                # Masking is opt-in per field (`secure_input`), never guessed
+                # from the variable name. Reveal is a painted eye — a text
+                # "Show"/"Hide" button clipped its letters in this narrow row.
+                w.setEchoMode(QLineEdit.EchoMode.Password)
+                reveal = EyeButton()
+
+                def _toggle_reveal(on, _w=w):
+                    _w.setEchoMode(QLineEdit.EchoMode.Normal if on
+                                   else QLineEdit.EchoMode.Password)
+
+                reveal.toggled.connect(_toggle_reveal)
+                lay.addWidget(reveal)
+            elif ftype == 'file_path':
+                browse = QPushButton("Browse")
+                browse.setFixedWidth(70)
+                browse.setStyleSheet(st['btn'])
+
+                def _browse(_w=w):
+                    fn, _ = QFileDialog.getOpenFileName(self, f"Select {label}", _w.text() or "")
+                    if fn:
+                        _w.setText(fn)
+
+                browse.clicked.connect(_browse)
+                lay.addWidget(browse)
+
+        if tooltip:
+            w.setToolTip(tooltip)
+        self._prov_display_widgets[var] = (ftype, w, extra)
+        return row
+
+    def _collect_provider_display_values(self) -> dict:
+        """Read the current Display form into a JSON-ready dict."""
+        vals = {}
+        for var, (ftype, w, extra) in self._prov_display_widgets.items():
+            try:
+                if ftype in ('input', 'secure_input', 'file_path'):
+                    vals[var] = w.text()
+                elif ftype == 'textarea':
+                    vals[var] = w.toPlainText()
+                elif ftype == 'checkbox':
+                    vals[var] = w.isChecked()
+                elif ftype == 'number':
+                    t = w.text().strip()
+                    if not t:
+                        continue
+                    try:
+                        vals[var] = int(t)
+                    except ValueError:
+                        vals[var] = float(t)
+                elif ftype == 'list_dropdown':
+                    # `extra` holds the revealed Custom… input for this row.
+                    if w.currentData() == _CUSTOM_SENTINEL:
+                        txt = extra.text().strip() if extra is not None else ''
+                        if not txt:
+                            continue          # Custom… picked but left blank
+                        vals[var] = txt
+                    else:
+                        vals[var] = w.currentData()
+            except Exception:
+                continue
+        return vals
+
+    def _stash_provider_display_cache(self):
+        """Snapshot the live form into the per-script cache (pre-rebuild/save)."""
+        key = getattr(self, '_prov_display_script_key', None)
+        if key and getattr(self, '_prov_display_widgets', None):
+            try:
+                self._prov_display_cache[key] = self._collect_provider_display_values()
+            except Exception:
+                pass
 
     def on_tts_provider_changed(self, index):
         """Show Edge TTS voice dropdown only when Edge TTS is selected; the
@@ -2786,6 +3088,12 @@ class SettingsWindow(BaseWindow):
         self.exec_timeout_spin.setValue(
             self.controller.settings.get('tool_execution_timeout_seconds', 300)
         )
+        self.response_timeout_spin.setValue(
+            self.controller.settings.get('response_timeout_seconds', 0)
+        )
+        self.streaming_checkbox.setChecked(
+            self.controller.settings.get('streaming_enabled', True)
+        )
         self.packet_port_spin.setValue(
             self.controller.settings.get('packet_port', 1111)
         )
@@ -2793,7 +3101,9 @@ class SettingsWindow(BaseWindow):
         _tc_idx = self.tool_calling_mode_combo.findData(_tc_mode)
         self.tool_calling_mode_combo.setCurrentIndex(_tc_idx if _tc_idx >= 0 else 0)
 
-        # Load active LLM provider script
+        # Load active LLM provider script (drop stale unsaved Display edits so
+        # the form re-reads persisted values)
+        self._prov_display_cache = {}
         self._refresh_llm_provider_scripts()
         self._on_llm_provider_changed(self.provider_script_combo.currentIndex())
         saved_script_path = self.controller.get_custom_script_path()
@@ -3445,8 +3755,29 @@ class SettingsWindow(BaseWindow):
         except Exception:
             pass
         s['tool_execution_timeout_seconds'] = self.exec_timeout_spin.value()
+        s['response_timeout_seconds'] = self.response_timeout_spin.value()
+        s['streaming_enabled'] = self.streaming_checkbox.isChecked()
         s['packet_port'] = self.packet_port_spin.value()
         s['tool_calling_mode'] = self.tool_calling_mode_combo.currentData()
+
+        # Per-provider Display values — settings['provider_display_values']
+        # keyed by script file name, so every provider keeps its OWN saved
+        # fields. MERGED per script (never wholesale-replaced): switching
+        # provider in the combo must not wipe another script's values.
+        # No side-effect queue entry needed: the engine re-imports the script
+        # every request and setattr's these onto it.
+        try:
+            self._stash_provider_display_cache()
+            pdv = dict(s.get('provider_display_values') or {})
+            for _key, _vals in self._prov_display_cache.items():
+                if not _key:
+                    continue
+                _merged = dict(pdv.get(_key) or {})
+                _merged.update(_vals)
+                pdv[_key] = _merged
+            s['provider_display_values'] = pdv
+        except Exception:
+            log.error("[settings] provider_display_values collect failed", exc_info=True)
 
         # Supervised execution + policy
         s['supervised_execution'] = self.supervised_checkbox.isChecked()

@@ -2,7 +2,7 @@
 
 **An AI-powered desktop assistant that controls your computer through natural language.**
 
-**License:** MIT  ·  **Author / Architect:** Niccc2007 ([@uukjtisa](https://github.com/uukjtisa))
+**License:** GPL-3.0-or-later  ·  **Author / Architect:** Niccc2007 ([@uukjtisa](https://github.com/uukjtisa))
 
 > **Status:** Work in progress. Actively developed by one person; not every feature is fully polished, and bugs are expected. Issues, ideas, and pull requests are genuinely appreciated.
 
@@ -35,12 +35,10 @@ control your computer in plain language. Instead of writing scripts or memorizin
 you describe what you want, and the assistant writes and runs the Python needed to do it,
 observing the result and iterating until the task is done.
 
-It runs locally as a PyQt6 desktop app. The reasoning comes from a configurable LLM provider
-of your choice; everything else, including code execution, runs on your machine.
-
-> **Full documentation lives in [`docs/`](docs/).** Every subsystem — providers,
-> tool calling, the Python interpreter, security, tasks, updates, voice/TTS, skills & memory,
-> and the Android bridge — has its own page. Start at [docs/README.md](docs/README.md).
+It's an open-source, flexible PyQt6 desktop AI harness. The reasoning comes from a configurable
+LLM provider of your choice — hosted APIs (Anthropic, Gemini, OpenAI, and more) or a local model
+you run yourself — while code execution and the app itself always run on your machine. What leaves
+your machine depends on which provider you choose.
 
 ---
 
@@ -100,8 +98,8 @@ strongly encouraged.
   diff, per-category allow/ask/deny policy, and a "don't ask again" memory. Obviously-safe snippets
   (plain print, math) run without a prompt. You review, edit, approve, or reject every action.
 
-> Scheduled tasks can't answer an approval prompt, so each task's risky operations are governed by a
-> per-category allow/deny security policy you set up front — be deliberate about what you allow.
+> Scheduled tasks approve code execution immediately within the task, so be deliberate about
+> each task's instructions and permissions.
 
 ---
 
@@ -115,10 +113,14 @@ There is no hardcoded provider list; each provider is a self-contained Python fi
 
 Each provider implements a small contract:
 
-- **LLM providers** (`providers/large-language-models/`) define `chat(system_prompt, messages) -> str`
-  - Optional: `chat_image(system_prompt, messages, image_paths)` for vision
-  - Optional: `chat_tools(system_prompt, messages, tools, images=None) -> dict` for native
-    function calling (see [Tool Calling](#tool-calling-native-and-compatibility))
+- **LLM providers** (`providers/large-language-models/`) declare `CONTRACT_VERSION = 2` and define
+  ONE entry point:
+  `chat(system_prompt, messages, *, images=None, tools=None, stream=False)`
+  - Returns `{"content", "thinking", "tool_calls", "finish_reason"}` (a plain string also works)
+  - `images` for vision, `tools` for native function calling (see
+    [Tool Calling](#tool-calling-native-and-compatibility)), `stream=True` to stream chunks
+  - Optional `Display` dict → an auto-generated settings form (API key, model dropdown, …)
+  - Legacy scripts (`chat(sys, msgs) -> str` + optional `chat_image` / `chat_tools`) still work
 - **TTS providers** (`providers/text-to-speech/`) define `speak(text, save_to) -> bool`
 
 Drop a script in the right folder, hit Refresh in Settings, and it appears instantly. No codebase
@@ -126,13 +128,13 @@ edits, no restart.
 
 **Included scripts:**
 
-- LLM (all support native function calling unless noted):
-  - `anthropic_provider.py` — Anthropic Claude
-  - `gemini_provider.py` — Google Gemini
-  - `provider_cloudflare_kimi_k2_6.py`, `provider_cloudflare_kimi_k2_7_code.py` — Cloudflare Workers AI / Kimi K2
-  - `provider_nvidia_glm51.py`, `provider_nvidia_deepseek_v4_flash.py`, `provider_nvidia_deepseek_v4_pro.py` — NVIDIA Inference API
-  - `provider_opencode_zen.py` — OpenCode Zen (free, OpenAI-compatible gateway)
-  - `llama-cpp-provider.py` — fully offline local GGUF models (native tool calling is opt-in and model-dependent)
+- LLM: `openai_provider.py` (OpenAI + any OpenAI-compatible endpoint),
+  `anthropic_provider.py` (Claude), `gemini_provider.py` (Gemini),
+  `provider_cloudflare.py` (Cloudflare Workers AI — whole `@cf/...` catalog, multi-account
+  failover), `provider_nvidia.py` (NVIDIA — GLM / DeepSeek V4),
+  `provider_opencode_zen.py` (free OpenAI-compatible gateway),
+  `provider_mixed_opencode.cloudflare.py` (text via OpenCode, vision via Cloudflare),
+  `provider_ollama.py` (any local Ollama model)
 - TTS: `elevenlabs_tts.py` (expressive voice synthesis)
 
 Each folder ships a `_template.py` with a ready-to-use skeleton, full docstrings, and a
@@ -144,17 +146,18 @@ to adding a provider is essentially zero.
 > Before you can chat, configure at least one LLM provider. This is the only real setup step and
 > works like any other AI platform: you supply an API key or credential for the service you want.
 
-1. Open `providers/large-language-models/` and pick an included script (or copy `_template.py`).
-2. Edit the file and fill in your API key, model name, or endpoint URL (clearly marked at the top).
-3. In the app: **Settings -> AI -> Active Provider Script**, select your script, and **Save Settings**.
+1. In the app: **Settings -> AI -> Active Provider Script**, pick an included script.
+2. Fill in the fields that appear right below it (API key, model, …) and **Save Settings**.
+3. Writing your own script? Copy `_template.py`, and list the variables users may edit in its
+   `Display` dict — the app renders the form for them automatically.
 
-Provider configuration lives in the script rather than the GUI because every provider has
-different fields; this keeps the codebase clean.
+Provider settings live in the app when a script declares `Display`; anything not declared stays
+configurable by editing the script itself.
 
 ### Tool Calling: Native and Compatibility
 
-The assistant drives its tools (the Python interpreter, file editing, skill load/unload, session
-naming) in one of two modes. Switch in **Settings -> System -> Tool Calling Mode**:
+The assistant drives its tools (the Python interpreter, file editing, skill load/unload, session naming)
+in one of two modes. Switch in **Settings -> System -> Tool Calling Mode**:
 
 - **Native.** Tool calls travel through the provider's own function-calling API. The system prompt
   is rebuilt fence-free, so the model relies purely on the structured tools channel. This is the
@@ -169,15 +172,16 @@ naming) in one of two modes. Switch in **Settings -> System -> Tool Calling Mode
   if a provider does not declare native support (or ignores `tools`), it automatically falls back
   here, so nothing breaks.
 
-A provider opts into native by declaring two markers and one function:
+A provider opts into native by declaring the markers and handling `tools` in its `chat()`:
 
 ```python
 SUPPORTS_NATIVE_TOOLS = True
 NATIVE_DIALECT        = "openai"   # "openai" | "anthropic" | "gemini"
 
-def chat_tools(system_prompt, messages, tools, images=None) -> dict:
+def chat(system_prompt, messages, *, images=None, tools=None, stream=False):
     # convert `tools` to your dialect, call the API, and return the normalized:
-    #   {"text": str | None, "tool_calls": [{"id", "name", "arguments"}, ...]}
+    #   {"content": str, "thinking": str | None,
+    #    "tool_calls": [{"id", "name", "arguments"}, ...], "finish_reason": ...}
     ...
 ```
 
@@ -201,7 +205,7 @@ or **Settings -> General** (shortcut) -> **Check for Updates**:
   modified; genuine conflicts are marked for you to resolve rather than silently overwritten.
 - **Protects your configured accounts** — files that hold your provider accounts, API keys, or
   tokens (e.g. under `providers/`) are flagged and auto-deselected, so an update can't wipe your
-  configuration. A built-in Manage view lets you resolve these hunk-by-hunk (or line-by-line)
+  configuration. A built-in **Manage** view lets you resolve these hunk-by-hunk (or line-by-line)
   yourself — keep your version, take the update, or hand-edit — before anything is written.
 - **Dependencies** — newly required Python packages are detected and installed automatically.
 - **Backup and revert** — a snapshot is taken before anything changes, so the whole update can be
@@ -232,35 +236,21 @@ Wi-Fi LAN using `IP:port`.
 ### Quick setup (all platforms)
 
 Run the unified setup script with any system Python. It auto-detects your OS, creates a `.venv`,
-lets you pick optional feature modules, generates the helper scripts, and installs dependencies:
+generates the right helper scripts, and installs dependencies from `requirements.txt`:
 
 ```bash
-python setup.py            # Windows
-python3 setup.py           # Linux / macOS
-python setup.py --cli      # force the terminal menu (skip the GUI)
-python setup.py --recover  # only regenerate the helper scripts (venv untouched)
+python setup.py        # Windows
+python3 setup.py       # Linux / macOS
 ```
-
-`setup.py` opens a small **graphical window** when tkinter and a display are available, and falls
-back to a robust **terminal menu** otherwise (Kali/Debian ship Python without `python3-tk`; install
-it with `sudo apt install python3-tk` if you want the GUI). The dependency list lives in `setup.py`
-and it **generates `requirements.txt`** from it, so the two never drift — that generated file is kept
-because the in-app self-updater reads it and `pip install -r requirements.txt` still works.
 
 Afterwards you will have helper scripts in the project root:
 
 - **Windows:** `run.bat`, `open_env.bat`, `add_autostart.bat`, `remove_autostart.bat`
-- **Linux / macOS:** `run.sh` / `run.command`, `open_env.sh`, `add_autostart.sh`, `remove_autostart.sh`
-  (Linux also gets a double-click `Systema Auxilium.desktop`)
+- **Linux / macOS:** `run.sh`, `open_env.sh`, `add_autostart.sh`, `remove_autostart.sh`
 
-⚠ **Do not delete the generated scripts, `requirements.txt`, `main.py`, `systema/`, `assets/` or
-`data/`** — the app, its Restart button, autostart and the self-updater depend on them. A
-`__DO_NOT_DELETE__.txt` in the project root lists them all with why. If a generated script is ever
-lost, regenerate them with `python setup.py --recover` (no reinstall needed).
-
-`setup.py` then offers to move itself into a `setup-scripts/` folder (defaults to no; the app's
-recovery + updater expect it in the root). It is self-contained and replaces the old per-platform
-setup scripts.
+`setup.py` then offers to move itself into a `setup-scripts/` folder (defaults to yes for a clean
+root; answer no to keep it handy for re-runs). It is self-contained and replaces the old
+per-platform setup scripts.
 
 Tested on Windows 11, Windows 10, and Kali Linux (Python 3.10). The macOS path is untested.
 
@@ -306,7 +296,11 @@ or generated by an AI, you are responsible for what runs on your system.
 
 - The assistant can perform system-level actions if run with sufficient permissions.
 - Be deliberate with your prompts and with what you approve.
-- Review generated code before execution, especially with guarded execution.
+- Review generated code before execution, especially with guarded execution. To help, guarded
+  execution runs an automatic static risk scan (flagging process/shell, file deletion, network,
+  dynamic-code, OS-internals, and hardcoded-credential patterns on Windows, Linux, and macOS) and
+  gives you an AI reviewer that can explain the code and propose a safer version — but the final
+  decision is always yours.
 - The app warns about elevated permissions on startup; prefer minimal necessary privileges.
 - Consider running in a VM or test environment initially, and keep regular backups.
 
@@ -318,8 +312,11 @@ This is a hobby project built and maintained by one person, developed and tested
 Windows 11, with Windows 10 and Kali Linux VMs (both on Python 3.10). Only one thing can be tested
 at a time, so unintended behaviors are possible.
 
-- **Bugs are expected.** Some features are not deeply tested. If something breaks, try to reproduce
-  it and open an issue with details. Fixes and PRs are very welcome.
+- **Bugs are expected.** There is an automated `pytest` suite (see [Testing](#testing)) covering the
+  core tooling — the `grep` search tool, the tool registry, and compat/native prompt parity — and it
+  grows over time, but broad end-to-end coverage is still a work in progress and only one thing can
+  be exercised at a time. If something breaks, try to reproduce it and open an issue with details.
+  Fixes and PRs are very welcome.
 - **Model capability matters.** The project was built and tested with strong frontier models.
   Weaker models are less predictable. In **Compatibility** tool-calling mode a weak model can
   mis-format a fenced call; **Native** tool-calling mode avoids the fenced format entirely and is
@@ -331,6 +328,25 @@ at a time, so unintended behaviors are possible.
 
 Development happens in whatever time is available, so updates may be slow or bursty. Co-authors are
 welcome, with no experience bar; just reach out or open a PR.
+
+---
+
+## Testing
+
+The project ships an automated [pytest](https://pytest.org) suite under `tests/`, which mirrors the
+`systema/` package layout (`tests/systema/<subpkg>/test_<module>.py`). The core suite — the `grep`
+search tool, the tool registry, and the compat/native prompt-parity invariants — is dependency-free
+and runs on a bare `pip install pytest`; GUI-dependent tests self-skip when PyQt6 is absent.
+
+```bash
+pip install pytest        # once
+pytest                    # run the whole suite
+pytest -k grep            # run a subset by keyword
+```
+
+Configuration lives in `pytest.ini`, and continuous integration
+(`.github/workflows/tests.yml`) runs the suite on every push and pull request to `main`/`unstable`
+across Python 3.10–3.12. See [tests/README.md](tests/README.md) for the full layout and conventions.
 
 ---
 

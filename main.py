@@ -43,9 +43,76 @@ def _make_log_path():
     return logs_dir / name
 
 
+class _LogSink:
+    """Shared, size-rotating session log file (both Tees write through ONE sink).
+    At ~2MB the current file is closed and a fresh part opened — an unbounded
+    log once grew ~2.8MB of scraped article text during a live demo and is the
+    prime suspect for the silent UI death (idea #12). faulthandler is re-aimed
+    at the new file on every rotation so C-level crashes always land somewhere
+    open."""
+    MAX_BYTES = 2 * 1024 * 1024
+
+    def __init__(self):
+        self.path = _make_log_path()
+        self.file = open(self.path, "w", encoding="utf-8", buffering=1)
+        self._written = 0
+        self._part = 1
+        self._lock = threading.Lock()
+
+    def write(self, data):
+        with self._lock:
+            self.file.write(data)
+            self._written += len(data)
+            if self._written >= self.MAX_BYTES:
+                self._rotate()
+
+    def _rotate(self):
+        old_name = self.path.name
+        try:
+            self.file.write(
+                f"\n=== Log rotated (~{self.MAX_BYTES // (1024 * 1024)}MB cap)"
+                f" — continues in a new file ===\n")
+            self.file.flush()
+            self.file.close()
+        except Exception:
+            pass
+        # _make_log_path() has 10ms resolution — a rotation landing in the same
+        # window as the previous open would silently REOPEN ("w") the same file.
+        cand = _make_log_path()
+        if cand == self.path or cand.exists():
+            cand = cand.with_name(f"{cand.stem}_p{self._part + 1}{cand.suffix}")
+        self.path = cand
+        self.file = open(self.path, "w", encoding="utf-8", buffering=1)
+        self._part += 1
+        self._written = 0
+        try:
+            self.file.write(
+                f"=== Systema Auxilium — Session Log "
+                f"(part {self._part}, continued from {old_name}) ===\n\n")
+        except Exception:
+            pass
+        try:
+            faulthandler.enable(file=self.file)
+        except Exception:
+            pass
+
+    def flush(self):
+        try:
+            self.file.flush()
+        except Exception:
+            pass
+
+    def close(self):
+        try:
+            self.file.flush()
+            self.file.close()
+        except Exception:
+            pass
+
+
 class _Tee:
     """
-    Thread-aware tee. Mirrors writes to both the real stream and the log file.
+    Thread-aware tee. Mirrors writes to both the real stream and the log sink.
     Threads that call set_capture() get their output routed to their own buffer
     instead — so background threads never bleed into code execution output.
     Strips ANSI color codes so the log file is clean plain text.
@@ -103,26 +170,27 @@ class _Tee:
 
 
 def _setup_session_logger():
-    log_path = _make_log_path()
-    log_file  = open(log_path, "w", encoding="utf-8", buffering=1)
+    sink = _LogSink()
+    log_path = sink.path
 
-    log_file.write(
+    sink.write(
         f"=== Systema Auxilium — Session Log ===\n"
         f"Started : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
         f"Log file: {log_path}\n"
         f"{'=' * 40}\n\n"
     )
-    log_file.flush()
+    sink.flush()
 
     # Replace stdout and stderr with Tees BEFORE any core module is imported.
     # logging.StreamHandler() stores a reference to sys.stderr at creation time,
     # so as long as we replace it here first, every logger created during import
     # will automatically write through our Tee — no FileHandler injection needed.
-    sys.stdout = _Tee(sys.stdout, log_file)
-    sys.stderr = _Tee(sys.stderr, log_file)
+    # Both Tees share the ONE rotating sink.
+    sys.stdout = _Tee(sys.stdout, sink)
+    sys.stderr = _Tee(sys.stderr, sink)
 
-    # C-level crashes / SIGSEGV → also goes to log file
-    faulthandler.enable(file=log_file)
+    # C-level crashes / SIGSEGV → also goes to log file (re-aimed on rotation)
+    faulthandler.enable(file=sink.file)
 
     # ── Exit hooks ────────────────────────────────────────────────────────────
     def _footer(reason: str):
@@ -133,11 +201,7 @@ def _setup_session_logger():
             )
         except Exception:
             pass
-        try:
-            log_file.flush()
-            log_file.close()
-        except Exception:
-            pass
+        sink.close()
 
     atexit.register(lambda: _footer("Process exited normally"))
 

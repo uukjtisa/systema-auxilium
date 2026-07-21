@@ -206,10 +206,18 @@ class ApprovalNotifCard(QDialog):
 
     # ── resolution ────────────────────────────────────────────────────────────
     def _chat_visible(self):
+        # The card only exists BECAUSE the chat was hidden when approval was
+        # requested, so any signal that the chat is now up (visible OR the
+        # active window) is a safe expand trigger — we can never spuriously
+        # expand a genuinely-closed chat (both are False then). Loosened from a
+        # bare isVisible() check, which could miss the chat-inside-floating-window
+        # surfacing (E2). Logged so a live repro pinpoints the exact gate.
         try:
             chat = self._chat_getter() if callable(self._chat_getter) else None
-            return (chat is not None and chat.isVisible()
-                    and not chat.isMinimized())
+            if chat is None:
+                return False
+            return bool((chat.isVisible() or chat.isActiveWindow())
+                        and not chat.isMinimized())
         except Exception:
             return False
 

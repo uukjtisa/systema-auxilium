@@ -552,16 +552,8 @@ class ManageTasksWindow(BaseWindow):
         )
         hl.addWidget(title, stretch=1)
 
-        close_btn = QPushButton("×")
-        close_btn.setFixedSize(28, 28)
-        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        close_btn.setStyleSheet(f"""
-                    QPushButton {{
-                        background: transparent; border: none;
-                        color: {_MUTED}; font-size: 18px; border-radius: 5px;
-                    }}
-                    QPushButton:hover {{ background: #EA4335; color: white; }}
-                """)
+        from systema.ui.widgets.painted_icons import CloseButton
+        close_btn = CloseButton(28, tooltip="Close", pill=True)
         close_btn.clicked.connect(self.close)
         hl.addWidget(close_btn)
 
@@ -960,7 +952,7 @@ class ManageTasksWindow(BaseWindow):
         head.addWidget(count_lbl)
         head.addStretch()
         if sessions:
-            clear_btn = QPushButton("✕  Clear all")
+            clear_btn = QPushButton("Clear all")
             clear_btn.setFixedHeight(24)
             clear_btn.setStyleSheet(_BTN_RED)
             clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1019,15 +1011,8 @@ class ManageTasksWindow(BaseWindow):
         rl.addWidget(lbl)
         rl.addStretch()
 
-        x_btn = QPushButton("✕")
-        x_btn.setFixedSize(22, 22)
-        x_btn.setStyleSheet(
-            f"QPushButton {{ background: transparent; color: {_MUTED}; border: none; "
-            f"border-radius: 5px; font-size: 13px; font-weight: 700; padding: 0; }}"
-            f"QPushButton:hover {{ background: {_RED}; color: #ffffff; }}"
-        )
-        x_btn.setToolTip("Delete this session")
-        x_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        from systema.ui.widgets.painted_icons import CloseButton as _XBtn
+        x_btn = _XBtn(22, tooltip="Delete this session", pill=False)
         x_btn.clicked.connect(lambda _, tid=task_id, d=date_str, lo=panel_layout: self._delete_session(tid, d, lo))
         rl.addWidget(x_btn)
 
@@ -2576,7 +2561,7 @@ class ManageTasksWindow(BaseWindow):
         lbl = QLabel(t_str)
         lbl.setStyleSheet(f"color: {_TEXT}; font-size: 12px; background: transparent;")
         rl.addWidget(lbl, stretch=1)
-        rm_btn = QPushButton("✕  Remove")
+        rm_btn = QPushButton("Remove")
         rm_btn.setStyleSheet(_BTN_RED)
         rm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         rm_btn.clicked.connect(row.deleteLater)
@@ -2634,10 +2619,8 @@ class ManageTasksWindow(BaseWindow):
         lbl = QLabel(display)
         lbl.setStyleSheet(f"color: {_TEXT}; font-size: 12px; background: transparent;")
         rl.addWidget(lbl, stretch=1)
-        rm_btn = QPushButton("✕")
-        rm_btn.setFixedSize(24, 24)
-        rm_btn.setStyleSheet(_BTN_RED)
-        rm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        from systema.ui.widgets.painted_icons import CloseButton as _XBtn
+        rm_btn = _XBtn(24, tooltip="Remove", pill=False)
         rm_btn.clicked.connect(row.deleteLater)
         rl.addWidget(rm_btn)
         self._one_time_dt_list_layout.addWidget(row)
@@ -3038,7 +3021,7 @@ class ManageTasksWindow(BaseWindow):
             edit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             edit_btn.clicked.connect(lambda _, f=fn: self._edit_function_entry(f))
             rl.addWidget(edit_btn)
-            del_btn = QPushButton("✕  Delete")
+            del_btn = QPushButton("Delete")
             del_btn.setStyleSheet(_BTN_RED)
             del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             del_btn.clicked.connect(lambda _, n=fn['name']: self._delete_function_entry(n))

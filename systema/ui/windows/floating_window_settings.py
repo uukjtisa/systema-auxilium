@@ -857,17 +857,10 @@ class AppearanceSettingsWindow(BaseWindow):
         header_layout.addWidget(title)
         header_layout.addStretch(1)
 
-        for symbol, size, slot in [("−", 17, self.showMinimized), ("×", 19, self.hide)]:
-            b = QPushButton(symbol)
-            b.setFixedSize(26, 26)
-            b.setStyleSheet(f"""
-                QPushButton {{
-                    background: transparent; border: none; border-radius: 5px;
-                    color: {_p['muted']}; padding: 0;
-                }}
-                QPushButton:hover {{ background: {_p['surface2']}; color: {_p['text']}; }}
-            """)
-            b.setFont(QFont("Segoe UI", size))
+        # Painted chrome (icon overhaul): − / × text glyphs → glyph buttons
+        from systema.ui.widgets.painted_icons import MinimizeButton, CloseButton
+        for b, slot in [(MinimizeButton(26, tooltip="Minimize"), self.showMinimized),
+                        (CloseButton(26, tooltip="Close", pill=True), self.hide)]:
             b.clicked.connect(slot)
             header_layout.addWidget(b, alignment=Qt.AlignmentFlag.AlignVCenter)
 

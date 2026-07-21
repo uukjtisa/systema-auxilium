@@ -12,7 +12,7 @@ Design notes
 - **install_root = APP_ROOT** — the running app updates itself in place.
 - **Channel = python-source** — 3-way merge preserves the user's local edits to
   tracked files (conflicts are marked), plus new Python deps are auto-installed.
-- **User data is excluded** (`data/**`, `assistant_settings.json`, venv, caches)
+- **User data is excluded** (`data/**`, `settings.json`, venv, caches)
   so logs/sessions/memory/settings are never overwritten or deleted.
 - Update state + pre-apply backups live under `data/updates/` (itself excluded),
   so a bad update can be rolled back by restoring from there.
@@ -48,7 +48,10 @@ _EXCLUDES = [
     "**/.git/**", "**/__pycache__/**", "**/*.pyc", "**/.gitplucker/**",
     ".venv/**", "**/.venv/**", "venv/**", "**/node_modules/**",
     "data/**",                       # logs, sessions, memory, tasks, updates, lock file
-    "assistant_settings.json",       # the user's own configuration
+    "settings.json",                 # the user's own configuration (consolidated)
+    # Legacy config names — pre-consolidation installs may still carry them and
+    # an update must never propose touching a stale copy.
+    "assistant_settings.json", "chat_config.json", "floating_window_config.json",
     "*.lock", "**/*.lock",
 ]
 

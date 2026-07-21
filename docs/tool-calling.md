@@ -1,8 +1,17 @@
 # Tool Calling: Native and Compatibility
 
-The assistant drives its tools — **python_interpreter**, **read/edit/write files**, **load/unload
-skill**, and **session naming** — in one of two modes. Switch under
-**Settings → System → Tool Calling Mode**.
+The assistant drives its tools — **python_interpreter**, **read/edit/write files**,
+**grep**, **web_search**, and **load/unload skill** — in one of two modes. Switch under
+**Settings → System → Tool Calling Mode**. Tools may be **batched** (several per
+response, including multiple `python_interpreter` calls); they run in order and
+return one combined observation.
+
+`web_search` (search / open / links) is a built-in, no-API-key research tool: it
+searches the web and reads pages, returning clickable result cards. It works from
+a direct tool call and from inside `python_interpreter` as `web_search(...)`.
+Optional higher-reliability backends (Brave Search API, Tavily, a SearXNG instance)
+and an optional Playwright JS renderer can be enabled in settings; without them it
+runs fully keyless.
 
 ## Compatibility (universal, always works)
 
@@ -38,37 +47,51 @@ tools channel.
 
 ## The native contract
 
-A provider opts into native by declaring two markers and one function:
+A provider opts into native by declaring the markers and handling the `tools`
+argument of its unified `chat()` (see [Providers](providers.md)):
 
 ```python
+CONTRACT_VERSION      = 2
 SUPPORTS_NATIVE_TOOLS = True
 NATIVE_DIALECT        = "openai"   # "openai" | "anthropic" | "gemini"
 
-def chat_tools(system_prompt, messages, tools, images=None) -> dict:
+def chat(system_prompt, messages, *, images=None, tools=None, stream=False):
     ...
 ```
 
-The engine only requires `SUPPORTS_NATIVE_TOOLS = True` and a callable
-`chat_tools`; `NATIVE_DIALECT` is documentation (the dialect conversion happens
-inside `chat_tools`).
+The engine requires `SUPPORTS_NATIVE_TOOLS = True` and a callable entry point;
+`NATIVE_DIALECT` is documentation (the dialect conversion happens inside your
+script). `tools` is only passed in native mode — ignore it otherwise.
 
 - `tools` is a list of **canonical** tool definitions:
   `{"name", "description", "parameters"}` where `parameters` is a JSON-Schema
   object.
-- `chat_tools` must return the **normalized** result the engine understands:
+- Return the **normalized** result the engine understands:
 
 ```python
 {
-  "text": str | None,
+  "content": str,
+  "thinking": str | None,
   "tool_calls": [
     {"id": str, "name": str, "arguments": dict},
     ...
   ],
+  "finish_reason": str | None,
 }
 ```
 
 The engine reconstructs everything else (executing the tools, appending
 tool-result messages, looping) from this normalized shape.
+
+Under **streaming**, text streams live and tool calls arrive COMPLETE at end of
+stream (yielded as `{"type": "tool_call", ...}` chunks) — assemble any
+fragment deltas inside the provider, or let
+`provider_contract.stream_openai_chunks()` do it. Tool cards still render in
+call order, exactly as in non-streaming mode.
+
+> Legacy scripts that define `chat_tools(system_prompt, messages, tools,
+> images=None) -> {"text", "tool_calls"}` still work unchanged — the loader
+> shims them into the shape above.
 
 ## `native_adapters` — do it in a few lines
 
@@ -93,16 +116,19 @@ Dispatch helpers `to_dialect_tools(dialect, tools)` and
 ### Example: an OpenAI-compatible provider
 
 ```python
-def chat_tools(system_prompt, messages, tools, images=None) -> dict:
+def chat(system_prompt, messages, *, images=None, tools=None, stream=False):
     from systema.engine import native_adapters as na
     payload = {
         "model": MODEL,
         "messages": ([{"role": "system", "content": system_prompt}] if system_prompt else []) + messages,
-        "tools": na.to_openai_tools(tools),
-        "tool_choice": "auto",
     }
-    resp = requests.post(API_URL, json=payload, headers=HEADERS, timeout=60).json()
-    return na.parse_openai(resp)
+    if tools:
+        payload["tools"] = na.to_openai_tools(tools)
+        payload["tool_choice"] = "auto"
+    resp = requests.post(API_URL, json=payload, headers=HEADERS).json()
+    parsed = na.parse_openai(resp)
+    return {"content": parsed["text"] or "", "thinking": None,
+            "tool_calls": parsed["tool_calls"], "finish_reason": None}
 ```
 
 Anthropic and Gemini are identical in shape — swap `to_openai_tools` →
@@ -116,6 +142,6 @@ so the shapes line up with the parsers. The included `anthropic_provider.py` and
 
 Some endpoints accept a `tools` parameter but the model just chats or writes a
 fence as text. Before trusting native on a new endpoint, run the provider's
-`__main__` smoke test — it calls `chat_tools` with a demo tool and prints whether
+`__main__` smoke test — it calls `chat()` with a demo tool and prints whether
 real `tool_calls` came back. If none do, leave `SUPPORTS_NATIVE_TOOLS = False` and
 use Compatibility mode for that model.

@@ -49,6 +49,10 @@ Accepted contributions will be credited in the project's commit history, release
 or documentation. Submitting a contribution does not transfer ownership or licensing
 rights of the project — see the LICENSE file for details.
 
+This project is licensed under the GNU GPL v3 (or any later version). By
+submitting a contribution you agree it is provided under the same license
+(inbound = outbound) — no CLA, you keep your copyright.
+
 ---
 
 *This is hobby project. Thanks for being kind about it.* :)

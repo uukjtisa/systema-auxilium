@@ -1,15 +1,23 @@
 """
-provider_cloudflare_kimi_k2_6.py
-==================================
+provider_cloudflare.py
+=======================
 Custom Script Provider for Systema Auxilium.
-Uses Kimi K2.6 via Cloudflare Workers AI — FREE tier available.
+ONE provider for Cloudflare Workers AI — pick any Cloudflare-hosted model in
+Settings (merged from the old per-model kimi scripts). FREE tier available.
 
-Model: @cf/moonshotai/kimi-k2.6
 Endpoint: https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/ai/v1
+Model catalog: https://developers.cloudflare.com/workers-ai/models/
+(The Display dropdown lists the current text-generation catalog — it is
+editable, so type any @cf/... id when Cloudflare ships new models.)
+
+Contract v2: unified chat() (text + vision + native tools + streaming);
+editable settings via Display. Reasoning is returned separately as
+"thinking" — the app renders it in a collapsible card.
 
 Free tier: ~2-5 million tokens/day (10,000 neurons/day). No credit card needed.
-Context window: 262,144 tokens.
-Vision: YES — supports MULTIPLE images per request via base64 image_url content blocks.
+Vision: model-dependent (Kimi K2.6/K2.7, Llama-4-Scout, Gemma-4,
+Mistral-Small-3.1, Llama-3.2-11b-vision) — multiple images per request via
+base64 image_url content blocks.
 
 Multi-account support (sequential + disk-persisted exhaustion cache):
     - Accounts that have hit the daily neuron limit are written to a JSON
@@ -23,15 +31,15 @@ Multi-account support (sequential + disk-persisted exhaustion cache):
     - When ALL accounts are exhausted, returns a human-readable error
       instead of crashing.
 
-Kimi K2.6 API notes (differs from K2.5):
-    - Reasoning control:  chat_template_kwargs.thinking  (was enable_thinking)
-    - Reasoning output:   response.choices[0].message.reasoning  (was reasoning_content)
+API notes:
+    - Reasoning output: response.choices[0].message.reasoning (reasoning
+      models); legacy inline <think> blocks are split out as a fallback.
     - Supported image formats: JPEG, PNG, GIF, WEBP
-    - Multiple images per request: YES (pass a list to chat_image)
+    - Multiple images per request: YES (pass a list via images=)
 
 Setup:
     Add each Cloudflare account as a dict in ACCOUNTS below:
-        {"account_id": "...", "api_token": "...", "label": "account"}
+        {"account_id": "...", "api_token": "...", "label": "..."}
 
     Point this file at:
         Settings -> AI -> Custom Script Provider
@@ -50,81 +58,92 @@ from openai import OpenAI, RateLimitError
 # ── Configure here ────────────────────────────────────────────────────────────
 
 ACCOUNTS = [
+    # ── FILL THIS IN ────────────────────────────────────────────────────────
+    # One entry per Cloudflare account. Get both values from
+    # dash.cloudflare.com (Workers AI):
+    #   account_id -- your account ID (the hex string in the dashboard URL)
+    #   api_token  -- an API token with Workers AI access
+    #   label      -- any name you like; it only appears in the log
+    # Add as many as you want: they are tried in order, and an account that
+    # hits its daily free neuron limit is skipped automatically for 24 hours.
     {
         "account_id": "YOUR_CLOUDFLARE_ACCOUNT_ID",
         "api_token":  "YOUR_CLOUDFLARE_API_TOKEN",
-        "label":      "account",
+        "label":      "my account",
     },
-    {
-        "account_id": "YOUR_CLOUDFLARE_ACCOUNT_ID",
-        "api_token":  "YOUR_CLOUDFLARE_API_TOKEN",
-        "label":      "account",
-    },
-    {
-        "account_id": "YOUR_CLOUDFLARE_ACCOUNT_ID",
-        "api_token":  "YOUR_CLOUDFLARE_API_TOKEN",
-        "label":      "account",
-    },
-    {
-        "account_id": "YOUR_CLOUDFLARE_ACCOUNT_ID",
-        "api_token":  "YOUR_CLOUDFLARE_API_TOKEN",
-        "label":      "account",
-    },
-    {
-        "account_id": "YOUR_CLOUDFLARE_ACCOUNT_ID",
-        "api_token":  "YOUR_CLOUDFLARE_API_TOKEN",
-        "label":      "account",
-    },
-    {
-        "account_id": "YOUR_CLOUDFLARE_ACCOUNT_ID",
-        "api_token":  "YOUR_CLOUDFLARE_API_TOKEN",
-        "label":      "account",
-    },
-    {
-        "account_id": "YOUR_CLOUDFLARE_ACCOUNT_ID",
-        "api_token":  "YOUR_CLOUDFLARE_API_TOKEN",
-        "label":      "account",
-    },
-    {
-        "account_id": "YOUR_CLOUDFLARE_ACCOUNT_ID",
-        "api_token":  "YOUR_CLOUDFLARE_API_TOKEN",
-        "label":      "account",
-    },
-    {
-        "account_id": "YOUR_CLOUDFLARE_ACCOUNT_ID",
-        "api_token":  "YOUR_CLOUDFLARE_API_TOKEN",
-        "label":      "account",
-    },
-    {
-        "account_id": "YOUR_CLOUDFLARE_ACCOUNT_ID",
-        "api_token":  "YOUR_CLOUDFLARE_API_TOKEN",
-        "label":      "account",
-    },
-    {
-        "account_id": "YOUR_CLOUDFLARE_ACCOUNT_ID",
-        "api_token":  "YOUR_CLOUDFLARE_API_TOKEN",
-        "label":      "account",
-    },
-    {
-        "account_id": "YOUR_CLOUDFLARE_ACCOUNT_ID",
-        "api_token":  "YOUR_CLOUDFLARE_API_TOKEN",
-        "label":      "account",
-    },
+    # {
+    #     "account_id": "SECOND_ACCOUNT_ID",
+    #     "api_token":  "SECOND_API_TOKEN",
+    #     "label":      "backup account",
+    # },
 ]
 
-MODEL          = "@cf/moonshotai/kimi-k2.7-code"
+MODEL          = "@cf/moonshotai/kimi-k2.6"
 MAX_TOKENS     = 16384   # Raise up to 16384 if needed — watch your neuron budget
-SHOW_REASONING = False  # Set True to include reasoning content in the reply
+
+CONTRACT_VERSION = 2
+
+# Current Cloudflare-hosted text-generation catalog (researched 2026-07-21,
+# https://developers.cloudflare.com/workers-ai/models/). Editable dropdown —
+# type any @cf/... id for models added after this list was compiled.
+Display = {
+    "MODEL": ("Model", "list_dropdown", [
+        "@cf/moonshotai/kimi-k2.6",
+        "@cf/moonshotai/kimi-k2.7-code",
+        "@cf/zai-org/glm-5.2",
+        "@cf/zai-org/glm-4.7-flash",
+        "@cf/openai/gpt-oss-120b",
+        "@cf/openai/gpt-oss-20b",
+        "@cf/nvidia/nemotron-3-120b-a12b",
+        "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+        "@cf/meta/llama-3.2-11b-vision-instruct",
+        "@cf/google/gemma-4-26b-a4b-it",
+        "@cf/mistralai/mistral-small-3.1-24b-instruct",
+        "@cf/qwen/qwen3-30b-a3b-fp8",
+        "@cf/qwen/qwen2.5-coder-32b-instruct",
+        "@cf/qwen/qwq-32b",
+        "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b"],
+        {"tooltip": "Editable — type any @cf/... id from the Workers AI catalog",
+         "item_tooltips": [
+             "Kimi K2.6 — 1T frontier model; vision + tools + reasoning",
+             "Kimi K2.7 Code — agentic/code tuned; vision + tools",
+             "GLM-5.2 — tools + reasoning",
+             "GLM-4.7 Flash — fast multilingual; tools + reasoning",
+             "gpt-oss-120b — OpenAI open-weight; tools + reasoning",
+             "gpt-oss-20b — lighter gpt-oss; tools + reasoning",
+             "Nemotron-3 120B — NVIDIA MoE; tools + reasoning",
+             "Llama-4 Scout — multimodal MoE; vision + tools",
+             "Llama-3.3 70B fast — tools",
+             "Llama-3.2 11B Vision — vision",
+             "Gemma-4 26B — vision + tools",
+             "Mistral Small 3.1 — vision",
+             "Qwen3 30B — tools + reasoning",
+             "Qwen2.5 Coder 32B — code-focused",
+             "QwQ 32B — reasoning-focused",
+             "DeepSeek R1 distill 32B — reasoning"]}),
+    "MAX_TOKENS": ("Max tokens", "number",
+                   {"tooltip": "Response cap — higher burns the daily free "
+                               "neuron budget faster"}),
+    "NOTE_1": ("NOTE: accounts are NOT set here. Open this script "
+               "(providers/large-language-models/provider_cloudflare.py) and "
+               "fill in the ACCOUNTS list near the top — one entry per "
+               "Cloudflare account: account_id, api_token, label. Get both "
+               "from dash.cloudflare.com (Workers AI). Add as many as you "
+               "like: they are tried in order and an account that hits its "
+               "daily free neuron limit is skipped automatically for 24h.",
+               "info_box"),
+    "NOTE_2": ("NOTE: vision needs a vision-capable model — Kimi, "
+               "Llama-4-Scout, Gemma-4, Mistral-Small or Llama-3.2-Vision.",
+               "info_box"),
+}
 
 # ── Native tool calling (function calling) ──────────────────────────────────
-# ENABLED (2026-06-28). Earlier (2026-06-27) this looked unsupported — Kimi kept
-# writing a fence as text with finish_reason='stop'. Root cause was OUR system
-# prompt, not Cloudflare: in native mode it still shipped fence examples/mandates
-# that pushed the model back to fences. Confirmed via opencode, which drives this
-# exact provider with real function calling. The native-mode prompt is now fully
-# fence-free (core/global_instructions native section variants), so Cloudflare
-# Workers AI's OpenAI-compatible endpoint DOES return real tool_calls for Kimi.
-# (If a future model regresses, set this False for clean auto-fallback to compat.)
+# ENABLED (2026-06-28, verified on Kimi). Cloudflare Workers AI's OpenAI-
+# compatible endpoint returns real tool_calls for its function-calling models
+# (Kimi, GLM, gpt-oss, Nemotron, Llama-4/3.3, Gemma-4, Qwen3 — see catalog).
+# Smaller/older models in the dropdown may ignore the tools channel — if one
+# does, switch Tool Calling Mode back to Compatibility; nothing breaks.
 SUPPORTS_NATIVE_TOOLS = True
 NATIVE_DIALECT        = "openai"   # Cloudflare Workers AI speaks the OpenAI dialect
 
@@ -211,33 +230,22 @@ def _make_client(account: dict) -> OpenAI:
     )
 
 
-def _extract_reply(response) -> str:
+def _split_reasoning(message) -> tuple:
+    """(content, thinking) from a Kimi response message.
+
+    K2.6+ puts reasoning in message.reasoning (was reasoning_content /
+    inline <think>...</think> in the body). Legacy inline blocks are split
+    out as a fallback in case a middleware proxy still emits them.
     """
-    Extract the reply text from a Kimi K2.6 response.
-
-    K2.6 change vs K2.5:
-        - Reasoning content is now in response.choices[0].message.reasoning
-          (was reasoning_content / <think>...</think> in the body).
-        - Main reply is still in response.choices[0].message.content.
-
-    If SHOW_REASONING is True, the reasoning block is prepended to the reply.
-    Fallback: also strips legacy <think>...</think> tags from content in case
-    they still appear (e.g. when proxied through a middleware).
-    """
-    message = response.choices[0].message
-    content = message.content or ""
-
-    # Grab the structured reasoning field (K2.6+)
-    reasoning = getattr(message, "reasoning", None) or ""
-
-    # Fallback: strip legacy <think> blocks from content body (K2.5 style)
-    if not SHOW_REASONING:
+    content = (getattr(message, "content", None) or "").strip()
+    reasoning = (getattr(message, "reasoning", None)
+                 or getattr(message, "reasoning_content", None) or "")
+    m = re.search(r"<think>(.*?)</think>", content, re.DOTALL)
+    if m:
+        if not reasoning:
+            reasoning = m.group(1)
         content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
-
-    if SHOW_REASONING and reasoning:
-        return f"<think>\n{reasoning.strip()}\n</think>\n\n{content}".strip()
-
-    return content.strip()
+    return content, (reasoning.strip() or None)
 
 
 def _is_neuron_limit(error: RateLimitError) -> bool:
@@ -513,9 +521,9 @@ def _call_accounts(
     raw_system_prompt: str = "",
     raw_messages: list = None,
     image_paths: list[str] | None = None,
-    return_raw: bool = False,
     tools: list | None = None,
-) -> str | object:
+    stream: bool = False,
+) -> object:
     """
     Core dispatcher: iterate accounts, skip exhausted ones, call the first
     available one.
@@ -525,16 +533,16 @@ def _call_accounts(
         raw_system_prompt -- Original system prompt (for error dumps).
         raw_messages    -- Original messages (for error dumps).
         image_paths     -- Image paths (for error dumps).
-        return_raw      -- If True, return the raw OpenAI response object
-                           instead of the extracted reply string.
-                           Used by chat_tools() to inspect tool_calls.
         tools           -- Optional list of OpenAI-format tool definitions.
                            Passed through to the API when provided.
+        stream          -- Request an SDK stream instead of a completed
+                           response. A neuron-limit 429 still raises at
+                           create(), so account failover works unchanged.
 
     Returns:
-        The reply string (return_raw=False) or the raw response object
-        (return_raw=True). Returns an all-exhausted error string when all
-        accounts are depleted.
+        The raw OpenAI response object (or SDK stream when stream=True).
+        Returns an all-exhausted error STRING when all accounts are depleted —
+        callers must check isinstance(..., str).
     """
     raw_messages = raw_messages or []
     last_error   = None
@@ -556,17 +564,12 @@ def _call_accounts(
                 model=MODEL,
                 messages=full_messages,
                 max_tokens=MAX_TOKENS,
-                stream=False,
+                stream=stream,
             )
             if tools:
                 kwargs["tools"] = tools
                 kwargs["tool_choice"] = "auto"   # nudge the model to actually call
-            response = client.chat.completions.create(**kwargs)
-            if return_raw:
-                return response
-            reply = _extract_reply(response)
-            print(f"[provider] OK Response from {label}")
-            return reply or "No response received."
+            return client.chat.completions.create(**kwargs)
 
         except RateLimitError as e:
             if _is_neuron_limit(e):
@@ -594,182 +597,102 @@ def _call_accounts(
     )
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
+# ── Public API (contract v2) ──────────────────────────────────────────────────
 
-def chat(system_prompt: str, messages: list) -> str:
-    """
-    Send a text-only request to Cloudflare Workers AI (Kimi K2.6) and return
-    the reply.
-
-    Iterates accounts sequentially, instantly skipping any marked exhausted
-    in the on-disk cache. Only ONE live account is called per request.
-    Neuron-limit failures are written to disk and skipped on future calls
-    for 24 hours — even across script reloads and process restarts.
-
-    On any non-neuron-limit error, a full verbose dump is printed showing
-    the raw inputs from the app and the assembled messages sent to the API.
-    """
-    full_messages = (
+def _build_full_messages(system_prompt: str, messages: list, image_paths=None) -> list:
+    """Assemble the wire messages; with images, the final user turn becomes a
+    multimodal message (one base64 image_url block per image + the text)."""
+    if image_paths:
+        last_user_text = messages[-1]["content"] if messages else ""
+        prior = messages[:-1] if len(messages) > 1 else []
+        tail = [_build_vision_message(image_paths, last_user_text)]
+    else:
+        prior, tail = messages, []
+    return (
         [{"role": "system", "content": system_prompt}] if system_prompt else []
-    ) + messages
-
-    return _call_accounts(
-        full_messages,
-        raw_system_prompt=system_prompt,
-        raw_messages=messages,
-        image_paths=None,
-    )
+    ) + prior + tail
 
 
-def chat_image(
-    system_prompt: str,
-    messages: list,
-    image_paths: list[str] | str,
-) -> str:
+def chat(system_prompt: str, messages: list, *, images=None, tools=None, stream=False):
     """
-    Send a vision request (text + one or more images) to Cloudflare Workers AI
-    (Kimi K2.6).
+    Unified v2 entry point — text, vision (multiple images), native tools and
+    streaming in ONE path.
 
-    Kimi K2.6 natively supports vision inputs — including MULTIPLE images in a
-    single request — via Cloudflare's OpenAI-compatible /v1/chat/completions
-    endpoint using base64 image_url content blocks.
-
-    Parameters:
-        system_prompt  -- Same as chat(). May be empty.
-        messages       -- Same as chat(). The latest user message is last.
-        image_paths    -- One of:
-                            • A list of absolute paths to image files on disk.
-                            • A single path string (auto-wrapped into a list).
-                          All images are sent in the SAME request as separate
-                          image_url content blocks — Kimi K2.6 can reason over
-                          all of them simultaneously.
-                          Supported formats: JPEG, PNG, GIF, WEBP.
-
-    Return:
-        A non-empty string containing the assistant's reply.
-
-    How it works:
-        - Prior conversation turns (all messages except the final user turn)
-          are passed through as plain text messages so that conversational
-          context is preserved.
-        - The final user turn is replaced with a multimodal message containing:
-            1. One image_url block per image (base64 data-URI).
-            2. The user's text as a final text block.
-        - The same multi-account failover + exhaustion cache logic used by
-          chat() applies here too.
-        - On any non-neuron-limit error, a full verbose dump is printed showing
-          the raw inputs from the app and the assembled messages sent to the API.
-
-    Single-image example:
-        chat_image(system, msgs, "/path/to/photo.jpg")
-        chat_image(system, msgs, ["/path/to/photo.jpg"])   # equivalent
-
-    Multi-image example:
-        chat_image(system, msgs, ["/path/to/img1.png", "/path/to/img2.jpg"])
-    """
-    # Accept a bare string for single-image callers (backwards compat)
-    if isinstance(image_paths, str):
-        image_paths = [image_paths]
-
-    if not image_paths:
-        raise ValueError("chat_image() requires at least one image path.")
-
-    # The last entry in messages is always the current user prompt.
-    last_user_text = messages[-1]["content"] if messages else ""
-    prior_messages = messages[:-1] if len(messages) > 1 else []
-
-    vision_message = _build_vision_message(image_paths, last_user_text)
-
-    full_messages = (
-        [{"role": "system", "content": system_prompt}] if system_prompt else []
-    ) + prior_messages + [vision_message]
-
-    n = len(image_paths)
-    print(f"[provider] Vision request — {n} image{'s' if n > 1 else ''} attached.")
-
-    return _call_accounts(
-        full_messages,
-        raw_system_prompt=system_prompt,
-        raw_messages=messages,
-        image_paths=image_paths,
-    )
-
-
-def chat_tools(
-    system_prompt: str,
-    messages: list,
-    tools: list,
-    images: list[str] | str | None = None,
-) -> dict:
-    """
-    Native (function-calling) entrypoint — used when Systema Auxilium's
-    Tool Calling Mode is set to Native. Folds text AND vision into one path.
-
-    Parameters:
-        system_prompt -- Same as chat(). May be empty.
-        messages      -- Same as chat(). In a multi-turn tool conversation these
-                         may already include the OpenAI tool-call / tool-result
-                         messages the engine appended via systema.engine.native_adapters.
-        tools         -- CANONICAL tool defs (name/description/parameters) from
-                         the engine's registry; converted to OpenAI format here.
-        images        -- Optional image path(s); folds vision into the same call.
-
-    Returns:
-        A NORMALIZED result the engine understands regardless of provider:
-            {"text": str | None, "tool_calls": [{"id","name","arguments"}, ...]}
+    Iterates accounts sequentially, instantly skipping any marked exhausted in
+    the on-disk cache; only ONE live account is called per request. When ALL
+    accounts are exhausted the human-readable notice becomes the reply text.
+    On any non-neuron-limit error a full verbose dump is printed.
     """
     from systema.engine import native_adapters as na
 
+    if isinstance(images, str):
+        images = [images]
+    full_messages = _build_full_messages(system_prompt, messages, image_paths=images)
     oai_tools = na.to_openai_tools(tools) if tools else None
-
     if images:
-        if isinstance(images, str):
-            images = [images]
-        last_user_text = messages[-1]["content"] if messages else ""
-        prior_messages = messages[:-1] if len(messages) > 1 else []
-        full_messages = (
-            [{"role": "system", "content": system_prompt}] if system_prompt else []
-        ) + prior_messages + [_build_vision_message(images, last_user_text)]
-    else:
-        full_messages = (
-            [{"role": "system", "content": system_prompt}] if system_prompt else []
-        ) + messages
+        n = len(images)
+        print(f"[provider] Vision request — {n} image{'s' if n > 1 else ''} attached.")
 
     response = _call_accounts(
         full_messages,
         raw_system_prompt=system_prompt,
         raw_messages=messages,
         image_paths=images if images else None,
-        return_raw=True,
         tools=oai_tools,
+        stream=stream,
     )
 
-    # All accounts exhausted → _call_accounts returns a human-readable string.
+    # All accounts exhausted → a human-readable string becomes the reply.
     if isinstance(response, str):
-        return {"text": response, "tool_calls": []}
+        if stream:
+            def _exhausted_stream(text=response):
+                yield {"type": "text", "content": text, "finish_reason": None}
+                yield {"type": "done", "content": "", "finish_reason": "stop"}
+            return _exhausted_stream()
+        return {"content": response, "thinking": None, "tool_calls": [],
+                "finish_reason": "stop"}
 
-    return na.parse_openai(response.model_dump())
+    if stream:
+        return _chunks(response)
+
+    parsed = na.parse_openai(response.model_dump())
+    msg = response.choices[0].message if response.choices else None
+    content, thinking = _split_reasoning(msg) if msg else ("", None)
+    return {
+        "content": content,
+        "thinking": thinking,
+        "tool_calls": parsed.get("tool_calls") or [],
+        "finish_reason": response.choices[0].finish_reason if response.choices else None,
+    }
+
+
+def _chunks(completion):
+    """SDK stream → contract chunks via the shared engine helper. Reasoning
+    arrives via delta.reasoning (K2.6+) or legacy inline <think> tags (split
+    incrementally); complete tool calls are emitted at end of stream."""
+    from systema.engine.provider_contract import stream_openai_chunks
+    return stream_openai_chunks(completion)
 
 
 # ── Quick test ────────────────────────────────────────────────────────────────
 # Run directly to verify credentials before using in Systema.
 #
 #   TEXT TEST (default):
-#       python provider_cloudflare_kimi_k2_6.py
+#       python provider_cloudflare_kimi.py
 #
 #   SINGLE-IMAGE TEST:
-#       python provider_cloudflare_kimi_k2_6.py --vision /path/to/image.jpg
+#       python provider_cloudflare_kimi.py --vision /path/to/image.jpg
 #
 #   MULTI-IMAGE TEST:
-#       python provider_cloudflare_kimi_k2_6.py --vision /path/to/img1.jpg /path/to/img2.png
+#       python provider_cloudflare_kimi.py --vision /path/to/img1.jpg /path/to/img2.png
 #
 #   SHOW CACHE STATE ONLY:
-#       python provider_cloudflare_kimi_k2_6.py --cache
+#       python provider_cloudflare_kimi.py --cache
 
 if __name__ == "__main__":
     import sys
 
-    print("Testing Cloudflare Workers AI — Kimi K2.6 (sequential + disk cache)")
+    print("Testing Cloudflare Workers AI — Kimi (sequential + disk cache)")
     print(f"Model:    {MODEL}")
     print(f"Accounts: {len(ACCOUNTS)} configured")
     print(f"Cache:    {_CACHE_FILE}")
@@ -796,15 +719,15 @@ if __name__ == "__main__":
         sys.exit(0)
 
     # ── Vision test ────────────────────────────────────────────────────────
-    # Usage: python provider_cloudflare_kimi_k2_6.py --vision img1.jpg [img2.png ...]
+    # Usage: python provider_cloudflare_kimi.py --vision img1.jpg [img2.png ...]
     if "--vision" in sys.argv:
         idx = sys.argv.index("--vision")
         image_args = sys.argv[idx + 1:]
 
         if not image_args:
             print("Usage:")
-            print("  Single image:  python provider_cloudflare_kimi_k2_6.py --vision /path/to/image.jpg")
-            print("  Multi-image:   python provider_cloudflare_kimi_k2_6.py --vision /path/img1.jpg /path/img2.png")
+            print("  Single image:  python provider_cloudflare_kimi.py --vision /path/to/image.jpg")
+            print("  Multi-image:   python provider_cloudflare_kimi.py --vision /path/img1.jpg /path/img2.png")
             sys.exit(1)
 
         # Validate all paths before sending
@@ -831,11 +754,12 @@ if __name__ == "__main__":
             )
 
         try:
-            result = chat_image(
+            out = chat(
                 system_prompt="You are a helpful assistant.",
                 messages=[{"role": "user", "content": prompt}],
-                image_paths=image_args,   # list — single or multi
+                images=image_args,   # list — single or multi
             )
+            result = out["content"]
             print("Response:", result)
             print("-" * 60)
             if "neuron limit" in result:
@@ -848,10 +772,11 @@ if __name__ == "__main__":
     # ── Standard text test ─────────────────────────────────────────────────
     else:
         try:
-            result = chat(
+            out = chat(
                 system_prompt="You are a helpful assistant.",
                 messages=[{"role": "user", "content": "Say 'Provider test successful.' and nothing else."}],
             )
+            result = out["content"]
             print("Response:", result)
             print("-" * 60)
             if "All" in result and "neuron limit" in result:

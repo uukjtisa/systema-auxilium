@@ -2,10 +2,14 @@
 ui/startup_notif.py
 
 Lightweight tkinter notice popups, shown as a separate process so they appear
-instantly while the main app is still importing. Two modes:
+instantly while the main app is still importing. Three modes:
 
   (default)                 boot splash while Systema Auxilium initializes
-  --already-running <PID>   shown when a second instance is blocked
+  --already-running <PID>   shown when a second instance is blocked; offers a
+                            "Force restart" button that kills the stuck PID and
+                            relaunches (for the zombie-holds-the-lock case)
+  --crashed <DUMP_DIR>      shown by the crash watcher after a UI freeze: the
+                            app saved a forensic dump and is restarting itself
 
 Optional (already-running mode):
   --console <HWND>          window handle of the terminal that launched the
@@ -17,6 +21,12 @@ Styling matches the app's GitHub-dark palette. No emojis.
 
 import sys
 import tkinter as tk
+from pathlib import Path
+
+# Project root (…/systema/ui/startup_notif.py -> parents[2]). Needed on
+# sys.path because this file runs as a bare script, so only systema/ui/ is
+# importable by default — and Force restart needs systema.common.relauncher.
+ROOT = Path(__file__).resolve().parents[2]
 
 # ── Palette (Systema Auxilium dark) ──────────────────────────────────────────
 BG_ELEV  = "#161b22"
@@ -47,13 +57,15 @@ def _close_console(hwnd):
 
 
 MODE_ALREADY = "--already-running" in sys.argv
-ACCENT = "#f85149" if MODE_ALREADY else "#3fb950"
-HOVER = "#da3633" if MODE_ALREADY else "#2ea043"
+MODE_CRASHED = "--crashed" in sys.argv
+_IS_RED = MODE_ALREADY or MODE_CRASHED
+ACCENT = "#f85149" if _IS_RED else "#3fb950"
+HOVER = "#da3633" if _IS_RED else "#2ea043"
 CONSOLE_HWND = _arg("--console") if MODE_ALREADY else None
 
 root = tk.Tk()
 root.title("Systema Auxilium")
-W, H = (472, 224) if MODE_ALREADY else (432, 202)
+W, H = (472, 236) if _IS_RED else (432, 202)
 root.geometry(f"{W}x{H}+{root.winfo_screenwidth() - W - 24}"
               f"+{root.winfo_screenheight() - H - 56}")
 root.overrideredirect(True)
@@ -87,10 +99,23 @@ if MODE_ALREADY:
              justify="left").pack(fill="x", pady=(6, 0))
     tk.Label(card, text=f"Process ID   {_pid}", bg=BG_ELEV, fg=ACCENT,
              font=("Segoe UI", 9, "bold"), anchor="w").pack(fill="x", pady=(4, 0))
-    tk.Label(card, text="Use the existing floating window instead of launching again.",
+    tk.Label(card, text="Use the existing floating window — or force restart if it is stuck.",
              bg=BG_ELEV, fg=FG_FAINT, font=("Segoe UI", 8), anchor="w",
              justify="left", wraplength=W - 74).pack(fill="x", pady=(3, 0))
-    BTN_TEXT, SECS = "Dismiss", 6
+    BTN_TEXT, SECS = "Dismiss", 8
+elif MODE_CRASHED:
+    _dump = _arg("--crashed") or ""
+    tk.Label(card, text="Interface crash detected", bg=BG_ELEV, fg=FG_MAIN,
+             font=("Segoe UI", 13, "bold"), anchor="w").pack(fill="x")
+    tk.Label(card, text="The UI stopped responding, so a crash dump was saved "
+                        "and Systema Auxilium is restarting itself.",
+             bg=BG_ELEV, fg=FG_SUB, font=("Segoe UI", 9), anchor="w",
+             justify="left", wraplength=W - 74).pack(fill="x", pady=(6, 0))
+    if _dump:
+        tk.Label(card, text=f"Dump   {_dump}", bg=BG_ELEV, fg=FG_FAINT,
+                 font=("Segoe UI", 8), anchor="w", justify="left",
+                 wraplength=W - 74).pack(fill="x", pady=(4, 0))
+    BTN_TEXT, SECS = "Dismiss", 12
 else:
     tk.Label(card, text="Starting Systema Auxilium", bg=BG_ELEV, fg=FG_MAIN,
              font=("Segoe UI", 13, "bold"), anchor="w").pack(fill="x")
@@ -144,6 +169,40 @@ _btn.bind("<Enter>", lambda e: _btn.config(bg=HOVER, fg="#ffffff"))
 _btn.bind("<Leave>", lambda e: _btn.config(bg=ACCENT, fg="#0d1117"))
 
 _left = [SECS]
+
+if MODE_ALREADY:
+    # Kill-and-relaunch for a STUCK instance (UI dead, zombie python.exe still
+    # holding the single-instance lock — the observed idea-#12 failure). Two
+    # clicks: first ARMS (button turns into a confirm), second executes. Kills
+    # the old PID, then the shared relauncher waits for it to die and starts
+    # the app fresh.
+    _armed = [False]
+
+    def _force_restart():
+        if not _armed[0]:
+            _armed[0] = True
+            _left[0] = max(_left[0], 20)      # give the decision time
+            _fr.config(text="  Confirm force restart  ")
+            return
+        try:
+            sys.path.insert(0, str(ROOT))
+            from systema.common.relauncher import kill_process, spawn_relauncher
+            pid = int(_arg("--already-running") or 0)
+            if pid:
+                kill_process(pid)
+                spawn_relauncher(pid, ROOT)
+        except Exception:
+            pass
+        _dismiss()
+
+    _FR_BG, _FR_HOV = "#21262d", "#30363d"
+    _fr = tk.Button(foot, text="  Force restart  ", command=_force_restart,
+                    bg=_FR_BG, fg="#f85149", font=("Segoe UI", 9, "bold"),
+                    activebackground=_FR_HOV, activeforeground="#ff7b72",
+                    bd=0, padx=12, pady=5, cursor="hand2", relief="flat")
+    _fr.pack(side="right", padx=(0, 8))
+    _fr.bind("<Enter>", lambda e: _fr.config(bg=_FR_HOV, fg="#ff7b72"))
+    _fr.bind("<Leave>", lambda e: _fr.config(bg=_FR_BG, fg="#f85149"))
 
 
 def _tick():

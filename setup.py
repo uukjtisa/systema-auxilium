@@ -64,9 +64,14 @@ ESSENTIAL = [
 
 # Optional feature groups the user can toggle in the picker.
 OPTIONAL_GROUPS = [
-    {"key": "web",   "label": "Web-browser skill",
-     "desc": "Live web search + page reading (beautifulsoup4, duckduckgo_search, trafilatura)",
+    {"key": "web",   "label": "Web search tool",
+     "desc": "Live web search + page reading for the built-in web_search tool "
+             "(beautifulsoup4, duckduckgo_search, trafilatura)",
      "default": True,  "pkgs": ["beautifulsoup4", "duckduckgo_search", "trafilatura"]},
+    {"key": "playwright", "label": "Playwright JS renderer (web_search extension)",
+     "desc": "Renders JavaScript-heavy pages for web_search's open mode (playwright — "
+             "heavy: downloads a browser; enable in Settings after install)",
+     "default": False, "pkgs": ["playwright"]},
     {"key": "data",  "label": "Data-viz skill",
      "desc": "DataFrame handling for the data/plot skill (pandas)",
      "default": True,  "pkgs": ["pandas"]},

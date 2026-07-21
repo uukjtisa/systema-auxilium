@@ -156,12 +156,17 @@ def test_single_exec_policy_ignores_inner_fences(tm):
     assert violated is False
 
 
-def test_single_exec_policy_still_catches_two_calls(tm):
+def test_exec_policy_cap_retired_allows_two_calls(tm):
+    # 2026-07 revamp: the one-python_interpreter-per-response cap is RETIRED —
+    # multiple calls run sequentially in emitted order. The enforcer is a
+    # no-op pass-through keeping the (text, violated, msg) contract.
     text = (f"{BT}python_interpreter\nprint(1)\n{BT}\n\n"
             f"{BT}python_interpreter\nprint(2)\n{BT}")
-    cleaned, violated, _ = tm.enforce_single_exec_policy(text)
-    assert violated is True
-    assert cleaned.count("python_interpreter") == 1
+    cleaned, violated, msg = tm.enforce_single_exec_policy(text)
+    assert violated is False
+    assert msg == ""
+    assert cleaned == text                      # nothing dropped or rewritten
+    assert cleaned.count("python_interpreter") == 2
 
 
 def test_recover_unclosed_depth_aware(tm):
@@ -175,10 +180,9 @@ def test_recover_unclosed_depth_aware(tm):
 
 # ── Native single-exec policy (structured calls, never text) ─────────────────
 
-def test_native_policy_keeps_first_exec_and_nonexec(tm):
-    # Interpreter-only cap (2026-07 parallel revamp): non-exec calls pass
-    # through freely (typos canonicalized); only EXTRA python_interpreter
-    # calls are dropped, and the first one is kept in place.
+def test_native_policy_cap_retired_keeps_all_calls(tm):
+    # Cap retired (2026-07): extra python_interpreter calls are NO LONGER
+    # dropped — the native enforcer only canonicalizes typo'd tool names.
     calls = [
         {"id": "1", "name": "read_file", "arguments": {"path": "a"}},
         {"id": "2", "name": "python_interpreter", "arguments": {"code": "1"}},
@@ -186,10 +190,12 @@ def test_native_policy_keeps_first_exec_and_nonexec(tm):
         {"id": "4", "name": "python_interpreter", "arguments": {"code": "2"}},
     ]
     kept, violated, msg = tm.enforce_single_exec_policy_native(calls)
-    assert violated is True
-    assert [c["name"] for c in kept] == ["read_file", "python_interpreter", "read_file"]
+    assert violated is False
+    assert msg == ""
+    assert [c["name"] for c in kept] == [
+        "read_file", "python_interpreter", "read_file", "python_interpreter"]
     assert kept[1]["arguments"]["code"] == "1"
-    assert "python_interpreter" in msg
+    assert kept[3]["arguments"]["code"] == "2"
 
 
 def test_native_policy_canonicalizes_typo_names(tm):
@@ -236,3 +242,102 @@ def test_native_args_grep_defaults(tm):
     assert spec["output_mode"] == "files_with_matches"
     assert spec["ignore_common"] is True
     assert spec["error"] is None
+
+
+# ── web_search: parse / native spec / fence round-trip / interp buffering ────
+
+def test_parse_web_search_full_opts(tm):
+    fence = (f"{BT}web_search: [find asyncio docs]\n"
+             "https://docs.python.org/3/library/asyncio.html\n"
+             "mode: open\n"
+             "max_results: 5\n"
+             "fetch_top: 2\n"
+             f"{BT}")
+    parsed = tm.parse_web_search(fence)
+    assert parsed is not None
+    spec, _remaining = parsed
+    assert spec["error"] is None
+    assert spec["mode"] == "open"
+    assert spec["query"] == "https://docs.python.org/3/library/asyncio.html"
+    assert spec["max_results"] == 5
+    assert spec["fetch_top"] == 2
+    assert spec["annotation"] == "find asyncio docs"
+
+
+def test_parse_web_search_defaults(tm):
+    fence = f"{BT}web_search\npython asyncio tutorial\n{BT}"
+    parsed = tm.parse_web_search(fence)
+    assert parsed is not None
+    spec, _ = parsed
+    assert spec["mode"] == "search"
+    assert spec["query"] == "python asyncio tutorial"
+    assert spec["max_results"] == 8
+    assert spec["fetch_top"] == 0
+    assert spec["error"] is None
+
+
+def test_parse_web_search_empty_query_flags_error(tm):
+    fence = f"{BT}web_search\n\nmode: search\n{BT}"
+    parsed = tm.parse_web_search(fence)
+    assert parsed is not None
+    spec, _ = parsed
+    assert spec["error"]
+
+
+def test_parse_web_search_bad_mode_falls_back(tm):
+    fence = f"{BT}web_search\nquery here\nmode: browse\n{BT}"
+    spec, _ = tm.parse_web_search(fence)
+    assert spec["mode"] == "search"
+
+
+def test_native_args_web_search_spec(tm):
+    spec = tm.native_args_to_spec(
+        "web_search", {"query": "rust borrow checker", "mode": "search",
+                       "max_results": "3", "annotation": "look up"})
+    assert spec == {"mode": "search", "query": "rust borrow checker",
+                    "max_results": 3, "fetch_top": 0,
+                    "annotation": "look up", "error": None}
+    # url alias for open/links + missing query flags an error
+    spec2 = tm.native_args_to_spec(
+        "web_search", {"url": "https://example.com", "mode": "links"})
+    assert spec2["mode"] == "links" and spec2["query"] == "https://example.com"
+    assert tm.native_args_to_spec("web_search", {"mode": "search"})["error"]
+
+
+def test_web_search_fence_roundtrip(tm):
+    # native call -> compat fence (registry to_fence) -> parse: same spec.
+    fences = tm.tool_calls_to_fences(
+        [{"name": "web_search",
+          "arguments": {"query": "qt event loop", "mode": "search",
+                        "max_results": 4, "annotation": "research"}}])
+    parsed = tm.parse_web_search(fences)
+    assert parsed is not None
+    spec, _ = parsed
+    assert spec["mode"] == "search"
+    assert spec["query"] == "qt event loop"
+    assert spec["max_results"] == 4
+    assert spec["error"] is None
+
+
+def test_interp_web_search_buffers_card_and_subresult(tm, monkeypatch):
+    # Inside the interpreter: card is BUFFERED (python card first), the full
+    # output is recorded as a separate tool subresult, and the interpreter
+    # gets only a short confirmation string.
+    from systema.net import web_research as wr
+    fake = [{"title": "T1", "href": "https://a", "body": "B1"}]
+    monkeypatch.setattr(wr, "search", lambda q, max_results=8, config=None: fake)
+    tm._interp_card_buffer.clear()
+    tm._interp_subresults.clear()
+    ret = tm.interp_web_search("qt docs")
+    assert "separate tool result" in ret
+    assert tm._card_capture is False                    # restored
+    assert len(tm._interp_card_buffer) == 1
+    card = tm._interp_card_buffer[0]
+    assert card["card_type"] == "web_search"
+    assert card["results"] == fake
+    assert len(tm._interp_subresults) == 1
+    name, obs = tm._interp_subresults[0]
+    assert name == "web_search" and "T1" in obs and "https://a" in obs
+    # flush empties the buffer (emission itself needs a chat window — not here)
+    tm.flush_interp_cards()
+    assert tm._interp_card_buffer == []

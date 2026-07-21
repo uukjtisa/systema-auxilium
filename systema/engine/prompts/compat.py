@@ -26,7 +26,7 @@ def tool_format_section(include_workmode: bool = True,
     if include_workmode:
         # The file subsystem rides with execution capability (default-on).
         active += ['python_interpreter', 'read_file', 'edit_file', 'write_file',
-                   'grep']
+                   'grep', 'web_search']
     if include_skills:
         active += ['load_skill', 'unload_skill']
 
@@ -46,8 +46,8 @@ RULES:
 - You may emit SEVERAL tool fences in one response. They run one after another
   in the order written, and ALL their results come back together in ONE
   observation.
-- HARD CAP: at most ONE python_interpreter fence per response. read_file,
-  edit_file, write_file, grep and the skill fences combine freely alongside it.
+- Multiple python_interpreter fences are allowed and combine freely with
+  read_file, edit_file, write_file, grep, web_search and the skill fences.
 - Results arrive only after the WHOLE batch has run — if a later call needs an
   earlier call's OUTPUT, stop after the producing fence and continue next turn.
 - Put tool fences at the END of your message, after your reply text.
@@ -99,10 +99,11 @@ MUST REMEMBER (quick recall of the rules above):
   "produce" text you could simply type.
 - Never roleplay: if you say you'll do it, emit the fence(s) in the SAME response.
 - python_interpreter = your ONLY code tool; you SEE output; chain turns; print()
-  what you need. At most ONE python_interpreter fence per response, at the END,
-  ALWAYS with an annotation: `python_interpreter: [short label]`.
+  what you need. One or more python_interpreter fences per response are allowed,
+  ALWAYS each with an annotation: `python_interpreter: [short label]`.
 - Several tool fences may share one response — they run in order and all
-  results return together; only python_interpreter is capped at one.
+  results return together; keep steps that depend on each other's OUTPUT in
+  separate turns.
 - Tool calls are code fences (tool name = fence language, content inside).
 - Be friendly and descriptive.
 """
@@ -142,9 +143,9 @@ PREFILLING = {
                 "answer simple requests you can handle from your own knowledge or "
                 "creativity (writing, explaining, chat) with a normal reply. "
                 "NEVER roleplay execution. Several tool fences may share one "
-                "response (they run in order); at most ONE python_interpreter "
-                "fence among them. If you say you will do something, do it in "
-                "that SAME response."
+                "response (they run in order), including multiple "
+                "python_interpreter fences. If you say you will do something, "
+                "do it in that SAME response."
             ),
         },
         {
@@ -166,8 +167,8 @@ PREFILLING = {
                 "until the task is fully complete, then finish with a normal reply "
                 "containing my full report. I may emit several tool fences in one "
                 "response — they run in the order written and I get all their "
-                "results together — but at most ONE python_interpreter fence among "
-                "them, always with a short annotation label. I never roleplay "
+                "results together, and that may include multiple python_interpreter "
+                "fences, each with a short annotation label. I never roleplay "
                 "execution — if I say I'll do something, I do it in that same "
                 "response with the actual fence."
             ),

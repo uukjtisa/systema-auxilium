@@ -213,18 +213,8 @@ class ManualResponseWindow(BaseWindow):
         h_lay.addWidget(title)
         h_lay.addSpacing(12)
 
-        close_btn = _btn("✕")
-        close_btn.setFixedSize(28, 28)
-        close_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent;
-                border: none;
-                color: {_MUTED};
-                font-size: 14px;
-                border-radius: 14px;
-            }}
-            QPushButton:hover {{ background: rgba(248,81,73,0.2); color: {_DANGER}; }}
-        """)
+        from systema.ui.widgets.painted_icons import CloseButton
+        close_btn = CloseButton(28, tooltip="Close", pill=False)
         close_btn.clicked.connect(self._cancel)
         h_lay.addWidget(close_btn)
         card_lay.addWidget(header)

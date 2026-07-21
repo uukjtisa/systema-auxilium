@@ -655,7 +655,10 @@ class EventCardsMixin:
         header_lay.setContentsMargins(4, 2, 6, 2)
         header_lay.setSpacing(6)
 
-        icon_lbl = QLabel(">_")   # styled by _restyle below (zoom-aware)
+        # Painted >_ prompt glyph (icon overhaul: the ASCII label is gone;
+        # zoom handled in _restyle via set_px)
+        from systema.ui.widgets.painted_icons import TerminalGlyph
+        icon_lbl = TerminalGlyph(px=12, color='#6E7681')
         header_lay.addWidget(icon_lbl)
 
         # Use the Working: annotation as the label if available
@@ -783,9 +786,7 @@ class EventCardsMixin:
         #    this card; re-invoked by _apply_zoom_all on Ctrl+scroll ──────────
         def _restyle():
             z = self._card_z
-            icon_lbl.setStyleSheet(
-                f"color: #6E7681; font-size: {z(10)}px; font-weight: bold; "
-                f"font-family: Consolas, monospace; background: transparent; border: none;")
+            icon_lbl.set_px(z(12))          # painted glyph scales with zoom
             summary_lbl.setText(
                 f"<span style='color:#9AA0A6;font-size:{z(11)}px;'>{header_label}</span>"
                 f"&nbsp;&nbsp;<span style='color:#5F6368;'>·</span>&nbsp;&nbsp;"
@@ -1175,13 +1176,13 @@ class EventCardsMixin:
         summary_lbl.setStyleSheet("background: transparent; border: none;")
         header_lay.addWidget(summary_lbl, stretch=1)
 
-        # ── Detach — small flat glyph; the button consumes its own clicks so
-        #    detaching never fires the header's expand toggle ────────────────
-        detach_btn = QPushButton("⊗")                # styled by _restyle
+        # ── Detach — painted boxless ✕ (icon overhaul); the button consumes
+        #    its own clicks so detaching never fires the header's expand toggle
+        from systema.ui.widgets.painted_icons import CloseButton as _XBtn
+        detach_btn = _XBtn(18, pill=False)           # sized by _restyle (zoom)
         detach_btn.setToolTip(
             "Remove this memory from the conversation context.\n"
             "The AI will no longer see it in this session.")
-        detach_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         header_lay.addWidget(detach_btn)
 
         toggle_lbl = QLabel("▶")                     # styled by _restyle
@@ -1254,13 +1255,6 @@ class EventCardsMixin:
                 f"{len(mems)} {count_word} recalled</span>"
                 f"&nbsp;&nbsp;<span style='color:{DIM};font-size:{z(10)}px;'>{preview_text}</span>")
             detach_btn.setFixedSize(max(18, round(18 * k)), max(18, round(18 * k)))
-            detach_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: transparent; border: none;
-                    font-size: {z(11)}px; color: {DIM}; padding: 0;
-                }}
-                QPushButton:hover {{ color: #E06060; }}
-            """)
             toggle_lbl.setStyleSheet(
                 f"background: transparent; border: none; font-size: {z(8)}px; color: {DIM};")
             detail.setStyleSheet(f"""
@@ -1340,6 +1334,409 @@ class EventCardsMixin:
                     '_memory_context_id': context_id,
                     'content': '',          # content is stored per-memory
                     '_memories_preview': memories,
+                })
+            except Exception:
+                pass
+
+    # ── web_search result cards ────────────────────────────────────────────────
+    # Card A: search results as a clickable title/url/snippet sub-list.
+    # Card B: an opened page's clean text (or a links list) in a compact viewer.
+    # Both follow the memory-context / code-exec card idioms so they blend in, and
+    # both round-trip through the session via render_loaded_messages().
+
+    def _web_card_shell(self, icon_glyph, header_text):
+        """Shared chrome: transparent wrapper + clickable borderless header +
+        hidden detail frame. Returns (message_widget, outer_lay, header,
+        summary_lbl, toggle_lbl, detail, detail_lay)."""
+        from PyQt6.QtWidgets import QFrame, QHBoxLayout, QVBoxLayout, QLabel
+
+        message_widget = QFrame()
+        message_widget.setStyleSheet(
+            "QFrame { background-color: transparent; padding: 0px; }")
+        outer_lay = QVBoxLayout(message_widget)
+        outer_lay.setContentsMargins(0, 0, 0, 0)
+        outer_lay.setSpacing(0)
+
+        header = QFrame()
+        header.setObjectName("webHeader")
+        header.setCursor(Qt.CursorShape.PointingHandCursor)
+        header.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+        header_lay = QHBoxLayout(header)
+        header_lay.setContentsMargins(4, 2, 6, 2)
+        header_lay.setSpacing(6)
+
+        icon_lbl = QLabel(icon_glyph)
+        header_lay.addWidget(icon_lbl)
+        summary_lbl = QLabel()
+        summary_lbl.setTextFormat(Qt.TextFormat.RichText)
+        summary_lbl.setStyleSheet("background: transparent; border: none;")
+        header_lay.addWidget(summary_lbl, stretch=1)
+        toggle_lbl = QLabel("▶")
+        header_lay.addWidget(toggle_lbl)
+        outer_lay.addWidget(header, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        detail = QFrame()
+        detail.setObjectName("webDetail")
+        detail.hide()
+        detail_lay = QVBoxLayout(detail)
+        detail_lay.setContentsMargins(12, 8, 12, 8)
+        detail_lay.setSpacing(6)
+        outer_lay.addWidget(detail)
+
+        return (message_widget, outer_lay, header, summary_lbl,
+                icon_lbl, toggle_lbl, detail, detail_lay)
+
+    def _web_card_finalize(self, message_widget, header, detail, summary_lbl,
+                           icon_lbl, toggle_lbl, restyle, role):
+        """Shared wiring: toggle, width cap, insertion, tracking."""
+        def _toggle():
+            showing = detail.isVisible()
+            detail.setVisible(not showing)
+            toggle_lbl.setText("▶" if showing else "▼")
+        header.mousePressEvent = lambda e: _toggle()
+        header.setMaximumWidth(self._bubble_max_width())
+        detail.setMaximumWidth(self._bubble_max_width())
+        restyle()
+        g = self._insert_turn_segment(message_widget)
+        self._animate_message_in(
+            message_widget,
+            on_settled=lambda: self.scroll_to_widget(message_widget))
+        self.message_widgets.append({
+            'widget': message_widget,
+            'role': role,
+            'content_wrapper': header,
+            'group_row': g['row'],
+            '_toggle_btn': toggle_lbl,
+            'zoom_restyle': restyle,
+        })
+
+    def add_web_search_card(self, info: dict, save_to_history: bool = True):
+        """Card A — web_search results as a clickable title/url/snippet list."""
+        import html as _html
+        from PyQt6.QtWidgets import QFrame, QLabel
+
+        query = str(info.get('query', '') or '')
+        results = list(info.get('results', []) or [])
+        (message_widget, outer_lay, header, summary_lbl,
+         icon_lbl, toggle_lbl, detail, detail_lay) = self._web_card_shell("⌕", "")
+
+        rows = []   # (title_lbl, url_lbl, snip_lbl, sep_or_None)
+        for i, r in enumerate(results):
+            if i:
+                sep = QFrame()
+                sep.setObjectName("webSep")
+                sep.setFixedHeight(1)
+                detail_lay.addWidget(sep)
+            else:
+                sep = None
+            title = str(r.get('title') or '(untitled)')
+            href = str(r.get('href') or '')
+            body = str(r.get('body') or '')
+            t_lbl = QLabel(f'<a href="{_html.escape(href, quote=True)}">'
+                           f'{_html.escape(title)}</a>')
+            t_lbl.setTextFormat(Qt.TextFormat.RichText)
+            t_lbl.setOpenExternalLinks(True)
+            t_lbl.setWordWrap(True)
+            detail_lay.addWidget(t_lbl)
+            u_lbl = QLabel(href)
+            u_lbl.setWordWrap(True)
+            detail_lay.addWidget(u_lbl)
+            s_lbl = None
+            if body:
+                s_lbl = QLabel(body[:220] + ("…" if len(body) > 220 else ""))
+                s_lbl.setWordWrap(True)
+                detail_lay.addWidget(s_lbl)
+            rows.append((t_lbl, u_lbl, s_lbl, sep))
+
+        def _restyle():
+            z, t = self._card_z, self._t()
+            # NOTE: _t() is the RAW theme dict (base/surface/elevated/border/
+            # accent/deep) — it has no 'text'/'muted' keys. Use the shared card
+            # grays like the code-exec / memory-context cards do.
+            accent, muted, dim, ctx = t['accent'], "#8B949E", "#5F6368", "#C9D1D9"
+            header.setStyleSheet(
+                "QFrame#webHeader { background: transparent; border: none; border-radius: 6px; }"
+                "QFrame#webHeader:hover { background: rgba(255,255,255,0.05); }")
+            icon_lbl.setStyleSheet(f"color: {dim}; font-size: {z(12)}px; background: transparent;")
+            _q = _html.escape(query[:64] + ("…" if len(query) > 64 else ""))
+            summary_lbl.setText(
+                f'<span style="color:{muted}; font-size:{z(11)}px;">Web search · </span>'
+                f'<span style="color:#E6EDF3; font-size:{z(11)}px; font-weight:600;">"{_q}"</span>'
+                f'<span style="color:{dim}; font-size:{z(10)}px;">  {len(results)}</span>')
+            toggle_lbl.setStyleSheet(f"color: {dim}; font-size: {z(8)}px; background: transparent;")
+            detail.setStyleSheet(
+                f"QFrame#webDetail {{ background: {t['base']}; border: 1px solid {t['border']};"
+                f" border-radius: 8px; margin-top: 4px; }}"
+                f"QFrame#webSep {{ background: {t['border']}; border: none; }}")
+            for (t_lbl, u_lbl, s_lbl, sep) in rows:
+                t_lbl.setStyleSheet(f"a {{ color: {accent}; text-decoration: none; }} "
+                                    f"QLabel {{ font-size: {z(11)}px; font-weight: 600;"
+                                    f" background: transparent; }}")
+                u_lbl.setStyleSheet(f"color: {dim}; font-size: {z(9)}px; background: transparent;")
+                if s_lbl is not None:
+                    s_lbl.setStyleSheet(f"color: {ctx}; font-size: {z(10)}px; background: transparent;")
+                if sep is not None:
+                    sep.setStyleSheet(f"background: {t['border']};")
+
+        self._web_card_finalize(message_widget, header, detail, summary_lbl,
+                                icon_lbl, toggle_lbl, _restyle, 'web_search')
+
+        if save_to_history:
+            try:
+                self.controller.ai.conversation_history.append({
+                    'role': 'ui_event', '_type': 'web_search',
+                    'content': f'Web search: {query}',
+                    '_web_query': query, '_web_results': results,
+                })
+            except Exception:
+                pass
+
+    def add_thinking_card(self, text: str, save_to_history: bool = True,
+                          live: bool = False):
+        """Collapsible reasoning card — ONE per assistant turn, pinned to the
+        TOP of the turn shell (unlike tool cards, which append below the text).
+
+        Assistant turns are merged into a single bubble, so every response in
+        that turn feeds the SAME card: repeat calls append to it, in order,
+        separated by a blank line. UI-ONLY: stored as a ui_event so it survives
+        reload, but ui_events are stripped from what is sent to the provider —
+        the model never pays for its own past thinking.
+
+        `live=True` returns the card handle so the streaming path can keep
+        appending deltas while the reply is still arriving."""
+        from PyQt6.QtWidgets import QTextEdit
+
+        text = (text or "").strip()
+        if not text and not live:
+            return None            # no thinking → no card at all
+
+        # ── Reuse this turn's card if it already exists ──────────────────────
+        card = self._live_thinking_card()
+        if card is not None:
+            if text:
+                card['append'](("\n\n" if card['state']['text'] else "") + text)
+            if not live:
+                card['finish']()
+                if save_to_history:
+                    self._save_thinking_event(text)
+            return card if live else card['widget']
+
+        (message_widget, outer_lay, header, summary_lbl,
+         icon_lbl, toggle_lbl, detail, detail_lay) = self._web_card_shell("◇", "")
+
+        viewer = QTextEdit()
+        viewer.setReadOnly(True)
+        viewer.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        viewer.setFrameShape(QTextEdit.Shape.NoFrame)
+        viewer.setPlainText(text)
+        detail_lay.addWidget(viewer)
+        detail_lay.addWidget(_ResizeGrip(viewer, min_h=44, max_h=680))
+
+        state = {'text': text, 'done': not live}
+
+        def _restyle():
+            z, t = self._card_z, self._t()
+            # _t() is the RAW theme dict — no 'text' key (see add_web_search_card).
+            muted, dim = "#8B949E", "#5F6368"
+            k = self._get_msg_font_size() / 13.0
+            header.setStyleSheet(
+                "QFrame#webHeader { background: transparent; border: none; border-radius: 6px; }"
+                "QFrame#webHeader:hover { background: rgba(255,255,255,0.05); }")
+            icon_lbl.setStyleSheet(f"color: {dim}; font-size: {z(12)}px; background: transparent;")
+            _words = len(state['text'].split())
+            _label = "Thinking" if state['done'] else "Thinking…"
+            _count = (f'<span style="color:{dim}; font-size:{z(10)}px;">  {_words} words</span>'
+                      if _words and state['done'] else '')
+            summary_lbl.setText(
+                f'<span style="color:{muted}; font-size:{z(11)}px;">{_label}</span>' + _count)
+            toggle_lbl.setStyleSheet(f"color: {dim}; font-size: {z(8)}px; background: transparent;")
+            detail.setStyleSheet(
+                f"QFrame#webDetail {{ background: {t['base']}; border: 1px solid {t['border']};"
+                f" border-radius: 8px; margin-top: 4px; }}")
+            _n = len(state['text'].splitlines())
+            _lh = max(12, round(17 * k))
+            viewer.setFixedHeight(min(max(_n * _lh + 20, 44), 220))
+            # Flat inside the card: the detail frame IS the box. A second
+            # border/background here read as an ugly nested panel.
+            viewer.setStyleSheet(
+                f"QTextEdit {{ background: transparent; color: #C9D1D9;"
+                f" border: none; padding: 0px; font-size: {z(10)}px; }}")
+
+        self._thinking_card_finalize(message_widget, header, detail, summary_lbl,
+                                     icon_lbl, toggle_lbl, _restyle)
+
+        def _append(delta: str):
+            state['text'] += delta
+            viewer.setPlainText(state['text'])
+            viewer.verticalScrollBar().setValue(
+                viewer.verticalScrollBar().maximum())
+            _restyle()
+
+        def _finish():
+            state['done'] = True
+            _restyle()
+            return state['text']
+
+        card = {'widget': message_widget, 'append': _append,
+                'finish': _finish, 'state': state}
+        # Remember it for the rest of this turn so later responses merge in.
+        self._turn_thinking_card = card
+        self._turn_thinking_group = getattr(self, '_ai_turn_group', None)
+
+        if not live:
+            _finish()
+            if save_to_history:
+                self._save_thinking_event(text)
+            return message_widget
+        return card
+
+    def _live_thinking_card(self):
+        """This turn's thinking card, or None. Cleared when a new turn shell
+        opens or when its widgets are gone."""
+        card = getattr(self, '_turn_thinking_card', None)
+        if card is None:
+            return None
+        if getattr(self, '_turn_thinking_group', None) is not getattr(self, '_ai_turn_group', None):
+            self._turn_thinking_card = None      # different turn → new card
+            return None
+        try:
+            if card['widget'].parent() is None:
+                raise RuntimeError
+        except RuntimeError:
+            self._turn_thinking_card = None
+            return None
+        return card
+
+    def _thinking_card_finalize(self, message_widget, header, detail, summary_lbl,
+                                icon_lbl, toggle_lbl, restyle):
+        """Like _web_card_finalize, but pins the card to the TOP of the turn
+        shell and never scroll-jumps to it (it must not fight the reply that
+        is still streaming in below)."""
+        def _toggle():
+            showing = detail.isVisible()
+            detail.setVisible(not showing)
+            toggle_lbl.setText("▶" if showing else "▼")
+        header.mousePressEvent = lambda e: _toggle()
+        header.setMaximumWidth(self._bubble_max_width())
+        detail.setMaximumWidth(self._bubble_max_width())
+        restyle()
+        g = self._insert_turn_segment(message_widget, at_top=True)
+        self.message_widgets.append({
+            'widget': message_widget,
+            'role': 'thinking',
+            'content_wrapper': header,
+            'group_row': g['row'],
+            '_toggle_btn': toggle_lbl,
+            'zoom_restyle': restyle,
+        })
+
+    def _save_thinking_event(self, text: str):
+        """Persist a thinking card as a ui_event (reload-visible, never sent)."""
+        text = (text or "").strip()
+        if not text:
+            return
+        try:
+            self.controller.ai.conversation_history.append({
+                'role': 'ui_event', '_type': 'thinking',
+                'content': 'Thinking', '_thinking': text,
+            })
+        except Exception:
+            pass
+
+    def add_web_page_card(self, info: dict, save_to_history: bool = True):
+        """Card B — an opened page's clean text, or a links list, in a compact
+        expandable viewer (does not balloon: capped height + resize grip)."""
+        import html as _html
+        from PyQt6.QtWidgets import QFrame, QLabel, QTextEdit
+
+        mode = str(info.get('mode', 'open') or 'open')
+        url = str(info.get('url', '') or '')
+        title = str(info.get('title', '') or url or 'Web page')
+        text = str(info.get('text', '') or '')
+        links = list(info.get('links', []) or [])
+
+        (message_widget, outer_lay, header, summary_lbl,
+         icon_lbl, toggle_lbl, detail, detail_lay) = self._web_card_shell("▤", "")
+
+        # Clickable source URL at the top of the detail.
+        src_lbl = QLabel(f'<a href="{_html.escape(url, quote=True)}">{_html.escape(url)} ↗</a>')
+        src_lbl.setTextFormat(Qt.TextFormat.RichText)
+        src_lbl.setOpenExternalLinks(True)
+        src_lbl.setWordWrap(True)
+        detail_lay.addWidget(src_lbl)
+
+        viewer = None
+        link_rows = []
+        if mode == 'links':
+            for it in links:
+                lt = str(it.get('text') or '(no text)')
+                lh = str(it.get('href') or '')
+                row = QLabel(f'<a href="{_html.escape(lh, quote=True)}">{_html.escape(lt)}</a>'
+                             f'<br><span>{_html.escape(lh)}</span>')
+                row.setTextFormat(Qt.TextFormat.RichText)
+                row.setOpenExternalLinks(True)
+                row.setWordWrap(True)
+                detail_lay.addWidget(row)
+                link_rows.append(row)
+        else:
+            viewer = QTextEdit()
+            viewer.setReadOnly(True)
+            viewer.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+            viewer.setFrameShape(QTextEdit.Shape.NoFrame)
+            viewer.setPlainText(text)
+            detail_lay.addWidget(viewer)
+            detail_lay.addWidget(_ResizeGrip(viewer, min_h=44, max_h=680))
+
+        def _restyle():
+            z, t = self._card_z, self._t()
+            # _t() is the RAW theme dict — no 'text' key (see add_web_search_card).
+            accent, muted, dim = t['accent'], "#8B949E", "#5F6368"
+            k = self._get_msg_font_size() / 13.0
+            header.setStyleSheet(
+                "QFrame#webHeader { background: transparent; border: none; border-radius: 6px; }"
+                "QFrame#webHeader:hover { background: rgba(255,255,255,0.05); }")
+            icon_lbl.setStyleSheet(f"color: {dim}; font-size: {z(12)}px; background: transparent;")
+            dom = ''
+            try:
+                from urllib.parse import urlparse
+                dom = urlparse(url).netloc
+            except Exception:
+                dom = ''
+            _title = _html.escape(title[:70] + ("…" if len(title) > 70 else ""))
+            _extra = (f'<span style="color:{dim}; font-size:{z(10)}px;">  {_html.escape(dom)}</span>'
+                      if dom else '')
+            summary_lbl.setText(
+                f'<span style="color:#E6EDF3; font-size:{z(11)}px; font-weight:600;">{_title}</span>'
+                + _extra)
+            toggle_lbl.setStyleSheet(f"color: {dim}; font-size: {z(8)}px; background: transparent;")
+            detail.setStyleSheet(
+                f"QFrame#webDetail {{ background: {t['base']}; border: 1px solid {t['border']};"
+                f" border-radius: 8px; margin-top: 4px; }}")
+            src_lbl.setStyleSheet(f"a {{ color: {accent}; text-decoration: none; }} "
+                                  f"QLabel {{ font-size: {z(9)}px; background: transparent; }}")
+            for row in link_rows:
+                row.setStyleSheet(f"a {{ color: {accent}; text-decoration: none; }} "
+                                  f"span {{ color: {dim}; }} "
+                                  f"QLabel {{ font-size: {z(10)}px; background: transparent; }}")
+            if viewer is not None:
+                _n = len(text.splitlines())
+                _lh = max(12, round(17 * k))
+                viewer.setFixedHeight(min(max(_n * _lh + 20, 44), 220))
+                viewer.setStyleSheet(
+                    f"QTextEdit {{ background: {t['base']}; color: #E6EDF3;"
+                    f" border: 1px solid {t['border']}; border-radius: 8px;"
+                    f" padding: 8px 12px; font-size: {z(10)}px; }}")
+
+        self._web_card_finalize(message_widget, header, detail, summary_lbl,
+                                icon_lbl, toggle_lbl, _restyle, 'web_page')
+
+        if save_to_history:
+            try:
+                self.controller.ai.conversation_history.append({
+                    'role': 'ui_event', '_type': 'web_page',
+                    'content': f'Web page: {url}',
+                    '_web_mode': mode, '_web_url': url, '_web_title': title,
+                    '_web_text': text, '_web_links': links,
                 })
             except Exception:
                 pass

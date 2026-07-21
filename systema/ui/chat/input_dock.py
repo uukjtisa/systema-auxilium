@@ -79,7 +79,8 @@ class _ChatBottomFade(QWidget):
 class _InputResizeHandle(QFrame):
     """Slim grab bar flanking the input pill — drag to resize its width.
     Symmetric: the pill stays centred, so 1px of drag = 2px of width. The
-    chosen width persists as input_box_geometry in chat_config.json."""
+    chosen width persists as input_box_geometry in settings.json
+    (chat_window_config section)."""
 
     W, H = 5, 40
 
@@ -401,45 +402,30 @@ class InputDockMixin:
         name_lbl.setStyleSheet("color: #C9D1D9; font-size: 10px; background: transparent;")
         name_lbl.setWordWrap(True)
         info_col.addWidget(name_lbl)
-        status_lbl = QLabel("🔁 Sending with every message")
+        status_lbl = QLabel("Sending with every message")
         status_lbl.setStyleSheet(f"color: {_tc['accent']}; font-size: 9px; background: transparent;")
         info_col.addWidget(status_lbl)
         row.addLayout(info_col, stretch=1)
 
         pin_info = {'path': path, 'widget': outer, 'auto_detach': auto_detach}
 
-        # 🔁 toggle button
-        toggle_btn = QPushButton("🔁")
-        toggle_btn.setFixedSize(26, 26)
-        toggle_btn.setToolTip("Toggle: send every message / send once then detach")
-        toggle_btn.setCheckable(True)
+        # Repeat toggle (painted circular arrows; accent while checked)
+        from systema.ui.widgets.painted_icons import RepeatButton
+        toggle_btn = RepeatButton(
+            26, tooltip="Toggle: send every message / send once then detach")
         toggle_btn.setChecked(not auto_detach)
-        toggle_btn.setStyleSheet(f"""
-                        QPushButton {{ background: {_tc['elevated']}; border: 1px solid {_tc['input_card_border']};
-                            border-radius: 6px; font-size: 11px; color: {_tc['accent']}; }}
-                        QPushButton:checked {{ background: {_tc['input_card_border']}; }}
-                        QPushButton:hover   {{ background: {_tc['elevated']}; border-color: {_tc['accent']}; }}
-                    """)
 
         def _on_toggle(checked, pi=pin_info, sl=status_lbl):
             pi['auto_detach'] = not checked
-            sl.setText("🔁 Sending with every message" if checked
-                       else "1️⃣ Sending once (then detach)")
+            sl.setText("Sending with every message" if checked
+                       else "Sending once (then detach)")
 
         toggle_btn.toggled.connect(_on_toggle)
         row.addWidget(toggle_btn)
 
-        # ✕ detach button
-        x_btn = QPushButton("✕")
-        x_btn.setFixedSize(22, 22)
-        x_btn.setToolTip("Detach image from context")
-        x_btn.setStyleSheet("""
-                QPushButton { background: rgba(255,255,255,0.05);
-                    border: 1px solid rgba(255,255,255,0.1);
-                    border-radius: 6px; color: #8B949E; font-size: 10px; }
-                QPushButton:hover { background: rgba(234,67,53,0.25); color: #EA4335;
-                    border-color: rgba(234,67,53,0.5); }
-            """)
+        # Painted detach button (icon overhaul: boxless ✕, glyph turns red)
+        from systema.ui.widgets.painted_icons import CloseButton as _XBtn
+        x_btn = _XBtn(22, tooltip="Detach image from context", pill=False)
         x_btn.clicked.connect(lambda _, pi=pin_info: self._remove_pinned_image(pi))
         row.addWidget(x_btn)
 
@@ -656,9 +642,9 @@ class InputDockMixin:
 
         # Action buttons
         btn_row = QHBoxLayout()
-        img_btn  = QPushButton("🖼 Attach as Image(s)")
+        img_btn  = QPushButton("Attach as Image(s)")
         img_btn.setObjectName("primaryBtn")
-        path_btn = QPushButton("📄 Insert Path(s)")
+        path_btn = QPushButton("Insert Path(s)")
         cancel_btn = QPushButton("Cancel")
 
         btn_row.addWidget(img_btn)
@@ -839,23 +825,12 @@ class InputDockMixin:
         bottom_row_layout.setSpacing(4)
 
         # ── LEFT: attach + mode ───────────────────────────────────────────────
-        browse_btn = QPushButton("📎")
-        browse_btn.setFixedSize(30, 30)
-        browse_btn.setToolTip("Attach file")
-        browse_btn.setStyleSheet("""
-            QPushButton {
-                background: rgba(255,255,255,0.04);
-                border: 1px solid rgba(255,255,255,0.08);
-                border-radius: 8px;
-                font-size: 13px;
-                color: #6E7280;
-            }
-            QPushButton:hover {
-                background: rgba(255,255,255,0.1);
-                border-color: rgba(255,255,255,0.2);
-                color: #9AA0A6;
-            }
-        """)
+        # Icon overhaul (2026-07-21): every input-row action is a PAINTED,
+        # BOXLESS glyph button (no background pill — user's aesthetic call);
+        # hover feedback = glyph brighten + per-button personality.
+        from systema.ui.widgets.painted_icons import (
+            PaperclipButton, MicButton, MuteButton, StopButton, SendButton)
+        browse_btn = PaperclipButton(30, tooltip="Attach file")
         browse_btn.clicked.connect(self.browse_for_file)
         bottom_row_layout.addWidget(browse_btn)
 
@@ -913,91 +888,22 @@ class InputDockMixin:
 
         bottom_row_layout.addStretch()
 
-        # ── RIGHT: voice + interrupt + send ──────────────────────────────────
-        self.voice_btn_inline = QPushButton("🎙️")
-        self.voice_btn_inline.setFixedSize(30, 30)
-        self.voice_btn_inline.setCheckable(True)
-        self.voice_btn_inline.setToolTip("Toggle voice mode")
-        self.voice_btn_inline.setStyleSheet("""
-            QPushButton {
-                background: rgba(255,255,255,0.04);
-                border: 1px solid rgba(255,255,255,0.08);
-                border-radius: 8px;
-                font-size: 13px;
-                color: #6E7280;
-            }
-            QPushButton:hover {
-                background: rgba(255,255,255,0.1);
-                border-color: rgba(255,255,255,0.2);
-                color: #9AA0A6;
-            }
-            QPushButton:checked {
-                background: rgba(52,168,83,0.22);
-                border-color: rgba(52,168,83,0.5);
-                color: #4CAF50;
-            }
-        """)
+        # ── RIGHT: voice + interrupt + send (painted, boxless) ───────────────
+        self.voice_btn_inline = MicButton(30, tooltip="Toggle voice mode")
         self.voice_btn_inline.clicked.connect(self.toggle_voice)
         bottom_row_layout.addWidget(self.voice_btn_inline)
 
-        self.voice_interrupt_btn = QPushButton("🔇")
-        self.voice_interrupt_btn.setFixedSize(30, 30)
-        self.voice_interrupt_btn.setStyleSheet("""
-            QPushButton {
-                background: rgba(234,67,53,0.18);
-                border: 1px solid rgba(234,67,53,0.45);
-                border-radius: 8px;
-                font-size: 13px;
-                color: #F07070;
-            }
-            QPushButton:hover { background: rgba(234,67,53,0.3); }
-        """)
+        self.voice_interrupt_btn = MuteButton(30, tooltip="Interrupt voice")
         self.voice_interrupt_btn.clicked.connect(self.interrupt_voice)
         self.voice_interrupt_btn.hide()
         bottom_row_layout.addWidget(self.voice_interrupt_btn)
 
-        self.interrupt_btn = QPushButton("■")
-        self.interrupt_btn.setFixedSize(30, 30)
-        self.interrupt_btn.setToolTip("Cancel AI response")
-        self.interrupt_btn.setStyleSheet("""
-            QPushButton {
-                background: rgba(234,67,53,0.18);
-                border: 1px solid rgba(234,67,53,0.45);
-                border-radius: 8px;
-                font-size: 14px;
-                color: #F07070;
-                font-weight: bold;
-            }
-            QPushButton:hover { background: rgba(234,67,53,0.3); }
-        """)
+        self.interrupt_btn = StopButton(30, tooltip="Cancel AI response")
         self.interrupt_btn.clicked.connect(self.interrupt_response)
         self.interrupt_btn.hide()
         bottom_row_layout.addWidget(self.interrupt_btn)
 
-        self.send_btn = QPushButton("➤")
-        self.send_btn.setFixedSize(30, 30)
-        self.send_btn.setStyleSheet("""
-            QPushButton {
-                background: rgba(255,255,255,0.08);
-                border: 1px solid rgba(255,255,255,0.15);
-                border-radius: 8px;
-                font-size: 14px;
-                color: #E6EDF3;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background: rgba(255,255,255,0.15);
-                border-color: rgba(255,255,255,0.3);
-            }
-            QPushButton:pressed {
-                background: rgba(255,255,255,0.22);
-            }
-            QPushButton:disabled {
-                background: transparent;
-                border-color: rgba(255,255,255,0.05);
-                color: #5F5F5F;
-            }
-        """)
+        self.send_btn = SendButton(30, tooltip="Send")
         self.send_btn.clicked.connect(self.send_message)
         bottom_row_layout.addWidget(self.send_btn)
 
@@ -1028,7 +934,7 @@ class InputDockMixin:
         _thumb_scroll.setWidget(self._img_thumbs_widget)
         _img_bar_outer.addWidget(_thumb_scroll, stretch=1)
 
-        _img_clear_all_btn = QPushButton("✕ Clear all")
+        _img_clear_all_btn = QPushButton("Clear all")
         _img_clear_all_btn.setFixedHeight(24)
         _img_clear_all_btn.setToolTip("Remove all image attachments")
         _img_clear_all_btn.setStyleSheet("""

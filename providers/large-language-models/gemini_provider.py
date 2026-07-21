@@ -1,101 +1,159 @@
 """
 providers/large-language-models/gemini_provider.py
-Google Gemini — modular LLM provider
+Google Gemini — modular LLM provider (contract v2)
 
-SETUP: Replace API_KEY and MODEL below with your values.
-Get your key: https://aistudio.google.com/apikey
+Text + vision + native tool calling + streaming, all through one chat().
+Uses the REST generateContent endpoint so request/response shapes line up
+exactly with systema.engine.native_adapters (functionDeclarations in,
+functionCall parts out) — no SDK required, just `requests`.
+
+SETUP: put your key in Settings ▸ AI ▸ Provider Settings (or edit API_KEY
+below). Get one at https://aistudio.google.com/apikey
 """
 
-# ─── Configuration ─────────────────────────────────────────────────────────────
+# ─── Configuration (editable from Settings via Display) ───────────────────────
 API_KEY     = "AIza-YOUR-KEY-HERE"
 MODEL       = "gemini-2.5-flash"
 MAX_TOKENS  = 8192
 TEMPERATURE = 1.0
-TOP_P       = None   # Set to float (0–1) or leave None for API default
-TOP_K       = None   # Set to int or leave None for API default
+TOP_P       = None   # float 0–1, or None for the API default
+TOP_K       = None   # int, or None for the API default
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Gemini performs real function calling, so opt into Systema's native tool-calling
-# mode (Settings -> System -> Tool Calling Mode -> Native).
+CONTRACT_VERSION = 2
+
+# Gemini performs real function calling — opt into Systema's native mode
+# (Settings -> System -> Tool Calling Mode -> Native).
 SUPPORTS_NATIVE_TOOLS = True
 NATIVE_DIALECT        = "gemini"
 
+Display = {
+    "API_KEY": ("API Key", "secure_input",
+                {"tooltip": "From aistudio.google.com/apikey",
+                 "placeholder": "AIza..."}),
+    "MODEL": ("Model", "list_dropdown", [
+        "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
+        {"tooltip": "Editable — any model id from Google's docs",
+         "item_tooltips": ["Fast, cheap, capable", "Deepest reasoning",
+                           "Previous-gen fast model"]}),
+    "MAX_TOKENS":  ("Max tokens", "number"),
+    "TEMPERATURE": ("Temperature", "number"),
+}
 
-def chat(system_prompt: str, messages: list) -> str:
-    """
-    Required signature for all LLM provider scripts.
+_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
-    Args:
-        system_prompt : Full effective system prompt (may be empty, never None).
-        messages      : List of {"role": "user"|"assistant", "content": str} dicts.
 
-    Returns:
-        A non-empty string response.
-    """
-    from google import genai
-    from google.genai import types as genai_types
+def _generation_config() -> dict:
+    cfg = {"maxOutputTokens": MAX_TOKENS, "temperature": TEMPERATURE}
+    if TOP_P is not None:
+        cfg["topP"] = TOP_P
+    if TOP_K is not None:
+        cfg["topK"] = TOP_K
+    return cfg
 
-    client = genai.Client(api_key=API_KEY)
 
-    # Convert role 'assistant' → 'model' for Gemini
+def _inline_image(path: str) -> dict:
+    import base64, mimetypes
+    mime, _ = mimetypes.guess_type(path)
+    with open(path, "rb") as f:
+        data = base64.b64encode(f.read()).decode()
+    return {"inline_data": {"mime_type": mime or "image/jpeg", "data": data}}
+
+
+def _body(system_prompt, messages, images=None, tools=None) -> dict:
     contents = []
     for msg in messages:
-        gemini_role = "model" if msg["role"] == "assistant" else "user"
-        contents.append({"role": gemini_role, "parts": [{"text": msg["content"]}]})
+        role = "model" if msg.get("role") == "assistant" else "user"
+        content = msg.get("content")
+        if isinstance(content, list):
+            # Already dialect-shaped (tool turns) — forward verbatim.
+            contents.append({"role": role, "parts": content})
+        else:
+            contents.append({"role": role, "parts": [{"text": content}]})
 
-    config_kwargs = {
-        "max_output_tokens": MAX_TOKENS,
-        "temperature":       TEMPERATURE,
-    }
+    if images and contents:
+        # Attach the images to the final user turn.
+        parts = [_inline_image(p) for p in images]
+        if contents[-1]["role"] == "user":
+            contents[-1]["parts"] = parts + contents[-1]["parts"]
+        else:
+            contents.append({"role": "user", "parts": parts})
+
+    body = {"contents": contents, "generationConfig": _generation_config()}
     if system_prompt:
-        config_kwargs["system_instruction"] = system_prompt
-    if TOP_P is not None:
-        config_kwargs["top_p"] = TOP_P
-    if TOP_K is not None:
-        config_kwargs["top_k"] = TOP_K
-
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=contents,
-        config=genai_types.GenerateContentConfig(**config_kwargs),
-    )
-    return response.text
+        body["system_instruction"] = {"parts": [{"text": system_prompt}]}
+    if tools:
+        from systema.engine import native_adapters as na
+        body["tools"] = na.to_gemini_tools(tools)
+    return body
 
 
-def chat_tools(system_prompt: str, messages: list, tools: list, images=None) -> dict:
-    """Native function-calling entrypoint (Gemini dialect).
-
-    Uses Gemini's REST generateContent endpoint so the request/response shapes
-    line up exactly with ``systema.engine.native_adapters`` (functionDeclarations
-    in, functionCall parts out). Returns the normalized result the app expects:
-        {"text": str | None, "tool_calls": [{"id","name","arguments"}, ...]}
-    """
+def chat(system_prompt: str, messages: list, *, images=None, tools=None, stream=False):
+    """Unified v2 entry point — text, vision, native tools, streaming."""
     import requests
     from systema.engine import native_adapters as na
 
-    contents = []
-    for msg in messages:
-        role = "model" if msg["role"] == "assistant" else "user"
-        contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+    body = _body(system_prompt, messages, images, tools)
+    if stream:
+        return _chat_stream(body)
 
-    generation_config = {"maxOutputTokens": MAX_TOKENS, "temperature": TEMPERATURE}
-    if TOP_P is not None:
-        generation_config["topP"] = TOP_P
-    if TOP_K is not None:
-        generation_config["topK"] = TOP_K
-
-    body = {
-        "contents": contents,
-        "tools": na.to_gemini_tools(tools),
-        "generationConfig": generation_config,
-    }
-    if system_prompt:
-        body["system_instruction"] = {"parts": [{"text": system_prompt}]}
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
-    response = requests.post(url, params={"key": API_KEY}, json=body, timeout=60)
+    url = f"{_BASE}/{MODEL}:generateContent"
+    response = requests.post(url, params={"key": API_KEY}, json=body)
     response.raise_for_status()
-    return na.parse_gemini(response.json())
+    data = response.json()
+    parsed = na.parse_gemini(data)
+    cand = (data.get("candidates") or [{}])[0]
+    # Gemini marks reasoning parts with "thought": true.
+    thinking = "".join(
+        p.get("text") or "" for p in ((cand.get("content") or {}).get("parts") or [])
+        if isinstance(p, dict) and p.get("thought"))
+    return {
+        "content": parsed.get("text") or "",
+        "thinking": thinking or None,
+        "tool_calls": parsed.get("tool_calls") or [],
+        "finish_reason": cand.get("finishReason"),
+    }
+
+
+def _chat_stream(body: dict):
+    """streamGenerateContent (SSE) → contract chunks. Function calls arrive
+    whole in Gemini's stream, so they are emitted as they appear."""
+    import json
+    import requests
+    from systema.engine import native_adapters as na
+
+    url = f"{_BASE}/{MODEL}:streamGenerateContent"
+    calls, finish = [], None
+    with requests.post(url, params={"key": API_KEY, "alt": "sse"},
+                       json=body, stream=True) as response:
+        response.raise_for_status()
+        for line in response.iter_lines(decode_unicode=True):
+            if not line or not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if payload == "[DONE]":
+                break
+            try:
+                event = json.loads(payload)
+                cand = (event.get("candidates") or [{}])[0]
+            except Exception:
+                continue
+            finish = cand.get("finishReason") or finish
+            for part in ((cand.get("content") or {}).get("parts") or []):
+                if not isinstance(part, dict):
+                    continue
+                if part.get("functionCall"):
+                    fc = part["functionCall"]
+                    calls.append({"id": na._new_call_id(),
+                                  "name": fc.get("name", ""),
+                                  "arguments": na._coerce_args(fc.get("args") or {})})
+                elif part.get("text"):
+                    kind = "thinking" if part.get("thought") else "text"
+                    yield {"type": kind, "content": part["text"], "finish_reason": None}
+
+    for call in calls:
+        yield {"type": "tool_call", "content": call, "finish_reason": None}
+    yield {"type": "done", "content": "", "finish_reason": finish or "stop"}
 
 
 # ── Quick test ────────────────────────────────────────────────────────────────
@@ -106,16 +164,15 @@ if __name__ == "__main__":
     print(f"Testing Gemini provider... model={MODEL}")
     print("-" * 60)
     try:
-        result = chat(
-            system_prompt="You are a helpful assistant.",
-            messages=[{"role": "user", "content": "Say 'Provider test successful.' and nothing else."}],
-        )
-        print("Response:", result)
+        out = chat(system_prompt="You are a helpful assistant.",
+                   messages=[{"role": "user",
+                              "content": "Say 'Provider test successful.' and nothing else."}])
+        print("Response:", out["content"])
         print("Test passed.")
     except Exception as e:
         print(f"Test failed: {e}")
 
-    print("\nTesting native tool calling (chat_tools)...")
+    print("\nTesting native tool calling...")
     demo_tools = [{
         "name": "get_weather",
         "description": "Get the current weather for a city.",
@@ -124,15 +181,14 @@ if __name__ == "__main__":
                        "required": ["city"]},
     }]
     try:
-        out = chat_tools(
+        out = chat(
             system_prompt="You are a helpful assistant. Use tools when appropriate.",
             messages=[{"role": "user", "content": "What's the weather in Tokyo? Use the tool."}],
             tools=demo_tools,
         )
         calls = out.get("tool_calls") or []
-        print("Text:", out.get("text"))
+        print("Text:", out.get("content"))
         print("Tool calls:", calls)
-        print("Native tool calling works." if calls else
-              "No tool_calls returned.")
+        print("Native tool calling works." if calls else "No tool_calls returned.")
     except Exception as e:
         print(f"Native tool-calling test failed: {e}")

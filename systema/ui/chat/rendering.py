@@ -3,7 +3,7 @@ systema/ui/chat/rendering.py
 RenderingMixin — markdown / LaTeX / table rendering helpers for ChatWindow.
 
 LaTeX pipeline (2026-07-20 overhaul): hash-keyed memory + disk cache under
-data/latex_cache/ plus ONE background render worker. A cache miss never blocks
+data/cache/latex/ plus ONE background render worker. A cache miss never blocks
 the GUI thread — _preprocess_latex emits a small placeholder, the worker
 renders the PNG (paying the matplotlib import off-thread, once), and
 _on_latex_ready refreshes the affected message labels. Session reloads replay
@@ -74,14 +74,18 @@ class RenderingMixin:
             self._latex_sig.ready.connect(self._on_latex_ready)
 
     def _latex_cache_dir(self):
-        from pathlib import Path
-        from systema import APP_ROOT
-        d = Path(APP_ROOT) / 'data' / 'latex_cache'
+        # Consolidated cache layout (2026-07-21): data/cache/latex — the old
+        # data/latex_cache is auto-migrated in, so previously rendered math
+        # from old sessions still hits the cache.
+        from systema.common.data_paths import cache_dir
         try:
-            d.mkdir(parents=True, exist_ok=True)
+            return cache_dir('latex', legacy='latex_cache')
         except Exception:
-            pass
-        return d
+            from pathlib import Path
+            from systema import APP_ROOT
+            d = Path(APP_ROOT) / 'data' / 'cache' / 'latex'
+            d.mkdir(parents=True, exist_ok=True)
+            return d
 
     def _latex_key(self, expr: str, display: bool) -> str:
         raw = f"{expr}|{'d' if display else 'i'}|{self._LATEX_COLOR}"

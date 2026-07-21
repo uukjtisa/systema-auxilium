@@ -25,6 +25,7 @@ from pathlib import Path
 
 # ── Anchor to app root at import time — immune to os.chdir() ─────────────────
 from systema import APP_ROOT as _APP_ROOT
+from systema.common import app_config as _app_config
 # ─────────────────────────────────────────────────────────────────────────────
 
 class FloatingWindow(QWidget):
@@ -120,6 +121,17 @@ class FloatingWindow(QWidget):
         self.raise_timer.timeout.connect(self.ensure_on_top)
         self.raise_timer.start(50)  # Check every 50ms
 
+        # Crash-watchdog heartbeat (idea #12) — a DEDICATED tiny timer, NOT
+        # piggybacked on raise_timer's 50ms z-order churn. Stamps
+        # data/logs/crash_dumps/heartbeat.txt from the UI thread; the CrashWatcher
+        # daemon thread autopsies + force-restarts if the stamp goes stale
+        # (event loop hung or windows silently gone).
+        from systema.ui import crash_watcher
+        self.heartbeat_timer = QTimer(self)
+        self.heartbeat_timer.timeout.connect(crash_watcher.beat)
+        self.heartbeat_timer.start(crash_watcher.HEARTBEAT_INTERVAL_MS)
+        crash_watcher.start_watcher()
+
         # Pre-initialize chat window at startup (warms up the widget)
         QTimer.singleShot(600, self._startup_chat_init)
 
@@ -188,29 +200,24 @@ class FloatingWindow(QWidget):
     # ── persistence ──────────────────────────────────────────────────────
 
     def load_settings(self):
-        """Load appearance settings from file"""
-        settings_file = _APP_ROOT / "floating_window_config.json"
+        """Load appearance settings — 'floating_window_config' section of settings.json"""
         try:
-            if os.path.exists(settings_file):
-                with open(settings_file, 'r') as f:
-                    loaded = json.load(f)
-                    # Merge with defaults to handle new settings
-                    settings = self.DEFAULT_SETTINGS.copy()
-                    settings.update(loaded)
-                    return settings
+            loaded = _app_config.load_section('floating_window_config')
+            if loaded:
+                # Merge with defaults to handle new settings
+                settings = self.DEFAULT_SETTINGS.copy()
+                settings.update(loaded)
+                return settings
         except Exception as e:
             log.error(f"[FloatingWindow.load_settings] Error loading settings: {e}")
         return self.DEFAULT_SETTINGS.copy()
 
     def save_settings(self):
-        """Save appearance settings to file"""
-        settings_file = _APP_ROOT / "floating_window_config.json"
+        """Save appearance settings to the 'floating_window_config' section"""
         try:
             # Save current position
             self.settings['position'] = (self.x(), self.y())
-
-            with open(settings_file, 'w') as f:
-                json.dump(self.settings, f, indent=2)
+            _app_config.save_section('floating_window_config', self.settings)
         except Exception as e:
             log.error(f"[FloatingWindow.save_settings] Error saving settings: {e}")
 
@@ -851,6 +858,12 @@ class FloatingWindow(QWidget):
                 self.chat_window.add_code_execution_note(code, tm_output)
             if self.android_bridge and self.android_bridge.isVisible():
                 self.android_bridge.add_work_execution(code, tm_output)
+        # Flush any tool cards spawned from inside that python step (web_search)
+        # AFTER the interpreter card, so ordering is python-first then tool card.
+        try:
+            self.controller.ai.tool_manager.flush_interp_cards()
+        except Exception:
+            pass
 
         # ── Clear work banner when work mode finishes ──────────────────────────
         exited   = result.get('finished_working', False)

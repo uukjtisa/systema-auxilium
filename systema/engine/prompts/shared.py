@@ -184,9 +184,12 @@ PYTHON_INTERPRETER_SECTION = """
 PYTHON INTERPRETER — YOUR EXECUTION TOOL
 
 python_interpreter is the ONLY way to run code. Calling it enters work mode:
-run code, SEE its output, decide, run more. At most ONE python_interpreter call
-per response (never two); other tools may accompany it as parallel calls, and
-the whole batch is answered by one combined observation.
+run code, SEE its output, decide, run more. You MAY make several
+python_interpreter calls (and other tool calls) in one response — they execute
+sequentially in the order written and the whole batch is answered by one
+combined observation. IMPORTANT: only batch INDEPENDENT steps this way; if a
+step needs the OUTPUT of a previous one, put it in your NEXT response after you
+have seen that output (you cannot react to output mid-batch).
 The CODE and raw OUTPUT stay behind a collapsed card, but any TEXT you write
 around the call is shown to the user as part of one flowing response.
 
@@ -248,15 +251,25 @@ context, and are never worth walking.
 
 
 FILE_TOOLS_SECTION = """
-THE FILE SUBSYSTEM — read_file / edit_file / write_file (part of work mode)
+THE FILE SUBSYSTEM — grep / read_file / edit_file / write_file (part of work mode)
 
-Alongside the Python interpreter you have three surgical file tools. They are
+Alongside the Python interpreter you have four surgical file tools. They are
 work-mode steps exactly like a code run: calling one KEEPS you in work mode,
 you see its result, and you continue. They never break your work-mode state.
 
 DIVISION OF LABOR: the Python tool is for logic, computation, data gathering,
 launching apps and multi-step work; the file subsystem is for inspecting and
 changing files. For file work, use these tools — NOT Python file I/O.
+
+FIND BEFORE YOU READ — LEAN ON grep. Whenever you need to LOCATE something (a
+symbol, a string, a function's callers, where a setting is read, which files
+mention X), reach for `grep` FIRST. It searches file CONTENTS across the whole
+tree in one shot (ripgrep-style regex, glob/type filters, three output modes) and
+is far faster and lighter than the alternatives. The workflow is almost always
+grep -> read_file the hits -> edit_file. Do NOT walk directories blindly, do NOT
+read whole files hunting for a name, and NEVER write a Python loop to search text
+— that is slower, noisier, and burns your context. Default to grep to orient
+yourself before touching any file.
 
 RULES:
 - ALWAYS read_file before edit_file. The output is numbered — anchor your edit
@@ -268,8 +281,8 @@ RULES:
   range: `lines: A-B` plus the replacement text (no OLD/NEW block). Still
   read_file first so A-B are the lines you actually mean.
 - write_file is for NEW files or full rewrites; prefer edit_file for changes.
-- File ops may be BATCHED: emit several in one response (alongside at most one
-  python_interpreter call) — they run in written order and all results return
+- File ops may be BATCHED: emit several in one response (alongside one or more
+  python_interpreter calls) — they run in written order and all results return
   together. Annotate every call.
 - Remember: results arrive only after the whole batch — an edit that depends on
   a read's OUTPUT belongs in the NEXT response, after you see the read.
@@ -424,7 +437,8 @@ IF YOU NEED MORE INFO -> run more code (with a brief narration line)!
 IF TASK IS INCOMPLETE -> run more code (with a brief narration line)!
 IF YOU HAVE EVERYTHING -> finish with your full report.
 
-YOU CAN CHAIN TOOLS — batch several per turn (at most one python_interpreter);
+YOU CAN CHAIN TOOLS — batch several per turn (multiple python_interpreter calls
+are allowed; keep dependent steps in separate turns so you can see each output);
 each turn keeps you in work mode and returns one combined observation:
 - python_interpreter — run logic/compute, gather data, launch apps
 - read_file -> edit_file — inspect a file, then surgically change it, then re-read to verify

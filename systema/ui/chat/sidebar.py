@@ -340,21 +340,9 @@ class SidebarMixin:
 
         layout.addLayout(content_layout, 1)
 
-        delete_btn = QPushButton("🗑️")
-        delete_btn.setFixedSize(24, 24)
-        delete_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                border: none;
-                font-size: 14px;
-            }
-            QPushButton:hover {
-                background: rgba(234, 67, 53, 0.2);
-                border-radius: 12px;
-            }
-        """)
+        from systema.ui.widgets.painted_icons import TrashButton
+        delete_btn = TrashButton(24, tooltip="Delete session")
         delete_btn.clicked.connect(lambda: self._delete_session_clicked(session_id))
-        delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         layout.addWidget(delete_btn)
 
         item_widget.mousePressEvent = lambda e: self._load_session_clicked(session_id)
@@ -816,7 +804,7 @@ class SidebarMixin:
         # Cycling sort button
         self._session_sort_modes = ["Time", "A→Z", "Z→A"]
         self._session_sort_idx   = 0
-        self._session_sort_btn = QPushButton("↕ Time")
+        self._session_sort_btn = QPushButton("Time")
         self._session_sort_btn.setFixedHeight(28)
         self._session_sort_btn.setFixedWidth(56)
         self._session_sort_btn.setStyleSheet(f"""
@@ -832,9 +820,10 @@ class SidebarMixin:
         """)
         def _cycle_sort():
             self._session_sort_idx = (self._session_sort_idx + 1) % len(self._session_sort_modes)
-            icons = ["↕", "↑", "↓"]
-            lbl = self._session_sort_modes[self._session_sort_idx]
-            self._session_sort_btn.setText(f"{icons[self._session_sort_idx]} {lbl}")
+            # Icon overhaul: labels only — the A→Z/Z→A text already carries the
+            # direction; the ↕↑↓ glyph prefix was redundant chrome.
+            self._session_sort_btn.setText(
+                self._session_sort_modes[self._session_sort_idx])
             self.refresh_session_list()
         self._session_sort_btn.clicked.connect(_cycle_sort)
         search_sort_row.addWidget(self._session_sort_btn)
@@ -842,7 +831,7 @@ class SidebarMixin:
         sidebar_layout.addLayout(search_sort_row)
 
         # New session button — accent, full width
-        self._new_session_btn = QPushButton("➕  New Session")
+        self._new_session_btn = QPushButton("New Session")
         new_session_btn = self._new_session_btn
         new_session_btn.setFixedHeight(32)
         new_session_btn.setStyleSheet("""

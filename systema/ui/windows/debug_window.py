@@ -147,49 +147,31 @@ class DebugWindow(BaseWindow):
             QPushButton:hover {{ background: {_SURFACE2}; color: {_TEXT}; }}
         """
 
-        # Clear button
-        clear_btn = QPushButton("⌫")
-        clear_btn.setFixedSize(32, 32)
-        clear_btn.setStyleSheet(_icon_btn)
+        # Painted chrome (icon overhaul 2026-07-21): ⌫ >_ − □ × → glyph buttons
+        from systema.ui.widgets.painted_icons import (
+            ClearButton, TerminalButton, MinimizeButton, MaximizeButton,
+            CloseButton)
+        clear_btn = ClearButton(32, tooltip="Clear debug log")
         clear_btn.clicked.connect(self.clear_debug)
-        clear_btn.setToolTip("Clear debug log")
         header_layout.addWidget(clear_btn)
 
-        # NEW: CMD toggle button (only if launched from CMD)
+        # CMD toggle button (only if launched from CMD)
         if self.launched_from_cmd:
-            self.cmd_toggle_btn = QPushButton(">_")
-            self.cmd_toggle_btn.setFixedSize(32, 32)
-            self.cmd_toggle_btn.setStyleSheet(_icon_btn)
+            self.cmd_toggle_btn = TerminalButton(
+                32, tooltip=("Toggle console window" if sys.platform == 'win32'
+                             else "Show live log terminal"))
             self.cmd_toggle_btn.clicked.connect(self.toggle_cmd_window)
-            self.cmd_toggle_btn.setToolTip(
-                "Toggle console window" if sys.platform == 'win32'
-                else "Show live log terminal")
             header_layout.addWidget(self.cmd_toggle_btn)
 
-        # Minimize button
-        minimize_btn = QPushButton("−")
-        minimize_btn.setFixedSize(32, 32)
-        minimize_btn.setStyleSheet(_icon_btn.replace("font-size: 16px", "font-size: 18px"))
+        minimize_btn = MinimizeButton(32, tooltip="Minimize")
         minimize_btn.clicked.connect(self.showMinimized)
         header_layout.addWidget(minimize_btn)
 
-        # Maximize button
-        self.maximize_btn = QPushButton("□")
-        self.maximize_btn.setFixedSize(32, 32)
-        self.maximize_btn.setStyleSheet(_icon_btn)
+        self.maximize_btn = MaximizeButton(32, tooltip="Maximize / restore")
         self.maximize_btn.clicked.connect(self.toggle_maximize)
         header_layout.addWidget(self.maximize_btn)
 
-        # Close button
-        close_btn = QPushButton("×")
-        close_btn.setFixedSize(32, 32)
-        close_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent; border: none; border-radius: 6px;
-                font-size: 22px; color: {_MUTED};
-            }}
-            QPushButton:hover {{ background: #EA4335; color: white; }}
-        """)
+        close_btn = CloseButton(32, tooltip="Close", pill=True)
         close_btn.clicked.connect(self.hide)
         header_layout.addWidget(close_btn)
 

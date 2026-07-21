@@ -878,15 +878,20 @@ class BubblesMixin:
         g = {'row': row, 'shell': shell, 'body_layout': body_layout,
              'col_widget': col_widget, 'name_label': name_label}
         self._ai_turn_group = g
+        # A fresh turn shell gets a fresh Thinking card (one per merged bubble).
+        self._turn_thinking_card = None
 
         # The thinking dots now live INSIDE this shell (not as a separate row),
         # so the group row always goes just above the trailing stretch.
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, row)
         return g
 
-    def _insert_turn_segment(self, widget) -> dict:
+    def _insert_turn_segment(self, widget, at_top: bool = False) -> dict:
         """Append `widget` as a segment of the current assistant turn
         (creating the turn shell when this is the turn's first item).
+
+        `at_top=True` pins the widget to the START of the shell instead — the
+        Thinking card lives there, above the reply, no matter when it arrives.
 
         Ordering: while a code card is STREAMING live (created at work-start,
         before its narration text has arrived), any NEW segment is inserted
@@ -895,6 +900,13 @@ class BubblesMixin:
         card first and the text after it."""
         g = self._ensure_ai_turn_group()
         body = g['body_layout']
+        if at_top:
+            body.insertWidget(0, widget)
+            widget._group_row = g['row']
+            self._move_thinking_dots_to_bottom()
+            if self._bubble_style() == 'compact':
+                self._refit_turn_shell(g['shell'])
+            return g
         lc = getattr(self, '_live_card', None)
         live_w = lc.get('widget') if lc else None
         if live_w is not None and widget is not live_w:
@@ -1126,10 +1138,139 @@ class BubblesMixin:
             return True
         return False
 
+    # ── Live streaming (provider contract v2) ────────────────────────────────
+    # A streamed turn paints text into a throwaway "live" segment as deltas
+    # arrive, then hands off: the final full-fidelity render (markdown, code
+    # blocks, LaTeX, tool cards) still goes through add_ai_message, which
+    # removes the live segment first. The stream IS the reveal, so the
+    # typewriter animation is skipped for that turn.
+
+    def on_stream_started(self):
+        """First chunk arrived — open the turn shell and a live text segment."""
+        try:
+            if getattr(self, '_stream_seg', None) is not None:
+                return
+            fsize = self._get_msg_font_size()
+            label = QLabel()
+            label.setTextFormat(Qt.TextFormat.RichText)
+            label.setWordWrap(True)
+            label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse)
+            label.setStyleSheet(
+                f"QLabel {{ color: #BDC1C6; font-size: {fsize}px; line-height: 1.5;"
+                f" background: transparent; border: none; }}")
+            holder = QFrame()
+            holder.setObjectName("turnSeg")
+            holder.setStyleSheet("QFrame#turnSeg { background-color: transparent; }")
+            lay = QVBoxLayout(holder)
+            lay.setContentsMargins(*bubble_wrapper_margins(
+                'assistant', self._bubble_style(),
+                getattr(self, '_glass_enabled', False), in_group=True))
+            lay.setSpacing(8)
+            lay.addWidget(label)
+            self._insert_turn_segment(holder)
+            self._stream_seg = {'widget': holder, 'label': label, 'text': ''}
+            self._stream_active = True
+        except Exception:
+            log.warning("[ChatWindow.on_stream_started] failed", exc_info=True)
+            self._stream_seg = None
+
+    def on_stream_text(self, delta: str):
+        """Append a reply delta to the live segment (plain text while
+        streaming — the final markdown render happens at hand-off)."""
+        seg = getattr(self, '_stream_seg', None)
+        if seg is None:
+            self.on_stream_started()
+            seg = getattr(self, '_stream_seg', None)
+            if seg is None:
+                return
+        try:
+            seg['text'] += delta
+            import html as _html
+            seg['label'].setText(
+                _html.escape(seg['text']).replace('\n', '<br>'))
+            self._stream_autoscroll()
+        except RuntimeError:
+            self._stream_seg = None      # widget went away mid-stream
+
+    def on_stream_thinking(self, delta: str):
+        """Append a reasoning delta to THIS TURN's thinking card (created on
+        first use, pinned to the top of the turn shell). Later responses in the
+        same merged bubble keep feeding the same card."""
+        card = getattr(self, '_stream_think_card', None)
+        if card is None:
+            try:
+                card = self.add_thinking_card('', save_to_history=False, live=True)
+            except Exception:
+                log.warning("[ChatWindow.on_stream_thinking] card failed", exc_info=True)
+                card = None
+            if card is not None and card['state']['text']:
+                # Reused an existing card from an earlier response in this
+                # turn — separate this response's reasoning from the last.
+                card['append']("\n\n")
+            self._stream_think_card = card
+            if card is None:
+                return
+        try:
+            card['append'](delta)
+            self._stream_autoscroll()
+        except RuntimeError:
+            self._stream_think_card = None
+
+    def on_stream_finished(self):
+        """Stream ended. Freeze the thinking card and persist ONLY this
+        response's reasoning (the card may hold several responses' worth; each
+        is saved as its own ui_event so reload replays them in order and the
+        per-turn card re-merges them)."""
+        card = getattr(self, '_stream_think_card', None)
+        if card is not None:
+            try:
+                before = card['state'].get('saved_upto', 0)
+                full = card['finish']()
+                self._save_thinking_event(full[before:])
+                card['state']['saved_upto'] = len(full)
+            except RuntimeError:
+                pass
+            self._stream_think_card = None
+        self._stream_active = False
+        # The final message normally lands in the same tick; if the turn
+        # produced no assistant text at all (e.g. tool-only), drop the stub.
+        QTimer.singleShot(1200, self._drop_stale_stream_segment)
+
+    def _drop_stale_stream_segment(self):
+        if not getattr(self, '_stream_active', False):
+            self._clear_stream_segment()
+
+    def _clear_stream_segment(self):
+        """Remove the live streaming segment (hand-off or abandonment)."""
+        seg = getattr(self, '_stream_seg', None)
+        self._stream_seg = None
+        if seg is None:
+            return
+        try:
+            w = seg['widget']
+            w.setParent(None)
+            w.deleteLater()
+        except RuntimeError:
+            pass
+
+    def _stream_autoscroll(self):
+        try:
+            if getattr(self, '_sticky_bottom', True):
+                self.scroll_to_bottom()
+        except Exception:
+            pass
+
     def add_ai_message(self, message):
         """Add AI message as a SEGMENT of the current turn group — the shell
         (avatar + name) is shared by every assistant item of the turn; this
         builds only the text block + its own hover 📋 ⋯ action row."""
+        # Hand-off from a streamed turn: the live stub is replaced by this
+        # full-fidelity render, and the typewriter reveal is skipped (the
+        # stream already served as the reveal).
+        _was_streamed = getattr(self, '_stream_seg', None) is not None
+        if _was_streamed:
+            self._clear_stream_segment()
         if self.voice_enabled:
             display_message = self._clean_emotion_brackets(message)
         else:
@@ -1308,6 +1449,7 @@ class BubblesMixin:
                         and first_text_label is not None
                         and (not isinstance(parts, list) or len(parts) == 1))
         if (_simple_text and self._reveal_enabled()
+                and not _was_streamed
                 and not getattr(self, '_bulk_render', False)):
             first_text_label.setText("")
             self._reveal_text_label(
@@ -1388,6 +1530,9 @@ class BubblesMixin:
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
         self._animate_message_in(message_widget,
                                  on_settled=lambda: self.scroll_to_widget(message_widget))
+        # The interjection just split the turn — carry the typing indicator down
+        # into the new shell so it rides the NEWEST bubble, not the old one.
+        self._rehome_thinking_dots()
 
     def copy_to_clipboard(self, text):
         """Copy text to clipboard"""

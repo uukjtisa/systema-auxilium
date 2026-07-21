@@ -32,60 +32,17 @@ log = _make_logger("Controller") if _verbose else _NoOpLogger()
 # ── Anchor to app root at import time — immune to os.chdir() ─────────────────
 # APP_ROOT is defined once in src/__init__.py (parent of the package dir).
 from systema import APP_ROOT as _APP_ROOT
+from systema.common import app_config as _app_config
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Unified restart relauncher ───────────────────────────────────────────────
 # The SINGLE relaunch path shared by every restart caller (update apply, Manage
-# apply, the floating-window menu). Spawns a DETACHED SHELL that INHERITS this
-# process's privileges — so an elevated app restarts elevated and a normal one
-# restarts normal, no user switching — which:
-#   1. polls until the OLD pid is gone (the moment the single-instance lock is
-#      released; bounded so it can never hang, NOT a fixed-time guess), then
-#   2. cd's to APP_ROOT and execs the canonical venv launch script (run.sh /
-#      run.bat), falling back to this same interpreter + main.py if it's missing.
-# POSIX uses an inline `sh -c` (kill -0 to watch the pid); Windows uses PowerShell
-# `Wait-Process` (a direct wait on the pid — no console-tool output parsing, which
-# is unreliable in a windowless process).
-def _spawn_relauncher(pid: int, root) -> bool:
-    import sys, os, subprocess
-    from pathlib import Path
-    root = Path(root)
-    try:
-        if sys.platform == "win32":
-            script = root / "run.bat"
-            # Windows paths never contain a single quote, so single-quoting is safe.
-            launch = (f"& cmd /c '{script}'" if script.exists()
-                      else f"& '{sys.executable}' '{root / 'main.py'}'")
-            ps = (f"Wait-Process -Id {pid} -Timeout 30 -ErrorAction SilentlyContinue; "
-                  f"Start-Sleep -Milliseconds 500; "
-                  f"Set-Location -LiteralPath '{root}'; {launch}")
-            # A REAL console, born hidden — NOT CREATE_NO_WINDOW. CREATE_NO_WINDOW
-            # gave the whole relaunched chain (powershell -> cmd -> python) a
-            # windowless conhost, so after a restart GetConsoleWindow() returned
-            # NULL and the Debug window's console toggle silently did nothing.
-            # A new console started SW_HIDE keeps the relaunch just as invisible
-            # while giving the restarted app a toggleable console window.
-            si = subprocess.STARTUPINFO()
-            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            si.wShowWindow = subprocess.SW_HIDE
-            subprocess.Popen(
-                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
-                cwd=str(root), close_fds=True,
-                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
-                startupinfo=si)
-        else:
-            script = root / "run.sh"
-            launch = (f'exec sh "{script}"' if script.exists()
-                      else f'exec "{sys.executable}" "{root / "main.py"}"')
-            # Wait (bounded ~30s) for our pid to vanish, tiny grace, then relaunch.
-            sh = (f'i=0; while kill -0 {pid} 2>/dev/null && [ "$i" -lt 300 ]; do '
-                  f'sleep 0.1; i=$((i+1)); done; sleep 0.5; cd "{root}" || exit 1; {launch}')
-            subprocess.Popen(["sh", "-c", sh], cwd=str(root),
-                             close_fds=True, start_new_session=True)
-        return True
-    except Exception as e:
-        log.error(f"[_spawn_relauncher] failed to spawn relauncher: {e}")
-        return False
+# apply, the floating-window menu, the crash notice's Force restart). The body
+# now lives in systema/common/relauncher.py — a stdlib-only module so the tiny
+# tkinter notice process and the crash watcher can relaunch WITHOUT importing
+# this controller (PyQt + engine + providers). Keep the old private name as the
+# in-module alias so existing call sites read unchanged.
+from systema.common.relauncher import spawn_relauncher as _spawn_relauncher
 
 
 class AssistantController(QObject):
@@ -113,8 +70,9 @@ class AssistantController(QObject):
         super().__init__()
         log.info("[AssistantController.__init__] ── Initializing AssistantController ──────────────")
 
-        # Settings — absolute path anchored to app root, safe after os.chdir()
-        self.settings_file = _APP_ROOT / "assistant_settings.json"
+        # Settings — the 'settings' section of the consolidated settings.json
+        # (common/app_config.py; legacy assistant_settings.json auto-migrates)
+        self.settings_file = _app_config.CONFIG_FILE
         log.debug(f"[AssistantController.__init__] Loading settings from '{self.settings_file}'")
         self.settings = self.load_settings()
         log.info(f"[AssistantController.__init__] Settings loaded | "
@@ -271,6 +229,8 @@ class AssistantController(QObject):
         self._agent_attach_image = _agent_attach_image
         self._agent_take_screenshot = _agent_take_screenshot
         self._agent_attach_image_to_context = _agent_attach_image_to_context
+        # Guarantee namespaces are re-injected on ANY interpreter reset path.
+        self.ai.tool_manager._namespace_injector = self._inject_interpreter_namespaces
         self._inject_interpreter_namespaces()
 
         # Apply settings
@@ -696,9 +656,8 @@ class AssistantController(QObject):
     def load_settings(self):
         log.debug(f"[AssistantController.load_settings] Loading from '{self.settings_file}'")
         try:
-            if os.path.exists(self.settings_file):
-                with open(self.settings_file, 'r') as f:
-                    settings = json.load(f)
+            settings = _app_config.load_section('settings')
+            if settings:
                 log.info(f"[AssistantController.load_settings] ✓ Settings loaded | "
                          f"provider='{settings.get('ai_provider')}' | "
                          f"has_api_key={bool(settings.get('api_key'))}")
@@ -764,8 +723,8 @@ class AssistantController(QObject):
         log.debug(f"[AssistantController.save_settings] Writing to '{self.settings_file}'")
         self.log("Saving settings...", "INFO")
         try:
-            with open(self.settings_file, 'w') as f:
-                json.dump(self.settings, f, indent=2)
+            if not _app_config.save_section('settings', self.settings):
+                raise OSError(f"save_section failed for '{self.settings_file}'")
             self.log("Settings saved", "SUCCESS")
             log.info(f"[AssistantController.save_settings] ✓ Settings saved to '{self.settings_file}'")
             self.refresh_memory_block()
@@ -780,7 +739,7 @@ class AssistantController(QObject):
         # start"). If voice is already on (e.g. enabled from the phone), no-op.
         if getattr(self, 'voice_mode_active', False):
             log.info("[AssistantController.enable_voice_mode] Already active — skipping re-start")
-            return True, "Voice mode already active"
+            return True, ""
         try:
             # List available devices
             input_devices, output_devices = self.voice_handler.list_audio_devices()
@@ -820,11 +779,6 @@ class AssistantController(QObject):
             self.voice_handler.set_bargein_sensitivity(
                 self.settings.get('voice_bargein_sensitivity', 'balanced'))
 
-            # Device name for display. voice_input_device is stored as a device
-            # NAME (stable across sessions, unlike PortAudio ids); output is
-            # always the system default now.
-            input_name = input_device if input_device else "Default"
-
             # Apply TTS provider settings
             tts_provider = self.settings.get('tts_provider', 'edge-tts')
             self.voice_handler.set_tts_provider(tts_provider)
@@ -856,15 +810,9 @@ class AssistantController(QObject):
                 # Update AI engine with voice settings
                 self.ai.update_voice_settings(True)
 
-                message = (
-                    f"**Microphone:** {input_name}\n\n"
-                    "Start speaking! I'll listen and respond naturally."
-                )
-
                 self.log("Voice mode enabled", "SUCCESS")
-                log.info(f"[AssistantController.enable_voice_mode] ✓ Voice mode active | "
-                         f"input='{input_name}'")
-                return True, message
+                log.info("[AssistantController.enable_voice_mode] ✓ Voice mode active")
+                return True, ""
             else:
                 log.error("[AssistantController.enable_voice_mode] ✗ start_listening() returned False")
                 return False, "Failed to start voice capture"
@@ -1806,6 +1754,10 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
                     tm_output = self.ai.tool_manager.work.last_output or ''
                     if tm_output and self._chat:
                         self._chat.add_code_execution_note(result['code'], tm_output)
+                    # Any tool card spawned from inside that python step (web_search)
+                    # is emitted now — AFTER the interpreter card, so order is
+                    # python-first then the tool's card.
+                    self.ai.tool_manager.flush_interp_cards()
                 except Exception:
                     pass
             # Start tool mode timer
@@ -2652,6 +2604,10 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         ns['search_memory'] = self.search_memory
         ns['update_memory'] = self.update_memory
         ns['forget_memory'] = self.forget_memory
+        # web_search(query, mode='search'|'open'|'links', max_results=8, fetch_top=0)
+        # — same tool the model can call directly; from inside python it spawns its
+        # own result card and returns its output as a separate tool result.
+        ns['web_search'] = self.ai.tool_manager.interp_web_search
         ns['app_root'] = str(_APP_ROOT)
         ns['skills_path'] = str(_APP_ROOT / "skills")
 

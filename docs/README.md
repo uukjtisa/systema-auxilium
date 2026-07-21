@@ -1,9 +1,11 @@
 # Systema Auxilium — Documentation
 
-Systema Auxilium is a local PyQt6 desktop AI assistant that controls your
-computer in plain language: you describe a goal, the assistant writes and runs
-the Python needed to reach it, observes the result, and iterates. The reasoning
-comes from a provider you configure; everything else runs on your machine.
+Systema Auxilium is an open-source, flexible PyQt6 desktop AI harness that
+controls your computer in plain language: you describe a goal, the assistant
+writes and runs the Python needed to reach it, observes the result, and iterates.
+The reasoning comes from a provider you configure — a hosted API or a local model
+you run yourself — while code execution and the app run on your machine. What
+leaves your machine depends on which provider you choose.
 
 This folder documents every major subsystem. Start with **Getting Started**, then
 read whichever areas you use.
@@ -13,7 +15,7 @@ read whichever areas you use.
 | Doc | What it covers |
 | --- | --- |
 | [Getting Started](getting-started.md) | Install, first run, configure a provider, run the app. |
-| [Providers](providers.md) | The modular provider system: the `chat` / `chat_image` / `chat_tools` / `speak` contracts, included scripts, and how to add your own (or have an AI write one). |
+| [Providers](providers.md) | The modular provider system: the unified `chat()` contract (vision, native tools, streaming, `Display` settings forms), the `speak` TTS contract, included scripts, and how to add your own (or have an AI write one). |
 | [Tool Calling](tool-calling.md) | Native vs Compatibility modes, the native contract, and `native_adapters` (openai / anthropic / gemini dialects). |
 | [The Python Interpreter & Code Execution](python-interpreter.md) | How the assistant writes and runs Python: interpreter mode, direct execution, the persistent interpreter, `#@FILE` literal blocks, and finishing. |
 | [Security & Guarded Execution](security.md) | Supervised Execution, the per-category policy engine, presets, the code-approval dialog (session / persistent allow, reason box), and the audit log. |

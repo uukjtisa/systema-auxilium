@@ -135,9 +135,11 @@ class TaskAIEngine:
             self._engine = AIEngine(
                 settings_callback=lambda: self._controller.settings,
             )
-            # Background mode — no UI, no approval dialogs
+            # Background mode — no UI, no approval dialogs, and no live
+            # streaming (its deltas belong to no chat turn).
             self._engine.tool_manager._get_chat = lambda: None
             self._engine.tool_manager._get_android_bridge = lambda: None
+            self._engine.allow_streaming = False
             # Resilience: retry transient provider failures so a single hiccup
             # doesn't kill an unattended background ping (main session uses 0).
             self._engine.provider_max_retries = 3

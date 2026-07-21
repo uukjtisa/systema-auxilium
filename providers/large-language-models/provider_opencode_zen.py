@@ -4,14 +4,20 @@ provider_opencode_zen.py
 Custom Script Provider for Systema Auxilium.
 Uses OpenCode Zen — a free, OpenAI-compatible gateway with multiple models.
 
-Models available (all free):
+Free models (current lineup, researched 2026-07-21 — https://opencode.ai/docs/zen/;
+free offerings rotate, the Model dropdown in Settings is editable):
   - deepseek-v4-flash-free   (default, fast, good reasoning)
-  - minimax-m2.5-free        (strong all-rounder)
-  - kimi-k2-free             (long context, strong reasoning)
-  - glm-5-free               (good for Chinese + English)
+  - big-pickle               (stealth frontier model, free for a limited time)
+  - mimo-v2.5-free
+  - north-mini-code-free
   - nemotron-3-ultra-free    (NVIDIA's best free model)
+Paid models (billed per request) are also available — type any id from the
+docs into the editable Model dropdown (e.g. deepseek-v4-pro, glm-5.2, ...).
 
 Endpoint: https://opencode.ai/zen/v1
+
+Contract v2: unified chat() (native tools + streaming); editable settings
+via Display.
 
 Get your API key at: https://opencode.ai/zen
 
@@ -25,7 +31,7 @@ from openai import OpenAI
 
 # ── Configure here ────────────────────────────────────────────────────────────
 
-API_KEY = "sk-YOUR-API-KEY"
+API_KEY = "YOUR_OPENCODE_API_KEY"
 MODEL   = "deepseek-v4-flash-free"   # Change to any model from the list above
 BASE_URL = "https://opencode.ai/zen/v1"
 
@@ -43,12 +49,33 @@ NATIVE_DIALECT        = "openai"
 
 # ─────────────────────────────────────────────────────────────────────────────
 
-client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
+CONTRACT_VERSION = 2
+
+Display = {
+    "API_KEY": ("API Key", "secure_input",
+                {"tooltip": "Get one at opencode.ai/zen",
+                 "placeholder": "sk-..."}),
+    "MODEL": ("Model", "list_dropdown", [
+        "deepseek-v4-flash-free", "big-pickle", "mimo-v2.5-free",
+        "north-mini-code-free", "nemotron-3-ultra-free"],
+        {"tooltip": "Editable — paid ids from opencode.ai/docs/zen work too",
+         "item_tooltips": [
+             "DeepSeek V4 Flash — fast, good reasoning (free)",
+             "Big Pickle — stealth frontier model (free, limited time)",
+             "Mimo V2.5 — free",
+             "North Mini Code — code-focused (free)",
+             "Nemotron 3 Ultra — NVIDIA's best free model"]}),
+    "NOTE_1": ("NOTE: free models rotate — when one disappears, pick another "
+               "or type any id from opencode.ai/docs/zen.", "info_box"),
+}
 
 
-def chat(system_prompt: str, messages: list[dict]) -> str:
-    """Send a request to OpenCode Zen and return the reply text."""
+def _client() -> OpenAI:
+    # Built per call so Display overrides (applied after import) take effect.
+    return OpenAI(base_url=BASE_URL, api_key=API_KEY)
 
+
+def _payload(system_prompt: str, messages: list, tools=None) -> dict:
     payload = {
         "model": MODEL,
         "messages": (
@@ -58,43 +85,44 @@ def chat(system_prompt: str, messages: list[dict]) -> str:
         "top_p": TOP_P,
         "max_tokens": MAX_TOKENS,
     }
+    if tools is not None:
+        from systema.engine import native_adapters as na
+        payload["tools"] = na.to_openai_tools(tools)
+        payload["tool_choice"] = "auto"
+    return payload
 
-    completion = client.chat.completions.create(**payload)
 
-    return completion.choices[0].message.content or "No response received."
+def chat(system_prompt: str, messages: list, *, images=None, tools=None, stream=False):
+    """Unified v2 entry point. ``tools`` (canonical defs) are converted to the
+    OpenAI dialect; the parsed calls come back in "tool_calls". stream=True
+    yields contract chunks — text/thinking deltas live, tool calls assembled
+    from SDK deltas and emitted complete at end of stream."""
+    payload = _payload(system_prompt, messages, tools)
 
+    if stream:
+        return _chat_stream(payload)
 
-def chat_tools(system_prompt: str, messages: list[dict], tools: list,
-               images=None) -> dict:
-    """Native function-calling entrypoint.
-
-    ``tools`` are Systema's CANONICAL tool defs (name/description/parameters).
-    We convert them to the OpenAI dialect, call the gateway, and return the
-    NORMALIZED result the app expects::
-
-        {"text": str | None,
-         "tool_calls": [{"id": str, "name": str, "arguments": dict}, ...]}
-
-    ``systema.engine.native_adapters`` does both conversions.
-    """
     from systema.engine import native_adapters as na
-
-    payload = {
-        "model": MODEL,
-        "messages": (
-            [{"role": "system", "content": system_prompt}] if system_prompt else []
-        ) + messages,
-        "tools": na.to_openai_tools(tools),
-        "tool_choice": "auto",
-        "temperature": TEMPERATURE,
-        "top_p": TOP_P,
-        "max_tokens": MAX_TOKENS,
+    completion = _client().chat.completions.create(**payload)
+    # model_dump() gives the plain OpenAI JSON shape parse_openai() understands.
+    parsed = na.parse_openai(completion.model_dump())
+    msg = completion.choices[0].message if completion.choices else None
+    thinking = (getattr(msg, "reasoning", None)
+                or getattr(msg, "reasoning_content", None)) if msg else None
+    return {
+        "content": parsed.get("text") or "",
+        "thinking": thinking,
+        "tool_calls": parsed.get("tool_calls") or [],
+        "finish_reason": completion.choices[0].finish_reason if completion.choices else None,
     }
 
-    completion = client.chat.completions.create(**payload)
-    # The OpenAI SDK returns a pydantic object; model_dump() gives the plain
-    # OpenAI JSON shape that parse_openai() understands.
-    return na.parse_openai(completion.model_dump())
+
+def _chat_stream(payload: dict):
+    """SDK stream → contract chunks (text/thinking live, complete tool calls
+    assembled at end) via the shared engine helper."""
+    from systema.engine.provider_contract import stream_openai_chunks
+    completion = _client().chat.completions.create(**payload, stream=True)
+    return stream_openai_chunks(completion)
 
 
 # ── Quick test ────────────────────────────────────────────────────────────────
@@ -112,14 +140,14 @@ if __name__ == "__main__":
             system_prompt="You are a helpful assistant.",
             messages=[{"role": "user", "content": "Say 'Provider test successful.' and nothing else."}],
         )
-        print("Response:", result)
+        print("Response:", result["content"])
         print("-" * 48)
         print("Test passed. Provider is working correctly.")
     except Exception as e:
         print(f"Test failed: {e}")
 
     # Native tool-calling smoke test — confirms the model returns real tool_calls.
-    print("\nTesting native tool calling (chat_tools)...")
+    print("\nTesting native tool calling (chat with tools)...")
     try:
         demo_tools = [{
             "name": "get_weather",
@@ -130,13 +158,13 @@ if __name__ == "__main__":
                 "required": ["city"],
             },
         }]
-        out = chat_tools(
+        out = chat(
             system_prompt="You are a helpful assistant. Use tools when appropriate.",
             messages=[{"role": "user", "content": "What's the weather in Tokyo? Use the tool."}],
             tools=demo_tools,
         )
         calls = out.get("tool_calls") or []
-        print("Text:", out.get("text"))
+        print("Text:", out.get("content"))
         print("Tool calls:", calls)
         if calls:
             print(f"Native tool calling works — model called '{calls[0]['name']}' "

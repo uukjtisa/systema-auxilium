@@ -170,16 +170,8 @@ class MemoryWindow(QWidget):
             color: {_TEXT}; background: transparent; border: none;
         """)
 
-        close_btn = QPushButton("×")
-        close_btn.setFixedSize(28, 28)
-        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        close_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent; border: none;
-                color: {_MUTED}; font-size: 18px; border-radius: 5px;
-            }}
-            QPushButton:hover {{ background: #EA4335; color: white; }}
-        """)
+        from systema.ui.widgets.painted_icons import CloseButton
+        close_btn = CloseButton(28, tooltip="Close", pill=True)
         close_btn.clicked.connect(self.close)
 
         hl.addWidget(title)

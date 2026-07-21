@@ -11,7 +11,10 @@ import re
 
 from systema.common.logger import _make_logger, _NoOpLogger
 from systema.execution.tool_manager import ToolManager
+import concurrent.futures as _cf
+
 from systema.engine import native_adapters as na
+from systema.engine import provider_contract as pc
 from systema.memory.memory_manager import get_memory_manager
 from systema.common.token_est import estimate_tokens
 from systema.engine.prompts.global_instructions import (
@@ -88,6 +91,10 @@ class AIEngine:
         # consumed by _append_assistant (attached as metadata to the assistant
         # entry). Set fresh per _call_provider; None in compat / text-only turns.
         self._pending_native = None
+        # Thinking/reasoning tokens the provider returned for the CURRENT turn
+        # (UI-only: rendered as a collapsible card, never sent back to any
+        # provider). Set fresh per _call_provider.
+        self._pending_thinking = None
         # Debug observability (surfaced in the Debug window): the tool transport
         # used this turn, its native tool-call count, and the exact wire payload +
         # raw provider result — so the user can confirm native is live and inspect
@@ -738,9 +745,10 @@ class AIEngine:
         return result
 
     def _load_provider_module(self):
-        """Import the user's custom provider .py fresh (live edits take effect).
-        Returns the module, or None on missing path / load error."""
-        import importlib.util, traceback, os
+        """Import the user's custom provider .py fresh (live edits take effect)
+        and apply the user's saved Display values (Settings ▸ AI Provider) onto
+        it. Returns the module, or None on missing path / load error."""
+        import os
         if not self.custom_script_path:
             log.error("[AIEngine._load_provider_module] ✗ No custom script path set")
             self.log("Custom script path is not set", "ERROR")
@@ -749,24 +757,93 @@ class AIEngine:
             log.error(f"[AIEngine._load_provider_module] ✗ File not found: '{self.custom_script_path}'")
             self.log(f"Custom script not found: {self.custom_script_path}", "ERROR")
             return None
-        try:
-            spec = importlib.util.spec_from_file_location("custom_provider", self.custom_script_path)
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            return module
-        except Exception as e:
-            log.error(f"[AIEngine._load_provider_module] ✗ Failed to load script: {e}\n{traceback.format_exc()}")
-            self.log(f"Custom script load error: {e}", "ERROR")
+        module = pc.load_module(self.custom_script_path)
+        if module is None:
+            self.log("Custom script load error — see log for details", "ERROR")
             return None
+        # Apply this script's saved Display values (settings ▸
+        # provider_display_values ▸ <script file name>), so a user's settings
+        # take effect on every request without touching the file.
+        if self.settings_callback:
+            try:
+                all_vals = (self.settings_callback() or {}).get('provider_display_values') or {}
+                pc.apply_display_overrides(
+                    module, all_vals.get(os.path.basename(self.custom_script_path), {}))
+            except Exception as e:
+                log.warning(f"[AIEngine._load_provider_module] Display overrides failed: {e}")
+        return module
 
     def _native_provider_supported(self, module) -> bool:
-        """True if the active mode is native AND the provider script opts in."""
+        """True if the active mode is native AND the provider script opts in
+        (v2 chat(tools=...) or legacy chat_tools)."""
+        return self._tool_mode() == 'native' and pc.supports_native(module)
+
+    def _setting(self, key, default=None):
+        """One safe read from the settings callback."""
+        if not self.settings_callback:
+            return default
+        try:
+            return (self.settings_callback() or {}).get(key, default)
+        except Exception:
+            return default
+
+    def _response_timeout(self) -> int:
+        """Response-wait timeout in seconds (0 = unlimited). Under streaming
+        this bounds time-to-FIRST-chunk only."""
+        try:
+            return int(self._setting('response_timeout_seconds', 0) or 0)
+        except Exception:
+            return 0
+
+    def _streaming_on(self, module) -> bool:
+        """Stream when the setting is on (default) AND the script is v2.
+        Sub-agents / background callers opt out via self.allow_streaming."""
         return (
-            self._tool_mode() == 'native'
-            and module is not None
-            and getattr(module, 'SUPPORTS_NATIVE_TOOLS', False)
-            and callable(getattr(module, 'chat_tools', None))
+            getattr(self, 'allow_streaming', True)
+            and bool(self._setting('streaming_enabled', True))
+            and pc.is_v2(module)
         )
+
+    def _run_provider_call(self, module, system_prompt, convo, images=None,
+                           tools=None, stream_ok=True) -> dict | None:
+        """THE provider invocation: starts the call (streaming when supported),
+        bounds time-to-first-chunk with the response timeout, then drains any
+        stream on THIS worker thread — emitting live deltas to the UI — into
+        the same normalized result a non-streaming provider returns.
+
+        Never call this from the GUI thread: the drain loop would block the
+        event loop and any approval dialog raised later would deadlock.
+        """
+        stream = stream_ok and self._streaming_on(module)
+        out = pc.start_stream(
+            lambda: pc.invoke(module, system_prompt or "", convo,
+                              images=images, tools=tools, stream=stream),
+            timeout=self._response_timeout(),
+        )
+        if not hasattr(out, '__next__'):
+            return out
+
+        sig = getattr(self.tool_manager, 'approval_signal', None)
+        started = False
+
+        def _emit(signal_name, delta):
+            nonlocal started
+            if sig is None:
+                return
+            if not started:
+                started = True
+                sig.stream_started.emit()
+            getattr(sig, signal_name).emit(delta)
+
+        try:
+            return pc.drain_stream(
+                out,
+                on_text=lambda d: _emit('stream_text', d),
+                on_thinking=lambda d: _emit('stream_thinking', d),
+            )
+        finally:
+            if started and sig is not None:
+                sig.stream_finished.emit()
 
     def _provider_script_native(self, module, messages, images=None) -> str | None:
         """Native tool-calling path. Rebuilds the conversation as REAL native
@@ -800,17 +877,24 @@ class AIEngine:
             include_skills=bool(self.skill_manager),
         )
         try:
-            result = module.chat_tools(system_prompt or "", convo, tools, images=images)
+            result = self._run_provider_call(module, system_prompt, convo,
+                                             images=images, tools=tools)
+        except _cf.TimeoutError:
+            log.error(f"[AIEngine._provider_script_native] ✗ no response within "
+                      f"{self._response_timeout()}s")
+            self.log(f"Provider did not respond within {self._response_timeout()}s", "ERROR")
+            return None
         except Exception as e:
-            log.error(f"[AIEngine._provider_script_native] ✗ chat_tools() raised: {e}\n{traceback.format_exc()}")
-            self.log(f"Custom script chat_tools() error: {e}", "ERROR")
+            log.error(f"[AIEngine._provider_script_native] ✗ provider raised: {e}\n{traceback.format_exc()}")
+            self.log(f"Custom script native-tools error: {e}", "ERROR")
             return None
         if not isinstance(result, dict):
-            log.error("[AIEngine._provider_script_native] ✗ chat_tools() must return a dict "
-                      "{'text', 'tool_calls'}")
+            log.error("[AIEngine._provider_script_native] ✗ provider must return a dict "
+                      "{'content'/'text', 'tool_calls'}")
             return None
 
-        text = (result.get('text') or "").strip()
+        self._pending_thinking = result.get('thinking') or None
+        text = (result.get('content') or "").strip()
         raw_calls = result.get('tool_calls') or []
         # ── Native purity: sanitize at the mouth ──────────────────────────────
         # The model's free text must carry NO fence-shaped tool syntax. Any
@@ -868,10 +952,15 @@ class AIEngine:
                  f"tool_calls={len(raw_calls)} | reconstructed_len={len(ai_text)}")
         return ai_text or None
 
-    def _provider_script(self, messages, images=None, module=None) -> str | None:
+    def _provider_script(self, messages, images=None, module=None,
+                         stream_ok=True) -> str | None:
         """Custom script provider — reimports the user's .py file on every call
-        and invokes its chat(system_prompt, messages) function.
-        If images (list) is provided and the script defines chat_image(), that is called instead."""
+        and invokes its unified chat() (legacy chat/chat_image/chat_tools are
+        shimmed). `images` routes to the vision path.
+
+        `stream_ok=False` forces a non-streaming call: callers whose output is
+        NOT the visible chat turn (the in-dialog code agent, compaction, the
+        session namer) must not push deltas into the chat window."""
         import traceback
 
         if module is None:
@@ -879,9 +968,9 @@ class AIEngine:
         if module is None:
             return None
 
-        if not hasattr(module, 'chat') or not callable(module.chat):
+        if not callable(getattr(module, 'chat', None)):
             log.error("[AIEngine._http_custom_script] ✗ Script has no callable chat() function")
-            self.log("Custom script must define a chat(system_prompt, messages) function", "ERROR")
+            self.log("Custom script must define a chat() function (see _template.py)", "ERROR")
             return None
 
         system_prompt, convo = self._extract_system_and_convo(messages)
@@ -889,24 +978,28 @@ class AIEngine:
         self.last_sent_messages = convo
 
         try:
-            if images and hasattr(module, 'chat_image') and callable(module.chat_image):
-                log.debug(f"[AIEngine._http_custom_script] Calling chat_image() | images={images}")
-                result = module.chat_image(system_prompt or "", convo, images)
-            else:
-                result = module.chat(system_prompt or "", convo)
+            result = self._run_provider_call(module, system_prompt, convo,
+                                             images=images, stream_ok=stream_ok)
+        except _cf.TimeoutError:
+            log.error(f"[AIEngine._http_custom_script] ✗ no response within "
+                      f"{self._response_timeout()}s")
+            self.log(f"Provider did not respond within {self._response_timeout()}s", "ERROR")
+            return None
         except Exception as e:
-            log.error(f"[AIEngine._http_custom_script] ✗ chat/chat_image() raised: {e}\n{traceback.format_exc()}")
+            log.error(f"[AIEngine._http_custom_script] ✗ provider raised: {e}\n{traceback.format_exc()}")
             self.log(f"Custom script error: {e}", "ERROR")
             return None
 
-        if not result or not isinstance(result, str):
-            log.error("[AIEngine._http_custom_script] ✗ chat() returned empty or non-string value")
-            self.log("Custom script chat() must return a non-empty string", "ERROR")
+        content = (result or {}).get('content') if isinstance(result, dict) else None
+        if not content or not isinstance(content, str):
+            log.error("[AIEngine._http_custom_script] ✗ chat() returned empty content")
+            self.log("Custom script chat() must return a non-empty reply", "ERROR")
             return None
 
-        self.last_raw_provider_result = result
-        log.info(f"[AIEngine._http_custom_script] ✓ Response | length={len(result)} chars")
-        return result
+        self._pending_thinking = result.get('thinking') or None
+        self.last_raw_provider_result = content
+        log.info(f"[AIEngine._http_custom_script] ✓ Response | length={len(content)} chars")
+        return content
 
     def _call_provider(self, image=None, images=None) -> str | None:
         """Build the unified message list and dispatch to the active provider script.
@@ -920,6 +1013,7 @@ class AIEngine:
         # compat or text-only turn leaves it None so no stale native metadata
         # attaches to the next assistant entry.
         self._pending_native = None
+        self._pending_thinking = None
         # Fresh per turn as well: the manual provider returns before the
         # custom-script labeling below, and the response processors route on
         # this flag — a stale 'native' from a previous turn must never leak.
@@ -962,14 +1056,24 @@ class AIEngine:
                                             if self._tool_mode() == 'native' else 'compat')
                 self.last_native_tool_calls = 0
 
+            # Response-wait timeout (E3) now lives in _run_provider_call →
+            # provider_contract.start_stream: 0 = unlimited, and under
+            # streaming it bounds time-to-FIRST-chunk only (once tokens flow,
+            # a long reply is never cut off mid-sentence).
+            def _invoke_provider():
+                if _native_module is not None:
+                    return self._provider_script_native(_native_module, messages, images=images)
+                return self._provider_script(messages, images=images)
+
             attempt = 0
             result = None
             while True:
                 try:
-                    if _native_module is not None:
-                        result = self._provider_script_native(_native_module, messages, images=images)
-                    else:
-                        result = self._provider_script(messages, images=images)
+                    result = _invoke_provider()
+                except _cf.TimeoutError:
+                    log.error(f"[AIEngine._call_provider] response timed out after "
+                              f"{self._response_timeout()}s")
+                    result = None
                 except Exception as e:
                     log.error(f"[AIEngine._call_provider] provider raised: {type(e).__name__}: {e}")
                     result = None
@@ -1010,7 +1114,9 @@ class AIEngine:
             log_tokens(estimate_history_tokens(messages))
         except Exception:
             pass
-        result = self._provider_script(messages)
+        # Background/one-shot callers (task agents, compaction, session naming):
+        # never stream — their output is not the visible chat turn.
+        result = self._provider_script(messages, stream_ok=False)
         if result:
             try:
                 from systema.common.token_est import log_output_tokens, estimate_tokens
@@ -1518,6 +1624,9 @@ class AIEngine:
 
         run_file = {'read_file': tm.run_read_file, 'edit_file': tm.run_edit_file,
                     'write_file': tm.run_write_file, 'grep': tm.run_grep}
+        # Fresh per batch: tools invoked from inside a python step append here.
+        tm._interp_subresults = []
+        tm._interp_card_buffer = []
         results = []          # (tool_name, observation) in run order
         loaded_skill = None
         unloaded_skill = None
@@ -1551,6 +1660,9 @@ class AIEngine:
                                          'path': (spec or {}).get('path', ''),
                                          'journal_id': jid})
                         tm.last_file_op_journal_id = None
+                elif name == 'web_search':
+                    obs = tm.run_web_search(spec)
+                    last_tool = 'web_search'
                 elif name == 'load_skill':
                     if self.skill_manager:
                         ok, msg = self.skill_manager.load_skill(spec)
@@ -1589,6 +1701,12 @@ class AIEngine:
                 obs = f"ERROR: {type(e).__name__}: {e}"
                 log.error(f"[AIEngine._run_tool_batch] '{name}' raised: {e}")
             results.append((name, obs))
+            # A tool called from INSIDE this python step (e.g. web_search) surfaces
+            # its output as its OWN result, right after the interpreter's — so the
+            # model sees it as a distinct tool call and the python card stays clean.
+            if name == 'python_interpreter' and tm._interp_subresults:
+                results.extend(tm._interp_subresults)
+                tm._interp_subresults = []
 
         # Session-persisted file-op records (reload maps edits → journal ids).
         if file_ops:

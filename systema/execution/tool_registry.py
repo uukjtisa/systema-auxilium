@@ -91,6 +91,18 @@ def _grep_body(args):
     return "\n".join(out)
 
 
+def _web_search_body(args):
+    out = [str(args.get('query', '') or args.get('url', '') or '').strip()]
+    mode = str(args.get('mode', '') or '').strip().lower()
+    if mode and mode != 'search':
+        out.append(f"mode: {mode}")
+    if args.get('max_results') not in (None, ''):
+        out.append(f"max_results: {int(args['max_results'])}")
+    if args.get('fetch_top') not in (None, '', 0):
+        out.append(f"fetch_top: {int(args['fetch_top'])}")
+    return "\n".join(out)
+
+
 CANONICAL_TOOLS = {
     'python_interpreter': {
         'description': (
@@ -309,6 +321,47 @@ CANONICAL_TOOLS = {
                       "'before:'/'after:'/'context:', 'only_matching: true', "
                       "'multiline: true', 'head_limit:', 'ignore_common: false'. "
                       "Default mode lists matching file paths."),
+        },
+    },
+    'web_search': {
+        'description': (
+            "Search the web and read pages — your built-in, no-API-key research tool. "
+            "Modes: 'search' (a query -> ranked results), 'open' (a URL -> clean readable "
+            "page text), 'links' (a URL -> its outgoing links). Use PRECISE queries and "
+            "open only the pages you actually need — do calculated, structured exploration, "
+            "never broad dumps, to keep your context lean. You MAY call it several times in "
+            "one response (e.g. parallel searches). When you use information from a page, "
+            "CITE it inline in your reply as [short label](https://the-url)."
+        ),
+        'param': ('query', "The search query (mode=search) OR the URL to open/extract "
+                           "(mode=open / mode=links)."),
+        'extra_params': [
+            ('mode', "'search' (default), 'open', or 'links'.", False,
+                     ('search', 'open', 'links')),
+            ('max_results', "search mode: how many results to return (default 8).", False),
+            ('fetch_top', "search mode: ALSO auto-open the top N result pages in this same "
+                          "call (default 0 = just the list). Use sparingly — each opened page "
+                          "adds a lot of context; prefer opening specific results deliberately.",
+                          False),
+            ('annotation',
+             "A short 3-6 word label (e.g. 'Searching RTX 5090 benchmarks'). ALWAYS include "
+             "it — shown to the user as this step's title.", False),
+        ],
+        'exec': False,
+        'to_fence': _web_search_body,
+        'compat': {
+            'table_row': "web_search: Search the web / read a page (no API key)",
+            'fence_example': (
+                "```web_search: [Searching RTX 5090 benchmarks]\n"
+                "rtx 5090 benchmarks\n"
+                "mode: search\n"
+                "max_results: 5\n"
+                "```"
+            ),
+            'usage': ("Line 1 = the query (search) or the URL (open / links). Optional opt "
+                      "lines: 'mode:' (search|open|links), 'max_results:', 'fetch_top:'. "
+                      "Read-only, no approval. May be batched. Cite pages you use as "
+                      "[label](url)."),
         },
     },
 }

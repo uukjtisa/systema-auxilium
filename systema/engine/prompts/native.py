@@ -59,10 +59,10 @@ twice.
 CALLING SEVERAL TOOLS IN ONE RESPONSE: you may emit MULTIPLE tool calls in a
 single response. They run one after another in the order you emit them, and ALL
 their results come back together in one observation. Combine freely (read_file
-+ edit_file + load_skill, several file ops, ...), with ONE hard cap: at most
-ONE python_interpreter call per response. Results arrive only after the WHOLE
-batch has run — if a later call depends on an earlier call's OUTPUT, stop after
-the producing call and continue next turn.
++ edit_file + load_skill, several file ops, multiple python_interpreter calls,
+web_search, ...). Results arrive only after the WHOLE batch has run — if a later
+call depends on an earlier call's OUTPUT, stop after the producing call and
+continue next turn.
 
 Invoke every tool through your native function-calling mechanism. Everything
 below — WHEN and WHY to use each tool, staying in work mode, directory safety,
@@ -99,10 +99,10 @@ MUST REMEMBER (quick recall of the rules above):
   "produce" text you could simply type.
 - Never roleplay: if you say you'll do it, MAKE THE TOOL CALL in the SAME response.
 - python_interpreter = your ONLY code tool; you SEE output; chain calls; print()
-  what you need. At most ONE python_interpreter call per response, ALWAYS with
-  the `annotation` argument (a short 3-6 word label shown to the user).
+  what you need. One or more python_interpreter calls per response are allowed,
+  ALWAYS each with the `annotation` argument (a short 3-6 word label).
 - Several tool calls may share one response — they run in order and all results
-  return together; only python_interpreter is capped at one.
+  return together; keep steps that depend on each other's OUTPUT in separate turns.
 - Invoke tools as native function calls; to speak in the same turn, just write
   your reply as normal text alongside the calls.
 - Be friendly and descriptive.
@@ -137,8 +137,8 @@ PREFILLING_NATIVE = {
                 "when none is needed: answer simple requests you can handle from "
                 "your own knowledge or creativity (writing, explaining, chat) with "
                 "a normal reply and no tool call. NEVER roleplay execution. You may "
-                "emit several tool calls per response (they run in order); at most "
-                "ONE python_interpreter call among them. To say something while "
+                "emit several tool calls per response (they run in order), "
+                "including multiple python_interpreter calls. To say something while "
                 "calling tools, just write it as normal text alongside the calls. "
                 "If you say you will do something, do it in that SAME response."
             ),
@@ -161,8 +161,8 @@ PREFILLING_NATIVE = {
                 "code, see the output, and chain calls until the task is fully "
                 "complete, then finish with a normal reply containing my full "
                 "report. I may emit several tool calls in one response — they run "
-                "in the order emitted and I get all their results together — but "
-                "at most ONE python_interpreter call among them, always with a "
+                "in the order emitted and I get all their results together, and "
+                "that can include multiple python_interpreter calls, each with a "
                 "short annotation label. I never roleplay execution; when I want "
                 "to speak while acting, I just write it as normal text."
             ),

@@ -4,8 +4,10 @@ systema/execution/file_journal.py
 Reverse file-state journal for the surgical file tools (read/edit/write).
 
 Before every mutation the CURRENT file bytes (the pre-image) are copied into
-``data/file_history/objects/<id>`` and one JSON line is appended to
-``data/file_history/manifest.jsonl``:
+``data/cache/file_history/objects/<id>`` and one JSON line is appended to
+``data/cache/file_history/manifest.jsonl`` (consolidated cache layout
+2026-07-21; the old ``data/file_history`` auto-migrates in on first use, so
+every old session's revert entries survive):
 
     {"id", "ts", "session_id", "tool", "path", "existed", "pre_hash", "size"}
 
@@ -32,10 +34,16 @@ from systema.common.logger import _make_logger
 
 log = _make_logger("FileJournal")
 
-HISTORY_DIR = APP_ROOT / "data" / "file_history"
+HISTORY_DIR = APP_ROOT / "data" / "cache" / "file_history"
 OBJECTS_DIR = HISTORY_DIR / "objects"
 MANIFEST = HISTORY_DIR / "manifest.jsonl"
 SHADOW_DIR = HISTORY_DIR / "shadow"
+
+# Migrate the pre-consolidation data/file_history in AT IMPORT — readers
+# (the history dialog's entries()) never call _ensure_dirs, and journal ids
+# are dir-relative, so after the move every old session's entries restore.
+from systema.common.data_paths import migrate_legacy as _migrate_legacy
+_migrate_legacy(APP_ROOT / "data" / "file_history", HISTORY_DIR)
 
 _lock = threading.Lock()
 

@@ -334,15 +334,18 @@ class BaseWindow(QWidget):
             self._title_label.setText(text)
 
     def _chrome_button(self, glyph, palette, on_click, danger=False):
-        btn = QPushButton(glyph)
-        btn.setFixedSize(32, 30)
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        hover = "rgba(232,72,72,0.90)" if danger else "rgba(255,255,255,0.10)"
-        hover_fg = "#ffffff" if danger else palette["text"]
-        btn.setStyleSheet(
-            f"QPushButton {{ background: transparent; color: {palette['muted']};"
-            f" border: none; border-radius: 6px; font-size: 13px; }}"
-            f"QPushButton:hover {{ background: {hover}; color: {hover_fg}; }}")
+        """Painted chrome button (icon overhaul 2026-07-21): the text glyph
+        argument now only SELECTS the painted class — '–' minimize, '□'
+        maximize, anything else = close (X, red hover pill). `palette` is
+        accepted for signature compatibility; icons use the house grays."""
+        from systema.ui.widgets.painted_icons import (
+            MinimizeButton, MaximizeButton, CloseButton)
+        if glyph == "–":
+            btn = MinimizeButton((32, 30), tooltip="Minimize")
+        elif glyph == "□":
+            btn = MaximizeButton((32, 30), tooltip="Maximize / restore")
+        else:
+            btn = CloseButton((32, 30), tooltip="Close", pill=True)
         btn.clicked.connect(on_click)
         return btn
 

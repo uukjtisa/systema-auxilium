@@ -63,7 +63,7 @@ class WorkState:
 # Tools whose fence opener carries a ": [annotation]" label (parsed by the
 # tolerant annotated branch of _parse_fence, returning a 3-tuple).
 _ANNOTATED_TOOL_NORMS = frozenset(
-    {'pythoninterpreter', 'readfile', 'editfile', 'writefile', 'grep'})
+    {'pythoninterpreter', 'readfile', 'editfile', 'writefile', 'grep', 'websearch'})
 
 
 # ──────────────── Malformed-opener tolerance helpers (weak models) ───────────
@@ -153,10 +153,18 @@ class ApprovalSignal(QObject):
     request_approval = pyqtSignal(str, str, object)  # code, execution_type, callback
     system_message   = pyqtSignal(str)               # text → chat window, main thread only
     file_op          = pyqtSignal(dict)              # structured file-op card → chat window
+    tool_card        = pyqtSignal(dict)              # CENTRAL tool-result card → chat ({'card_type', ...})
     close_approval_dialog = pyqtSignal(bool, str)  # approved, modified_code — closes active dialog
     timeout_signal   = pyqtSignal(int, object, object, object)  # elapsed, done_event, result_holder, user_event — timeout prompt
     work_code_active = pyqtSignal(bool)                          # True when code execution starts, False when it finishes
     work_narration   = pyqtSignal(str)               # a work step's narration → chat BEFORE its tool runs (ordering)
+    # ── Live streaming (provider contract v2) — emitted from the AIWorker
+    # thread as chunks arrive; the chat window appends them to the in-flight
+    # turn. stream_finished fires before the normal full-response path runs.
+    stream_started   = pyqtSignal()                   # a streamed turn begins
+    stream_text      = pyqtSignal(str)                # reply text delta
+    stream_thinking  = pyqtSignal(str)                # reasoning-token delta
+    stream_finished  = pyqtSignal()                   # stream ended (any reason)
 
 
 class ToolManager:
@@ -264,8 +272,14 @@ class ToolManager:
         self.approval_signal.request_approval.connect(self._show_approval_dialog_on_main_thread)
         self.approval_signal.system_message.connect(self._deliver_system_message)
         self.approval_signal.file_op.connect(self._deliver_file_op)
+        self.approval_signal.tool_card.connect(self._deliver_tool_card)
         self.approval_signal.close_approval_dialog.connect(self._close_active_approval_dialog)
         self.approval_signal.timeout_signal.connect(self._show_timeout_dialog_on_main_thread)
+        # Live streaming → chat window (queued: emitted from the AIWorker thread)
+        self.approval_signal.stream_started.connect(self._deliver_stream_started)
+        self.approval_signal.stream_text.connect(self._deliver_stream_text)
+        self.approval_signal.stream_thinking.connect(self._deliver_stream_thinking)
+        self.approval_signal.stream_finished.connect(self._deliver_stream_finished)
         self._active_approval_dialog = None
         self._get_android_bridge = None
         log.debug("[ToolManager.__init__] ApprovalSignal connected")
@@ -287,6 +301,18 @@ class ToolManager:
         # Injected by the controller after construction via:
         #   self.ai.tool_manager._get_chat = lambda: self._chat
         self._get_chat = None
+
+        # ── In-interpreter tool invocation (e.g. web_search called from python) ─
+        # When a tool runs INSIDE a python_interpreter step, its result card is
+        # buffered (flushed after the interpreter card) and its observation is
+        # recorded as a SEPARATE tool result so the model sees it cleanly.
+        self._card_capture = False        # True while capturing in-interpreter cards
+        self._interp_card_buffer = []     # buffered card payloads to flush
+        self._interp_subresults = []      # [(tool_name, observation)] for the model
+
+        # Set by the controller to _inject_interpreter_namespaces — invoked on
+        # every reset_python() so agent namespaces survive an interpreter restart.
+        self._namespace_injector = None
 
         log.info("[ToolManager.__init__] ✓ ToolManager initialization complete")
 
@@ -327,6 +353,80 @@ class ToolManager:
                 ab.add_file_op(info)
             except Exception as e:
                 log.debug(f"[ToolManager._deliver_file_op] android mirror skipped: {e}")
+
+    # ── Centralized tool-result card spawning ────────────────────────────────
+    # ONE signal (tool_card) + ONE slot (_deliver_tool_card) + this map is the
+    # single place every tool routes its result card through. Adding a card for
+    # a new tool = one entry here + the chat-side builder method. emit_tool_card()
+    # is the thread-safe entry point tools call; when _card_capture is on (a
+    # tool invoked from INSIDE the python interpreter) the payloads are buffered
+    # and flushed AFTER the interpreter's own card, so ordering stays python-first.
+    _CARD_DISPATCH = {
+        'web_search': 'add_web_search_card',   # search results sub-list
+        'web_page':   'add_web_page_card',     # page content / links viewer
+    }
+
+    def _deliver_tool_card(self, info: dict):
+        """Slot — main thread. Route a tool-result card to the right chat builder."""
+        chat = self._chat
+        if chat is None:
+            return
+        method = self._CARD_DISPATCH.get(info.get('card_type'))
+        if not method or not hasattr(chat, method):
+            return
+        try:
+            getattr(chat, method)(info)
+        except Exception as e:
+            import traceback
+            log.error(f"[ToolManager._deliver_tool_card] {info.get('card_type')} "
+                      f"card failed: {e}\n{traceback.format_exc()}")
+
+    def emit_tool_card(self, card_type: str, **payload):
+        """Thread-safe: spawn a tool-result card. Buffered (not emitted) while a
+        tool runs inside the python interpreter — see flush_interp_cards()."""
+        payload = {'card_type': card_type, **payload}
+        if self._card_capture:
+            self._interp_card_buffer.append(payload)
+            return
+        try:
+            self.approval_signal.tool_card.emit(payload)
+        except Exception as e:
+            log.debug(f"[ToolManager.emit_tool_card] skipped: {e}")
+
+    def flush_interp_cards(self):
+        """Main thread: emit cards buffered during an in-interpreter tool call.
+        Called right AFTER the python interpreter's own card is added so the
+        interpreter card appears first, then the tool's card(s)."""
+        buf, self._interp_card_buffer = self._interp_card_buffer, []
+        for payload in buf:
+            try:
+                self.approval_signal.tool_card.emit(payload)
+            except Exception:
+                pass
+
+    # ── Live streaming slots (main thread) ───────────────────────────────────
+    # Thin forwarders: the chat window owns all streaming widget state. Each is
+    # a no-op when no chat window exists (background tasks, headless tests).
+
+    def _deliver_stream_started(self):
+        chat = self._chat
+        if chat is not None:
+            chat.on_stream_started()
+
+    def _deliver_stream_text(self, delta: str):
+        chat = self._chat
+        if chat is not None:
+            chat.on_stream_text(delta)
+
+    def _deliver_stream_thinking(self, delta: str):
+        chat = self._chat
+        if chat is not None:
+            chat.on_stream_thinking(delta)
+
+    def _deliver_stream_finished(self):
+        chat = self._chat
+        if chat is not None:
+            chat.on_stream_finished()
 
     def _deliver_system_message(self, text: str):
         """
@@ -390,6 +490,9 @@ class ToolManager:
         active = []
         if self.allow_workmode:
             active.append('python_interpreter')
+            # web_search is a read-only native tool; rides with work mode so its
+            # native schema stays in parity with the compat tool table.
+            active.append('web_search')
         if include_skills:
             active += ['load_skill', 'unload_skill']
 
@@ -717,6 +820,7 @@ class ToolManager:
             'edit_file': self.parse_edit_file,
             'write_file': self.parse_write_file,
             'grep': self.parse_grep,
+            'web_search': self.parse_web_search,
             'load_skill': self.parse_load_skill,
             'unload_skill': self.parse_unload_skill,
         }
@@ -769,6 +873,9 @@ class ToolManager:
         r'^[ \t]*(path|glob|type|output|output_mode|case|case_insensitive|'
         r'line_numbers|before|after|context|only_matching|multiline|head_limit|'
         r'max|ignore_common)[ \t]*:[ \t]*(\S[^\n]*?)[ \t]*$', re.IGNORECASE)
+    _WEB_OPT_RE = re.compile(
+        r'^[ \t]*(mode|max_results|max|fetch_top)[ \t]*:[ \t]*(\S[^\n]*?)[ \t]*$',
+        re.IGNORECASE)
 
     def _split_file_body(self, content, annotation, consume_options=True):
         """Common body head parsing for the file tools: line 1 = path, then
@@ -1069,6 +1176,153 @@ class ToolManager:
         return obs
 
     # ─────────────────────────────────────────────────────────────────────────
+    # web_search: search / open / links (backed by systema.net.web_research)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def parse_web_search(self, text):
+        """Returns (spec, remaining) or None. Line 1 = query (search) or URL
+        (open/links); the rest are 'key: value' opts (mode/max_results/fetch_top)."""
+        result = self._parse_fence(text, 'web_search', record=True)
+        if not result:
+            return None
+        content, remaining, annotation = result
+        lines = content.split('\n')
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        # A missing query must NOT promote the first opt line ("mode: open")
+        # into the query — that would silently search for the literal opt text.
+        query = ''
+        if lines and not self._WEB_OPT_RE.match(lines[0]):
+            query = lines.pop(0).strip()
+        opts = {}
+        for ln in lines:
+            m = self._WEB_OPT_RE.match(ln)
+            if m:
+                opts[m.group(1).lower()] = m.group(2).strip()
+
+        def _i(val, default):
+            try:
+                return int(str(val).strip())
+            except (TypeError, ValueError):
+                return default
+
+        mode = (opts.get('mode') or 'search').strip().lower()
+        if mode not in ('search', 'open', 'links'):
+            mode = 'search'
+        spec = {
+            'mode': mode,
+            'query': query,
+            'max_results': _i(opts.get('max_results', opts.get('max')), 8),
+            'fetch_top': _i(opts.get('fetch_top'), 0),
+            'annotation': annotation,
+            'error': None,
+        }
+        if not query:
+            spec['error'] = ("web_search needs a query (search mode) or a URL "
+                             "(open/links mode) on the first line.")
+        self.work.interpreter.last_annotation = annotation or None
+        self._flush_parse_corrections('web_search')
+        log.info(f"[ToolManager.parse_web_search] ✓ mode={mode} | query={query!r}")
+        return spec, remaining
+
+    def _web_config(self):
+        """Backend config for web_research from user settings: optional API-key
+        backends, a SearXNG endpoint, and the Playwright JS-render toggle. All
+        absent -> pure keyless mode."""
+        try:
+            ctrl = getattr(self.ai_engine, 'controller', None)
+            s = (getattr(ctrl, 'settings', None) or {}) if ctrl else {}
+            return {
+                'brave_api_key': (s.get('web_brave_api_key') or '').strip() or None,
+                'tavily_api_key': (s.get('web_tavily_api_key') or '').strip() or None,
+                'searxng_url': (s.get('web_searxng_url') or '').strip() or None,
+                'use_playwright': bool(s.get('web_use_playwright', False)),
+            }
+        except Exception:
+            return {}
+
+    def run_web_search(self, spec):
+        """Search the web / open a page / list links. Read-only (no approval).
+        Emits a result card (via the central dispatcher) and returns a compact
+        observation string. Used by BOTH the direct tool path (_run_tool_batch)
+        and the in-interpreter path (interp_web_search)."""
+        if spec.get('error'):
+            return "ERROR:\n" + spec['error']
+        from systema.net import web_research as wr
+        cfg = self._web_config()
+        mode = spec.get('mode', 'search')
+        query = spec.get('query', '')
+        try:
+            if mode == 'links':
+                items = wr.links(query, config=cfg,
+                                 max_results=spec.get('max_results') or 50)
+                self.emit_tool_card('web_page', mode='links', url=query,
+                                    title=f"Links — {query}", links=items)
+                body = "\n".join(f"- [{it['text']}]({it['href']})" for it in items)
+                return f"Links on {query} ({len(items)}):\n{body or '(no links found)'}"
+
+            if mode == 'open':
+                page = wr.open_page(query, config=cfg)
+                self.emit_tool_card('web_page', mode='open', url=page['url'],
+                                    title=page.get('title') or query, text=page['text'])
+                head = f"Opened {page['url']}"
+                if page.get('title'):
+                    head += f" — {page['title']}"
+                if page.get('truncated'):
+                    head += " (truncated)"
+                return f"{head}\n\n{page['text']}"
+
+            # search
+            results = wr.search(query, max_results=spec.get('max_results') or 8, config=cfg)
+            self.emit_tool_card('web_search', query=query, results=results)
+            if not results:
+                return f"No results for '{query}'."
+            lines = [f"Search results for '{query}' ({len(results)}):"]
+            for i, r in enumerate(results, 1):
+                lines.append(f"{i}. {r.get('title', '')}\n   {r.get('href', '')}\n"
+                             f"   {(r.get('body', '') or '')[:200]}")
+            obs = "\n".join(lines)
+            fetch_top = spec.get('fetch_top') or 0
+            if fetch_top > 0:
+                for r in results[:fetch_top]:
+                    try:
+                        page = wr.open_page(r['href'], config=cfg)
+                        self.emit_tool_card('web_page', mode='open', url=page['url'],
+                                            title=page.get('title') or r.get('title', ''),
+                                            text=page['text'])
+                        obs += f"\n\n=== PAGE: {page['url']} ===\n{page['text']}"
+                    except Exception as e:
+                        obs += f"\n\n=== PAGE {r.get('href')} — failed: {e} ==="
+            return obs
+        except Exception as e:
+            log.error(f"[ToolManager.run_web_search] {mode} failed: {e}")
+            return f"web_search {mode} failed: {type(e).__name__}: {str(e)[:200]}"
+
+    def interp_web_search(self, query, mode='search', max_results=8, fetch_top=0):
+        """`web_search(...)` as exposed INSIDE the python interpreter namespace
+        (compat mode). Runs the same tool, but its card is buffered (flushed
+        after the interpreter's own card) and its full output is recorded as a
+        SEPARATE tool result for the model — so the interpreter card stays clean
+        ('Done'-style) and the model still receives the web output uniformly,
+        exactly as if it had made a direct web_search tool call.
+
+        Returns a short confirmation string (not the full dump)."""
+        m = str(mode or 'search').strip().lower()
+        if m not in ('search', 'open', 'links'):
+            m = 'search'
+        spec = {'mode': m, 'query': str(query or ''),
+                'max_results': max_results or 8, 'fetch_top': fetch_top or 0,
+                'annotation': None, 'error': None}
+        self._card_capture = True
+        try:
+            obs = self.run_web_search(spec)
+        finally:
+            self._card_capture = False
+        self._interp_subresults.append(('web_search', obs))
+        return ("[web_search delivered its results as a separate tool result and "
+                "card — see below; do not reprint them here.]")
+
+    # ─────────────────────────────────────────────────────────────────────────
     # Native argument extraction — the native front-end's replacement for
     # fence parsing (see AIEngine._process_native_response). A native call's
     # structured arguments become exactly the payload the matching run_* /
@@ -1176,6 +1430,22 @@ class ToolManager:
                 spec['error'] = "grep needs a regex pattern in the 'pattern' argument."
             return spec
 
+        if name == 'web_search':
+            self.work.interpreter.last_annotation = annotation or None
+            mode = str(args.get('mode') or 'search').strip().lower()
+            if mode not in ('search', 'open', 'links'):
+                mode = 'search'
+            spec = {'mode': mode,
+                    'query': str(args.get('query') or args.get('url') or '').strip(),
+                    'max_results': self._native_int(args.get('max_results'), 8),
+                    'fetch_top': self._native_int(args.get('fetch_top'), 0),
+                    'annotation': annotation,
+                    'error': None}
+            if not spec['query']:
+                spec['error'] = ("web_search needs a 'query' (search) or 'url' "
+                                 "(open/links) argument.")
+            return spec
+
         return None
 
     @staticmethod
@@ -1268,9 +1538,8 @@ class ToolManager:
             self._pending_file_edit = {'path': str(path), 'old': old_text,
                                        'new': new_text, 'tool': tool}
             self.approval_signal.request_approval.emit(new_text, tool, callback)
-            if not approval_event.wait(timeout=300):
-                self._audit_decision(f"{tool}: {path}", tool, 'rejected', 'timeout')
-                return False, new_text, 'approval timed out'
+            # No timeout by design — halt here until the user decides (see E1).
+            approval_event.wait()
             self._audit_decision(f"{tool}: {path}", tool,
                                  'approved' if result['approved'] else 'rejected',
                                  'user')
@@ -1287,105 +1556,29 @@ class ToolManager:
     # ─────────────────────────────────────────────────────────────────────────
 
     def enforce_single_exec_policy(self, text):
-        """
-        Scan text for python_interpreter fences. If more than one is found,
-        keep only the first and drop the rest. This is the ONE hard cap under
-        parallel tool calls (2026-07 revamp) — every other tool fence may batch
-        freely and is untouched here.
-
-        Returns:
-            tuple: (cleaned_text, violation_bool, violation_msg)
-        """
-        log.info(f"[ToolManager.enforce_single_exec_policy] Scanning {len(text)} chars for policy violations")
-        # Depth-aware close (\1`*): closing run >= opener run, inner fences literal.
-        pattern = r'(`{3,})[ \t]*([\w-]+)[^\n]*\n.*?\1`*'
-        matches = []
-        for match in re.finditer(pattern, text, re.DOTALL):
-            canonical, _exact = self._resolve_tool_tag(match.group(2))
-            if canonical == 'python_interpreter':
-                matches.append((match, canonical))
-
-        if len(matches) <= 1:
-            log.debug("[ToolManager.enforce_single_exec_policy] No violation — returning text unchanged")
-            return text, False, ""
-
-        extras = matches[1:]
-        with self._exec_violations_lock:
-            self.exec_violations += 1
-            _v = self.exec_violations
-        dropped_names = [name for _, name in extras]
-        violation_msg = (
-            f"[POLICY] {len(extras)} extra code-execution tool call(s) were dropped "
-            f"({', '.join(dropped_names)}). Only the first call was kept. "
-            f"Total violations this session: {_v}."
-        )
-        log.warning(f"[ToolManager.enforce_single_exec_policy] ✗ POLICY VIOLATION #{_v} — "
-                    f"dropping {dropped_names}")
-
-        # Notify the user via chat window (signal is thread-safe)
-        self.approval_signal.system_message.emit(
-            f"**NOTICE:** The model emitted {len(extras)} extra python_interpreter "
-            f"call(s) in one response. Only the first was kept and executed — code "
-            f"execution stays one step at a time (other tools may batch freely). "
-            f"The model has been reminded of the cap.\n"
-            f"Total violations this session: {_v}"
-        )
-
-        for match, _ in reversed(extras):
-            text = text[:match.start()] + text[match.end():]
-
-        log.info(f"[ToolManager.enforce_single_exec_policy] ✓ Policy enforced")
-        return text.strip(), True, violation_msg
+        """RETIRED CAP (2026-07): multiple python_interpreter calls in ONE
+        response are now allowed. They execute sequentially in emitted order,
+        each with its own approval dialog, and the model receives every output
+        together (labeled by call order) on the next work ping. Kept as a no-op
+        pass-through so the call sites and (text, violated, msg) contract are
+        unchanged."""
+        return text, False, ""
 
     def enforce_single_exec_policy_native(self, tool_calls):
-        """Structured counterpart of enforce_single_exec_policy for native mode:
-        operates on the normalized tool_calls list itself — never on text. Also
-        canonicalizes near-miss names (a native model can typo 'readfile' just
-        like a compat one), keeps the FIRST python_interpreter call, passes
-        every other call through (parallel batching, 2026-07 revamp), and
-        drops extra interpreter calls. Same violation counter + user NOTICE
-        as the compat version.
-
-        Returns (kept_calls, violation_bool, violation_msg).
-        """
-        kept, dropped_names = [], []
-        interp_taken = False
+        """Native counterpart — the cap is retired (see enforce_single_exec_policy)
+        so extra python_interpreter calls are NO LONGER dropped. Still performs
+        the useful native name-canonicalization (a native model can typo
+        'readfile' / 'pythoninterpreter'). Returns (canonicalized_calls, False, '')."""
+        kept = []
         for call in (tool_calls or []):
             name = str(call.get('name') or '')
-            canonical, exact = self._resolve_tool_tag(name, include_legacy=True)
+            canonical, _exact = self._resolve_tool_tag(name, include_legacy=True)
             if canonical and canonical != name:
                 log.warning(f"[ToolManager.enforce_single_exec_policy_native] "
                             f"native tool name '{name}' corrected to '{canonical}'")
                 call = dict(call, name=canonical)
-            if canonical == 'python_interpreter':
-                if interp_taken:
-                    dropped_names.append(canonical)
-                    continue
-                interp_taken = True
             kept.append(call)
-
-        if not dropped_names:
-            return kept, False, ""
-
-        with self._exec_violations_lock:
-            self.exec_violations += 1
-            _v = self.exec_violations
-        violation_msg = (
-            f"[POLICY] {len(dropped_names)} extra code-execution tool call(s) were "
-            f"dropped ({', '.join(dropped_names)}). Only the first call was kept. "
-            f"Total violations this session: {_v}."
-        )
-        log.warning(f"[ToolManager.enforce_single_exec_policy_native] ✗ POLICY "
-                    f"VIOLATION #{_v} — dropping {dropped_names}")
-        self.approval_signal.system_message.emit(
-            f"**NOTICE:** The model made {len(dropped_names)} extra "
-            f"python_interpreter call(s) in one response. Only the first was "
-            f"kept and executed — code execution stays one step at a time "
-            f"(other tools may batch freely). The model has been reminded of "
-            f"the cap.\n"
-            f"Total violations this session: {_v}"
-        )
-        return kept, True, violation_msg
+        return kept, False, ""
 
     # ─────────────────────────────────────────────────────────────────────────
     # Supervised execution helpers
@@ -1617,13 +1810,11 @@ class ToolManager:
             # Emit signal to main thread (will show dialog there)
             self.approval_signal.request_approval.emit(code, execution_type, callback)
 
-            # Wait for approval (blocks worker thread, but not main thread)
-            log.debug("[ToolManager._check_supervised_execution] Waiting for user approval (blocking worker thread)...")
-            approved = approval_event.wait(timeout=300)
-            if not approved:
-                log.error("[ToolManager._check_supervised_execution] Approval wait timed out after 300s — denying by default")
-                self._audit_decision(code, execution_type, 'rejected', 'timeout')
-                return False, code
+            # Wait for approval (blocks worker thread, but not main thread).
+            # No timeout by design — the user may be AFK; the decision must halt
+            # here indefinitely rather than silently auto-rejecting.
+            log.debug("[ToolManager._check_supervised_execution] Waiting for user approval (blocking worker thread, no timeout)...")
+            approval_event.wait()
 
             log.info(f"[ToolManager._check_supervised_execution] User decision received | "
                      f"approved={approval_result['approved']}")
@@ -2050,9 +2241,18 @@ class ToolManager:
         return prompt
 
     def reset_python(self):
-        """Reset Python interpreter state"""
+        """Reset Python interpreter state, then re-inject the agent namespaces
+        (web_search, take_screenshot, notify, memory helpers, ...) so a reset
+        from ANY path — the floating-window button, the tray, or the engine —
+        never leaves the interpreter with a bare namespace."""
         log.info("[ToolManager.reset_python] Resetting Python interpreter state")
         self.tools['python'].reset()
+        if callable(self._namespace_injector):
+            try:
+                self._namespace_injector()
+                log.debug("[ToolManager.reset_python] namespaces re-injected")
+            except Exception as e:
+                log.error(f"[ToolManager.reset_python] namespace re-injection failed: {e}")
         log.info("[ToolManager.reset_python] ✓ Python interpreter reset complete")
 
     def strip_tool_calls(self, text):

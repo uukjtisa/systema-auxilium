@@ -74,6 +74,25 @@ VERBOSE      = False     # True to print llama.cpp load/inference logs to consol
 SUPPORTS_NATIVE_TOOLS = False
 NATIVE_DIALECT        = "openai"
 
+CONTRACT_VERSION = 2
+
+Display = {
+    "MODEL_PATH": ("Model file (.gguf)", "file_path",
+                   {"tooltip": "Path to a GGUF model on this machine"}),
+    "N_CTX":        ("Context tokens", "number",
+                     {"tooltip": "Larger = more RAM"}),
+    "N_GPU_LAYERS": ("GPU layers", "number",
+                     {"tooltip": "0 = CPU only, -1 = offload everything"}),
+    "TEMPERATURE":  ("Temperature", "number"),
+    "TOP_P":        ("Top P", "number"),
+    "MAX_TOKENS":   ("Max tokens", "number"),
+    "NOTE_1": ("NOTE: fully offline — no API key. Requires "
+               "pip install llama-cpp-python and a .gguf model file. "
+               "Native tool calling stays OFF unless your model's chat "
+               "template really supports it (set SUPPORTS_NATIVE_TOOLS = True "
+               "in this script to try).", "info_box"),
+}
+
 
 # Key under which the loaded model + its config live on the persistent `sys`
 # module, so the instance survives this file being re-imported each request.
@@ -140,56 +159,50 @@ def _build_messages(system_prompt, messages):
     ) + list(messages)
 
 
-def chat(system_prompt: str, messages: list) -> str:
-    """
-    Required signature for all LLM provider scripts.
+def chat(system_prompt: str, messages: list, *, images=None, tools=None, stream=False):
+    """Unified v2 entry point for a local GGUF model.
 
-    Args:
-        system_prompt : Full effective system prompt (may be empty, never None).
-        messages      : List of {"role": "user"|"assistant", "content": str} dicts.
-                        The latest user message is always the last entry.
-
-    Returns:
-        A non-empty string response. Raising an exception surfaces as an error.
-    """
-    llm = _get_llm()
-
-    result = llm.create_chat_completion(
-        messages=_build_messages(system_prompt, messages),
-        temperature=TEMPERATURE,
-        top_p=TOP_P,
-        max_tokens=MAX_TOKENS,
-        repeat_penalty=REPEAT_PENALTY,
-    )
-
-    reply = (result["choices"][0]["message"].get("content") or "").strip()
-    if not reply:
-        raise RuntimeError("Local model returned an empty response.")
-    return reply
-
-
-def chat_tools(system_prompt: str, messages: list, tools: list, images=None) -> dict:
-    """Native function-calling entrypoint (OpenAI dialect).
-
-    ``llm.create_chat_completion`` already returns an OpenAI-shaped dict, so
-    native_adapters converts the tool schema going in and parses the reply going
-    out into the normalized result the app expects:
-        {"text": str | None, "tool_calls": [{"id","name","arguments"}, ...]}
-    Requires a tool-capable GGUF model (see the SUPPORTS_NATIVE_TOOLS note above).
+    `images` is ignored (llama.cpp vision needs a separate mmproj setup).
+    `tools` is honoured only when SUPPORTS_NATIVE_TOOLS is enabled AND the
+    model's chat template implements function calling.
     """
     from systema.engine import native_adapters as na
 
     llm = _get_llm()
-    result = llm.create_chat_completion(
+    kwargs = dict(
         messages=_build_messages(system_prompt, messages),
-        tools=na.to_openai_tools(tools),
-        tool_choice="auto",
         temperature=TEMPERATURE,
         top_p=TOP_P,
         max_tokens=MAX_TOKENS,
         repeat_penalty=REPEAT_PENALTY,
     )
-    return na.parse_openai(result)
+    if tools:
+        kwargs["tools"] = na.to_openai_tools(tools)
+        kwargs["tool_choice"] = "auto"
+
+    if stream:
+        return _chat_stream(llm, kwargs)
+
+    # create_chat_completion already returns an OpenAI-shaped dict.
+    result = llm.create_chat_completion(**kwargs)
+    parsed = na.parse_openai(result)
+    content = (parsed.get("text") or "").strip()
+    if not content and not parsed.get("tool_calls"):
+        raise RuntimeError("Local model returned an empty response.")
+    choice = (result.get("choices") or [{}])[0]
+    return {
+        "content": content,
+        "thinking": None,
+        "tool_calls": parsed.get("tool_calls") or [],
+        "finish_reason": choice.get("finish_reason"),
+    }
+
+
+def _chat_stream(llm, kwargs: dict):
+    """llama.cpp streams OpenAI-shaped chunk dicts — hand them to the shared
+    helper (text deltas live, inline <think> split, tool calls at end)."""
+    from systema.engine.provider_contract import stream_openai_chunks
+    return stream_openai_chunks(llm.create_chat_completion(stream=True, **kwargs))
 
 
 # ── Quick test ────────────────────────────────────────────────────────────────
@@ -205,11 +218,11 @@ if __name__ == "__main__":
         print("MODEL_PATH does not point at a .gguf file yet — set it, then re-run.")
     else:
         try:
-            result = chat(
+            out = chat(
                 system_prompt="You are a helpful assistant.",
                 messages=[{"role": "user", "content": "Say 'Provider test successful.' and nothing else."}],
             )
-            print("Response:", result)
+            print("Response:", out["content"])
             print("Test passed.")
         except Exception as e:
             print(f"Test failed: {e}")

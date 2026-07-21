@@ -54,6 +54,7 @@ from pathlib import Path
 
 # ── Anchor to app root at import time — immune to os.chdir() ─────────────────
 from systema import APP_ROOT as _APP_ROOT
+from systema.common import app_config as _app_config
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -148,14 +149,21 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         # Current assistant TURN GROUP (claude.ai-style merged work turn) —
         # None between turns; see BubblesMixin._ensure_ai_turn_group.
         self._ai_turn_group = None
+        # Live-streaming state (provider contract v2): the throwaway text
+        # segment deltas paint into, and the in-flight Thinking card.
+        self._stream_seg = None
+        self._stream_think_card = None
+        self._stream_active = False
+        # ONE Thinking card per merged assistant bubble (reset per turn shell).
+        self._turn_thinking_card = None
+        self._turn_thinking_group = None
         self._skills_ui_card_widget = None   # Single per-session skills card (only one allowed)
         self._skills_ui_card_timer = None    # 500ms live-sync timer for that card
 
         # Window chrome state
         self._init_chrome_state()
 
-        # Avatar settings
-        self.config_file = _APP_ROOT / "chat_config.json"
+        # Avatar settings — 'chat_window_config' section of settings.json
         self.load_config()
 
         self.setMouseTracking(True)
@@ -207,32 +215,20 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
 
     def load_config(self):
         try:
-            if os.path.exists(self.config_file):
-                with open(self.config_file, 'r') as f:
-                    config = json.load(f)
-                    self.bot_avatar = config.get('bot_avatar', '🤖')
-                    self.user_avatar = config.get('user_avatar', '👤')
-                    self.chat_zoom = float(config.get('chat_zoom', 1.0))
-                    self._bot_avatar_image_path  = config.get('bot_avatar_image_path', '')
-                    self._user_avatar_image_path = config.get('user_avatar_image_path', '')
-                    self._bot_avatar_size  = int(config.get('bot_avatar_size', 32))
-                    self._user_avatar_size = int(config.get('user_avatar_size', 32))
-                    self._avatar_size_uniform = bool(config.get('avatar_size_uniform', False))
-                    self._input_box_width = int(config.get('input_box_geometry', 640))
-                    for _t in ('bot', 'user'):
-                        setattr(self, f'_{_t}_avatar_zoom', float(config.get(f'{_t}_avatar_zoom', 1.0)))
-                        setattr(self, f'_{_t}_avatar_ox', float(config.get(f'{_t}_avatar_ox', 0.5)))
-                        setattr(self, f'_{_t}_avatar_oy', float(config.get(f'{_t}_avatar_oy', 0.5)))
-            else:
-                self.bot_avatar = '🤖'
-                self.user_avatar = '👤'
-                self.chat_zoom = 1.0
-                self._bot_avatar_image_path  = ''
-                self._user_avatar_image_path = ''
-                self._bot_avatar_size  = 32
-                self._user_avatar_size = 32
-                self._avatar_size_uniform = False
-                self._input_box_width = 640
+            config = _app_config.load_section('chat_window_config')
+            self.bot_avatar = config.get('bot_avatar', '🤖')
+            self.user_avatar = config.get('user_avatar', '👤')
+            self.chat_zoom = float(config.get('chat_zoom', 1.0))
+            self._bot_avatar_image_path  = config.get('bot_avatar_image_path', '')
+            self._user_avatar_image_path = config.get('user_avatar_image_path', '')
+            self._bot_avatar_size  = int(config.get('bot_avatar_size', 32))
+            self._user_avatar_size = int(config.get('user_avatar_size', 32))
+            self._avatar_size_uniform = bool(config.get('avatar_size_uniform', False))
+            self._input_box_width = int(config.get('input_box_geometry', 640))
+            for _t in ('bot', 'user'):
+                setattr(self, f'_{_t}_avatar_zoom', float(config.get(f'{_t}_avatar_zoom', 1.0)))
+                setattr(self, f'_{_t}_avatar_ox', float(config.get(f'{_t}_avatar_ox', 0.5)))
+                setattr(self, f'_{_t}_avatar_oy', float(config.get(f'{_t}_avatar_oy', 0.5)))
         except Exception:
             self.bot_avatar = '🤖'
             self.user_avatar = '👤'
@@ -327,10 +323,7 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
 
     def save_config(self):
         try:
-            config = {}
-            if os.path.exists(self.config_file):
-                with open(self.config_file, 'r') as f:
-                    config = json.load(f)
+            config = _app_config.load_section('chat_window_config')
             config['bot_avatar']  = self.bot_avatar
             config['user_avatar'] = self.user_avatar
             config['chat_zoom']   = self.chat_zoom
@@ -347,8 +340,7 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
                 config[f'{_t}_avatar_zoom'] = float(getattr(self, f'_{_t}_avatar_zoom', 1.0))
                 config[f'{_t}_avatar_ox']   = float(getattr(self, f'_{_t}_avatar_ox', 0.5))
                 config[f'{_t}_avatar_oy']   = float(getattr(self, f'_{_t}_avatar_oy', 0.5))
-            with open(self.config_file, 'w') as f:
-                json.dump(config, f, indent=2)
+            _app_config.save_section('chat_window_config', config)
         except Exception as e:
             log.error(f"[ChatWindow.save_config] Error saving config: {e}")
 
@@ -672,15 +664,11 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
                 row_l = QHBoxLayout(row)
                 row_l.setContentsMargins(0, 0, 0, 0)
                 row_l.setSpacing(4)
-                load_btn = _chip(f"📂 {name}")
+                load_btn = _chip(name)
                 load_btn.clicked.connect(lambda _, c=content: _insert(c))
                 row_l.addWidget(load_btn, stretch=1)
-                del_btn = QPushButton("✕")
-                del_btn.setFixedSize(22, 22)
-                del_btn.setStyleSheet(f"""
-                    QPushButton {{ background: transparent; border: none; color: #8B949E; font-size: 11px; border-radius: 4px; }}
-                    QPushButton:hover {{ background: rgba(242,139,130,0.15); color: #F28B82; }}
-                """)
+                from systema.ui.widgets.painted_icons import CloseButton as _XBtn
+                del_btn = _XBtn(22, tooltip="Delete preset", pill=False)
                 del_btn.clicked.connect(lambda _, n=name: _delete_preset(n))
                 row_l.addWidget(del_btn)
                 self._saved_presets_layout.addWidget(row)
@@ -833,7 +821,6 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         if success:
             self.voice_enabled = True
             self.voice_btn_inline.setChecked(True)
-            self.add_system_message(f"**Voice Mode Enabled**\n\n{message}")
             self.update_voice_status("Ready")
         else:
             self.voice_enabled = False
@@ -847,7 +834,6 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         self.voice_enabled = False
         self.voice_btn_inline.setChecked(False)
         self.update_voice_status("")
-        self.add_system_message("**Voice Mode Disabled**")
         self._sync_voice_to_phone()
 
     def _sync_voice_to_phone(self):
@@ -1239,6 +1225,11 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
 
         self.message_widgets = []
         self._ai_turn_group = None   # widgets are gone — never append into them
+        self._stream_seg = None      # ditto for any in-flight stream widgets
+        self._stream_think_card = None
+        self._stream_active = False
+        self._turn_thinking_card = None
+        self._turn_thinking_group = None
         # Stop the live-sync timer and drop the card reference so a new session gets a fresh card
         if hasattr(self, '_skills_ui_card_timer') and self._skills_ui_card_timer is not None:
             try:
@@ -1340,6 +1331,22 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
                     elif msg.get("_type") == "file_op":
                         self.add_file_op_card(msg.get("_file_op") or {},
                                               save_to_history=False)
+                    elif msg.get("_type") == "web_search":
+                        self.add_web_search_card(
+                            {'query': msg.get("_web_query", ""),
+                             'results': msg.get("_web_results", [])},
+                            save_to_history=False)
+                    elif msg.get("_type") == "thinking":
+                        self.add_thinking_card(msg.get("_thinking", ""),
+                                               save_to_history=False)
+                    elif msg.get("_type") == "web_page":
+                        self.add_web_page_card(
+                            {'mode': msg.get("_web_mode", "open"),
+                             'url': msg.get("_web_url", ""),
+                             'title': msg.get("_web_title", ""),
+                             'text': msg.get("_web_text", ""),
+                             'links': msg.get("_web_links", [])},
+                            save_to_history=False)
                     else:
                         self.add_code_execution_note(
                             msg.get("_code", ""),
@@ -1514,7 +1521,7 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
             wl.addWidget(grid_w)
 
             # Upload picture button
-            upload_btn = QPushButton("🖼  Upload custom picture…")
+            upload_btn = QPushButton("Upload custom picture…")
             upload_btn.setStyleSheet(f"""
                 QPushButton {{ background: transparent; border: 1px solid {_tc['border']};
                     border-radius: 7px; padding: 9px; font-size: 11px; color: #8B949E; }}
@@ -2187,19 +2194,52 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
     def _move_thinking_dots_to_bottom(self):
         """Keep the dots at the END of the turn shell body as new segments are
         appended, so the indicator always rides the bottom of the growing turn.
-        Called from _insert_turn_segment."""
+        Called from _insert_turn_segment.
+
+        A system interjection (notification card) closes the turn the dots were
+        living in — the next segment opens a FRESH shell. So the dots are also
+        MIGRATED into the current shell whenever it differs, otherwise they
+        strand on the pre-split bubble instead of the newest one."""
         host = self._thinking_bubble_widget
-        g = getattr(self, '_thinking_bubble_group', None)
-        if host is None or g is None:
+        old = getattr(self, '_thinking_bubble_group', None)
+        cur = getattr(self, '_ai_turn_group', None) or old
+        if host is None or cur is None:
             return
         try:
-            body = g['body_layout']
-            if body is None or host.parent() is None:
+            body = cur['body_layout']
+            if body is None:
                 return
+            if cur is old and host.parent() is None:
+                return          # detached husk, nothing to reorder
+            if old is not None and old is not cur:
+                try:
+                    old['body_layout'].removeWidget(host)
+                except (RuntimeError, KeyError, TypeError):
+                    pass
             body.removeWidget(host)
             body.addWidget(host)
+            self._thinking_bubble_group = cur
         except RuntimeError:
-            pass
+            return
+        if old is not None and old is not cur:
+            try:
+                self._prune_empty_group(old['row'])   # no husk left behind
+            except Exception:
+                pass
+
+    def _rehome_thinking_dots(self):
+        """Move the typing indicator into a FRESH turn shell at the bottom of
+        the chat. Called right after a system interjection is inserted so the
+        dots immediately follow the notification card instead of sitting on the
+        bubble that card just split off. No-op when no dots are showing."""
+        if self._thinking_bubble_widget is None:
+            return
+        try:
+            self._ensure_ai_turn_group()      # closed by the interjection → new shell
+            self._move_thinking_dots_to_bottom()
+            self.scroll_to_bottom()
+        except Exception:
+            log.debug("[ChatWindow._rehome_thinking_dots] skipped", exc_info=True)
 
     def hide_thinking_bubble(self):
         """Remove the in-turn typing indicator. If the dots were the ONLY thing
@@ -2276,37 +2316,28 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         if self.isMinimized() or self.isMaximized():
             return  # don't persist a minimized/maximized transient geometry
         try:
-            config = {}
-            if os.path.exists(self.config_file):
-                with open(self.config_file, 'r') as f:
-                    config = json.load(f)
-
+            config = _app_config.load_section('chat_window_config')
             config['window_geometry'] = {
                 'x': self.x(),
                 'y': self.y(),
                 'width': self.width(),
                 'height': self.height()
             }
-
-            with open(self.config_file, 'w') as f:
-                json.dump(config, f, indent=2)
+            _app_config.save_section('chat_window_config', config)
         except Exception as e:
             log.error(f"[ChatWindow.save_window_geometry] Error saving window geometry: {e}")
 
     def load_window_geometry(self):
         """Load window size and position from config"""
         try:
-            if os.path.exists(self.config_file):
-                with open(self.config_file, 'r') as f:
-                    config = json.load(f)
-                    geometry = config.get('window_geometry')
-                    if geometry:
-                        self.setGeometry(
-                            geometry['x'],
-                            geometry['y'],
-                            geometry['width'],
-                            geometry['height']
-                        )
+            geometry = _app_config.load_section('chat_window_config').get('window_geometry')
+            if geometry:
+                self.setGeometry(
+                    geometry['x'],
+                    geometry['y'],
+                    geometry['width'],
+                    geometry['height']
+                )
         except Exception as e:
             log.error(f"[ChatWindow.load_window_geometry] Error loading window geometry: {e}")
         finally:

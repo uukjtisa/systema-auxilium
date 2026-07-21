@@ -10,13 +10,10 @@ from PyQt6.QtWidgets import QPushButton
 from PyQt6.QtCore import Qt, QRectF, QPointF, QVariantAnimation, QEasingCurve
 from PyQt6.QtGui import QPainter, QPen, QColor, QPainterPath
 
-
-def _lerp_color(a: str, b: str, t: float) -> QColor:
-    """Linear blend between two hex colours (glyph idle → hover tint)."""
-    ca, cb = QColor(a), QColor(b)
-    return QColor(int(ca.red() + (cb.red() - ca.red()) * t),
-                  int(ca.green() + (cb.green() - ca.green()) * t),
-                  int(ca.blue() + (cb.blue() - ca.blue()) * t))
+# Canonical copy lives in the shared painted-icon module (2026-07-21 icon
+# overhaul); re-exported here so existing `from window_controls import
+# _lerp_color` call sites keep working.
+from systema.ui.widgets.painted_icons import _lerp_color
 
 
 class PanelToggleButton(QPushButton):
@@ -230,25 +227,13 @@ class WindowControlsMixin:
         self.toggle_sidebar_btn.raise_()
         self.toggle_sidebar_btn.show()
 
-        # ── Boxless minimize / close — float top-right over the chat ────────
-        self._win_min_btn = QPushButton("−", self.container)
-        self._win_min_btn.setFixedSize(32, 32)
-        self._win_min_btn.setToolTip("Minimize")
-        self._win_min_btn.setStyleSheet("""
-            QPushButton { background: transparent; border: none; border-radius: 8px;
-                          font-size: 18px; color: #9AA0A6; }
-            QPushButton:hover { background: #21262D; color: #E8EAED; }
-        """)
+        # ── Painted minimize / close — float top-right over the chat ────────
+        # (icon overhaul: text −/× glyphs → painted chrome buttons)
+        from systema.ui.widgets.painted_icons import MinimizeButton, CloseButton
+        self._win_min_btn = MinimizeButton(32, self.container, "Minimize")
         self._win_min_btn.clicked.connect(self.showMinimized)
 
-        self._win_close_btn = QPushButton("×", self.container)
-        self._win_close_btn.setFixedSize(32, 32)
-        self._win_close_btn.setToolTip("Close")
-        self._win_close_btn.setStyleSheet("""
-            QPushButton { background: transparent; border: none; border-radius: 8px;
-                          font-size: 22px; color: #9AA0A6; }
-            QPushButton:hover { background: #EA4335; color: white; }
-        """)
+        self._win_close_btn = CloseButton(32, self.container, "Close", pill=True)
         self._win_close_btn.clicked.connect(self.close)
 
         # Session tools moved into the input row (see input_dock); the window

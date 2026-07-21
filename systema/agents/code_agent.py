@@ -106,7 +106,9 @@ class CodeAgent:
     def _default_provider(self, messages: list) -> str:
         if self.ai is None:
             raise RuntimeError("no provider available")
-        text = self.ai._provider_script(messages)
+        # stream_ok=False: this agent runs inside the approval dialog — its
+        # tokens must never appear in the chat turn.
+        text = self.ai._provider_script(messages, stream_ok=False)
         if not text and hasattr(self.ai, "_get_ai_response_internal"):
             user = next((m["content"] for m in reversed(messages)
                          if m["role"] == "user"), "")

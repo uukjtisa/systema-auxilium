@@ -11,65 +11,117 @@ and it appears instantly.
 Each folder ships a `_template.py` skeleton with full docstrings and a
 paste-ready prompt you can hand to any AI to generate a working provider.
 
-## LLM provider contract
+## LLM provider contract (version 2)
 
-An LLM provider script must define one function:
+An LLM provider script declares the contract version and defines ONE function:
 
 ```python
-def chat(system_prompt: str, messages: list[dict]) -> str
+CONTRACT_VERSION = 2
+
+def chat(system_prompt: str, messages: list, *,
+         images=None, tools=None, stream=False)
 ```
 
 - `system_prompt` — the full effective system prompt as a plain string (may be
   empty, never `None`).
 - `messages` — a list of `{"role": "user"|"assistant", "content": str}` dicts,
-  alternating, with the latest user message last.
-- Returns the assistant's reply as a **non-empty string**. Returning `None`/`""`
-  or raising surfaces as an error in the chat window.
+  with the latest user message last. In a native tool conversation these arrive
+  already shaped for your dialect (real tool_use / tool_result turns).
+- `images` — `None`, or a list of absolute image paths the user attached.
+  Ignore it if your provider has no vision.
+- `tools` — `None`, or canonical tool defs; only passed when native tool calling
+  is on and you set `SUPPORTS_NATIVE_TOOLS = True`.
+- `stream` — when `True` you *may* return a generator of chunks instead of the
+  result dict (see below). Ignoring it still works.
 
-The file is re-imported fresh on every request, so live edits take effect
-immediately. All configuration (keys, URLs, models) lives in the script — the app
-forwards nothing.
-
-### Optional: vision
+Non-stream return:
 
 ```python
-def chat_image(system_prompt, messages, image_paths) -> str
+{"content": str,             # the reply (required)
+ "thinking": str | None,     # reasoning tokens → collapsible card, UI-only
+ "tool_calls": [{"id":..., "name":..., "arguments": {...}}],
+ "finish_reason": str | None}
 ```
 
-Called instead of `chat()` when the user attaches images. `image_paths` is a list
-of absolute file paths. If it is not defined, attachments fall back to `chat()`
-with text only. The included template uses the OpenAI base64 vision format.
+A plain string return is also accepted. The file is re-imported fresh on every
+request, so live edits take effect immediately.
+
+### Optional: streaming
+
+With `stream=True`, return a generator yielding:
+
+```python
+{"type": "text",      "content": "...delta..."}
+{"type": "thinking",  "content": "...delta..."}
+{"type": "tool_call", "content": {"id":..., "name":..., "arguments": {...}}}
+{"type": "done",      "content": "", "finish_reason": "stop"}
+```
+
+Text/thinking deltas render live. If your API streams tool-call *fragments*,
+assemble them yourself and yield each COMPLETE call (typically at end of
+stream). For OpenAI-dialect providers,
+`systema.engine.provider_contract.stream_openai_chunks(events)` does all of
+this for you — pass it SDK chunks or parsed SSE dicts.
+
+### Optional: the `Display` settings form
+
+Declare which module-level variables users may edit from Settings ▸ AI Provider.
+The app auto-generates the form, persists values per script, and applies them to
+the module before every request — users never open the file.
+
+```python
+Display = {
+    "API_KEY": ("API Key", "input",
+                {"tooltip": "Get one at example.com", "placeholder": "sk-..."}),
+    "MODEL":   ("Model", "list_dropdown", ["fast-model", "smart-model"],
+                {"item_tooltips": ["cheap + quick", "best quality"]}),
+    "NOTE_1":  ("NOTE: free models rotate.", "info_box"),
+}
+```
+
+Keys are variable NAMES. Types: `input`, `textarea`, `list_dropdown`,
+`checkbox`, `number`, `file_path`, `info_box` (a read-only note — nothing
+stored). The optional trailing dict supports `tooltip`, `placeholder`, and
+`item_tooltips`. Key-ish names are password-masked with a Show/Hide toggle, and
+`list_dropdown` is editable so users can type ids beyond your presets. Expose
+only what users genuinely need — leave internal constants out.
 
 ### Optional: native function calling
 
 ```python
 SUPPORTS_NATIVE_TOOLS = True
 NATIVE_DIALECT        = "openai"   # "openai" | "anthropic" | "gemini"
-
-def chat_tools(system_prompt, messages, tools, images=None) -> dict
 ```
 
-See [Tool Calling](tool-calling.md) for the full explanation. In short: convert
-the canonical `tools` to your provider's dialect, call the API, and return the
-normalized `{"text": ..., "tool_calls": [...]}` result. The helper module
-`systema/engine/native_adapters.py` does the conversion and parsing for all three
-dialects, so `chat_tools` is only a few lines.
+Then handle the `tools` argument inside `chat()`. See
+[Tool Calling](tool-calling.md). `systema/engine/native_adapters.py` converts
+canonical tools to your dialect and parses responses back, so this is a few
+lines.
+
+### Legacy contract (still supported)
+
+Scripts written against the old contract — `chat(system_prompt, messages) -> str`
+plus optional `chat_image(...)` / `chat_tools(...)` — keep working untouched.
+The loader wraps them into the same normalized result. They simply cannot
+stream. New scripts should use the v2 contract above.
 
 ## Included LLM providers
 
 All of these ship configured with placeholder keys — add your own key and select
-the script. All support native tool calling unless noted.
+the script. All are contract v2 with streaming, and support native tool calling
+unless noted. Model choice is a dropdown in Settings, so ONE script covers a
+whole backend.
 
 | Script | Backend | Notes |
 | --- | --- | --- |
-| `anthropic_provider.py` | Anthropic Claude | Native (anthropic dialect); vision. |
-| `gemini_provider.py` | Google Gemini | Native (gemini dialect, REST). |
-| `provider_cloudflare_kimi_k2_6.py` | Cloudflare Workers AI / Kimi K2.6 | Native (openai); vision-aware `chat_tools`. |
-| `provider_cloudflare_kimi_k2_7_code.py` | Cloudflare Workers AI / Kimi K2.7 (coding) | Native (openai). |
-| `provider_nvidia_glm51.py` | NVIDIA Inference API / GLM-5.1 | Native (openai); streaming chat with reasoning. |
-| `provider_nvidia_deepseek_v4_flash.py` | NVIDIA / DeepSeek V4 Flash | Native (openai). |
-| `provider_nvidia_deepseek_v4_pro.py` | NVIDIA / DeepSeek V4 Pro | Native (openai). |
-| `provider_opencode_zen.py` | OpenCode Zen (free OpenAI-compatible gateway) | Native (openai); several free models. |
+| `openai_provider.py` | OpenAI (and any OpenAI-compatible endpoint) | Native (openai dialect); vision. Point `BASE_URL` at Groq / Mistral / OpenRouter / vLLM / LM Studio to reuse it unchanged. |
+| `anthropic_provider.py` | Anthropic Claude | Native (anthropic dialect); vision; extended thinking. |
+| `gemini_provider.py` | Google Gemini | Native (gemini dialect, REST); vision. |
+| `provider_cloudflare.py` | Cloudflare Workers AI | Whole `@cf/...` catalog in one dropdown (Kimi, GLM, gpt-oss, Nemotron, Llama-4, Gemma, Qwen…). Multi-account failover + 24h exhaustion cache; vision on vision-capable models. |
+| `provider_nvidia.py` | NVIDIA Inference API | GLM-5.1 / DeepSeek V4 Pro / Flash in one dropdown; reasoning tokens surface as thinking. |
+| `provider_opencode_zen.py` | OpenCode Zen (free OpenAI-compatible gateway) | Free-model lineup in a dropdown; paid ids typeable. |
+| `provider_mixed_opencode.cloudflare.py` | OpenCode Zen (text) + Cloudflare (vision) | Routes by attachment: text → OpenCode, images → Cloudflare. Both models configurable. |
+| `provider_ollama.py` | Local Ollama | Any pulled model (default `qwen3.5:9b`); inline `<think>` split into thinking. Fully offline. |
 | `llama-cpp-provider.py` | Local GGUF via `llama-cpp-python` | Fully offline, no API key. Native tool calling is **opt-in** (`SUPPORTS_NATIVE_TOOLS = False` by default) because it depends on the model + chat template. |
 
 ## TTS provider contract
