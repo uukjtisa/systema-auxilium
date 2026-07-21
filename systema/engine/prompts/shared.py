@@ -115,14 +115,26 @@ Three functions are available inside python_interpreter for managing memory:
                                       memory whose text contains identifier
 
 MEMORY STRUCTURE:
-  title  — Required. Concise, descriptive, unique. One line.
-  body   — Required. 1-5 sentences, enough context to be useful later.
-  tags   — Optional but recommended. Comma-separated keywords.
+  title  — Required. Concise, descriptive, unique. ONE line.
+  body   — Required. NO LENGTH LIMIT. Write however much detail the memory
+           genuinely needs — one sentence or many paragraphs. Newlines, blank
+           lines, lists and multi-line snippets are all allowed. YOU decide the
+           depth; judge it by what a future session would need in order to act
+           on this without re-asking.
+  tags   — Optional but recommended. ONE line, comma-separated keywords.
+
+  The only hard structural rules: the title is one line, the tags are one line,
+  and the body must not END with a line starting "Tags:" (that line is reserved
+  for the tags field and would be read back as tags).
 
 Example usage — {invoke_hint}
     result = memorize(
         title="User prefers concise responses",
-        body="The user dislikes long explanations and prefers short, direct answers.", #NO NEW LINES
+        body=(
+            "The user dislikes long explanations and prefers short, direct answers.\\n"
+            "Applies to chat replies and to code comments.\\n"
+            "Exception: he wants full detail when reviewing a design decision."
+        ),
         tags="preferences, communication style"
     )
     print(result)
@@ -131,8 +143,16 @@ Guidelines:
   - Memorize proactively, one fact per call: preferences, habits, milestones,
     software/hardware details, anything the user asks you to remember.
     NEVER passwords or credentials unless the user explicitly asks.
+  - One MEMORY per call still means one subject — but write that subject up
+    fully: the specifics (names, paths, versions, numbers, dates), the WHY
+    behind it, and anything that would otherwise have to be re-derived. Prefer
+    completeness over brevity; only avoid padding that carries no information.
+  - Every memory in this mode sits in the system prompt and spends context
+    budget, so detail must be earned — long because it is informative, never
+    long because it is verbose.
   - To revise a fact, call update_memory() with its exact title (from the
-    block) instead of storing a duplicate.
+    block) instead of storing a duplicate. Passing new_body REPLACES the body,
+    so include the parts you want to keep.
   - To delete, pass the exact title (from the block) to forget_memory.
   - NEVER mention any of this during unrelated conversation.
 """
@@ -152,15 +172,27 @@ Four functions are available inside python_interpreter for managing memory:
                                       memory whose text contains identifier
 
 MEMORY STRUCTURE:
-  title  — Required. Concise, descriptive, unique. One line.
-  body   — Required. 1-5 sentences, enough context to be useful later.
-  tags   — Optional but recommended. Comma-separated keywords a future
-           query might contain.
+  title  — Required. Concise, descriptive, unique. ONE line.
+  body   — Required. NO LENGTH LIMIT. Write however much detail the memory
+           genuinely needs — one sentence or many paragraphs. Newlines, blank
+           lines, lists and multi-line snippets are all allowed. YOU decide the
+           depth; judge it by what a future session would need in order to act
+           on this without re-asking.
+  tags   — Optional but recommended. ONE line, comma-separated keywords a
+           future query might contain.
+
+  The only hard structural rules: the title is one line, the tags are one line,
+  and the body must not END with a line starting "Tags:" (that line is reserved
+  for the tags field and would be read back as tags).
 
 Example usage — {invoke_hint}
     result = memorize(
         title="User prefers concise responses",
-        body="The user dislikes long explanations and prefers short, direct answers.", #NO NEW LINES
+        body=(
+            "The user dislikes long explanations and prefers short, direct answers.\\n"
+            "Applies to chat replies and to code comments.\\n"
+            "Exception: he wants full detail when reviewing a design decision."
+        ),
         tags="preferences, communication style"
     )
     print(result)
@@ -169,8 +201,13 @@ Guidelines:
   - Memorize proactively, one fact per call: preferences, habits, milestones,
     software/hardware details, anything the user asks you to remember.
     NEVER passwords or credentials unless the user explicitly asks.
+  - One MEMORY per call still means one subject — but write that subject up
+    fully: the specifics (names, paths, versions, numbers, dates), the WHY
+    behind it, and anything that would otherwise have to be re-derived. Prefer
+    completeness over brevity; only avoid padding that carries no information.
   - search_memory() first if unsure whether a fact is already stored; use
-    update_memory() to revise a fact instead of storing a duplicate.
+    update_memory() to revise a fact instead of storing a duplicate. Passing
+    new_body REPLACES the body, so include the parts you want to keep.
   - Before deleting, confirm with search_memory(); pass the exact title to
     forget_memory to remove a single memory.
   - Memory questions ("do you remember X?", "what do you know about me?"):
