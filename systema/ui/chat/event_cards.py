@@ -24,6 +24,37 @@ def _fmt_tok(n: int) -> str:
     return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
 
 
+# ── Card icons ───────────────────────────────────────────────────────────────
+# One rule for the whole set: the glyph depicts the ACTION, never the tool —
+# every card already prints its tool name right beside the icon, so spending the
+# icon on it again said nothing. Two cards may share a glyph when they really do
+# the same thing (⌕ searching, ▤ a page you read, ⊘ refused); what they may NOT
+# do is share one across OPPOSITE actions, which is what load/unload used to.
+#
+# Pure functions of the card's own persisted data: a card rebuilt from a
+# reloaded session derives the identical glyph, so there is no icon state to
+# save and none that can drift.
+
+def file_op_glyph(tool: str, added=None, removed=None,
+                  created: bool = False, rejected: bool = False) -> str:
+    """read/grep → what you looked at; write-like → what happened to the file."""
+    if rejected:
+        return '⊘'                                  # refused, nothing written
+    if tool in ('read_file', 'grep'):
+        return '⌕' if tool == 'grep' else '▤'
+    if created:
+        return '⊕'                                  # brought into existence
+    net = (added or 0) - (removed or 0)
+    return '+' if net > 0 else ('−' if net < 0 else '±')
+
+
+def skill_action_glyph(action: str, ok: bool = True) -> str:
+    """Loading pulls instructions IN, unloading pushes them OUT — so it points."""
+    if not ok:
+        return '⊘'
+    return '↧' if action == 'load' else '↥'
+
+
 class _ResizeGrip(QWidget):
     """A thin draggable strip under an expanded tool-card box: drag it to resize
     the target QTextEdit vertically, hard-clamped to [min_h, max_h] so the card
@@ -934,9 +965,8 @@ class EventCardsMixin:
         GREEN, RED = "#3FB950", "#F85149"
         MUTED, CTX = "#8B949E", "#C9D1D9"
         MONO = "'Consolas','Cascadia Mono','SF Mono',Menlo,monospace"
-        icon_map = {'read_file': '›', 'edit_file': '±', 'write_file': '+',
-                    'grep': '⌕'}
         read_like = tool in ('read_file', 'grep')
+        op_glyph = file_op_glyph(tool, added, removed, created, rejected)
 
         message_widget = QFrame()
         message_widget.setStyleSheet("QFrame { background-color: transparent; padding: 0px; }")
@@ -956,7 +986,7 @@ class EventCardsMixin:
         header_lay.setContentsMargins(4, 2, 6, 2)
         header_lay.setSpacing(6)
 
-        icon_lbl = QLabel(icon_map.get(tool, '±'))   # styled by _restyle (zoom-aware)
+        icon_lbl = QLabel(op_glyph)                  # styled by _restyle (zoom-aware)
         header_lay.addWidget(icon_lbl)
 
         # ── Path — its OWN elided label so it can shrink with the card without
@@ -987,10 +1017,13 @@ class EventCardsMixin:
             net_color = GREEN if net >= 0 else RED
             net_txt = f"+{net}" if net >= 0 else str(net)
             bits = []
-            if added is not None:
+            # Zero counts are omitted: "+91 −0" put a minus sign on a purely
+            # additive edit, which is exactly the thing the icon is now trying
+            # to say at a glance.
+            if added:
                 bits.append(f"<span style='color:{GREEN};font-size:{z(11)}px;"
                             f"font-weight:600;'>+{added}</span>")
-            if removed is not None:
+            if removed:
                 bits.append(f"<span style='color:{RED};font-size:{z(11)}px;"
                             f"font-weight:600;'>−{removed}</span>")
             bits.append(f"<span style='color:#5F6368;font-size:{z(11)}px;'>·</span>"
@@ -1114,7 +1147,7 @@ class EventCardsMixin:
                 slim['detail'] = (detail or "")[:20000]
                 self.controller.ai.conversation_history.append({
                     'role': 'ui_event',
-                    'content': f"± {tool} {display}",
+                    'content': f"{op_glyph} {tool} {display}",
                     '_type': 'file_op',
                     '_file_op': slim,
                 })
@@ -1383,7 +1416,12 @@ class EventCardsMixin:
     def _web_card_shell(self, icon_glyph, header_text):
         """Shared chrome: transparent wrapper + clickable borderless header +
         hidden detail frame. Returns (message_widget, outer_lay, header,
-        summary_lbl, toggle_lbl, detail, detail_lay)."""
+        summary_lbl, toggle_lbl, detail, detail_lay).
+
+        `icon_glyph` is a text glyph, OR an already-built widget for cards whose
+        icon is painted rather than typed (the Thinking card's animated
+        SparkleGlyph). The caller's _restyle sees whichever it passed.
+        """
         from PyQt6.QtWidgets import QFrame, QHBoxLayout, QVBoxLayout, QLabel
 
         message_widget = QFrame()
@@ -1401,7 +1439,8 @@ class EventCardsMixin:
         header_lay.setContentsMargins(4, 2, 6, 2)
         header_lay.setSpacing(6)
 
-        icon_lbl = QLabel(icon_glyph)
+        icon_lbl = (icon_glyph if isinstance(icon_glyph, QWidget)
+                    else QLabel(icon_glyph))
         header_lay.addWidget(icon_lbl)
         summary_lbl = QLabel()
         summary_lbl.setTextFormat(Qt.TextFormat.RichText)
@@ -1544,7 +1583,8 @@ class EventCardsMixin:
         detail = str(info.get('detail') or '')
 
         (message_widget, outer_lay, header, summary_lbl,
-         icon_lbl, toggle_lbl, detail_frame, detail_lay) = self._web_card_shell("▤", "")
+         icon_lbl, toggle_lbl, detail_frame, detail_lay) = self._web_card_shell(
+            skill_action_glyph(action, ok), "")
 
         # PLAIN text, NOT escaped. A QLabel left on AutoText only parses markup
         # when the string looks like HTML, and an escaped message never does —
@@ -1679,6 +1719,7 @@ class EventCardsMixin:
         `live=True` returns the card handle so the streaming path can keep
         appending deltas while the reply is still arriving."""
         from PyQt6.QtWidgets import QTextEdit
+        from systema.ui.widgets.painted_icons import SparkleGlyph
 
         text = (text or "").strip()
         if not text and not live:
@@ -1696,7 +1737,8 @@ class EventCardsMixin:
             return card if live else card['widget']
 
         (message_widget, outer_lay, header, summary_lbl,
-         icon_lbl, toggle_lbl, detail, detail_lay) = self._web_card_shell("◇", "")
+         icon_lbl, toggle_lbl, detail, detail_lay) = self._web_card_shell(
+            SparkleGlyph(px=12, color='#5F6368'), "")
 
         viewer = QTextEdit()
         viewer.setReadOnly(True)
@@ -1717,7 +1759,8 @@ class EventCardsMixin:
             header.setStyleSheet(
                 "QFrame#webHeader { background: transparent; border: none; border-radius: 6px; }"
                 "QFrame#webHeader:hover { background: rgba(255,255,255,0.05); }")
-            icon_lbl.setStyleSheet(f"color: {dim}; font-size: {z(12)}px; background: transparent;")
+            icon_lbl.set_px(z(12))         # painted sparkle — scales with zoom
+            icon_lbl.set_color(dim)
             _words = state['words']        # running count — never re-split the text
             _label = "Thinking" if state['done'] else "Thinking…"
             _count = (f'<span style="color:{dim}; font-size:{z(10)}px;">  {_words} words</span>'
@@ -1745,6 +1788,12 @@ class EventCardsMixin:
             the note there; this used to setPlainText() the WHOLE reasoning
             and restyle on every single delta."""
             state['pending'].append(delta)
+            # A multi-step work turn shares ONE card across responses, so
+            # reasoning can resume after a finish() — the card is live again,
+            # and the sparkle (and the "Thinking…" label) must say so.
+            if state['done']:
+                state['done'] = False
+                self._sync_thinking_sparkle()
 
         def _flush() -> bool:
             """Paint buffered deltas. Returns True if anything was drawn.
@@ -1772,6 +1821,7 @@ class EventCardsMixin:
             _flush()
             state['done'] = True
             _restyle()
+            self._sync_thinking_sparkle()
             return state['text']
 
         def _discard(keep: int = 0) -> bool:
@@ -1810,10 +1860,12 @@ class EventCardsMixin:
             return True
 
         card = {'widget': message_widget, 'append': _append, 'flush': _flush,
-                'finish': _finish, 'discard': _discard, 'state': state}
+                'finish': _finish, 'discard': _discard, 'state': state,
+                'icon': icon_lbl}
         # Remember it for the rest of this turn so later responses merge in.
         self._turn_thinking_card = card
         self._turn_thinking_group = getattr(self, '_ai_turn_group', None)
+        self._sync_thinking_sparkle()
 
         if not live:
             _finish()
@@ -1821,6 +1873,36 @@ class EventCardsMixin:
                 self._save_thinking_event(text)
             return message_widget
         return card
+
+    def _sync_thinking_sparkle(self):
+        """Start or stop the Thinking card's sparkle from the CURRENT state.
+
+        Derived, never tracked: every caller just says "something changed" and
+        this decides, so no path can leave the glyph spinning after the turn is
+        over (or frozen while it is still working). It animates while:
+
+          * reasoning is still streaming in — the streamed case; or
+          * the reply's typewriter reveal is running — the non-streamed case,
+            where all the reasoning arrives at once and the only thing still
+            "happening" is the text appearing.
+
+        A reloaded session hits neither: replayed cards are built finished and
+        the reveal is skipped during bulk render, so a restored transcript shows
+        the same resting star a completed live turn ends on.
+        """
+        card = getattr(self, '_turn_thinking_card', None)
+        glyph = (card or {}).get('icon')
+        if glyph is None or not hasattr(glyph, 'start'):
+            return
+        active = (not card['state'].get('done')
+                  or bool(getattr(self, '_reveal_jobs', [])))
+        try:
+            if active:
+                glyph.start()
+            else:
+                glyph.stop()
+        except RuntimeError:
+            pass                      # card torn down mid-turn
 
     def _live_thinking_card(self):
         """This turn's thinking card, or None. Cleared when a new turn shell

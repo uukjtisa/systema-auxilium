@@ -637,6 +637,17 @@ class BubblesMixin:
 
     # ── Typing reveal (fake streaming) ───────────────────────────────────────
 
+    def _sparkle_sync(self):
+        """Nudge the Thinking card's sparkle after a typing-reveal transition.
+
+        Guarded: _sync_thinking_sparkle belongs to EventCardsMixin, and the
+        reveal path is exercised by test doubles that mix in only this one.
+        Same reason the pinned-overlay calls below are hasattr-guarded.
+        """
+        fn = getattr(self, '_sync_thinking_sparkle', None)
+        if fn is not None:
+            fn()
+
     def _reveal_enabled(self) -> bool:
         """Settings toggle: progressive text reveal on AI replies."""
         try:
@@ -717,6 +728,10 @@ class BubblesMixin:
                 self._reveal_jobs.remove(job)
             except ValueError:
                 pass
+            # Non-streamed turns: the typing reveal IS the "still working"
+            # signal, so the Thinking card's sparkle rides it (see
+            # _sync_thinking_sparkle).
+            self._sparkle_sync()
 
         def _tick():
             target = min(n, int(cps * clock.elapsed() / 1000))
@@ -756,6 +771,7 @@ class BubblesMixin:
         timer.timeout.connect(_tick)
         label._reveal_timer = timer   # keep alive with the label
         timer.start(interval)
+        self._sparkle_sync()
 
     def _finish_active_reveals(self):
         """Snap every in-flight typing reveal to its full text — called when
@@ -777,6 +793,7 @@ class BubblesMixin:
                     job['on_done']()
                 except Exception:
                     pass
+        self._sparkle_sync()   # nothing is typing any more
 
     def _refresh_message_latex(self, md):
         """Re-render a message's text labels after a background LaTeX render

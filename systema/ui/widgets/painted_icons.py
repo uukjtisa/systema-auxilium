@@ -24,7 +24,8 @@ Adding a new icon = subclass GlyphButton and implement draw_glyph().
 import math
 
 from PyQt6.QtWidgets import QComboBox, QPushButton, QWidget
-from PyQt6.QtCore import Qt, QRectF, QPointF, QVariantAnimation, QEasingCurve
+from PyQt6.QtCore import (Qt, QRectF, QPointF, QTimer, QElapsedTimer,
+                          QVariantAnimation, QEasingCurve)
 from PyQt6.QtGui import QPainter, QPen, QColor, QPainterPath
 
 
@@ -674,4 +675,136 @@ class TerminalGlyph(QWidget):
         p.drawPath(chev)
         p.drawLine(QPointF(cx + 0.9 * u, cy + 3.4 * u),
                    QPointF(cx + 5.2 * u, cy + 3.4 * u))
+        p.end()
+
+
+class SparkleGlyph(QWidget):
+    """The Thinking card's icon: a painted four-point sparkle that ANIMATES
+    while the assistant is actually thinking, and freezes solid when it stops.
+
+    Replaces QLabel("◇") — a hollow outline diamond that read as an empty box
+    next to the filled card glyphs, and could not move.
+
+    Two motions, on their own phases so the result never looks like a metronome:
+      * the star's arms breathe in and out, its glow following the extension;
+      * two micro-sparks orbit it, each fading in as it swings past.
+
+    Painted rather than swapped between text frames: a QLabel changing glyphs
+    re-lays-out the whole card header every frame, and the shapes step instead
+    of moving. This is the same approach as TerminalGlyph above.
+
+    `stop()` leaves the star fully extended and opaque — the resting shape is
+    the one a reloaded session shows, so a replayed transcript is identical to
+    a finished live one.
+    """
+
+    FPS_MS = 33               # ~30fps: plenty for a 12px glyph, cheap enough
+    BREATH_MS = 1100.0        # one full in-out of the arms
+    ORBIT_MS = 1900.0         # one full revolution of the sparks
+    MIN_ARM = 0.62            # arm length at full retraction (fraction of max)
+    MIN_GLOW = 0.55           # never fade so far it reads as blinking out
+    SPARKS = 2
+    ORBIT_R = 0.36            # spark orbit radius (fraction of the widget)
+
+    def __init__(self, px: int = 12, color: str = '#5F6368', parent=None):
+        super().__init__(parent)
+        self._color = QColor(color)
+        self._t0 = None                     # None = resting (not animating)
+        self._timer = QTimer(self)
+        self._timer.setInterval(self.FPS_MS)
+        self._timer.timeout.connect(self.update)
+        self._clock = QElapsedTimer()
+        self.set_px(px)
+
+    # ── geometry / style ─────────────────────────────────────────────────────
+
+    def set_px(self, px: int):
+        px = max(8, int(px))
+        # Square, and roomier than the text glyph it replaces: the orbiting
+        # sparks need somewhere to be without clipping.
+        self.setFixedSize(int(px * 1.5), int(px * 1.5))
+        self.update()
+
+    def set_color(self, color: str):
+        self._color = QColor(color)
+        self.update()
+
+    # ── run state ────────────────────────────────────────────────────────────
+
+    def is_running(self) -> bool:
+        return self._timer.isActive()
+
+    def start(self):
+        """Begin sparkling. Idempotent — restarting mid-cycle would jump the
+        phase, so a second call while running is ignored."""
+        if self._timer.isActive():
+            return
+        self._clock.start()
+        self._t0 = 0.0
+        self._timer.start()
+
+    def stop(self):
+        """Freeze at the resting shape: fully extended, no sparks."""
+        self._timer.stop()
+        self._t0 = None
+        self.update()
+
+    def hideEvent(self, event):
+        # A card scrolled out of the transcript, or a turn torn down mid-stream,
+        # must not keep a repaint timer alive.
+        self.stop()
+        super().hideEvent(event)
+
+    # ── painting ─────────────────────────────────────────────────────────────
+
+    def _phases(self):
+        """(arm 0..1, glow 0..1, orbit radians). Resting = fully extended."""
+        if self._t0 is None:
+            return 1.0, 1.0, 0.0
+        ms = float(self._clock.elapsed())
+        breath = (math.sin(2 * math.pi * (ms / self.BREATH_MS)) + 1.0) / 2.0
+        arm = self.MIN_ARM + (1.0 - self.MIN_ARM) * breath
+        glow = self.MIN_GLOW + (1.0 - self.MIN_GLOW) * breath
+        return arm, glow, 2 * math.pi * (ms / self.ORBIT_MS)
+
+    @staticmethod
+    def _star(cx, cy, r):
+        """A four-point sparkle: arms to N/E/S/W, each pair pinched through the
+        centre so the waist is concave — the shape of ✦ rather than a diamond."""
+        path = QPainterPath()
+        path.moveTo(cx, cy - r)
+        for ex, ey in ((cx + r, cy), (cx, cy + r), (cx - r, cy), (cx, cy - r)):
+            path.quadTo(cx, cy, ex, ey)
+        path.closeSubpath()
+        return path
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = float(self.width()), float(self.height())
+        cx, cy = w / 2.0, h / 2.0
+        arm, glow, orbit = self._phases()
+
+        body = QColor(self._color)
+        body.setAlphaF(max(0.0, min(1.0, body.alphaF() * glow)))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(body)
+        p.drawPath(self._star(cx, cy, (min(w, h) / 2.0 - 1.0) * arm))
+
+        if self._t0 is not None:
+            r = min(w, h) * self.ORBIT_R
+            for i in range(self.SPARKS):
+                a = orbit + (2 * math.pi * i / self.SPARKS)
+                # Sparks brighten on the DIAGONALS and vanish as they cross an
+                # arm. The star's waist is pinched, so the diagonals are the
+                # only empty space in the glyph — fading in over an arm instead
+                # (which sin(a)**2 did) just smeared the spark into the body.
+                fade = math.sin(2 * a) ** 2
+                if fade <= 0.02:
+                    continue
+                c = QColor(self._color)
+                c.setAlphaF(max(0.0, min(1.0, c.alphaF() * fade * 0.9)))
+                p.setBrush(c)
+                p.drawPath(self._star(cx + r * math.cos(a), cy + r * math.sin(a),
+                                      max(1.5, min(w, h) * 0.13)))
         p.end()
