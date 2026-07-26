@@ -41,6 +41,24 @@ class BaseWindow(QWidget):
     # Override in subclasses that have a shorter / taller header bar
     _header_height: int = 50
 
+    def showEvent(self, event):
+        """Give every scrollable view in this window the house wheel behaviour.
+
+        Done here rather than at each QScrollArea construction site so a NEW
+        window inherits it automatically — scrolling that differs per window is
+        exactly how the app ended up with views you could not aim in.
+        Idempotent (install_smooth_scroll no-ops on an area it already owns), so
+        re-showing a window costs nothing.
+        """
+        try:
+            from PyQt6.QtWidgets import QAbstractScrollArea
+            from systema.ui.widgets.smooth_scroll import install_smooth_scroll
+            for area in self.findChildren(QAbstractScrollArea):
+                install_smooth_scroll(area)
+        except Exception:
+            pass
+        super().showEvent(event)
+
     # ── Chrome state bootstrap ─────────────────────────────────────────────────
 
     def _init_chrome_state(self):

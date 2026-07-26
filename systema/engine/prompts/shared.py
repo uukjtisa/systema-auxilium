@@ -47,28 +47,26 @@ def get_skill_path_rule() -> str:
     """The SKILL SCRIPTS FULL PATH RULE block. Also called directly by
     controller.build_task_system_prompt for tasks with preloaded skills.
 
-    `app_root` and `skills_path` are pre-injected into the Python interpreter
-    namespace by AssistantController.__init__ — the agent just uses them."""
+    APP_ROOT / SKILLS_PATH are pre-injected into the interpreter namespace and
+    listed in the built-in-names recap — this section only states the RULES for
+    using them, so the names are taught in exactly one place and in exactly one
+    spelling (this block used to teach the lower-case aliases, leaving the same
+    prompt advertising two spellings of the same variable)."""
     return (
         "SKILL SCRIPTS — FULL PATH RULE (THIS IS A MUST)\n"
         "\n"
-        "Two variables are pre-injected into your Python namespace — use them:\n"
-        "\n"
-        "  app_root     -> absolute path to the application root directory\n"
-        "  skills_path  -> absolute path to the skills directory (app_root/skills)\n"
-        "\n"
         "Skill script example location:\n"
-        "  {skills_path}\\<skill-name>\\scripts\\<script.py>\n"
+        "  {SKILLS_PATH}\\<skill-name>\\scripts\\<script.py>\n"
         "\n"
         "CRITICAL — WHEN EXECUTING SKILL SCRIPTS YOU MUST ALWAYS:\n"
         "\n"
-        "  1. Build paths from `skills_path` — never hardcode, never use relative paths\n"
+        "  1. Build paths from `SKILLS_PATH` — never hardcode, never use relative paths\n"
         '  2. Use raw strings r"..." or double-backslashes for Windows path separators\n'
         "  3. Use sys.executable — never bare \"python\" — to guarantee the correct environment\n"
         "---EXAMPLES---\n"
         "CORRECT:\n"
         "  import subprocess, sys\n"
-        "  script = rf\"{skills_path}\\\\<skill-name>\\\\scripts\\\\<script.py>\"\n"
+        "  script = rf\"{SKILLS_PATH}\\\\<skill-name>\\\\scripts\\\\<script.py>\"\n"
         "  result = subprocess.run(\n"
         "      [sys.executable, script, \"arg1\", \"arg2\"],\n"
         "      capture_output=True, text=True, encoding=\"utf-8\"\n"
@@ -524,6 +522,58 @@ SKILL '{skill_name}' has been loaded into your system context.
 You now have its full instructions available.
 You are in normal chat mode. Respond to the user naturally.
 </SYSTEM_MESSAGE>"""
+
+def namespace_summary_section(context=None, gates=None,
+                              memory_inject_all: bool = False) -> str:
+    """The built-in python namespace, summarised — rendered near the BOTTOM of
+    the assembled prompt as a quick-reference recap.
+
+    Rendered FROM the capability manifest rather than hand-written, so it is
+    automatically correct for whichever prompt variant is being built:
+
+      * a TASKER gets the task wording (its screenshot auto-queues into its own
+        context; its images and messages go to the user's MAIN chat) and the
+        task-only entries, never the chat ones;
+      * every include_* / permission switch is honoured, because the same
+        gates that decide what is INJECTED decide what is listed here — the
+        prompt cannot advertise a name the namespace does not hold;
+      * a context with nothing to offer renders NOTHING, not an empty heading.
+
+    Deliberately terse: these are already described in full in their own
+    sections above. This is the recap you skim, not the manual.
+    """
+    from systema.execution import capabilities as caps
+
+    ctx = context or caps.CHAT
+    documented = [c for c in caps.namespace_for(ctx, gates or {})
+                  if c.describe(ctx)]
+    if memory_inject_all:
+        # Inject-all recall puts EVERY memory in the system block already, so
+        # search_memory is redundant and is deliberately undocumented in that
+        # mode (see the capability's note + memory_section). It stays BOUND —
+        # this is a documentation rule, not a capability gate.
+        documented = [c for c in documented if c.name != 'search_memory']
+    if not documented:
+        return ""
+
+    lines = [
+        "",
+        "",
+        "BUILT-IN NAMES (quick reference)",
+        "",
+        "These already exist inside your python interpreter. Do NOT import them,",
+        "do NOT redefine them, and do NOT re-implement what they already do.",
+        "",
+    ]
+    width = max(len(c.signature or c.name) for c in documented)
+    for cap in documented:
+        lines.append(f"  {(cap.signature or cap.name).ljust(width)}  {cap.describe(ctx)}")
+    lines.append("")
+    lines.append("Paths: build every app path from APP_ROOT. A bare relative path")
+    lines.append("follows the interpreter's CURRENT directory, which an earlier")
+    lines.append("step may have changed with os.chdir().")
+    return "\n".join(lines)
+
 
 SKILL_UNLOADED_CHAT_PROMPT = """<SYSTEM_MESSAGE>
 SKILL '{skill_name}' has been unloaded from your system context.

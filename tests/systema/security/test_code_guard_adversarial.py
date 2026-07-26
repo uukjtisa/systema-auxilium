@@ -236,3 +236,44 @@ def test_audit_failures_never_break_execution(monkeypatch, tmp_path):
     monkeypatch.setattr(cg.AuditLog, "_FILE", tmp_path / "no" / "such" / "x.jsonl")
     cg.AuditLog.record(code="x=1", execution_type="python",
                        decision="auto", source="safe")     # must not raise
+
+
+# ── CWD-relative destinations are spelled out ────────────────────────────────
+
+def test_a_relative_write_reports_where_it_actually_lands(tmp_path):
+    """Agent code may chdir freely, so `open("out.txt","w")` lands wherever the
+    interpreter currently is — which is how a folder once appeared somewhere the
+    app had never written. The approval card must name the real destination."""
+    findings = cg.scan_code("open('out.txt', 'w').write('x')")
+    annotated = cg.annotate_relative_paths(findings, "open('out.txt', 'w').write('x')",
+                                           cwd=str(tmp_path))
+
+    notes = " ".join(f.note for f in annotated)
+    assert "RELATIVE" in notes
+    assert str(tmp_path) in notes or "out.txt" in notes
+
+
+def test_an_absolute_write_is_not_annotated(tmp_path):
+    code = f"open(r'{tmp_path / 'x.txt'}', 'w').write('x')"
+    findings = cg.scan_code(code)
+    annotated = cg.annotate_relative_paths(findings, code, cwd=str(tmp_path))
+    assert not any("RELATIVE" in f.note for f in annotated)
+
+
+def test_reads_are_not_annotated(tmp_path):
+    """Only create/write/delete/move/copy answer 'where does this land?'."""
+    code = "open('notes.txt').read()"
+    annotated = cg.annotate_relative_paths(cg.scan_code(code), code, cwd=str(tmp_path))
+    assert not any("RELATIVE" in f.note for f in annotated)
+
+
+def test_annotation_never_changes_the_category_or_severity(tmp_path):
+    code = "import os\nos.remove('scratch.tmp')"
+    before = cg.scan_code(code)
+    after = cg.annotate_relative_paths(before, code, cwd=str(tmp_path))
+    assert [(f.category, f.severity, f.line) for f in before] == \
+           [(f.category, f.severity, f.line) for f in after]
+
+
+def test_annotation_is_defensive_on_broken_code():
+    assert cg.annotate_relative_paths([], "def broken(:", cwd="/tmp") == []

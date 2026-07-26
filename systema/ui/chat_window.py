@@ -412,8 +412,10 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         _sb.valueChanged.connect(self._update_stick_to_bottom)
         _sb.rangeChanged.connect(self._on_scroll_range_changed)
 
-        # Install event filter on the viewport for smooth inertia scrolling (main chat)
+        # Drag-strip / press handling still rides on this filter…
         scroll_area.viewport().installEventFilter(self)
+        # …while the WHEEL is owned by the shared smooth scroller.
+        self._install_smooth_scrolling(scroll_area)
 
         self._build_input_dock(chat_container)
 
@@ -1708,6 +1710,26 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
     # works"). The pin now mirrors the actual scroll position: near the
     # bottom = follow new content, away = back-reading in peace.
 
+    def _install_smooth_scrolling(self, scroll_area):
+        """Shared target-based wheel scrolling for the chat viewport, plus the
+        pin release: scrolling UP must drop sticky-bottom IMMEDIATELY.
+
+        Position alone is not enough to decide the pin — a glide that happens to
+        end inside the bottom tolerance re-armed it, so the next streamed chunk
+        yanked the view back down while the user was reading. Intent (which way
+        the wheel turned) is authoritative; position only re-arms the pin when
+        the user deliberately scrolls back down to the end.
+        """
+        from systema.ui.widgets.smooth_scroll import install_smooth_scroll
+
+        def _on_user_scroll(dy):
+            self._user_scrolling = True
+            self._last_user_scroll_dy = dy
+            if dy < 0:                       # upward → user is back-reading
+                self._stick_to_bottom = False
+
+        install_smooth_scroll(scroll_area, on_user_scroll=_on_user_scroll)
+
     STICKY_ZONE_PX = 60   # "near the bottom" tolerance
 
     def _update_stick_to_bottom(self, _value=None):
@@ -1724,7 +1746,14 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
             sb = self.chat_scroll_area.verticalScrollBar()
         except (AttributeError, RuntimeError):
             return
-        self._stick_to_bottom = (sb.maximum() - sb.value()) <= self.STICKY_ZONE_PX
+        near_bottom = (sb.maximum() - sb.value()) <= self.STICKY_ZONE_PX
+        # Do not re-arm the pin from POSITION alone while the user is heading
+        # up: a small upward nudge that leaves you still inside the tolerance
+        # would otherwise re-pin instantly, and the next streamed chunk would
+        # drag you back down mid-read. Only a deliberate downward move re-arms.
+        if near_bottom and getattr(self, '_last_user_scroll_dy', 0) < 0:
+            return
+        self._stick_to_bottom = near_bottom
 
     def _on_scroll_range_changed(self, _min=0, _max=0):
         """Content grew (streaming text / work cards): while sticky, re-pin to
@@ -2401,22 +2430,8 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         # ── Smooth inertia scroll — SIDEBAR viewport ───────────────────────
         if hasattr(self, 'sidebar_scroll') and obj is self.sidebar_scroll.viewport():
             if event.type() == QEvent.Type.Wheel:
-                if self._sidebar_scroll_anim is not None:
-                    try:
-                        if self._sidebar_scroll_anim.state() == QPropertyAnimation.State.Running:
-                            self._sidebar_scroll_anim.stop()
-                    except RuntimeError:
-                        pass
-
-                delta = event.angleDelta().y()
-                self._sidebar_inertia_velocity -= delta * ANIM_INERTIA_SCALE
-                self._sidebar_inertia_velocity = max(
-                    -ANIM_INERTIA_MAX_VELOCITY,
-                    min(ANIM_INERTIA_MAX_VELOCITY, self._sidebar_inertia_velocity)
-                )
-                if not self._sidebar_inertia_timer.isActive():
-                    self._sidebar_inertia_timer.start()
-                return True
+                # Handled by the shared SmoothScroller (installed on show).
+                return False
 
             elif event.type() == QEvent.Type.MouseButtonPress:
                 if self._sidebar_scroll_anim is not None:
@@ -2429,15 +2444,7 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         # ── Smooth inertia scroll — INPUT FIELD viewport ───────────────────
         if hasattr(self, 'input_field') and obj is self.input_field.text_input.viewport():
             if event.type() == QEvent.Type.Wheel:
-                delta = event.angleDelta().y()
-                self._input_inertia_velocity -= delta * ANIM_INERTIA_SCALE
-                self._input_inertia_velocity = max(
-                    -ANIM_INERTIA_MAX_VELOCITY,
-                    min(ANIM_INERTIA_MAX_VELOCITY, self._input_inertia_velocity)
-                )
-                if not self._input_inertia_timer.isActive():
-                    self._input_inertia_timer.start()
-                return True
+                return False        # shared SmoothScroller owns the wheel
 
         # ── Smooth inertia scroll — MAIN CHAT viewport ────────────────────
         if hasattr(self, 'chat_scroll_area') and obj is self.chat_scroll_area.viewport():
@@ -2468,23 +2475,12 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
                     else:
                         self.zoom_out()
                     return True
-
-                if self._scroll_anim is not None:
-                    try:
-                        if self._scroll_anim.state() == QPropertyAnimation.State.Running:
-                            self._scroll_anim.stop()
-                    except RuntimeError:
-                        pass
-                self._user_scrolling = True
-
-                delta = event.angleDelta().y()
-                self._inertia_velocity -= delta * ANIM_INERTIA_SCALE
-                self._inertia_velocity = max(-ANIM_INERTIA_MAX_VELOCITY, min(ANIM_INERTIA_MAX_VELOCITY, self._inertia_velocity))
-
-                if not self._inertia_timer.isActive():
-                    self._inertia_timer.start()
-
-                return True
+                # Plain wheel is handled by the shared SmoothScroller installed
+                # on this viewport (see _install_smooth_scrolling). Let it fall
+                # through — the old velocity/friction inertia moved ~326px per
+                # notch, which made positions less than a third of a viewport
+                # away impossible to land on.
+                return False
 
             elif event.type() == QEvent.Type.MouseButtonPress:
                 self._user_scrolling = True

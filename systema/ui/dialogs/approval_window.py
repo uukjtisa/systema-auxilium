@@ -37,7 +37,8 @@ from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushBut
                              QScrollArea)
 
 from systema.agents.code_agent import CodeAgent
-from systema.security.code_guard import (scan_code, refine_file_ops, summarize_findings,
+from systema.security.code_guard import (scan_code, refine_file_ops,
+                                         annotate_relative_paths, summarize_findings,
                                          redact_secrets, SEV_DANGER, SEV_CAUTION, SEV_INFO)
 from systema.ui import theme
 from systema.updater.hunks import build_segments, assemble
@@ -648,6 +649,7 @@ class CodeApprovalDialog(QDialog):
             py = (getattr(tm, "tools", {}) or {}).get("python") if tm else None
             ns = getattr(py, "namespace", None)
             findings = refine_file_ops(findings, code, ns)
+            findings = annotate_relative_paths(findings, code, ns)
         except Exception:
             pass
         return findings

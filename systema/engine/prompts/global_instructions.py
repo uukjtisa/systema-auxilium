@@ -137,10 +137,35 @@ def get_system_prompt(
         voice_instructions,
     ])
 
+    # ── Built-in namespace recap (near the BOTTOM, last thing before skills) ──
+    # Rendered from the capability manifest with THIS prompt's own flags, so a
+    # tasker sees task wording and task-only names, and a switched-off option is
+    # never advertised. Only meaningful when the interpreter is available.
+    namespace_recap = ""
+    if include_execution_tools and include_interpreter_mode_rules:
+        from systema.execution import capabilities as caps
+        _ctx = caps.TASK if is_task_session_prompt else caps.CHAT
+        _gates = (caps.gates_for_task(
+                      {'allow_workmode': True,
+                       'inject_image_tools': include_image_tools,
+                       'inject_notify_tool': include_notify_tool,
+                       'inject_controller_ref': include_controller_ref},
+                      has_skills=skills_present, include_memory=include_memory)
+                  if is_task_session_prompt else
+                  caps.gates_for_chat(
+                      allow_workmode=True, has_skills=skills_present,
+                      include_image_tools=include_image_tools,
+                      include_notify_tool=include_notify_tool,
+                      include_memory=include_memory,
+                      include_controller_ref=include_controller_ref))
+        namespace_recap = shared.namespace_summary_section(
+            _ctx, _gates, memory_inject_all=memory_inject_all)
+
     return (
         "\n\n".join(preamble_parts)
         + "\n\n"
         + "\n\n".join(body)
         + _skill_path_rule
+        + namespace_recap
         + (f"\n\n{skills_block}" if skills_block else "")
     )

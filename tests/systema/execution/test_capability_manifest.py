@@ -291,3 +291,119 @@ def test_unbound_capabilities_are_never_injected_as_none():
                                 include_notify_tool=True, include_memory=True)
     ns = caps.build_namespace(caps.CHAT, gates, {'notify': None})
     assert 'notify' not in ns
+
+
+# ── the built-in namespace recap in the prompt ───────────────────────────────
+
+def _recap(prompt: str) -> str:
+    i = prompt.find("BUILT-IN NAMES")
+    return prompt[i:] if i >= 0 else ""
+
+
+def test_the_chat_prompt_lists_its_namespace():
+    prompt = get_system_prompt(system_info="x", skills=[],
+                               include_image_tools=True, include_notify_tool=True)
+    recap = _recap(prompt)
+
+    assert recap, "the built-in namespace recap is missing from the chat prompt"
+    for name in ("web_search", "APP_ROOT", "memorize", "take_screenshot"):
+        assert name in recap, f"{name} is bound but not summarised"
+
+
+def test_the_recap_sits_near_the_bottom():
+    """It is a recap, not an introduction — it must come AFTER the sections
+    that actually teach these tools."""
+    prompt = get_system_prompt(system_info="x", skills=[], include_image_tools=True)
+    assert prompt.find("BUILT-IN NAMES") > len(prompt) * 0.5
+
+
+def test_a_tasker_gets_task_wording_not_chat_wording():
+    """The tasker's bindings genuinely behave differently; describing chat
+    behaviour to a background agent would be a lie it cannot detect."""
+    task = _recap(get_system_prompt(is_task_session_prompt=True, system_info="x",
+                                    skills=None, include_image_tools=True))
+
+    assert "send_message_main" in task, "the task-only channel is not summarised"
+    assert "MAIN CHAT" in task.upper(), "task image wording missing"
+    assert "queue it into your own context" in task, "task screenshot wording missing"
+
+
+def test_the_chat_prompt_never_advertises_the_task_only_channel():
+    chat = _recap(get_system_prompt(system_info="x", skills=[],
+                                    include_image_tools=True))
+    assert "send_message_main" not in chat
+
+
+def test_switched_off_options_are_not_advertised():
+    """The recap renders from the same gates that decide what is INJECTED, so
+    it can never name something the namespace does not hold."""
+    recap = _recap(get_system_prompt(system_info="x", skills=[],
+                                     include_image_tools=False,
+                                     include_notify_tool=False))
+    assert "take_screenshot" not in recap
+    assert "attach_image_to_context" not in recap
+    assert "notify(" not in recap
+    assert "APP_ROOT" in recap          # ungated names stay
+
+
+def test_no_recap_when_the_interpreter_is_unavailable():
+    """A stripped-down agent with no interpreter must not be handed a list of
+    interpreter built-ins — and must not get an empty heading either."""
+    prompt = get_system_prompt(system_info="x", skills=[],
+                               include_execution_tools=False,
+                               include_interpreter_mode_rules=False)
+    assert "BUILT-IN NAMES" not in prompt
+
+
+def test_the_recap_teaches_one_spelling_of_the_root_path():
+    """app_root stays BOUND for older snippets, but only the canonical
+    APP_ROOT (matching systema.APP_ROOT) is taught."""
+    recap = _recap(get_system_prompt(system_info="x", skills=[]))
+    assert "APP_ROOT" in recap
+    assert "app_root" not in recap
+
+
+def test_both_spellings_are_bound_in_the_namespace():
+    gates = caps.gates_for_chat(allow_workmode=True, has_skills=False)
+    ns = caps.build_namespace(caps.CHAT, gates, {'app_root': '/root',
+                                                 'skills_path': '/skills'})
+    assert ns['APP_ROOT'] == '/root'
+    assert ns['app_root'] == '/root'      # back-compat alias
+    assert ns['SKILLS_PATH'] == '/skills'
+
+
+def test_every_documented_namespace_name_is_actually_injectable():
+    """A summarised name with no binding would be advertised and absent."""
+    for cap in caps.CAPABILITIES:
+        if cap.on(caps.NAMESPACE) and cap.describe(caps.CHAT):
+            assert cap.binding, f"{cap.name} is documented but has no binding"
+
+
+def test_inject_all_mode_drops_search_memory_from_the_recap():
+    """Inject-all already puts every memory in the system block, so
+    search_memory is redundant there — the recap must not smuggle it back in
+    after memory_section deliberately dropped it. The BINDING stays."""
+    recap = _recap(get_system_prompt(system_info="x", skills=[],
+                                     memory_inject_all=True))
+    assert "search_memory" not in recap
+    assert "memorize(" in recap                  # the rest of the set stays
+
+    gates = caps.gates_for_chat(allow_workmode=True, has_skills=False,
+                                include_memory=True)
+    ns = caps.build_namespace(caps.CHAT, gates, {'search_memory': print})
+    assert 'search_memory' in ns, "the binding must survive inject-all mode"
+
+
+@pytest.mark.parametrize("native_mode", [True, False])
+@pytest.mark.parametrize("task_mode", [True, False])
+def test_the_prompt_teaches_exactly_one_spelling_of_the_injected_paths(native_mode, task_mode):
+    """The skill-path rule used to teach `app_root` / `skills_path` while the
+    built-in recap teaches APP_ROOT / SKILLS_PATH — the same prompt advertising
+    two spellings of the same variable. Names are taught in ONE place now."""
+    prompt = get_system_prompt(
+        is_task_session_prompt=task_mode, native_tools=native_mode,
+        system_info="x",
+        skills=[{'name': 'demo', 'description': 'd', 'is_loaded': True}])
+
+    assert "app_root" not in prompt, "the lower-case alias is being taught again"
+    assert "skills_path" not in prompt

@@ -8,3 +8,9 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
+
+# Runtime counters written by the app (and by any local test run). The rest of
+# data/ is user state that is never mirrored; these two kept getting staged by
+# accident after running the suite inside the repo copy.
+data/token_usage.json
+data/token_usage_output.json

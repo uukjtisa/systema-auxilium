@@ -45,6 +45,67 @@ from systema.common import app_config as _app_config
 from systema.common.relauncher import spawn_relauncher as _spawn_relauncher
 
 
+_PLACEHOLDER_NAMES = ("USER", "USERNAME", "NAME")
+
+
+def build_identity_block(assistant_name: str = "", user_name: str = "",
+                         custom_instructions: str = "") -> str:
+    """The identity half of the system prompt: who the assistant is, who the
+    user is, and any custom instructions.
+
+    A pure function of its three inputs — no app state, no I/O — so the exact
+    wording the model receives can be asserted directly.
+    """
+    out = ""
+
+    # ── who the assistant is ─────────────────────────────────────────────────
+    if assistant_name:
+        out += f"""
+
+**CUSTOM ASSISTANT IDENTITY:**
+Your name is **{assistant_name}**. This is the name given to you by the user and it is your primary identity.
+- Always introduce yourself as {assistant_name}, never as "Systema Auxilium" unprompted.
+- If asked who you are, say you are {assistant_name}.
+- If the user asks whether you are Systema Auxilium, clarify: Systema Auxilium is the underlying agent platform you run on, but your identity as their personalized assistant is {assistant_name}.
+- Never forget or deny your base architecture (Systema Auxilium), but your active name and personality is {assistant_name}.
+- Example: "I'm {assistant_name}, your system assistant. (Systema Auxilium is the platform powering me.)"
+"""
+    else:
+        out += """
+
+**ASSISTANT IDENTITY:**
+You are Systema Auxilium. If the user asks about your name, tell them it is Systema Auxilium — both your name and the platform you run on.
+Let the user know they can give you a custom name from the sidebar (top-left ☰ menu → custom assistant name field).
+"""
+
+    # ── who the user is ──────────────────────────────────────────────────────
+    # The shipped default used to be the literal placeholder "USER", which is
+    # truthy — so a fresh install injected 'USER NAME: USER' plus "address the
+    # user by their name", and the assistant genuinely greeted people as "USER".
+    # A placeholder is not a name.
+    name = (user_name or "").strip()
+    if name and name.upper() not in _PLACEHOLDER_NAMES:
+        out += f"\n\n**USER NAME:** {name}\nAddress the user by their name when appropriate."
+    else:
+        out += """
+
+**USER NAME: NOT SET YET**
+You do not know this person's name. Address them directly and naturally ("you"),
+the way you would talk to someone whose name simply has not come up yet.
+- NEVER call them "USER", "user", "Human", or any other placeholder. It is not a
+  name and it reads as robotic.
+- Do NOT invent a name for them, and do NOT open by demanding one.
+- If it comes up naturally — or if they ask how to personalise things — you may
+  mention ONCE, briefly and without nagging, that the sidebar lets them set their
+  own name, give you a custom name, and write custom instructions that shape your
+  personality and how you work. Frame it as entirely optional: they lose nothing
+  by ignoring it."""
+
+    if custom_instructions:
+        out += f"\n\n**CUSTOM USER INSTRUCTIONS:**\n{custom_instructions}"
+    return out
+
+
 class AssistantController(QObject):
     """Main controller for the AI assistant with voice support"""
 
@@ -697,7 +758,11 @@ class AssistantController(QObject):
             'file_history_enabled': True,
             'file_history_git': False,
             'file_history_keep_days': 14,
-            'user_name': 'USER',
+            # Empty = not set. Never ship a placeholder here: it is truthy, so
+            # it reached the prompt as a real name and the assistant addressed
+            # people as "USER". (_update_system_prompt also treats the old
+            # 'USER' value as unset, for installs that already saved it.)
+            'user_name': '',
             'custom_instructions': '',
             'vad_webrtc_enabled': True,
             'vad_silero_enabled': False,
@@ -1084,40 +1149,11 @@ class AssistantController(QObject):
         system_info_dict = get_system_info()
         system_info_text = format_system_info_for_prompt(system_info_dict)
 
-        # Add assistant name if set
-        assistant_name = self.get_assistant_name()
-        if assistant_name:
-            log.debug(f"[AssistantController._update_system_prompt] Injecting assistant_name='{assistant_name}'")
-            system_info_text += f"""
-
-**CUSTOM ASSISTANT IDENTITY:**
-Your name is **{assistant_name}**. This is the name given to you by the user and it is your primary identity.
-- Always introduce yourself as {assistant_name}, never as "Systema Auxilium" unprompted.
-- If asked who you are, say you are {assistant_name}.
-- If the user asks whether you are Systema Auxilium, clarify: Systema Auxilium is the underlying agent platform you run on, but your identity as their personalized assistant is {assistant_name}.
-- Never forget or deny your base architecture (Systema Auxilium), but your active name and personality is {assistant_name}.
-- Example: "I'm {assistant_name}, your system assistant. (Systema Auxilium is the platform powering me.)"
-"""
-        else:
-            system_info_text += """
-
-**ASSISTANT IDENTITY:**
-You are Systema Auxilium. If the user asks about your name, tell them it is Systema Auxilium — both your name and the platform you run on.
-Let the user know they can give you a custom name from the sidebar (top-left ☰ menu → custom assistant name field).
-"""
-
-        # Add username if set
-        user_name = self.get_user_name()
-        if user_name:
-            log.debug(f"[AssistantController._update_system_prompt] Injecting user_name='{user_name}'")
-            system_info_text += f"\n\n**USER NAME:** {user_name}\nAddress the user by their name when appropriate."
-
-        # Add custom instructions if set
-        custom_instructions = self.get_custom_instructions()
-        if custom_instructions:
-            log.debug(f"[AssistantController._update_system_prompt] Injecting custom_instructions "
-                      f"({len(custom_instructions)} chars)")
-            system_info_text += f"\n\n**CUSTOM USER INSTRUCTIONS:**\n{custom_instructions}"
+        system_info_text += build_identity_block(
+            assistant_name=self.get_assistant_name(),
+            user_name=self.get_user_name(),
+            custom_instructions=self.get_custom_instructions(),
+        )
 
         # Update AI engine
         self.ai.system_info = system_info_text

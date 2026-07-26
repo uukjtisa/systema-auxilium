@@ -1757,6 +1757,10 @@ class ToolManager:
             try:
                 _ns = self.tools['python'].namespace if 'python' in self.tools else None
                 findings = guard.refine_file_ops(findings, code, _ns)
+                # Spell out where a CWD-relative write/delete actually lands —
+                # agent code may have chdir'd, and 'out.txt' alone tells the
+                # user nothing about the directory it will appear in.
+                findings = guard.annotate_relative_paths(findings, code, _ns)
             except Exception:
                 pass
             # Only real operations gate. INFO-level signals (bare import, chdir,
@@ -1859,6 +1863,10 @@ class ToolManager:
             try:
                 _ns = self.tools['python'].namespace if 'python' in self.tools else None
                 findings = guard.refine_file_ops(findings, code, _ns)
+                # Spell out where a CWD-relative write/delete actually lands —
+                # agent code may have chdir'd, and 'out.txt' alone tells the
+                # user nothing about the directory it will appear in.
+                findings = guard.annotate_relative_paths(findings, code, _ns)
             except Exception:
                 pass
             engine = guard.PolicyEngine(settings)

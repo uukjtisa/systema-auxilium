@@ -71,6 +71,13 @@ class Capability:
     gate: str = ''                 # '' = always offered in its contexts
     binding: str = ''              # namespace surface: key the binder supplies
     note: str = ''                 # declared divergence / design intent
+    # Agent-facing one-liners for the namespace summary in the system prompt.
+    # `summary` is the default; `task_summary` overrides it where a tasker's
+    # binding genuinely behaves differently, so the prompt can never describe
+    # chat behaviour to a background agent.
+    summary: str = ''
+    task_summary: str = ''
+    signature: str = ''            # how it is called, e.g. "notify(title, msg)"
 
     def offered_in(self, context: str, gates: dict) -> bool:
         if context not in self.contexts:
@@ -79,6 +86,12 @@ class Capability:
 
     def on(self, surface: str) -> bool:
         return surface in self.surfaces
+
+    def describe(self, context: str = CHAT) -> str:
+        """The one-liner for this context ('' when undocumented)."""
+        if context == TASK and self.task_summary:
+            return self.task_summary
+        return self.summary
 
 
 # ── THE MANIFEST ─────────────────────────────────────────────────────────────
@@ -95,11 +108,19 @@ CAPABILITIES = (
     # ── both surfaces (the web_search bar) ───────────────────────────────────
     Capability('web_search', (TOOL, NAMESPACE), gate=G_WORKMODE,
                binding='web_search',
+               signature="web_search(query, mode='search'|'open'|'links', offset=0)",
+               summary="Search the web or read a page. Same tool as the direct "
+                       "call — from here it still gets its own result card.",
                note="Reference dual-surface capability: the in-python call routes "
                     "through interp_web_search so it spawns the same card and comes "
                     "back as its own tool result."),
     Capability('attach_image_to_chat', (TOOL, NAMESPACE), gate=G_IMAGES,
                binding='attach_image_to_chat',
+               signature="attach_image_to_chat(path_or_paths)",
+               summary="Show image(s) to the user. Use when you built the path in "
+                       "this same step; otherwise call the tool directly.",
+               task_summary="Show image(s) to the USER'S MAIN CHAT (a background "
+                            "task has no chat of its own).",
                note="TASK BINDING DIFFERS: a tasker has no chat turn of its own, so "
                     "its images are delivered into the user's MAIN chat."),
 
@@ -110,25 +131,62 @@ CAPABILITIES = (
     # ── namespace surface ────────────────────────────────────────────────────
     Capability('attach_image_to_context', (NAMESPACE,), gate=G_IMAGES,
                binding='attach_image_to_context',
+               signature="attach_image_to_context(path)",
+               summary="Feed ONE image into your OWN context for the next step "
+                       "(private; the file on disk is never touched).",
                note="Private one-turn vision context. NEVER deletes the source file."),
     Capability('take_screenshot', (NAMESPACE,), gate=G_IMAGES,
                binding='take_screenshot',
+               signature="take_screenshot(save_path=None)",
+               summary="Capture the screen to data/temp/ and return the path. "
+                       "Does NOT attach it — pass the path on yourself.",
+               task_summary="Capture the screen AND queue it into your own context "
+                            "for the next step; returns the path.",
                note="TASK BINDING DIFFERS: the tasker's capture auto-queues itself "
                     "into that task's own context; the chat one only returns a path."),
-    Capability('notify', (NAMESPACE,), gate=G_NOTIFY, binding='notify'),
-    Capability('memorize', (NAMESPACE,), gate=G_MEMORY, binding='memorize'),
+    Capability('notify', (NAMESPACE,), gate=G_NOTIFY, binding='notify',
+               signature="notify(title, message)",
+               summary="Raise a desktop notification."),
+    Capability('memorize', (NAMESPACE,), gate=G_MEMORY, binding='memorize',
+               signature="memorize(text)",
+               summary="Store a long-term memory."),
     Capability('search_memory', (NAMESPACE,), gate=G_MEMORY, binding='search_memory',
+               signature="search_memory(query)",
+               summary="Search long-term memories.",
                note="Prompt-level nuance: inject-all recall mode stops DOCUMENTING "
                     "this (every memory is already in the block); the binding stays."),
-    Capability('update_memory', (NAMESPACE,), gate=G_MEMORY, binding='update_memory'),
-    Capability('forget_memory', (NAMESPACE,), gate=G_MEMORY, binding='forget_memory'),
+    Capability('update_memory', (NAMESPACE,), gate=G_MEMORY, binding='update_memory',
+               signature="update_memory(memory_id_or_title, new_text)",
+               summary="Rewrite an existing memory."),
+    Capability('forget_memory', (NAMESPACE,), gate=G_MEMORY, binding='forget_memory',
+               signature="forget_memory(memory_id_or_title)",
+               summary="Delete a memory."),
     Capability('send_message_main', (NAMESPACE,), contexts=(TASK,),
                gate=G_MAIN_CHANNEL, binding='send_message_main',
+               signature="send_message_main(message)",
+               task_summary="Send a message to the user's main chat — your ONLY "
+                            "way to reach them. Delivered immediately.",
                note="Task-only: the ONE supported way for a tasker to reach the user."),
     Capability('controller', (NAMESPACE,), gate=G_CONTROLLER, binding='controller',
+               signature="controller",
+               summary="Live app object (settings, windows, sessions). Powerful — "
+                       "read before you write.",
                note="Raw app handle — powerful, so it is gated in both contexts."),
-    Capability('app_root', (NAMESPACE,), binding='app_root'),
-    Capability('skills_path', (NAMESPACE,), binding='skills_path'),
+    # Canonical spelling matches the codebase constant (systema.APP_ROOT), so a
+    # path written in a snippet reads the same as one written in the app. The
+    # lower-case aliases are kept bound for older skills/snippets but are NOT
+    # advertised, so the prompt teaches exactly one spelling.
+    Capability('APP_ROOT', (NAMESPACE,), binding='app_root',
+               signature="APP_ROOT",
+               summary="Absolute path to the app root, as a string. Build every "
+                       "app path from this — it is immune to os.chdir()."),
+    Capability('SKILLS_PATH', (NAMESPACE,), binding='skills_path',
+               signature="SKILLS_PATH",
+               summary="Absolute path to the skills folder."),
+    Capability('app_root', (NAMESPACE,), binding='app_root',
+               note="Back-compat alias of APP_ROOT — bound, never documented."),
+    Capability('skills_path', (NAMESPACE,), binding='skills_path',
+               note="Back-compat alias of SKILLS_PATH — bound, never documented."),
 )
 
 BY_NAME = {c.name: c for c in CAPABILITIES}

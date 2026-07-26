@@ -583,6 +583,74 @@ def _resolve_path(node: "ast.AST", ns: dict):
     return None
 
 
+# Categories where "where does this actually land?" is the question the user
+# needs answered before approving. Reads are excluded deliberately.
+_LOCATION_CATEGORIES = (CAT_FILE_CREATE, CAT_FILE_EDIT, CAT_FILE_WRITE,
+                        CAT_FILE_DELETE, CAT_FILE_MOVE, CAT_FILE_COPY)
+
+
+def annotate_relative_paths(findings, code, namespace=None, cwd=None):
+    """Spell out where a CWD-RELATIVE file operation will actually land.
+
+    Agent-authored code is free to `os.chdir()`, and a later `open("out.txt","w")`
+    then writes relative to wherever the interpreter happens to be — which is how
+    a stray folder appeared somewhere the app had never written before. The path
+    is not wrong, it is just invisible: the approval card showed `out.txt` and
+    said nothing about the directory.
+
+    So: for any operation that CREATES, WRITES, DELETES, MOVES or COPIES, if the
+    target resolves to a relative path, append the absolute destination to the
+    finding's note. Reads are left alone. Nothing is blocked or rewritten — the
+    user simply gets told the real destination before approving.
+    """
+    try:
+        if not findings:
+            return findings
+        base = cwd or os.getcwd()
+        ns = namespace if isinstance(namespace, dict) else {}
+        tree = ast.parse(code)
+        # line -> the path argument on that line. ONLY calls whose argument 0 is
+        # genuinely a path count: in `open(p, "w").write(data)` the outer call's
+        # argument is CONTENT, and treating it as a path mislabels the line.
+        by_line = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not node.args:
+                continue
+            dotted = _dotted_name(node.func) or ""
+            tail = dotted.split(".")[-1]
+            owner = dotted.split(".")[0] if "." in dotted else ""
+            takes_path = (
+                dotted == "open"
+                or tail in ("Path", "PurePath", "PosixPath", "WindowsPath")
+                or (owner in ("os", "shutil", "path")
+                    and tail in ("remove", "unlink", "rmdir", "removedirs",
+                                 "mkdir", "makedirs", "rmtree", "rename",
+                                 "replace", "move", "copy", "copy2", "copytree"))
+            )
+            if not takes_path:
+                continue
+            resolved = _resolve_path(node.args[0], ns)
+            if resolved:
+                by_line.setdefault(getattr(node, "lineno", 0), resolved)
+
+        out = []
+        for f in findings:
+            path = by_line.get(f.line)
+            if (f.category in _LOCATION_CATEGORIES and path
+                    and not os.path.isabs(path)):
+                landing = os.path.normpath(os.path.join(base, path))
+                note = (f"{f.note} — RELATIVE path '{path}' resolves to "
+                        f"'{landing}' (follows the interpreter's current "
+                        f"directory, which earlier code may have changed)")
+                out.append(Finding(category=f.category, severity=f.severity,
+                                   line=f.line, snippet=f.snippet, note=note))
+            else:
+                out.append(f)
+        return out
+    except Exception:
+        return findings
+
+
 def refine_file_ops(findings, code, namespace=None):
     """Refine ambiguous content-write findings (file_write) into file_create or
     file_edit where the target path can be resolved — from a string literal in the

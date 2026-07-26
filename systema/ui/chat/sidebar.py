@@ -495,6 +495,9 @@ class SidebarMixin:
         self.sidebar_scroll = QScrollArea()
         self.sidebar_scroll.setWidgetResizable(True)
         self.sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Same aimable wheel behaviour as the chat (shared implementation).
+        from systema.ui.widgets.smooth_scroll import install_smooth_scroll
+        install_smooth_scroll(self.sidebar_scroll)
         self.sidebar_scroll.setStyleSheet("""
             QScrollArea { border: none; background: transparent; }
             QScrollBar:vertical { background: transparent; width: 10px; margin: 0; }
