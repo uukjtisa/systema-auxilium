@@ -205,6 +205,26 @@ def _agent_sources():
     return sorted(p for p in folder.glob("*.py") if p.name != "__init__.py")
 
 
+def _agent_cases():
+    """(path, n_provider_calls) for every agent module.
+
+    The count rides along so the CASE ID says what was checked — with -v the
+    run reads `code_agent.py-1-provider-call` / `skill_manager.py-no-provider-
+    call`, instead of a bare filename that tells you nothing about whether the
+    guard had anything to bite on.
+    """
+    out = []
+    for path in _agent_sources():
+        n = len(_provider_calls(ast.parse(path.read_text(encoding="utf-8"))))
+        out.append((path, n))
+    return out
+
+
+def _case_id(case):
+    path, n = case
+    return f"{path.name}-{n}-provider-call" if n else f"{path.name}-no-provider-call"
+
+
 def _provider_calls(tree):
     """Every `<x>._provider_script(...)` Call node in the tree."""
     return [n for n in ast.walk(tree)
@@ -221,15 +241,31 @@ def _is_background_with(node):
         for item in node.items)
 
 
-@pytest.mark.parametrize("path", _agent_sources(), ids=lambda p: p.name)
-def test_every_agent_provider_call_is_isolated(path):
+@pytest.mark.parametrize("case", _agent_cases(), ids=_case_id)
+def test_every_agent_provider_call_is_isolated(case):
     """Every provider call made from systema/agents/ must be (a) unstreamed and
     (b) wrapped in background_call(). Both, not either: stream_ok=False alone
-    silences the deltas but still clobbers the main turn's scratch state."""
+    silences the deltas but still clobbers the main turn's scratch state.
+
+    A module with no provider call ASSERTS that, rather than skipping. Three of
+    them are in that state for real reasons — skill_manager watches a folder,
+    compaction_manager delegates to compactor_agent, and task_manager drives its
+    OWN AIEngine (which is exactly why it needs no background_call: it shares no
+    scratch state with the main turn). A skip reported "nothing was verified
+    here"; the assertion reports the truth, which is "verified: this module
+    makes no unisolated call", and the case ID says which of the two it was.
+    """
+    path, expected_calls = case
     tree = ast.parse(path.read_text(encoding="utf-8"))
     calls = _provider_calls(tree)
+    assert len(calls) == expected_calls, "collection and run disagree — stale parse?"
+
     if not calls:
-        pytest.skip(f"{path.name} makes no direct provider call")
+        # Nothing to isolate, and that is the finding. If a provider call is
+        # ever added here the ID flips to "-N-provider-call" and every
+        # assertion below starts applying to it.
+        assert calls == []
+        return
 
     for call in calls:
         kw = {k.arg: k.value for k in call.keywords}
@@ -246,3 +282,12 @@ def test_every_agent_provider_call_is_isolated(path):
             f"{path.name}:{call.lineno} calls _provider_script outside a "
             f"`with <engine>.background_call(...)` block — the main turn's "
             f"scratch state would be clobbered")
+
+
+def test_the_guard_looks_at_every_agent_module():
+    """A filter bug that quietly dropped a module would look exactly like a
+    clean pass, so the case list is checked against the folder itself."""
+    covered = {path.name for path, _ in _agent_cases()}
+    on_disk = {p.name for p in _agent_sources()}
+    assert covered == on_disk
+    assert covered, "no agent modules found — the folder path is wrong"
