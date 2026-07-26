@@ -708,7 +708,10 @@ class UpdateWindow(BaseWindow):
         self.dev_check.setEnabled(not auto)
         self.dev_check.blockSignals(False)
         if auto:
-            self._banner("Developer working copy detected (.dev-copy present). Auto-update is "
+            # Says WHAT was detected, never which file gave it away — the marker
+            # is an implementation detail and naming it in the UI leaks the
+            # maintainer's local tooling to every user.
+            self._banner("Developer working copy detected. Auto-update is "
                          "disabled here; applying would overwrite your local files with the repo.")
         elif self.service.dev_mode:
             self._banner("Developer mode is on. Startup update notifications are disabled.")

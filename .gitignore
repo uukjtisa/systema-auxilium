@@ -21,3 +21,7 @@ venv/
 # belongs in the repo under data/ needs an explicit `git add -f`.
 data/
 
+
+# Developer working-copy marker (systema/updater/service.py DEV_MARKER).
+# Local only — its presence is what disables auto-update in a dev checkout.
+.dev-copy

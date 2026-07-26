@@ -94,6 +94,47 @@ def test_the_fields_are_distinct_widgets(dialog):
     assert "approv" in d.note_edit.placeholderText().lower()
 
 
+# ── each message sits with the button it feeds ───────────────────────────────
+
+def _grid_of(d, widget):
+    """(layout, row, column) for a widget inside a QGridLayout."""
+    from PyQt6.QtWidgets import QGridLayout
+    for lay in d.findChildren(QGridLayout):
+        idx = lay.indexOf(widget)
+        if idx >= 0:
+            row, col, _, _ = lay.getItemPosition(idx)
+            return lay, row, col
+    return None, None, None
+
+
+def test_each_field_sits_directly_above_its_own_button(dialog):
+    """Strung along one row they read as four unrelated controls — it was not
+    obvious the left box feeds Reject and the right one feeds Accept."""
+    d = dialog()
+    lay, r_row, r_col = _grid_of(d, d.reason_edit)
+    _, rb_row, rb_col = _grid_of(d, d.reject_btn)
+    _, n_row, n_col = _grid_of(d, d.note_edit)
+    _, ab_row, ab_col = _grid_of(d, d.accept_btn)
+
+    assert lay is not None, "the decision row is no longer a grid"
+    assert (r_col, rb_col) == (0, 0), "reason and Reject are not in one column"
+    assert (n_col, ab_col) == (1, 1), "note and Accept are not in one column"
+    assert r_row == n_row and rb_row == ab_row, "the two columns are not level"
+    assert rb_row > r_row, "the buttons should sit under their fields"
+
+
+def test_the_two_columns_are_symmetric(dialog):
+    """Equal stretch, so the halves match instead of one hugging its label."""
+    d = dialog()
+    lay, _, _ = _grid_of(d, d.reason_edit)
+    assert lay.columnStretch(0) == lay.columnStretch(1) != 0
+
+
+def test_the_buttons_share_a_height(dialog):
+    d = dialog()
+    assert d.reject_btn.minimumHeight() == d.accept_btn.minimumHeight() > 0
+
+
 # ── the annotation band ──────────────────────────────────────────────────────
 
 def _labels(d):

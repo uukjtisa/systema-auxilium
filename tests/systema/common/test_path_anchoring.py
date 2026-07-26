@@ -9,7 +9,7 @@ against a RELATIVE path silently follows the agent around: a config, cache or
 log ends up wherever the interpreter happened to be, creating folders in places
 the app has never written before.
 
-The rule (already in .dev-copy) is that every path is anchored to `APP_ROOT`.
+The rule (already in the project guidance) is that every path is anchored to `APP_ROOT`.
 This test enforces it mechanically for the whole `systema/` package, so the next
 relative `open("thing.json", "w")` fails here instead of scattering files across
 the user's disk months later.

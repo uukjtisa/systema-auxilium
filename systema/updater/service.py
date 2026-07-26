@@ -113,9 +113,15 @@ def make_updater(branch: str = DEFAULT_BRANCH, token: str | None = None,
     return updater
 
 
+# Marker file that identifies a developer working copy. Deliberately neutral and
+# purpose-named: it says what it is FOR, not which editor happens to create it,
+# and it is gitignored so it never reaches a shipped checkout.
+DEV_MARKER = ".dev-copy"
+
+
 def in_dev_environment() -> bool:
-    """True in the developer working dir (.dev-copy present, gitignored in ships)."""
-    return (APP_ROOT / ".dev-copy").exists()
+    """True in the developer working dir (marker file present, never shipped)."""
+    return (APP_ROOT / DEV_MARKER).exists()
 
 
 class _FnWorker(QThread):
@@ -183,7 +189,7 @@ class UpdaterService(QObject):
 
     @property
     def auto_dev_detected(self) -> bool:
-        """Auto-detected developer working dir (.dev-copy present, gitignored in ships)."""
+        """Auto-detected developer working dir (marker file present, never shipped)."""
         return in_dev_environment()
 
     @property

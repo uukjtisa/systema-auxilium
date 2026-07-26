@@ -12,7 +12,7 @@ module; the actual text lives in:
 Tool docs (tables, fence examples, native schemas) render from
 systema.execution.tool_registry — the single source of truth for tools.
 
-Parity rule (.dev-copy): every behavioral instruction must be present in BOTH
+Parity rule (project guidance): every behavioral instruction must be present in BOTH
 modes' output; native output contains no code fences and never the word "JSON";
 the assembled compat prompt says "NEVER use JSON" exactly once; the FINISH rule
 is stated exactly once per assembled prompt (in the work section).

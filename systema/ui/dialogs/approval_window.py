@@ -34,7 +34,7 @@ from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                              QTextEdit, QListWidget, QListWidgetItem, QSplitter,
                              QWidget, QCheckBox, QFrame, QLineEdit, QStackedWidget,
-                             QScrollArea)
+                             QScrollArea, QGridLayout)
 
 from systema.agents.code_agent import CodeAgent
 from systema.security.code_guard import (scan_code, refine_file_ops,
@@ -507,38 +507,7 @@ class CodeApprovalDialog(QDialog):
             split.setSizes([680, 420])
             root.addWidget(split, stretch=1)
 
-        # ── Optional messages to the AI, one per decision ────────────────────
-        # Two fields, not one: the reason explains a refusal ("that path is
-        # wrong"), the note steers an approval ("go ahead, but log to stderr").
-        # Only the one matching the button you press is sent, so a stale value
-        # in the other can never leak into the observation.
-        notes = QHBoxLayout()
-        notes.setSpacing(8)
-        _note_css = (f"QLineEdit {{ background: {p['bg']}; color: {p['text']}; "
-                     f"border: 1px solid {p['border']}; border-radius: 6px; "
-                     f"padding: 5px 8px; font-size: 11px; }}"
-                     f"QLineEdit:focus {{ border-color: {p['accent_dk']}; }}")
-
-        self.reason_edit = QLineEdit()
-        self.reason_edit.setPlaceholderText("Reason for rejecting (optional)")
-        self.reason_edit.setStyleSheet(_note_css)
-        self.reason_edit.setToolTip(
-            "Sent to the AI only if you Reject, so it knows WHY and can try "
-            "something else instead of repeating itself.")
-        self.reason_edit.returnPressed.connect(self.on_reject)
-        notes.addWidget(self.reason_edit, 1)
-
-        self.note_edit = QLineEdit()
-        self.note_edit.setPlaceholderText("Note to the AI when approving (optional)")
-        self.note_edit.setStyleSheet(_note_css)
-        self.note_edit.setToolTip(
-            "Sent to the AI only if you Approve — steer the step without "
-            "stopping it (\"fine, but write to data/ not the desktop\").")
-        self.note_edit.returnPressed.connect(self.on_accept)
-        notes.addWidget(self.note_edit, 1)
-        root.addLayout(notes)
-
-        # footer: tag-based "don't ask again" controls + Reject / Accept
+        # ── "Don't ask again" controls, on their own line ────────────────────
         foot = QHBoxLayout()
         cb_css = (f"QCheckBox {{ color: {p['muted']}; font-size: 11px; background: transparent; }}"
                   f"QCheckBox::indicator {{ width: 14px; height: 14px; }}")
@@ -555,11 +524,53 @@ class CodeApprovalDialog(QDialog):
         foot.addWidget(self.session_allow_cb)
         foot.addWidget(self.persist_allow_cb)
         foot.addStretch()
+        root.addLayout(foot)
 
-        reject_btn = QPushButton("Reject")
-        reject_btn.setStyleSheet(self._btn(kind="danger"))
-        reject_btn.clicked.connect(self.on_reject)
-        foot.addWidget(reject_btn)
+        # ── The decision: two symmetric columns, each message above its own
+        #    button ────────────────────────────────────────────────────────────
+        # Two fields, not one: the reason explains a refusal ("that path is
+        # wrong"), the note steers an approval ("go ahead, but log to stderr").
+        # Only the one matching the button you press is sent, so a stale value
+        # in the other can never leak into the observation.
+        #
+        # A GRID, so each field sits directly over the button it belongs to and
+        # both columns are exactly the same width. Strung along one row they
+        # read as four unrelated controls, and it was not obvious that the left
+        # box feeds Reject and the right one feeds Accept.
+        decide = QGridLayout()
+        decide.setHorizontalSpacing(10)
+        decide.setVerticalSpacing(6)
+        decide.setColumnStretch(0, 1)
+        decide.setColumnStretch(1, 1)
+
+        _note_css = (f"QLineEdit {{ background: {p['bg']}; color: {p['text']}; "
+                     f"border: 1px solid {p['border']}; border-radius: 6px; "
+                     f"padding: 5px 8px; font-size: 11px; }}"
+                     f"QLineEdit:focus {{ border-color: {p['accent_dk']}; }}")
+
+        self.reason_edit = QLineEdit()
+        self.reason_edit.setPlaceholderText("Reason for rejecting (optional)")
+        self.reason_edit.setStyleSheet(_note_css)
+        self.reason_edit.setToolTip(
+            "Sent to the AI only if you Reject, so it knows WHY and can try "
+            "something else instead of repeating itself.")
+        self.reason_edit.returnPressed.connect(self.on_reject)
+        decide.addWidget(self.reason_edit, 0, 0)
+
+        self.note_edit = QLineEdit()
+        self.note_edit.setPlaceholderText("Note to the AI when approving (optional)")
+        self.note_edit.setStyleSheet(_note_css)
+        self.note_edit.setToolTip(
+            "Sent to the AI only if you Approve — steer the step without "
+            "stopping it (\"fine, but write to data/ not the desktop\").")
+        self.note_edit.returnPressed.connect(self.on_accept)
+        decide.addWidget(self.note_edit, 0, 1)
+
+        self.reject_btn = QPushButton("Reject")
+        self.reject_btn.setStyleSheet(self._btn(kind="danger"))
+        self.reject_btn.clicked.connect(self.on_reject)
+        self.reject_btn.setMinimumHeight(34)
+        decide.addWidget(self.reject_btn, 1, 0)
 
         if self._file_edit is not None:
             _accept_label = ("Approve write" if self.execution_type == 'write_file'
@@ -570,8 +581,10 @@ class CodeApprovalDialog(QDialog):
         self.accept_btn.setStyleSheet(self._btn(primary=True))
         self.accept_btn.clicked.connect(self.on_accept)
         self.accept_btn.setDefault(True)
-        foot.addWidget(self.accept_btn)
-        root.addLayout(foot)
+        self.accept_btn.setMinimumHeight(34)
+        decide.addWidget(self.accept_btn, 1, 1)
+
+        root.addLayout(decide)
 
     def _build_code_side(self) -> QWidget:
         p = self.p
