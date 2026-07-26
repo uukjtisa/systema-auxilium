@@ -7,7 +7,8 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                              QTextEdit, QLineEdit, QPushButton, QLabel,
                              QFrame, QMenu, QScrollArea, QApplication,
                              QGraphicsOpacityEffect, QSizePolicy)
-from PyQt6.QtCore import Qt, QTimer, QPoint, pyqtSignal, QRect, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup
+from PyQt6.QtCore import (Qt, QTimer, QPoint, pyqtSignal, QRect, QEvent,
+                          QPropertyAnimation, QEasingCurve, QParallelAnimationGroup)
 from PyQt6.QtGui import QAction, QCursor, QRegion, QPixmap
 from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QFont
 from systema.common.logger import _make_logger, _NoOpLogger
@@ -96,6 +97,32 @@ class _InputResizeHandle(QFrame):
             QFrame { background: rgba(255,255,255,0.10); border-radius: 2px; }
             QFrame:hover { background: rgba(255,255,255,0.35); }
         """)
+        # The handle places ITSELF against its parent's edges. Being positioned
+        # only by the code that calls setGeometry() was not enough: the pill's
+        # layout uses SetMinimumSize, so when the bottom row's content grows
+        # (the token estimate going from "~0" to "~8.3k token per request", a
+        # work banner appearing) the layout pushes a WIDER minimumSize onto the
+        # container and Qt resizes it on the spot — no setGeometry call, so
+        # nothing repositioned the bars and the right one stranded in the middle
+        # of the pill, a stray vertical line next to the mic button.
+        parent.installEventFilter(self)
+
+    def reposition(self):
+        """Glue this bar to its parent's side gutter, vertically centred."""
+        p = self.parentWidget()
+        if p is None:
+            return
+        try:
+            y = max(0, (p.height() - self.H) // 2)
+            self.move(4 if self._side == 'left' else p.width() - self.W - 4, y)
+            self.raise_()
+        except RuntimeError:
+            pass
+
+    def eventFilter(self, obj, event):
+        if obj is self.parentWidget() and event.type() == QEvent.Type.Resize:
+            self.reposition()
+        return False
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -443,19 +470,17 @@ class InputDockMixin:
             _ab.notify_image_attached(path, send_every=not auto_detach)
 
     def _position_input_handles(self):
-        """Keep the two width-resize grab bars glued to the pill's side gutters,
-        vertically centred on the container."""
+        """Re-glue the two width-resize grab bars to the pill's side gutters.
+
+        Each handle also tracks its parent's resizes on its own (see
+        _InputResizeHandle), so this is the eager path, not the only one — a
+        container that resizes itself still keeps its bars.
+        """
         handles = getattr(self, '_input_resize_handles', None)
-        ic = getattr(self, 'input_container', None)
-        if not handles or ic is None:
+        if not handles:
             return
-        try:
-            for hd in handles:
-                y = max(0, (ic.height() - hd.H) // 2)
-                hd.move(4 if hd._side == 'left' else ic.width() - hd.W - 4, y)
-                hd.raise_()
-        except RuntimeError:
-            pass
+        for hd in handles:
+            hd.reposition()
 
     def _update_pinned_overlay(self):
         """Reposition the pinned-image overlay to float just above the input container."""

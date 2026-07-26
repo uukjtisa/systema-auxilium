@@ -1546,8 +1546,13 @@ class EventCardsMixin:
         (message_widget, outer_lay, header, summary_lbl,
          icon_lbl, toggle_lbl, detail_frame, detail_lay) = self._web_card_shell("▤", "")
 
-        detail_lbl = QLabel(_html.escape(detail or
-                            f"Skill '{skill}' {action}ed."))
+        # PLAIN text, NOT escaped. A QLabel left on AutoText only parses markup
+        # when the string looks like HTML, and an escaped message never does —
+        # so `Skill 'x' loaded.` rendered literally as `Skill &#x27;x&#x27;
+        # loaded.`. Declaring the format is also the safer half: a manager
+        # message or traceback containing <module> can't be eaten as a tag.
+        detail_lbl = QLabel(detail or f"Skill '{skill}' {action}ed.")
+        detail_lbl.setTextFormat(Qt.TextFormat.PlainText)
         detail_lbl.setWordWrap(True)
         detail_lay.addWidget(detail_lbl)
 
@@ -1608,7 +1613,11 @@ class EventCardsMixin:
 
         thumbs, names = [], []
         for p in paths:
-            name_lbl = QLabel(_html.escape(os.path.basename(p)))
+            # Plain, unescaped — same reason as the skill card: an escaped
+            # filename ("Dad's photo.png") has no markup for AutoText to detect,
+            # so the entity rendered literally.
+            name_lbl = QLabel(os.path.basename(p))
+            name_lbl.setTextFormat(Qt.TextFormat.PlainText)
             name_lbl.setWordWrap(True)
             detail_lay.addWidget(name_lbl)
             names.append(name_lbl)
