@@ -546,10 +546,17 @@ def work_context_block(last_tool: str = None,
 
     if not lines:
         return ""
-    # Leading newline: the template holds "{work_output}\n{situation}\n---DECISION",
+    # Leading newline: the template holds "{work_output}\n{situation}\n---DECIDE",
     # so an empty block leaves the ping's spacing exactly as it was before this
     # existed, and a filled one sits in its own paragraph.
-    return "\n---WHERE YOU ARE---\n" + "\n".join(lines) + "\n"
+    #
+    # "(reference)" in the heading is load-bearing. A model handed a briefing
+    # under a ---HEADING--- will restate it: one reply opened with "No current
+    # skill appears loaded, so no unload prompt is needed unless you want to
+    # search memory. I have enough to respond." — the checklist and this block's
+    # namespace line, read back to the user, separator and all.
+    return "\n---WHERE YOU ARE (reference — never repeat this to the user)---\n" \
+           + "\n".join(lines) + "\n"
 
 
 # ── Injected work-continuation core (WORK_MODE_PROMPT et al.) ─────────────────
@@ -558,14 +565,17 @@ def work_context_block(last_tool: str = None,
 # warning promoted to both modes. {situation} is work_context_block() above —
 # empty string when there is nothing live to report.
 WORK_CONTINUATION_CORE = """\
-This block (the raw output below) is internal — but the TEXT you write in your
-reply IS shown to the user, stitched around the tool cards as one flowing
-response. Say a short line about what the output told you / what you do next.
+EVERY WORD OF THIS MESSAGE IS INTERNAL — the whole message, not just the output
+below. Never quote it, never answer its questions on the page, never copy its
+headings or --- rules, and never narrate what you have or haven't got. The user
+sees ONLY the text you write, stitched around the tool cards as one flowing
+response: give them a short line about what the output told you / what you do
+next, and then the answer itself. Nothing about this message.
 
 Previous execution output:
 {work_output}
 {situation}
----DECISION TIME---
+---DECIDE (silently — none of this goes in your reply)---
 1. Do I have ALL information needed?
 2. Could I provide a more complete answer?
 3. Are there follow-up checks needed?

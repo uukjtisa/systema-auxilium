@@ -34,7 +34,7 @@ def test_nothing_to_report_renders_nothing():
 def test_the_last_tool_is_named():
     block = shared.work_context_block(last_tool='interpreter', observation="ok")
     assert "python_interpreter" in block
-    assert "---WHERE YOU ARE---" in block
+    assert "---WHERE YOU ARE" in block
 
 
 def test_the_step_annotation_grounds_the_output():
@@ -151,6 +151,56 @@ def test_the_block_is_a_pure_function_of_its_inputs():
     assert shared.work_context_block(**args) == shared.work_context_block(**args)
 
 
+# ── the ping must not end up in the reply ────────────────────────────────────
+# A real leak, from session Valleymed_Logo_Review_07_27_2026. The visible reply
+# opened with:
+#
+#   "It's indeed blocked. No current skill appears loaded, so no unload prompt
+#    is needed unless you want to search memory. I have enough to respond."
+#   ---
+#   "I can see the ValleyMed brand logo — ..."
+#
+# — the ping's four-question checklist answered out loud, the situation block's
+# namespace line read back, and even its --- separator copied. The reasoning
+# itself was clean; only the user-facing text was polluted. The old opening
+# said "This block (the raw output below) is internal", which scopes "internal"
+# to the OUTPUT and leaves the instructions looking quotable.
+
+@pytest.mark.parametrize("template", [WORK_MODE_PROMPT, WORK_MODE_PROMPT_NATIVE],
+                         ids=["compat", "native"])
+def test_the_whole_ping_is_declared_internal_not_just_the_output(template):
+    out = template.format(work_output="OUT", situation="")
+    head = out[:out.index("Previous execution output")]
+    assert "EVERY WORD OF THIS MESSAGE IS INTERNAL" in head
+    assert "not just the output" in head
+
+
+@pytest.mark.parametrize("template", [WORK_MODE_PROMPT, WORK_MODE_PROMPT_NATIVE],
+                         ids=["compat", "native"])
+def test_the_ping_forbids_quoting_answering_and_copying_it(template):
+    out = template.format(work_output="OUT", situation="")
+    for rule in ("Never quote it", "answer its questions", "copy its"):
+        assert rule in out, f"the ping no longer forbids: {rule}"
+
+
+@pytest.mark.parametrize("template", [WORK_MODE_PROMPT, WORK_MODE_PROMPT_NATIVE],
+                         ids=["compat", "native"])
+def test_the_checklist_says_it_is_silent_in_its_own_heading(template):
+    """The heading is what a skimming model sees; "DECISION TIME" above four
+    numbered questions reads like a form to fill in on the page."""
+    out = template.format(work_output="OUT", situation="")
+    assert "---DECIDE (silently" in out
+    assert "none of this goes in your reply" in out
+    assert "---DECISION TIME---" not in out
+
+
+def test_the_situation_heading_marks_itself_as_reference():
+    """It sits directly above the checklist in the same ---HEADING--- style, so
+    it inherits the same pull to be restated."""
+    block = shared.work_context_block(last_tool='interpreter', observation="ok")
+    assert "never repeat this to the user" in block.splitlines()[1]
+
+
 # ── mode parity ──────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("template", [WORK_MODE_PROMPT, WORK_MODE_PROMPT_NATIVE],
@@ -158,7 +208,7 @@ def test_the_block_is_a_pure_function_of_its_inputs():
 def test_both_templates_carry_the_situation(template):
     sit = shared.work_context_block(last_tool='interpreter', observation="ok")
     out = template.format(work_output="OUT", situation=sit)
-    assert "---WHERE YOU ARE---" in out
+    assert "---WHERE YOU ARE" in out
     assert "OUT" in out
 
 
@@ -166,7 +216,7 @@ def test_an_empty_situation_leaves_the_ping_shape_untouched():
     """Spacing regression guard: the placeholder must vanish completely, not
     leave a stray blank paragraph in every plain ping."""
     out = WORK_MODE_PROMPT.format(work_output="OUT", situation="")
-    assert "OUT\n\n---DECISION TIME---" in out
+    assert "OUT\n\n---DECIDE (silently" in out
     assert "{situation}" not in out
 
 
@@ -187,8 +237,8 @@ def test_the_slim_history_variant_carries_output_only():
     """Only the LIVE ping may carry the block — otherwise every turn's copy
     accumulates in history and the saving is undone."""
     slim = shared.WORK_MODE_OUTPUT_ONLY_PROMPT.format(work_output="OUT")
-    assert "---WHERE YOU ARE---" not in slim
-    assert "---DECISION TIME---" not in slim
+    assert "---WHERE YOU ARE" not in slim
+    assert "---DECIDE (silently" not in slim
     assert "OUT" in slim
 
 
@@ -223,7 +273,7 @@ def test_a_broken_situation_never_kills_the_work_loop(tool_manager, monkeypatch)
     prompt = tool_manager.get_work_prompt()
 
     assert "still here" in prompt
-    assert "---DECISION TIME---" in prompt
+    assert "---DECIDE (silently" in prompt
 
 
 def test_the_recap_lists_what_this_agent_was_taught(tool_manager):

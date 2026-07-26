@@ -285,7 +285,7 @@ class AssistantController(QObject):
             self.ai.queue_context_image(path)
             return (f"[attach_image_to_context] Queued for ONE-TURN analysis: {path}. "
                     "Describe what you see in your very next reply — it is detached "
-                    "from your context after this turn (the file stays on disk).")
+                    "from your context after this turn.")
 
         self._agent_attach_image = _agent_attach_image
         self._agent_take_screenshot = _agent_take_screenshot
