@@ -8,6 +8,7 @@ HANDLES ALL CODE FROM CODE EXECUTION TOOL CALLS
 import sys
 import os
 import io
+import builtins
 import time
 import traceback
 import code
@@ -64,12 +65,30 @@ class CustomInterpreter(code.InteractiveInterpreter):
         old_displayhook = sys.displayhook
         log.debug("[CustomInterpreter.runcode] Original displayhook saved — installing capture hook")
 
-        # Create custom displayhook that stores the result
+        # Create custom displayhook that stores the result.
+        #
+        # CAPTURE ONLY — it must not also print. The default hook writes repr()
+        # to stdout the way a REPL echoes an expression, but the value is then
+        # ALSO reported by run_python_interpreter as its own RESULT section, so
+        # a bare expression came back to the model twice:
+        #
+        #   STDOUT:
+        #   '[attach_image_to_context] Queued for ONE-TURN analysis: ...'
+        #   RESULT:
+        #   [attach_image_to_context] Queued for ONE-TURN analysis: ...
+        #
+        # (Only for a bare expression with a non-None value — code that print()s
+        # never fired the hook, which is why it looked intermittent.)
         def capture_displayhook(value):
             self.last_result = value  # Store in instance!
             log.debug(f"[CustomInterpreter.runcode] displayhook triggered — "
                       f"captured result type: {type(value).__name__} | value: {repr(value)[:120]}")
-            old_displayhook(value)  # Also print it
+            # The interpreter is persistent, so `_` stays useful across steps —
+            # that half of the default hook's job is kept, the printing is not.
+            try:
+                builtins._ = value
+            except Exception:
+                pass
 
         sys.displayhook = capture_displayhook
 
