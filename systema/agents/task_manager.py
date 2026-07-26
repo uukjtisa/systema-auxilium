@@ -316,6 +316,14 @@ class TaskAIEngine:
         }
         ns.update(caps.build_namespace(caps.TASK, gates, bindings))
 
+        # A tasker's prompt gates ARE its injection gates (both come from the
+        # task's permissions), so the work-mode ping can reuse them directly —
+        # it will describe task bindings with task wording and never name a
+        # chat-only capability.
+        tm = self._engine.tool_manager
+        tm.prompt_context = caps.TASK
+        tm.documented_gates = gates
+
     def _queue_image(self, path: str):
         with self._images_lock:
             self._pending_context_images.append(path)

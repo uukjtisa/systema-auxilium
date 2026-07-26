@@ -2159,6 +2159,7 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
                 w.deleteLater()
                 self.last_user_message_widget = None
                 self._refresh_msg_navigator()
+            canceled_turn = getattr(self, '_ai_turn_group', None)
             self._end_ai_turn_group()   # defensive: never append into a canceled turn
 
             if self.last_sent_message:
@@ -2175,6 +2176,15 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
 
             self.hide_thinking()
             self.hide_thinking_bubble()
+            # The canceled turn may now be an empty shell — an avatar+name husk
+            # with nothing under it. hide_thinking_bubble only prunes the shell
+            # the DOTS were in, which is not always this one (a system
+            # interjection can have split the turn since).
+            if canceled_turn is not None:
+                try:
+                    self._prune_empty_group(canceled_turn['row'])
+                except Exception:
+                    pass
 
     def interrupt_work(self):
         """Legacy method - now redirects to interrupt_response"""

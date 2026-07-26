@@ -1791,9 +1791,11 @@ class EventCardsMixin:
                     if e.get('widget') is not message_widget]
             except Exception:
                 pass
+            # _detach_chat_widget, not a bare delete: the card is a SEGMENT, so
+            # dropping it can empty the turn shell — which must go with it
+            # rather than linger as an avatar+name husk.
             try:
-                message_widget.setParent(None)
-                message_widget.deleteLater()
+                self._detach_chat_widget(message_widget)
             except RuntimeError:
                 pass
             return True

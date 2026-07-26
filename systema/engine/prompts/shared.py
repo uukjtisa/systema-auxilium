@@ -454,10 +454,109 @@ def skills_list_block(skills) -> str:
     return "\n".join(lines)
 
 
+# ── The situational half of the work ping ─────────────────────────────────────
+# The system prompt is a bad place to shout: every word there is paid for on
+# every request, forever. The work ping is not — AIEngine.continue_work() slims
+# the PREVIOUS ping down to WORK_MODE_OUTPUT_ONLY_PROMPT and appends a fresh
+# full one, so only the LATEST ping ever carries this block. A reminder placed
+# here costs its tokens once per turn instead of accumulating, and it can be
+# built from live state, which the system prompt cannot.
+#
+# Mode-agnostic by construction (this module's rule): no fences, no "JSON" — it
+# renders identically for compat and native, and for taskers.
+
+_TOOL_LABELS = {
+    'interpreter': 'python_interpreter',
+    'skill': 'a skill load/unload',
+    'batch': 'a batch of tool calls',
+}
+
+# Steers keyed on what the last step WAS — cheap situational guidance that a
+# static prompt cannot give. Chosen after the failure/empty checks below.
+_TOOL_STEERS = {
+    'skill': "Your loaded skills just changed — follow the new instructions, and "
+             "build any script path from the skill's own folder (exact paths below).",
+    'read_file': "You have the file's contents now. Edit surgically rather than "
+                 "rewriting it whole.",
+    'edit_file': "Re-read the region you changed to confirm the edit landed the way "
+                 "you intended before building on it.",
+    'write_file': "The file is written. Verify it (read it back, or run it) rather "
+                  "than assuming.",
+}
+
+
+def work_context_block(last_tool: str = None,
+                       annotation: str = None,
+                       loaded_skills=(),
+                       namespace_names=(),
+                       observation: str = "") -> str:
+    """The live-state preamble spliced into the work-mode continuation ping.
+
+    Pure function of its arguments (same contract as build_identity_block) so
+    it is directly testable and cannot reach for app state behind the caller's
+    back. Returns "" when there is nothing worth saying — a ping with no
+    situation must not grow an empty heading.
+
+    `loaded_skills` is a sequence of (display_name, folder_name) pairs. Both
+    halves matter: the model knows the skill by its display name but the path
+    needs the FOLDER, and conflating the two is the single most common path
+    mistake it makes — SKILLS_PATH\\scripts\\x.py instead of
+    SKILLS_PATH\\<folder>\\scripts\\x.py. The app knows the real folder, so the
+    ping states the finished path instead of a rule to apply from memory.
+    """
+    lines = []
+
+    tool = (last_tool or "").strip()
+    if tool:
+        label = _TOOL_LABELS.get(tool, tool)
+        note = (annotation or "").strip()
+        lines.append(f"That output came from {label}"
+                     + (f' — "{note}"' if note else "") + ".")
+
+    obs = (observation or "").strip()
+    blank = (not obs
+             or obs == "No previous output"
+             or obs.startswith("(empty python_interpreter call"))
+    failed = ("Traceback (most recent call last)" in obs
+              or obs.startswith("ERROR:")
+              or obs.startswith("SKILL LOAD REJECTED")
+              or obs.startswith("SKILL UNLOAD REJECTED"))
+    if failed:
+        lines.append("That step FAILED. Read the error and fix its CAUSE — "
+                     "re-running the same thing unchanged will fail again.")
+    elif blank and tool:
+        lines.append("That step printed nothing. Print what you actually need to "
+                     "see, or check your assumption, before repeating it.")
+    elif tool in _TOOL_STEERS:
+        lines.append(_TOOL_STEERS[tool])
+
+    skills = [(str(n), str(f)) for n, f in (loaded_skills or ()) if f]
+    for name, folder in skills[:3]:
+        lines.append(
+            f"Skill '{name}' is loaded — its folder is `{folder}`, so its scripts "
+            f"are at  SKILLS_PATH\\{folder}\\scripts\\<script.py>  "
+            f"(the folder name is PART of the path).")
+    if len(skills) > 3:
+        lines.append(f"({len(skills) - 3} more skill(s) loaded — same path shape.)")
+
+    names = [str(n) for n in (namespace_names or ())]
+    if names:
+        lines.append("Already in your python namespace — never import or redefine: "
+                     + ", ".join(names) + ".")
+
+    if not lines:
+        return ""
+    # Leading newline: the template holds "{work_output}\n{situation}\n---DECISION",
+    # so an empty block leaves the ping's spacing exactly as it was before this
+    # existed, and a filled one sits in its own paragraph.
+    return "\n---WHERE YOU ARE---\n" + "\n".join(lines) + "\n"
+
+
 # ── Injected work-continuation core (WORK_MODE_PROMPT et al.) ─────────────────
 # {options} is the per-mode invocation tail (compat fences / native calls); the
 # finish rule lives inside that tail, stated once, with the visible-reply
-# warning promoted to both modes.
+# warning promoted to both modes. {situation} is work_context_block() above —
+# empty string when there is nothing live to report.
 WORK_CONTINUATION_CORE = """\
 This block (the raw output below) is internal — but the TEXT you write in your
 reply IS shown to the user, stitched around the tool cards as one flowing
@@ -465,7 +564,7 @@ response. Say a short line about what the output told you / what you do next.
 
 Previous execution output:
 {work_output}
-
+{situation}
 ---DECISION TIME---
 1. Do I have ALL information needed?
 2. Could I provide a more complete answer?

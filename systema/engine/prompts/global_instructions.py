@@ -40,7 +40,8 @@ MALFORMED_WORK_STEP_PROMPT = compat.MALFORMED_WORK_STEP_PROMPT
 MALFORMED_WORK_STEP_PROMPT_NATIVE = native.MALFORMED_WORK_STEP_PROMPT_NATIVE
 
 # ── Injected work-continuation prompts (per-mode options tail composed in) ────
-# .replace keeps the {work_output} placeholder intact for the caller's .format.
+# .replace keeps the {work_output} / {situation} placeholders intact for the
+# caller's .format — ToolManager.get_work_prompt supplies both.
 _CORE = shared.WORK_CONTINUATION_CORE
 WORK_MODE_PROMPT = ("<SYSTEM_MESSAGE>\n"
                     + _CORE.replace("{options}", compat.WORK_OPTIONS)
@@ -49,6 +50,10 @@ WORK_MODE_PROMPT_NATIVE = ("<SYSTEM_MESSAGE>\n"
                            + _CORE.replace("{options}", native.WORK_OPTIONS)
                            + "</SYSTEM_MESSAGE>")
 
+# The skill-load/unload work variants are formatted by callers that supply only
+# skill_name + work_output, so their situation slot is resolved to empty here.
+_SKILL_CORE = _CORE.replace("{situation}", "")
+
 _SKILL_LOADED_HDR = ("<SYSTEM_MESSAGE>\n"
                      "SKILL '{skill_name}' has been loaded into your system context.\n"
                      "You now have its full instructions available. Proceed with your task.\n\n")
@@ -56,13 +61,13 @@ _SKILL_UNLOADED_HDR = ("<SYSTEM_MESSAGE>\n"
                        "SKILL '{skill_name}' has been unloaded from your system context.\n"
                        "You now have its full instructions removed. Proceed with your task.\n\n")
 SKILL_LOADED_WORK_PROMPT = (
-    _SKILL_LOADED_HDR + _CORE.replace("{options}", compat.WORK_OPTIONS) + "</SYSTEM_MESSAGE>")
+    _SKILL_LOADED_HDR + _SKILL_CORE.replace("{options}", compat.WORK_OPTIONS) + "</SYSTEM_MESSAGE>")
 SKILL_LOADED_WORK_PROMPT_NATIVE = (
-    _SKILL_LOADED_HDR + _CORE.replace("{options}", native.WORK_OPTIONS) + "</SYSTEM_MESSAGE>")
+    _SKILL_LOADED_HDR + _SKILL_CORE.replace("{options}", native.WORK_OPTIONS) + "</SYSTEM_MESSAGE>")
 SKILL_UNLOADED_WORK_PROMPT = (
-    _SKILL_UNLOADED_HDR + _CORE.replace("{options}", compat.WORK_OPTIONS) + "</SYSTEM_MESSAGE>")
+    _SKILL_UNLOADED_HDR + _SKILL_CORE.replace("{options}", compat.WORK_OPTIONS) + "</SYSTEM_MESSAGE>")
 SKILL_UNLOADED_WORK_PROMPT_NATIVE = (
-    _SKILL_UNLOADED_HDR + _CORE.replace("{options}", native.WORK_OPTIONS) + "</SYSTEM_MESSAGE>")
+    _SKILL_UNLOADED_HDR + _SKILL_CORE.replace("{options}", native.WORK_OPTIONS) + "</SYSTEM_MESSAGE>")
 
 
 def get_system_prompt(

@@ -2730,6 +2730,20 @@ class AssistantController(QObject):
         ns = tm.tools['python'].namespace
         ns.update(caps.build_namespace(caps.CHAT, gates, bindings))
 
+        # What the PROMPT is allowed to name is a stricter set than what is
+        # bound above — the include_* switches are real there. Record it so the
+        # work-mode ping's recap lists exactly what the system prompt taught,
+        # instead of re-advertising an option the user switched off.
+        tm.prompt_context = caps.CHAT
+        tm.documented_gates = caps.gates_for_chat(
+            allow_workmode=bool(getattr(tm, 'allow_workmode', True)),
+            has_skills=bool(getattr(self, 'skill_manager', None)),
+            include_image_tools=bool(self.settings.get('include_image_tools', False)),
+            include_notify_tool=bool(self.settings.get('include_notify_tool', False)),
+            include_memory=bool(self.settings.get('memory_enabled', True)),
+            include_controller_ref=bool(self.settings.get('include_controller_ref', False)),
+        )
+
     def reset_python_interpreter(self):
         """Reset the Python interpreter and reinject namespaces"""
         log.info("[AssistantController.reset_python_interpreter] Resetting Python interpreter...")

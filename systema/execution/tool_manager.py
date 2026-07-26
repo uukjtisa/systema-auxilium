@@ -273,6 +273,18 @@ class ToolManager:
         # in the system prompt. Set by TaskAIEngine from the task dict.
         self.allow_workmode = True
 
+        # ── Which agent this ToolManager belongs to (capability manifest) ─────
+        # Recorded by whoever builds the python namespace: the controller for the
+        # main chat, TaskAIEngine for a background tasker. The work-mode ping
+        # reads it so its namespace recap matches what THIS agent was actually
+        # taught — a tasker must never be reminded of chat-only names, and an
+        # option the user switched off must not be re-advertised mid-work.
+        # `documented_gates` is the STRICT (prompt) gate set, which is not always
+        # the injection gate set: the main session's namespace is deliberately
+        # permissive (see controller._inject_interpreter_namespaces).
+        self.prompt_context = capabilities.CHAT
+        self.documented_gates = None
+
         # Approval signal for main thread communication
         log.debug("[ToolManager.__init__] Creating ApprovalSignal and connecting to main thread handler")
         self.approval_signal = ApprovalSignal()
@@ -2402,7 +2414,15 @@ class ToolManager:
 
     def get_work_prompt(self):
         """Get the prompt for work mode continuation. In native tool-calling mode
-        the variant that instructs native tool calls (not fences) is used."""
+        the variant that instructs native tool calls (not fences) is used.
+
+        The static half is WORK_CONTINUATION_CORE; the situational half is built
+        here from live state (what just ran, whether it failed, which skills are
+        loaded and where their folders actually are, what the namespace holds).
+        Only the LATEST ping carries it — continue_work() slims the previous one
+        to output-only — so this costs its tokens once per turn, not once per
+        turn forever, which is why the emphasis lives here and not in the system
+        prompt."""
         log.debug(f"[ToolManager.get_work_prompt] Building work mode prompt | "
                   f"has_last_output={self.work.last_output is not None}")
         from systema.engine.prompts.global_instructions import WORK_MODE_PROMPT, WORK_MODE_PROMPT_NATIVE
@@ -2416,9 +2436,81 @@ class ToolManager:
 
         template = WORK_MODE_PROMPT_NATIVE if native else WORK_MODE_PROMPT
         output = self.work.last_output or "No previous output"
-        prompt = template.format(work_output=output)
+        prompt = template.format(work_output=output,
+                                 situation=self._work_situation(output))
         log.debug(f"[ToolManager.get_work_prompt] Prompt built | native={native} | length={len(prompt)}")
         return prompt
+
+    def _work_situation(self, output: str) -> str:
+        """Render the ping's live-state block. Never raises: a work loop must not
+        die because a skill folder could not be resolved."""
+        from systema.engine.prompts import shared
+        try:
+            return shared.work_context_block(
+                last_tool=self.work.last_tool,
+                annotation=self.work.interpreter.last_annotation,
+                loaded_skills=self._loaded_skill_folders(),
+                namespace_names=self._documented_namespace_names(),
+                observation=output,
+            )
+        except Exception:
+            log.warning("[ToolManager._work_situation] failed — plain ping",
+                        exc_info=True)
+            return ""
+
+    def _loaded_skill_folders(self) -> list:
+        """(display_name, folder_name) for every loaded skill.
+
+        The two differ: a skill is KNOWN by its SKILL.md frontmatter name but
+        LIVES in a folder, and the model routinely builds a path out of the name
+        — or drops the folder entirely. Resolving it here means the ping can
+        state the finished path instead of a rule."""
+        sm = getattr(self.ai_engine, 'skill_manager', None)
+        if sm is None:
+            return []
+        loaded = set(sm.get_loaded_skills() or {})
+        if not loaded:
+            return []
+        out = []
+        for s in sm.get_skills() or []:
+            if s.get('name') in loaded:
+                path = s.get('path')
+                folder = getattr(path, 'name', None) or str(path or '')
+                out.append((s['name'], folder))
+        return out
+
+    def _documented_namespace_names(self) -> list:
+        """The built-in names THIS agent was actually taught — same manifest
+        query the system prompt's recap uses, with this agent's own context and
+        gates (recorded when its namespace was built). Falls back to the plain
+        chat gates so a ToolManager nobody registered still says something true.
+        """
+        ctx = getattr(self, 'prompt_context', capabilities.CHAT)
+        gates = getattr(self, 'documented_gates', None)
+        if gates is None:
+            gates = capabilities.gates_for_chat(
+                allow_workmode=bool(self.allow_workmode),
+                has_skills=bool(getattr(self.ai_engine, 'skill_manager', None)))
+        if not gates.get(capabilities.G_WORKMODE):
+            # No interpreter, no namespace to recap — the system prompt drops its
+            # recap on the same condition, and the ping must not out-promise it.
+            return []
+        inject_all = False
+        if ctx == capabilities.CHAT and self.settings_callback:
+            try:
+                s = self.settings_callback() or {}
+                inject_all = (s.get('memory_enabled', True)
+                              and s.get('memory_recall_mode', 'inject_all') == 'inject_all')
+            except Exception:
+                inject_all = False
+        names = [c.name for c in capabilities.namespace_for(ctx, gates)
+                 if c.describe(ctx)]
+        if inject_all:
+            # Same rule as memory_section / namespace_summary_section: with every
+            # memory already in the prompt, search_memory is bound but deliberately
+            # undocumented. The ping must not re-advertise it.
+            names = [n for n in names if n != 'search_memory']
+        return names
 
     def reset_python(self):
         """Reset Python interpreter state, then re-inject the agent namespaces

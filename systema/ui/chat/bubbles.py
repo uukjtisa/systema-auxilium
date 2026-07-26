@@ -1358,19 +1358,32 @@ class BubblesMixin:
         self._stream_active = False
         self._stream_suppressed = False
         self._clear_stream_segment()
+        # Both removals above are SEGMENT removals; the shell they lived in is
+        # not touched by either. Without this the stop left an avatar+name husk
+        # (nothing under it) sitting in the chat — see _prune_empty_group.
+        g = getattr(self, '_ai_turn_group', None)
+        if g is not None:
+            try:
+                self._prune_empty_group(g['row'])
+            except Exception:
+                pass
         return had_stream
 
     def _clear_stream_segment(self):
-        """Remove the live streaming segment (hand-off or abandonment)."""
+        """Remove the live streaming segment (hand-off or abandonment).
+
+        Deletes through _detach_chat_widget so the turn shell is pruned when
+        this was its only content — an abandoned stream must not leave a husk.
+        A shell that still holds a finished card or an earlier narration is
+        left alone (the prune only fires on an EMPTY body).
+        """
         self._stop_stream_flush()
         seg = getattr(self, '_stream_seg', None)
         self._stream_seg = None
         if seg is None:
             return
         try:
-            w = seg['widget']
-            w.setParent(None)
-            w.deleteLater()
+            self._detach_chat_widget(seg['widget'])
         except RuntimeError:
             pass
 
@@ -1820,12 +1833,16 @@ class BubblesMixin:
                 self.controller.ai.conversation_history = \
                     self.controller.ai.conversation_history[:history_index]
 
-            # Animate out the stale widgets
+            # Animate out the stale widgets. Via _detach_chat_widget, NOT a
+            # bare removeWidget+deleteLater: assistant items are SEGMENTS of a
+            # turn shell, so removing them without pruning left one avatar+name
+            # husk per discarded turn stacked above the re-sent message.
             for widget in widgets_to_remove:
                 def _destroy(w=widget):
-                    self.chat_layout.removeWidget(w)
-                    w.deleteLater()
+                    self._detach_chat_widget(w)
                 self._animate_message_out(widget, _destroy)
+
+            self._end_ai_turn_group()   # never append into a discarded turn
 
             # Re-render the user bubble with updated text, then fire AI
             self.add_user_message(new_content)
