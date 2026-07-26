@@ -12,23 +12,27 @@ separate per-request primer channel, not part of the system prompt.
 '''
 
 from systema.execution.tool_registry import CANONICAL_TOOLS
+from systema.execution import capabilities
 
 # Frames a shared-core code example for fence invocation (see shared.py).
 INVOKE_HINT = "run this in a python_interpreter fence — its code being:"
 
 
 def tool_format_section(include_workmode: bool = True,
-                        include_skills: bool = False) -> str:
+                        include_skills: bool = False,
+                        include_images: bool = False) -> str:
     """The ONE compat format section: fence rule, tool table + examples from
     the registry, the batch-fence policy. (The finish rule is NOT here — the
     work section owns it.)"""
-    active = []
-    if include_workmode:
-        # The file subsystem rides with execution capability (default-on).
-        active += ['python_interpreter', 'read_file', 'edit_file', 'write_file',
-                   'grep', 'web_search']
-    if include_skills:
-        active += ['load_skill', 'unload_skill']
+    # The SAME query the native schema list uses (tool_manager.offered_tools) —
+    # one manifest, two renderers, so compat and native can never advertise
+    # different sets again.
+    active = [n for n in capabilities.tools_for(
+        capabilities.CHAT,
+        capabilities.gates_for_chat(allow_workmode=include_workmode,
+                                    has_skills=include_skills,
+                                    include_image_tools=include_images))
+        if n in CANONICAL_TOOLS]
 
     if not active:
         table = "(no interactive tools available in this context)"

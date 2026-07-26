@@ -554,6 +554,31 @@ class EventCardsMixin:
         except Exception:
             pass
 
+    def finalize_code_step(self, code: str, output: str, annotation: str = ""):
+        """Freeze ONE interpreter step's card with THAT step's own output.
+
+        Called from ToolManager._deliver_work_step_output the moment the step's
+        observation exists — the authoritative pairing. A pending live card is
+        the card for this step, so it is frozen in place; if none is open (the
+        step never streamed, e.g. a rejected or capability-blocked call) a
+        permanent card is added instead.
+
+        After this, `_last_finalized_step` marks the step as carded, so the
+        post-batch add_code_execution_note() — which carries the whole batch's
+        COMBINED observation — cannot overwrite this card or stack a duplicate.
+        """
+        lc = getattr(self, '_live_card', None)
+        if lc is not None:
+            self._finalize_live_card(code, output, annotation or lc.get('annotation'))
+            return
+        # No live card: the step never reached execution (rejected / disabled /
+        # policy-blocked), so step_seq did not advance — add the card
+        # unconditionally (two rejected calls in one batch are two cards), then
+        # mark the step carded so the post-batch combined note stays suppressed.
+        self.add_code_execution_note(code, output, annotation=annotation or None,
+                                     authoritative=True)
+        self._last_finalized_step = self._current_step_seq()
+
     def _finalize_live_fallback(self):
         """Finalize a live card that ended but never got a permanent note."""
         lc = getattr(self, '_live_card', None)
@@ -615,7 +640,8 @@ class EventCardsMixin:
             pass
 
     def add_code_execution_note(self, code: str, output: str, save_to_history: bool = True,
-                                annotation: str = None, live: bool = False):
+                                annotation: str = None, live: bool = False,
+                                authoritative: bool = False):
         """Compact inline code-execution note (claude.ai-style borderless header).
         Persists to conversation_history as a ui_event so it survives reloads.
 
@@ -631,6 +657,16 @@ class EventCardsMixin:
         if not live and getattr(self, '_live_card', None) is not None:
             self._finalize_live_card(code, output, annotation)
             return
+
+        # Batch-safety: the post-batch callers (controller / floating window)
+        # pass the COMBINED observation of the whole batch. finalize_code_step()
+        # has already given this step its own output, so a second permanent card
+        # here would either duplicate it or overwrite it with every call's output
+        # glued together (the reported "same name, empty output" symptom).
+        if save_to_history and not live and not authoritative:
+            _seq = self._current_step_seq()
+            if _seq is not None and _seq == getattr(self, '_last_finalized_step', None):
+                return
 
         _tc = self._t()
 
@@ -1491,6 +1527,135 @@ class EventCardsMixin:
             except Exception:
                 pass
 
+    def add_skill_action_card(self, info: dict, save_to_history: bool = True):
+        """Card for load_skill / unload_skill.
+
+        These were the only tools that ran invisibly — the agent could swap its
+        own instructions mid-task with nothing in the transcript to show it. The
+        card states the action and the skill; the detail carries the manager's
+        message, which is what matters when a load is REJECTED.
+        """
+        import html as _html
+        from PyQt6.QtWidgets import QLabel
+
+        action = str(info.get('action') or 'load')
+        skill = str(info.get('skill') or '')
+        ok = bool(info.get('ok'))
+        detail = str(info.get('detail') or '')
+
+        (message_widget, outer_lay, header, summary_lbl,
+         icon_lbl, toggle_lbl, detail_frame, detail_lay) = self._web_card_shell("▤", "")
+
+        detail_lbl = QLabel(_html.escape(detail or
+                            f"Skill '{skill}' {action}ed."))
+        detail_lbl.setWordWrap(True)
+        detail_lay.addWidget(detail_lbl)
+
+        def _restyle():
+            z, t = self._card_z, self._t()
+            dim, muted, ctx = "#5F6368", "#8B949E", "#C9D1D9"
+            header.setStyleSheet(
+                "QFrame#webHeader { background: transparent; border: none; border-radius: 6px; }"
+                "QFrame#webHeader:hover { background: rgba(255,255,255,0.05); }")
+            icon_lbl.setStyleSheet(f"color: {dim}; font-size: {z(12)}px; background: transparent;")
+            verb = "Skill loaded" if action == 'load' else "Skill unloaded"
+            if not ok:
+                verb = "Skill load rejected" if action == 'load' else "Skill unload rejected"
+            summary_lbl.setText(
+                f'<span style="color:{muted}; font-size:{z(11)}px;">{verb} · </span>'
+                f'<span style="color:#E6EDF3; font-size:{z(11)}px; font-weight:600;">'
+                f'{_html.escape(skill)}</span>')
+            toggle_lbl.setStyleSheet(f"color: {dim}; font-size: {z(8)}px; background: transparent;")
+            detail_frame.setStyleSheet(
+                f"QFrame#webDetail {{ background: {t['base']}; border: 1px solid {t['border']};"
+                f" border-radius: 8px; margin-top: 4px; }}")
+            detail_lbl.setStyleSheet(
+                f"color: {ctx}; font-size: {z(10)}px; background: transparent;")
+
+        self._web_card_finalize(message_widget, header, detail_frame, summary_lbl,
+                                icon_lbl, toggle_lbl, _restyle, 'skill_action')
+
+        if save_to_history:
+            try:
+                self.controller.ai.conversation_history.append({
+                    'role': 'ui_event', '_type': 'skill_action',
+                    'content': f'Skill {action}: {skill}',
+                    '_skill': skill, '_skill_action': action,
+                    '_skill_ok': ok, '_skill_detail': detail,
+                })
+            except Exception:
+                pass
+
+    def add_image_attach_card(self, info: dict, save_to_history: bool = True):
+        """Card for attach_image_to_chat — thumbnails of the image(s) the agent
+        pinned for the user, from EITHER surface (direct tool call or the
+        in-python namespace call; both route through the same dispatcher).
+
+        Deliberately minimal: the image-pipeline redesign owns how attached
+        images should really live in the chat (persistent bubbles, detach
+        buttons, token accounting). This card exists so the action is visible
+        and honest today.
+        """
+        import os
+        import html as _html
+        from PyQt6.QtWidgets import QLabel
+        from PyQt6.QtGui import QPixmap
+
+        paths = [str(p) for p in (info.get('paths') or [])]
+        annotation = str(info.get('annotation') or '')
+        (message_widget, outer_lay, header, summary_lbl,
+         icon_lbl, toggle_lbl, detail, detail_lay) = self._web_card_shell("▣", "")
+
+        thumbs, names = [], []
+        for p in paths:
+            name_lbl = QLabel(_html.escape(os.path.basename(p)))
+            name_lbl.setWordWrap(True)
+            detail_lay.addWidget(name_lbl)
+            names.append(name_lbl)
+            try:
+                pm = QPixmap(p)
+                if not pm.isNull():
+                    thumb = QLabel()
+                    thumb.setPixmap(pm.scaledToWidth(
+                        min(360, self._bubble_max_width() - 40),
+                        Qt.TransformationMode.SmoothTransformation))
+                    detail_lay.addWidget(thumb)
+                    thumbs.append(thumb)
+            except Exception:
+                pass
+
+        def _restyle():
+            z, t = self._card_z, self._t()
+            dim, muted = "#5F6368", "#8B949E"
+            header.setStyleSheet(
+                "QFrame#webHeader { background: transparent; border: none; border-radius: 6px; }"
+                "QFrame#webHeader:hover { background: rgba(255,255,255,0.05); }")
+            icon_lbl.setStyleSheet(f"color: {dim}; font-size: {z(12)}px; background: transparent;")
+            label = _html.escape(annotation) if annotation else "Image attached"
+            summary_lbl.setText(
+                f'<span style="color:{muted}; font-size:{z(11)}px;">{label} · </span>'
+                f'<span style="color:#E6EDF3; font-size:{z(11)}px; font-weight:600;">'
+                f'{len(paths)} image(s)</span>')
+            toggle_lbl.setStyleSheet(f"color: {dim}; font-size: {z(8)}px; background: transparent;")
+            detail.setStyleSheet(
+                f"QFrame#webDetail {{ background: {t['base']}; border: 1px solid {t['border']};"
+                f" border-radius: 8px; margin-top: 4px; }}")
+            for lbl in names:
+                lbl.setStyleSheet(f"color: {muted}; font-size: {z(10)}px; background: transparent;")
+
+        self._web_card_finalize(message_widget, header, detail, summary_lbl,
+                                icon_lbl, toggle_lbl, _restyle, 'image_attach')
+
+        if save_to_history:
+            try:
+                self.controller.ai.conversation_history.append({
+                    'role': 'ui_event', '_type': 'image_attach',
+                    'content': f'Attached {len(paths)} image(s)',
+                    '_image_paths': paths, '_annotation': annotation,
+                })
+            except Exception:
+                pass
+
     def add_thinking_card(self, text: str, save_to_history: bool = True,
                           live: bool = False):
         """Collapsible reasoning card — ONE per assistant turn, pinned to the
@@ -1600,8 +1765,41 @@ class EventCardsMixin:
             _restyle()
             return state['text']
 
+        def _discard(keep: int = 0) -> bool:
+            """Abort path (user pressed Stop mid-stream): drop reasoning that was
+            never persisted. `keep` = characters already saved by an earlier
+            response of this same turn — those stay so the card and the session
+            file keep agreeing. Returns True when the card was removed entirely.
+            """
+            state['pending'].clear()
+            kept = state['text'][:keep] if keep else ""
+            if kept.strip():
+                state['text'] = kept
+                state['lines'] = kept.count("\n")
+                state['words'] = len(kept.split())
+                try:
+                    viewer.setPlainText(kept)
+                except RuntimeError:
+                    pass
+                _finish()
+                return False
+            # Nothing of this card was ever saved — remove it, don't orphan it.
+            self._turn_thinking_card = None
+            try:
+                self.message_widgets[:] = [
+                    e for e in self.message_widgets
+                    if e.get('widget') is not message_widget]
+            except Exception:
+                pass
+            try:
+                message_widget.setParent(None)
+                message_widget.deleteLater()
+            except RuntimeError:
+                pass
+            return True
+
         card = {'widget': message_widget, 'append': _append, 'flush': _flush,
-                'finish': _finish, 'state': state}
+                'finish': _finish, 'discard': _discard, 'state': state}
         # Remember it for the rest of this turn so later responses merge in.
         self._turn_thinking_card = card
         self._turn_thinking_group = getattr(self, '_ai_turn_group', None)

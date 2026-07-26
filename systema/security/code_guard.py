@@ -247,7 +247,11 @@ _SECRET_PATTERNS: list[tuple[str, str]] = [
     ("NVIDIA API key", r"nvapi-[A-Za-z0-9_\-]{20,}"),
     ("Cloudflare token", r"cfut_[A-Za-z0-9]{20,}"),
     ("Anthropic key", r"sk-ant-[A-Za-z0-9\-]{24,}"),
-    ("API key", r"sk-[A-Za-z0-9]{30,}"),
+    # Hyphens/underscores allowed INSIDE the body: modern keys are prefixed
+    # (sk-live-…, sk-proj-…), and an alnum-only body stopped matching at the
+    # first hyphen — so exactly the keys in circulation today sailed through
+    # unredacted on their way to a provider.
+    ("API key", r"sk-[A-Za-z0-9][A-Za-z0-9_\-]{29,}"),
     ("Google key", r"AIza[A-Za-z0-9_\-]{30,}"),
     ("GitHub token", r"ghp_[A-Za-z0-9]{20,}"),
     ("AWS access key", r"AKIA[0-9A-Z]{16}"),

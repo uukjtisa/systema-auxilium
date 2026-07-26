@@ -47,7 +47,10 @@ class CompactorAgent:
                     f"INPUT CODE (comments = what mattered):\n{code}\n\n"
                     f"RAW OUTPUT TO COMPACT:\n{output}"},
             ]
-            reply = (self.ai._provider_script(messages) or "").strip()
+            # background_call: compaction output is not the visible chat turn —
+            # no streaming deltas, no thinking card, no scratch-state clobber.
+            with self.ai.background_call("compactor"):
+                reply = (self.ai._provider_script(messages, stream_ok=False) or "").strip()
             if not reply:
                 log.warning("[CompactorAgent.compact] empty reply — skipping")
                 return None

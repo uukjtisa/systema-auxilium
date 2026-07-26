@@ -408,6 +408,28 @@ def drain_stream(gen, on_text=None, on_thinking=None) -> dict:
             "tool_calls": tool_calls, "finish_reason": finish}
 
 
+def supports_images(module) -> bool:
+    """Can this provider script be handed images?
+
+    Contract v2 takes them through the ONE `chat(..., images=...)` entry point,
+    so every v2 script qualifies unless it opts out with `SUPPORTS_VISION =
+    False`. Only LEGACY scripts still need a separate `chat_image()`.
+
+    This used to be an unconditional `hasattr(module, 'chat_image')` — a check
+    left over from before the contract was unified. After the unification no v2
+    script defines chat_image() any more, so it answered False for EVERY modern
+    provider and image analysis was reported as unsupported across the board.
+    """
+    if module is None:
+        return False
+    declared = getattr(module, "SUPPORTS_VISION", None)
+    if declared is not None:
+        return bool(declared)
+    if is_v2(module):
+        return True
+    return callable(getattr(module, "chat_image", None))
+
+
 # ── the ONE call site ────────────────────────────────────────────────────────
 
 def invoke(module, system_prompt: str, messages: list, *,

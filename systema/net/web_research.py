@@ -408,16 +408,40 @@ def _page_title(html: str) -> str:
         return ""
 
 
-def open_page(url: str, config=None, max_chars: int = _MAX_PAGE_CHARS) -> dict:
-    """Fetch a URL and return cleaned, truncated readable text."""
+def open_page(url: str, config=None, max_chars: int = _MAX_PAGE_CHARS,
+              offset: int = 0) -> dict:
+    """Fetch a URL and return cleaned readable text, windowed.
+
+    `offset` selects WHERE the window starts, so a long page can be read in
+    successive calls. Without it the text beyond the cap was simply
+    unreachable — the caller's only options were to guess a more specific page
+    or find a raw/API mirror, neither of which exists for most sites.
+
+    Returns `total_chars` and `next_offset` (None when the end is reached) so
+    the caller can continue deterministically instead of re-fetching blindly.
+    """
     html = fetch_html(url, config)
-    text = _html_to_text(html)
-    truncated = False
-    if max_chars and len(text) > max_chars:
-        text = text[:max_chars].rstrip() + "\n\n[... truncated — refine your query or open a more specific page ...]"
-        truncated = True
+    full = _html_to_text(html)
+    total = len(full)
+    offset = max(0, int(offset or 0))
+    if offset >= total and total:
+        return {"url": url, "title": _page_title(html), "text": "",
+                "truncated": False, "offset": offset, "total_chars": total,
+                "next_offset": None,
+                "engine": "playwright" if (_cfg(config, "use_playwright")
+                                           and playwright_available()) else "trafilatura"}
+
+    text = full[offset:offset + max_chars] if max_chars else full[offset:]
+    end = offset + len(text)
+    truncated = end < total
+    next_offset = end if truncated else None
+    if truncated:
+        text = text.rstrip() + (
+            f"\n\n[... {total - end} more characters — continue with "
+            f"offset: {next_offset} ...]")
     return {"url": url, "title": _page_title(html), "text": text,
-            "truncated": truncated,
+            "truncated": truncated, "offset": offset, "total_chars": total,
+            "next_offset": next_offset,
             "engine": "playwright" if (_cfg(config, "use_playwright")
                                        and playwright_available()) else "trafilatura"}
 

@@ -41,7 +41,11 @@ class SessionNamerAgent:
                 {'role': 'system', 'content': _SYSTEM},
                 {'role': 'user', 'content': user},
             ]
-            reply = (self.ai._provider_script(messages) or "").strip()
+            # background_call: this runs on its own thread while a chat turn may
+            # still be generating — it must neither stream into the chat bubble /
+            # thinking card nor clobber the main turn's scratch state.
+            with self.ai.background_call("session-namer"):
+                reply = (self.ai._provider_script(messages, stream_ok=False) or "").strip()
             if not reply:
                 log.warning("[SessionNamerAgent.generate] empty reply")
                 return None

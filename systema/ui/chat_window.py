@@ -1339,6 +1339,18 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
                     elif msg.get("_type") == "thinking":
                         self.add_thinking_card(msg.get("_thinking", ""),
                                                save_to_history=False)
+                    elif msg.get("_type") == "skill_action":
+                        self.add_skill_action_card(
+                            {'skill': msg.get("_skill", ""),
+                             'action': msg.get("_skill_action", "load"),
+                             'ok': msg.get("_skill_ok", True),
+                             'detail': msg.get("_skill_detail", "")},
+                            save_to_history=False)
+                    elif msg.get("_type") == "image_attach":
+                        self.add_image_attach_card(
+                            {'paths': msg.get("_image_paths", []),
+                             'annotation': msg.get("_annotation", "")},
+                            save_to_history=False)
                     elif msg.get("_type") == "web_page":
                         self.add_web_page_card(
                             {'mode': msg.get("_web_mode", "open"),
@@ -1930,6 +1942,11 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
             self.waiting_for_playback = True
 
             self.start_thinking_animation()
+            # Keep the in-turn typing dots alive through synthesis. The
+            # controller hides them the moment the response lands, but in voice
+            # mode nothing is shown until playback starts — leaving a dead gap
+            # where the indicator had vanished and no text had appeared yet.
+            self.show_thinking_bubble()
 
             self.speak_ai_response(message)
         else:
@@ -1957,6 +1974,8 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
             self.waiting_for_playback = False
 
             self.stop_thinking_animation()
+            # The dots handed the turn over to the speech-synced reveal.
+            self.hide_thinking_bubble()
 
             self.add_ai_message(self.pending_voice_message)
 
@@ -1965,6 +1984,22 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
             self.log("[Voice] Message displayed successfully")
         else:
             self.log("[Voice] No pending message to display")
+
+    def flush_pending_voice_message(self):
+        """Display a reply still waiting on TTS playback.
+
+        Voice mode holds the text back until playback starts. If the audio is
+        killed first (auto barge-in, or the user hitting Stop), that callback
+        never arrives — the reply stayed invisible while the synthesis dots span
+        forever, even though the message was already in the session. Idempotent;
+        also clears stale dots when nothing is pending.
+        """
+        if self.waiting_for_playback and self.pending_voice_message:
+            self.log("[Voice] Playback aborted — displaying buffered message now")
+            self._handle_voice_playback_on_main_thread()
+            return True
+        self.hide_thinking_bubble()
+        return False
 
     def speak_ai_response(self, text):
         """Queue AI response for TTS (serialized speech queue — non-blocking,

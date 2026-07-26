@@ -60,6 +60,38 @@ def migrate_legacy(old: Path, new: Path) -> None:
         pass    # migration is best-effort — the caller's dir still gets made
 
 
+def is_app_generated(path) -> bool:
+    """True only for files the APP itself created under data/temp/.
+
+    The image-context pipeline cleans up after itself, and cleanup must never
+    reach a path the user (or the AI) supplied: attach_image_to_context() takes
+    any path, so an unguarded delete removed the user's own screenshots and
+    reference art. Anything outside data/temp/ is somebody else's file.
+    """
+    try:
+        p = Path(path).resolve()
+    except (OSError, ValueError, TypeError):
+        return False
+    try:
+        return p.is_relative_to((DATA_DIR / "temp").resolve())
+    except AttributeError:              # Python < 3.9
+        return str(p).startswith(str((DATA_DIR / "temp").resolve()))
+    except (OSError, ValueError):
+        return False
+
+
+def discard_temp_image(path) -> bool:
+    """Delete a queued context image ONLY if the app generated it. Returns True
+    when a file was actually removed. Never raises."""
+    if not is_app_generated(path):
+        return False
+    try:
+        Path(path).unlink()
+        return True
+    except OSError:
+        return False
+
+
 def cache_dir(name: str, legacy=None) -> Path:
     """data/cache/<name>, created (parents included). `legacy` = the folder's
     pre-consolidation location (str relative to data/, or a Path) — migrated

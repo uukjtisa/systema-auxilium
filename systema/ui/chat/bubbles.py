@@ -1145,10 +1145,32 @@ class BubblesMixin:
     # removes the live segment first. The stream IS the reveal, so the
     # typewriter animation is skipped for that turn.
 
+    def _voice_defers_the_reply(self) -> bool:
+        """True when this turn's reply will be revealed IN SYNC WITH SPEECH
+        rather than shown as it arrives (voice mode, outside work mode — see
+        show_ai_message).
+
+        Streaming into the bubble in that case produced the reported flash: the
+        text painted live, was dropped 1.2s after the stream ended (it is only a
+        stub, and the real render was still waiting on TTS), and then re-appeared
+        with the typewriter reveal. Suppressing the live segment keeps voice mode
+        to ONE appearance of the text — the spoken one.
+        """
+        try:
+            return bool(self.voice_enabled
+                        and not self.controller.ai.tool_manager.work.is_working)
+        except Exception:
+            return False
+
     def on_stream_started(self):
         """First chunk arrived — open the turn shell and a live text segment."""
         try:
             if getattr(self, '_stream_seg', None) is not None:
+                return
+            if self._voice_defers_the_reply():
+                # Dots stay, text waits for the speech-synced reveal.
+                self._stream_suppressed = True
+                self._stream_active = True
                 return
             fsize = self._get_msg_font_size()
             label = QLabel()
@@ -1191,6 +1213,8 @@ class BubblesMixin:
         setText() it on every delta — O(n) work and a full rich-text relayout
         per token, i.e. O(n^2) over a reply. A long report (with the thinking
         card doing the same thing simultaneously) froze the UI near the end."""
+        if getattr(self, '_stream_suppressed', False):
+            return                      # voice mode: the reveal is the reply
         seg = getattr(self, '_stream_seg', None)
         if seg is None:
             self.on_stream_started()
@@ -1293,6 +1317,7 @@ class BubblesMixin:
                 pass
             self._stream_think_card = None
         self._stream_active = False
+        self._stream_suppressed = False
         # The final message normally lands in the same tick; if the turn
         # produced no assistant text at all (e.g. tool-only), drop the stub.
         QTimer.singleShot(1200, self._drop_stale_stream_segment)
@@ -1300,6 +1325,40 @@ class BubblesMixin:
     def _drop_stale_stream_segment(self):
         if not getattr(self, '_stream_active', False):
             self._clear_stream_segment()
+
+    def abort_stream(self) -> bool:
+        """User stopped the response MID-STREAM: erase every trace of the
+        half-written turn.
+
+        A stop used to leave the live thinking card orphaned on screen (its
+        finish path only runs on a natural stream end) and the partial reply
+        segment floating in the turn shell — neither of which is in the saved
+        session, so the window and the session file disagreed on reload.
+
+        Returns True when there WAS something in flight, so the caller knows to
+        purge the matching partial entry from the conversation history too.
+        """
+        self._stop_stream_flush()
+        seg = getattr(self, '_stream_seg', None)
+        card = getattr(self, '_stream_think_card', None)
+        had_stream = (seg is not None or card is not None
+                      or getattr(self, '_stream_suppressed', False))
+
+        if card is not None:
+            try:
+                # Keep only reasoning already persisted by an EARLIER response of
+                # this same turn (multi-step work turns share one card); anything
+                # from the aborted response is dropped, card and all.
+                card['discard'](card['state'].get('saved_upto', 0))
+            except Exception:
+                log.warning("[ChatWindow.abort_stream] thinking card discard failed",
+                            exc_info=True)
+            self._stream_think_card = None
+
+        self._stream_active = False
+        self._stream_suppressed = False
+        self._clear_stream_segment()
+        return had_stream
 
     def _clear_stream_segment(self):
         """Remove the live streaming segment (hand-off or abandonment)."""

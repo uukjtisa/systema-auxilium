@@ -100,7 +100,16 @@ def _web_search_body(args):
         out.append(f"max_results: {int(args['max_results'])}")
     if args.get('fetch_top') not in (None, '', 0):
         out.append(f"fetch_top: {int(args['fetch_top'])}")
+    if args.get('offset') not in (None, '', 0):
+        out.append(f"offset: {int(args['offset'])}")
     return "\n".join(out)
+
+
+def _attach_image_body(args):
+    paths = args.get('paths') or args.get('path') or ''
+    if isinstance(paths, str):
+        paths = [p for p in paths.splitlines() if p.strip()]
+    return "\n".join(str(p).strip() for p in paths if str(p).strip())
 
 
 CANONICAL_TOOLS = {
@@ -343,6 +352,10 @@ CANONICAL_TOOLS = {
                           "call (default 0 = just the list). Use sparingly — each opened page "
                           "adds a lot of context; prefer opening specific results deliberately.",
                           False),
+            ('offset', "open mode: character position to start reading from (default 0). A long "
+                       "page comes back in windows — when the result says more is available, "
+                       "call again with the SAME url and the offset it gives you to read on.",
+                       False),
             ('annotation',
              "A short 3-6 word label (e.g. 'Searching RTX 5090 benchmarks'). ALWAYS include "
              "it — shown to the user as this step's title.", False),
@@ -362,6 +375,32 @@ CANONICAL_TOOLS = {
                       "lines: 'mode:' (search|open|links), 'max_results:', 'fetch_top:'. "
                       "Read-only, no approval. May be batched. Cite pages you use as "
                       "[label](url)."),
+        },
+    },
+    'attach_image_to_chat': {
+        'description': (
+            "Show one or more images to the USER by pinning them to your reply — previews, "
+            "screenshots, generated designs, charts. One absolute path per line. The files "
+            "are NOT modified or deleted. Use this whenever you produced or found an image "
+            "the user should actually see; do not tell them to open a file themselves."
+        ),
+        'param': ('paths', "Absolute image path(s) to show the user — one per line."),
+        'extra_params': [
+            ('annotation',
+             "A short 3-6 word label (e.g. 'Showing the rendered preview'). ALWAYS include "
+             "it — shown to the user as this step's title.", False),
+        ],
+        'exec': False,
+        'to_fence': _attach_image_body,
+        'compat': {
+            'table_row': "attach_image_to_chat: Show image(s) to the user in chat",
+            'fence_example': (
+                "```attach_image_to_chat: [Showing the rendered preview]\n"
+                "C:/Users/you/Desktop/preview.png\n"
+                "```"
+            ),
+            'usage': ("One absolute image path per line. Read-only, no approval. The source "
+                      "files are left untouched."),
         },
     },
 }

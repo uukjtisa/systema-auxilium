@@ -295,7 +295,7 @@ def test_native_args_web_search_spec(tm):
         "web_search", {"query": "rust borrow checker", "mode": "search",
                        "max_results": "3", "annotation": "look up"})
     assert spec == {"mode": "search", "query": "rust borrow checker",
-                    "max_results": 3, "fetch_top": 0,
+                    "max_results": 3, "fetch_top": 0, "offset": 0,
                     "annotation": "look up", "error": None}
     # url alias for open/links + missing query flags an error
     spec2 = tm.native_args_to_spec(

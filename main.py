@@ -44,57 +44,26 @@ def _make_log_path():
 
 
 class _LogSink:
-    """Shared, size-rotating session log file (both Tees write through ONE sink).
-    At ~2MB the current file is closed and a fresh part opened — an unbounded
-    log once grew ~2.8MB of scraped article text during a live demo and is the
-    prime suspect for the silent UI death (idea #12). faulthandler is re-aimed
-    at the new file on every rotation so C-level crashes always land somewhere
-    open."""
-    MAX_BYTES = 2 * 1024 * 1024
+    """Shared session log file — ONE file per run, both Tees write through it.
+
+    Deliberately NOT rotated. Size-based rotation used to split a run at ~2MB
+    into `_p2`, `_p3`… parts, which made debugging worse than the problem it was
+    guarding: a single session's story was scattered across files, greps missed
+    half the evidence, and the tail of a crash often lived in a different part
+    than its cause. faulthandler stays aimed at this one file for the whole run,
+    so a C-level crash always lands in the same place as the Python log.
+    """
 
     def __init__(self):
         self.path = _make_log_path()
         self.file = open(self.path, "w", encoding="utf-8", buffering=1)
         self._written = 0
-        self._part = 1
         self._lock = threading.Lock()
 
     def write(self, data):
         with self._lock:
             self.file.write(data)
             self._written += len(data)
-            if self._written >= self.MAX_BYTES:
-                self._rotate()
-
-    def _rotate(self):
-        old_name = self.path.name
-        try:
-            self.file.write(
-                f"\n=== Log rotated (~{self.MAX_BYTES // (1024 * 1024)}MB cap)"
-                f" — continues in a new file ===\n")
-            self.file.flush()
-            self.file.close()
-        except Exception:
-            pass
-        # _make_log_path() has 10ms resolution — a rotation landing in the same
-        # window as the previous open would silently REOPEN ("w") the same file.
-        cand = _make_log_path()
-        if cand == self.path or cand.exists():
-            cand = cand.with_name(f"{cand.stem}_p{self._part + 1}{cand.suffix}")
-        self.path = cand
-        self.file = open(self.path, "w", encoding="utf-8", buffering=1)
-        self._part += 1
-        self._written = 0
-        try:
-            self.file.write(
-                f"=== Systema Auxilium — Session Log "
-                f"(part {self._part}, continued from {old_name}) ===\n\n")
-        except Exception:
-            pass
-        try:
-            faulthandler.enable(file=self.file)
-        except Exception:
-            pass
 
     def flush(self):
         try:
@@ -185,11 +154,12 @@ def _setup_session_logger():
     # logging.StreamHandler() stores a reference to sys.stderr at creation time,
     # so as long as we replace it here first, every logger created during import
     # will automatically write through our Tee — no FileHandler injection needed.
-    # Both Tees share the ONE rotating sink.
+    # Both Tees share the ONE sink (one file per run — never split).
     sys.stdout = _Tee(sys.stdout, sink)
     sys.stderr = _Tee(sys.stderr, sink)
 
-    # C-level crashes / SIGSEGV → also goes to log file (re-aimed on rotation)
+    # C-level crashes / SIGSEGV → also goes to the log file (one file, so this
+    # aim holds for the whole run)
     faulthandler.enable(file=sink.file)
 
     # ── Exit hooks ────────────────────────────────────────────────────────────

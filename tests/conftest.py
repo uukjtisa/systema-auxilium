@@ -59,6 +59,30 @@ def sample_tree(tmp_path):
     return tmp_path
 
 
+@pytest.fixture
+def tool_manager(qapp):
+    """A ToolManager with deterministic teardown.
+
+    Each ToolManager owns an ApprovalSignal QObject wired to its own bound
+    methods, plus a PythonInterpreter. Letting dozens of them simply fall out of
+    scope over a full-suite run left queued signal deliveries aimed at
+    already-collected C++ objects — which then crashed the interpreter (Windows
+    access violation) inside whichever unrelated test next called
+    processEvents(). Tests that build a ToolManager should use this fixture.
+    """
+    from systema.execution.tool_manager import ToolManager
+    tm = ToolManager()
+    yield tm
+    try:
+        tm.approval_signal.disconnect()
+    except (TypeError, RuntimeError):
+        pass            # nothing connected — fine
+    try:
+        qapp.processEvents()
+    except Exception:
+        pass
+
+
 @pytest.fixture(scope="session")
 def qapp():
     """A headless QApplication for tests that construct Qt objects.

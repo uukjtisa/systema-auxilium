@@ -102,7 +102,8 @@ def get_system_prompt(
     elif include_tool_format:
         body.append(compat.tool_format_section(
             include_workmode=include_interpreter_mode_rules and include_fence_syntax,
-            include_skills=skills_present))
+            include_skills=skills_present,
+            include_images=include_image_tools))
 
     if include_memory:
         body.append(shared.memory_section(hint, inject_all=memory_inject_all))

@@ -206,10 +206,10 @@ class AssistantController(QObject):
 
         def _agent_attach_image_to_context(path):
             """Feed an image to the AI as PRIVATE, one-turn context (NOT pinned to
-            the chat, not shown to the user). It is sent to the provider's
-            chat_image() on the next interpreter step, then deleted from disk — the tokens
-            are spent exactly once. Requires a provider that supports image
-            analysis (defines chat_image()).
+            the chat, not shown to the user). It is sent to the provider on the
+            next interpreter step, then DETACHED FROM CONTEXT — the tokens are
+            spent exactly once. The file on disk is never modified or removed.
+            Requires a provider that supports image analysis.
 
             Usage inside code execution:
                 attach_image_to_context(r"C:\\path\\to\\image.png")
@@ -218,17 +218,22 @@ class AssistantController(QObject):
             if not os.path.isfile(path):
                 return f"[attach_image_to_context] File not found: {path}"
             if not self.ai.supports_image_analysis():
-                return ("[attach_image_to_context] The active provider can't analyze "
-                        "images (it has no chat_image()). Use attach_image_to_chat() "
-                        "to pin the image for the user instead.")
+                return ("[attach_image_to_context] The active provider cannot accept "
+                        "images. Use attach_image_to_chat() to pin the image for the "
+                        "user instead.")
             self.ai.queue_context_image(path)
             return (f"[attach_image_to_context] Queued for ONE-TURN analysis: {path}. "
-                    "Describe what you see in your very next reply — it is removed "
-                    "after this turn to save tokens.")
+                    "Describe what you see in your very next reply — it is detached "
+                    "from your context after this turn (the file stays on disk).")
 
         self._agent_attach_image = _agent_attach_image
         self._agent_take_screenshot = _agent_take_screenshot
         self._agent_attach_image_to_context = _agent_attach_image_to_context
+        # Delivery binding for the attach_image_to_chat TOOL surface. Both
+        # surfaces (tool call and in-python call) go through this one function,
+        # so they cannot diverge — the dual-surface rule from the capability
+        # manifest. The tasker supplies its own binding for the same capability.
+        self.ai.tool_manager._attach_image_binding = _agent_attach_image
         # Guarantee namespaces are re-injected on ANY interpreter reset path.
         self.ai.tool_manager._namespace_injector = self._inject_interpreter_namespaces
         self._inject_interpreter_namespaces()
@@ -1923,9 +1928,19 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             self.ai.tool_manager.work.reset()
             self.is_processing = False
 
+            # Same clean abort as interrupt_request: a work step interrupted
+            # while its reply was streaming must not leave a half-written
+            # segment on screen or a partial assistant entry in the session.
+            self._abort_active_stream()
+
             # Cancel any pending narration along with the work it described
             try:
                 self.voice_handler.stop_all()
+            except Exception:
+                pass
+            try:
+                if self._chat:
+                    self._chat.flush_pending_voice_message()
             except Exception:
                 pass
 
@@ -1980,6 +1995,19 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
                 self.voice_handler.stop_all()
             except Exception:
                 pass
+            # Killing the audio also kills the callback that would have shown a
+            # voice-buffered reply — surface it now instead of stranding it.
+            try:
+                if self._chat:
+                    self._chat.flush_pending_voice_message()
+            except Exception:
+                pass
+
+        # Streaming stop = clean abort: erase the half-written reply and its
+        # live thinking card from the UI, then purge the matching partial entry
+        # from history so it is never saved to the session or re-sent.
+        if self._abort_active_stream():
+            interrupted = True
 
         # Remove the last user message from conversation history
         if interrupted:
@@ -2000,6 +2028,32 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
             pass
 
         return interrupted
+
+    def _abort_active_stream(self) -> bool:
+        """Tear down an in-flight streamed turn and purge its partial history
+        entry. No-op (False) when nothing was streaming, so the normal
+        non-streaming interrupt paths are unaffected.
+
+        Must run AFTER the worker has been terminated and waited on — otherwise
+        the dying worker could append its partial entry back after the purge.
+        """
+        if not self._chat:
+            return False
+        try:
+            had_stream = self._chat.abort_stream()
+        except Exception:
+            log.warning("[AssistantController._abort_active_stream] UI abort failed",
+                        exc_info=True)
+            return False
+        if not had_stream:
+            return False
+        try:
+            self.ai.discard_streamed_partial()
+        except Exception:
+            log.warning("[AssistantController._abort_active_stream] history purge failed",
+                        exc_info=True)
+        log.info("[AssistantController._abort_active_stream] ✓ streamed turn aborted cleanly")
+        return True
 
     def _on_work_narration(self, text):
         """Slot for ApprovalSignal.work_narration — a work step's narration, sent
@@ -2594,22 +2648,51 @@ Let the user know they can give you a custom name from the sidebar (top-left ☰
         self.ui.show()
 
     def _inject_interpreter_namespaces(self):
-        ns = self.ai.tool_manager.tools['python'].namespace
-        ns['controller'] = self
-        ns['attach_image_to_chat'] = self._agent_attach_image
-        ns['attach_image_to_context'] = self._agent_attach_image_to_context
-        ns['take_screenshot'] = self._agent_take_screenshot
-        ns['notify'] = self.notify
-        ns['memorize'] = self.memorize
-        ns['search_memory'] = self.search_memory
-        ns['update_memory'] = self.update_memory
-        ns['forget_memory'] = self.forget_memory
-        # web_search(query, mode='search'|'open'|'links', max_results=8, fetch_top=0)
-        # — same tool the model can call directly; from inside python it spawns its
-        # own result card and returns its output as a separate tool result.
-        ns['web_search'] = self.ai.tool_manager.interp_web_search
-        ns['app_root'] = str(_APP_ROOT)
-        ns['skills_path'] = str(_APP_ROOT / "skills")
+        """Build the main session's python namespace FROM the capability manifest.
+
+        The names and their gates live in systema/execution/capabilities.py; this
+        method only supplies the bindings. The tasker builds its namespace the
+        same way with its own bindings, so a capability can never mean one thing
+        here and something else in a background task — and a capability the
+        prompt hides can no longer be silently injected anyway (which is exactly
+        what used to happen to notify/memory in taskers).
+        """
+        from systema.execution import capabilities as caps
+        tm = self.ai.tool_manager
+        # The main session's NAMESPACE is deliberately permissive: every one of
+        # these names has always been present in the interpreter regardless of
+        # the prompt's include_* switches, and the user's own snippets rely on
+        # that. Over-provisioning the namespace is not a lie (nothing advertises
+        # what isn't there) — the strict gating that matters is on the TOOL
+        # surface and in the prompt, which is where the drift actually hurt.
+        # Flip these to the settings lookups to make the namespace strict too.
+        gates = caps.gates_for_chat(
+            allow_workmode=bool(getattr(tm, 'allow_workmode', True)),
+            has_skills=bool(getattr(self, 'skill_manager', None)),
+            include_image_tools=True,
+            include_notify_tool=True,
+            include_memory=True,
+            include_controller_ref=True,
+        )
+        bindings = {
+            'controller': self,
+            # Dual-surface mirrors: these route through the SAME run_* the tool
+            # call uses, so an in-python call spawns the same card and returns
+            # the same observation (the web_search bar).
+            'web_search': tm.interp_web_search,
+            'attach_image_to_chat': tm.interp_attach_image_to_chat,
+            'attach_image_to_context': self._agent_attach_image_to_context,
+            'take_screenshot': self._agent_take_screenshot,
+            'notify': self.notify,
+            'memorize': self.memorize,
+            'search_memory': self.search_memory,
+            'update_memory': self.update_memory,
+            'forget_memory': self.forget_memory,
+            'app_root': str(_APP_ROOT),
+            'skills_path': str(_APP_ROOT / "skills"),
+        }
+        ns = tm.tools['python'].namespace
+        ns.update(caps.build_namespace(caps.CHAT, gates, bindings))
 
     def reset_python_interpreter(self):
         """Reset the Python interpreter and reinject namespaces"""

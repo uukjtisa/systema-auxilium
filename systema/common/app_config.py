@@ -35,7 +35,10 @@ from systema.common.logger import _make_logger, _NoOpLogger
 _verbose = True
 log = _make_logger("AppConfig") if _verbose else _NoOpLogger()
 
-CONFIG_FILE = APP_ROOT / "settings.json"
+# Lives under data/ with the rest of the user's state (2026-07-26). The old
+# root-level location is migrated in on first load — see _adopt_root_config.
+CONFIG_FILE = APP_ROOT / "data" / "settings.json"
+ROOT_CONFIG_FILE = APP_ROOT / "settings.json"
 
 # section name → legacy root file it replaces
 LEGACY_FILES = {
@@ -64,6 +67,7 @@ def _atomic_write(path, data: dict) -> bool:
     """Write JSON via temp file + os.replace so a crash mid-write can never
     leave a truncated settings.json."""
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name, suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -85,7 +89,10 @@ def _migrate(config_file) -> dict:
     """One-time merge of the legacy per-file configs into settings.json.
     Returns the merged dict (possibly empty on a fresh install). Legacy files
     are deleted only for sections that made it into a verified settings.json."""
-    legacy_dir = config_file.parent
+    # The legacy per-file configs always lived at the project ROOT, which is no
+    # longer where settings.json itself lives.
+    legacy_dir = (config_file.parent if config_file != CONFIG_FILE
+                  else ROOT_CONFIG_FILE.parent)
     merged, migrated_paths = {}, []
     for section, filename in LEGACY_FILES.items():
         path = legacy_dir / filename
@@ -113,8 +120,74 @@ def _migrate(config_file) -> dict:
     return merged
 
 
+def _quarantine_unreadable(path) -> bool:
+    """A config file that EXISTS but will not parse is renamed aside, never
+    silently ignored.
+
+    Without this, an unreadable settings.json fell through to "fresh install":
+    the next save_section() then wrote a file containing only that one section,
+    permanently discarding everything else. A wipe caused by a transient read
+    failure must never be indistinguishable from a first run.
+    """
+    try:
+        if not os.path.isfile(path):
+            return False
+        import time
+        aside = f"{path}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
+        os.replace(path, aside)
+        log.error(f"[app_config] ✗ '{path}' could not be parsed — preserved as "
+                  f"'{aside}'. Starting from defaults; restore it by hand to "
+                  f"recover the settings inside.")
+        return True
+    except OSError as e:
+        log.error(f"[app_config._quarantine_unreadable] ✗ {path}: {e}")
+        return False
+
+
+def _adopt_root_config(config_file) -> dict | None:
+    """Move a pre-2026-07-26 root-level settings.json into data/.
+
+    Sections are MERGED rather than replaced: if a data/ file already exists,
+    anything it is missing is taken from the root file. That matters when the
+    root file is restored from a backup after data/settings.json has already
+    been written — the restored sections are folded in instead of ignored.
+    """
+    # ONLY for the real app config. A caller that passed an explicit path (the
+    # test suite) must never touch — let alone delete — the project's own
+    # root settings.json.
+    if config_file != CONFIG_FILE:
+        return None
+    root = _read_json(ROOT_CONFIG_FILE)
+    if root is None:
+        return None
+    current = _read_json(config_file) or {}
+    merged = dict(root)
+    merged.update(current)              # data/ wins where both have a section
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    if not _atomic_write(config_file, merged):
+        return merged                   # keep working; root file stays put
+    if _read_json(config_file) != merged:
+        log.error("[app_config._adopt_root_config] ✗ verify-read failed — the "
+                  "root settings.json is being kept")
+        return merged
+    try:
+        os.remove(ROOT_CONFIG_FILE)
+        log.info(f"[app_config._adopt_root_config] ✓ moved settings.json into "
+                 f"'{config_file}' ({len(merged)} section(s))")
+    except OSError as e:
+        log.warning(f"[app_config._adopt_root_config] could not remove the old "
+                    f"root settings.json: {e}")
+    return merged
+
+
 def _load_all(config_file) -> dict:
     data = _read_json(config_file)
+    if data is None and os.path.isfile(config_file):
+        # Exists but unparseable — preserve it, then continue as a fresh start.
+        _quarantine_unreadable(config_file)
+    adopted = _adopt_root_config(config_file)
+    if adopted is not None:
+        return adopted
     if data is not None:
         return data
     return _migrate(config_file)

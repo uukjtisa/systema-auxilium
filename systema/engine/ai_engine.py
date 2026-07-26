@@ -8,6 +8,8 @@ UNIFIED: Single _build_messages() for all providers. Each _http_* helper
 """
 
 import re
+import threading as _threading
+from contextlib import contextmanager as _contextmanager
 
 from systema.common.logger import _make_logger, _NoOpLogger
 from systema.execution.tool_manager import ToolManager
@@ -103,6 +105,14 @@ class AIEngine:
         self.last_native_tool_calls = 0
         self.last_sent_messages = None
         self.last_raw_provider_result = None
+        # Last NAMED provider failure (see _record_provider_error) — consumed by
+        # _provider_failure_message so the turn's error says which provider
+        # failed and why, instead of a bare "no response".
+        self.last_provider_error = None
+        # Background-call depth (see background_call()). > 0 means the provider
+        # call in flight belongs to a SUB-AGENT, not the visible chat turn.
+        self._background_depth = 0
+        self._background_lock = _threading.RLock()
         log.debug("[AIEngine.__init__] conversation_history initialized (empty)")
 
 
@@ -170,7 +180,6 @@ class AIEngine:
         # Ephemeral image analysis: paths queued by attach_image_to_context() are
         # fed to the provider's chat_image() on the NEXT work-mode step, exactly
         # once, then deleted — never pinned, never stored in history (token-cheap).
-        import threading as _threading
         self._pending_context_images = []
         self._images_lock = _threading.Lock()
 
@@ -190,12 +199,16 @@ class AIEngine:
         return pending
 
     def supports_image_analysis(self) -> bool:
-        """True if the active provider script exposes chat_image() — the capability
-        attach_image_to_context() needs. Never raises."""
+        """True if the active provider script can be handed images — the
+        capability attach_image_to_context() needs. Never raises.
+
+        Delegates to the contract (see provider_contract.supports_images): v2
+        scripts take images through chat(images=...), legacy ones need
+        chat_image(). Checking for chat_image() directly — as this did — locked
+        every post-unification provider out of image analysis.
+        """
         try:
-            module = self._load_provider_module()
-            return bool(module and hasattr(module, 'chat_image')
-                        and callable(getattr(module, 'chat_image')))
+            return pc.supports_images(self._load_provider_module())
         except Exception:
             return False
 
@@ -797,12 +810,60 @@ class AIEngine:
 
     def _streaming_on(self, module) -> bool:
         """Stream when the setting is on (default) AND the script is v2.
-        Sub-agents / background callers opt out via self.allow_streaming."""
+        Sub-agents / background callers opt out via self.allow_streaming or,
+        structurally, by running inside background_call()."""
+        # getattr, not the in_background_call property: this method is also
+        # bound onto lightweight engine stand-ins (tests, task shims) that carry
+        # the methods but not the class.
         return (
             getattr(self, 'allow_streaming', True)
+            and getattr(self, '_background_depth', 0) <= 0
             and bool(self._setting('streaming_enabled', True))
             and pc.is_v2(module)
         )
+
+    @property
+    def in_background_call(self) -> bool:
+        """True while a SUB-AGENT provider call is in flight on this engine."""
+        return getattr(self, '_background_depth', 0) > 0
+
+    @_contextmanager
+    def background_call(self, label: str = "sub-agent"):
+        """Isolate a sub-agent provider call from the visible chat turn.
+
+        Sub-agents (session namer, compactor, code agent, task pings, one-shot
+        internal asks) share the MAIN engine instance, so without this guard
+        their call would (a) stream its deltas into the live chat bubble and the
+        turn's thinking card, and (b) clobber the per-turn scratch state the
+        main turn is mid-way through using — the namer runs on its own QThread
+        while a chat turn may still be generating.
+
+        Inside this block streaming is forced OFF (`_streaming_on` consults
+        `in_background_call`) and every per-turn scratch attribute is snapshotted
+        and restored on exit, so a sub-agent can never paint into, or corrupt,
+        the main conversation. Re-entrant and thread-safe.
+
+        Any NEW sub-agent MUST route its provider call through this — that is
+        the structural rule; passing `stream_ok=False` alone is not sufficient
+        (it silences the stream but still clobbers the scratch state).
+        """
+        _SCRATCH = ('_pending_native', '_pending_thinking', 'last_tool_transport',
+                    'last_native_tool_calls', 'last_sent_messages',
+                    'last_raw_provider_result')
+        with self._background_lock:
+            self._background_depth += 1
+            depth = self._background_depth
+        saved = {k: getattr(self, k, None) for k in _SCRATCH}
+        log.debug(f"[AIEngine.background_call] ▶ {label} (depth={depth}) — "
+                  f"streaming suppressed, scratch state isolated")
+        try:
+            yield
+        finally:
+            for k, v in saved.items():
+                setattr(self, k, v)
+            with self._background_lock:
+                self._background_depth -= 1
+            log.debug(f"[AIEngine.background_call] ◀ {label} — scratch restored")
 
     def _run_provider_call(self, module, system_prompt, convo, images=None,
                            tools=None, stream_ok=True) -> dict | None:
@@ -875,22 +936,25 @@ class AIEngine:
         # set_session_name tool was retired 2026-07-19 (#31).
         tools = self.tool_manager.get_canonical_tools(
             include_skills=bool(self.skill_manager),
+            # Same gate the prompt uses — advertising and teaching must agree.
+            include_images=bool(getattr(self, 'include_image_tools', False)),
         )
         try:
             result = self._run_provider_call(module, system_prompt, convo,
                                              images=images, tools=tools)
         except _cf.TimeoutError:
-            log.error(f"[AIEngine._provider_script_native] ✗ no response within "
-                      f"{self._response_timeout()}s")
-            self.log(f"Provider did not respond within {self._response_timeout()}s", "ERROR")
+            self._record_provider_error(
+                module, f"did not send a first token within {self._response_timeout()}s")
             return None
         except Exception as e:
             log.error(f"[AIEngine._provider_script_native] ✗ provider raised: {e}\n{traceback.format_exc()}")
-            self.log(f"Custom script native-tools error: {e}", "ERROR")
+            self._record_provider_error(module, f"raised {type(e).__name__}: {e}")
             return None
         if not isinstance(result, dict):
-            log.error("[AIEngine._provider_script_native] ✗ provider must return a dict "
-                      "{'content'/'text', 'tool_calls'}")
+            self._record_provider_error(
+                module, "returned a malformed result",
+                detail="native chat() must return {'content'/'text', 'tool_calls'}, "
+                       f"got {type(result).__name__}")
             return None
 
         self._pending_thinking = result.get('thinking') or None
@@ -950,7 +1014,41 @@ class AIEngine:
         ai_text = (text + ("\n\n" if text and fences else "") + fences).strip()
         log.info(f"[AIEngine._provider_script_native] ✓ native result | text_len={len(text)} | "
                  f"tool_calls={len(raw_calls)} | reconstructed_len={len(ai_text)}")
-        return ai_text or None
+        if not ai_text:
+            # Neither free text nor a tool call: the turn is empty. Name it,
+            # rather than unwinding into a bare "no response".
+            self._record_provider_error(
+                module, "returned an empty response (no text and no tool calls)",
+                detail=f"finish_reason={result.get('finish_reason')} | turns={len(convo)}")
+            return None
+        return ai_text
+
+    def _provider_error_context(self, module=None) -> str:
+        """Name the provider the way the USER knows it: the script's file name
+        (self.ai_provider is always the literal 'custom_script')."""
+        import os as _os
+        name = getattr(module, '__name__', None) if module is not None else None
+        path = getattr(self, 'custom_script_path', '') or ''
+        return name or (_os.path.basename(path) if path else self.ai_provider)
+
+    def _record_provider_error(self, module, what: str, detail: str = "") -> str:
+        """Turn a silent provider failure into a NAMED, actionable error.
+
+        An empty return used to surface as a bare "no response" with no provider,
+        no reason and nothing in the log to debug from — indistinguishable from
+        the app hanging. The message built here is stashed on
+        `last_provider_error` so whichever call path unwinds can show it instead
+        of its own generic string.
+        """
+        who = self._provider_error_context(module)
+        msg = (f"Provider '{who}' {what}. This usually means a temporary outage, "
+               f"a rate limit, or a request the model refused. Try again, or "
+               f"switch providers in Settings ▸ AI Provider.")
+        self.last_provider_error = msg
+        log.error(f"[AIEngine] ✗ provider '{who}' {what}"
+                  + (f" | {detail}" if detail else ""))
+        self.log(msg, "ERROR")
+        return msg
 
     def _provider_script(self, messages, images=None, module=None,
                          stream_ok=True) -> str | None:
@@ -981,19 +1079,22 @@ class AIEngine:
             result = self._run_provider_call(module, system_prompt, convo,
                                              images=images, stream_ok=stream_ok)
         except _cf.TimeoutError:
-            log.error(f"[AIEngine._http_custom_script] ✗ no response within "
-                      f"{self._response_timeout()}s")
-            self.log(f"Provider did not respond within {self._response_timeout()}s", "ERROR")
+            self._record_provider_error(
+                module, f"did not send a first token within {self._response_timeout()}s",
+                detail=f"turns={len(convo)}")
             return None
         except Exception as e:
             log.error(f"[AIEngine._http_custom_script] ✗ provider raised: {e}\n{traceback.format_exc()}")
-            self.log(f"Custom script error: {e}", "ERROR")
+            self._record_provider_error(module, f"raised {type(e).__name__}: {e}",
+                                        detail=f"turns={len(convo)}")
             return None
 
         content = (result or {}).get('content') if isinstance(result, dict) else None
         if not content or not isinstance(content, str):
-            log.error("[AIEngine._http_custom_script] ✗ chat() returned empty content")
-            self.log("Custom script chat() must return a non-empty reply", "ERROR")
+            self._record_provider_error(
+                module, "returned an empty response",
+                detail=f"finish_reason={(result or {}).get('finish_reason') if isinstance(result, dict) else 'n/a'} | "
+                       f"turns={len(convo)}")
             return None
 
         self._pending_thinking = result.get('thinking') or None
@@ -1115,8 +1216,10 @@ class AIEngine:
         except Exception:
             pass
         # Background/one-shot callers (task agents, compaction, session naming):
-        # never stream — their output is not the visible chat turn.
-        result = self._provider_script(messages, stream_ok=False)
+        # never stream, never touch the main turn's scratch state — their output
+        # is not the visible chat turn.
+        with self.background_call("raw_call"):
+            result = self._provider_script(messages, stream_ok=False)
         if result:
             try:
                 from systema.common.token_est import log_output_tokens, estimate_tokens
@@ -1124,6 +1227,18 @@ class AIEngine:
             except Exception:
                 pass
         return result
+
+    def _provider_failure_message(self) -> str:
+        """The user-facing text for a turn that produced nothing. Prefers the
+        specific reason recorded by the provider path (named provider + likely
+        cause) and falls back to a named generic when none was recorded."""
+        specific = getattr(self, 'last_provider_error', None)
+        if specific:
+            self.last_provider_error = None       # consumed
+            return specific
+        return (f"Provider '{self._provider_error_context()}' returned no "
+                f"response. Try again, or switch providers in "
+                f"Settings ▸ AI Provider.")
 
     def _make_error_result(self, message="Error: No response from AI") -> dict:
         """Return a standard error result dict."""
@@ -1156,7 +1271,7 @@ class AIEngine:
         ai_text = self._call_provider()
         if not ai_text:
             log.error("[AIEngine.generate_response] ✗ No AI text returned")
-            return self._make_error_result(f"Error: No response from {self.ai_provider} provider")
+            return self._make_error_result(self._provider_failure_message())
 
         log.info(f"[AIEngine.generate_response] ✓ Got response | length={len(ai_text)} chars | "
                  f"→ _process_ai_response()")
@@ -1222,25 +1337,28 @@ class AIEngine:
 
         # Ephemeral image context: if the AI queued image(s) via
         # attach_image_to_context() during the step it just ran, feed them to the
-        # provider's chat_image() for THIS one continuation call, then delete the
-        # files. They are never pinned to the chat or written into history, so the
-        # tokens are spent exactly once (same contract as a task session).
+        # provider for THIS one continuation call. They are never pinned to the
+        # chat or written into history, so the tokens are spent exactly once
+        # (same contract as a task session).
+        #
+        # USER FILES ARE LEFT ALONE. This used to os.remove() every image after
+        # the call — a context-management tool silently deleting the user's
+        # originals (screenshots, references, work in progress). "Dropped from
+        # context" never meant "deleted from disk". Only the app's OWN
+        # data/temp/ captures are cleaned up (discard_temp_image enforces that).
         _pending = self._drain_context_images()
         if _pending:
             log.info(f"[AIEngine.continue_work] Feeding {len(_pending)} ephemeral "
                      "context image(s) to the provider for this turn only")
             ai_text = self._call_provider(images=_pending)
-            import os as _os
+            from systema.common.data_paths import discard_temp_image
             for _p in _pending:
-                try:
-                    _os.remove(_p)
-                except Exception:
-                    pass
+                discard_temp_image(_p)
         else:
             ai_text = self._call_provider()
         if not ai_text:
             log.error("[AIEngine.continue_work] ✗ No AI text returned")
-            return self._make_error_result(f"Error: No response from {self.ai_provider} provider")
+            return self._make_error_result(self._provider_failure_message())
 
         log.info(f"[AIEngine.continue_work] ✓ Got response | length={len(ai_text)} chars | "
                  f"→ _process_work_response()")
@@ -1254,7 +1372,10 @@ class AIEngine:
         try:
             single_turn = [{'role': 'user', 'content': prompt}]
             if self.ai_provider == 'custom_script':
-                result = self._provider_script(single_turn)
+                # One-shot internal ask (explanation/approval dialogs) — not the
+                # visible chat turn, so it runs isolated and unstreamed.
+                with self.background_call("internal-ask"):
+                    result = self._provider_script(single_turn, stream_ok=False)
             else:
                 log.error(f"[AIEngine._get_ai_response_internal] Unknown provider: '{self.ai_provider}'")
                 return f"Error: Unknown provider '{self.ai_provider}'"
@@ -1412,8 +1533,14 @@ class AIEngine:
             known = name in tm._tool_keys
             spec = (tm.native_args_to_spec(name, call.get('arguments') or {})
                     if known else None)
+            # Capture THIS call's annotation into the batch entry. All calls are
+            # converted before ANY of them runs, so the single-slot
+            # work.interpreter.last_annotation ends up holding the LAST call's
+            # label — reading it at execution time labelled every card in the
+            # batch identically (the reported duplicate-card symptom).
             batch.append({'tool': name, 'spec': spec,
-                          'call_id': call.get('id')})
+                          'call_id': call.get('id'),
+                          'annotation': tm.work.interpreter.last_annotation})
 
         # Bare/empty interpreter-only turn — never executed; fold into the
         # finish path (same safety net as compat).
@@ -1648,7 +1775,8 @@ class AIEngine:
                     if not code.strip() or code.strip().lower() == 'exit':
                         obs = "(empty python_interpreter call — nothing was run)"
                     else:
-                        obs = tm.run_python_interpreter(code)
+                        # Pass THIS call's own annotation — see run_python_interpreter.
+                        obs = tm.run_python_interpreter(code, call.get('annotation'))
                         last_code = code
                     last_tool = 'interpreter'
                 elif name in run_file:
@@ -1663,6 +1791,9 @@ class AIEngine:
                 elif name == 'web_search':
                     obs = tm.run_web_search(spec)
                     last_tool = 'web_search'
+                elif name == 'attach_image_to_chat':
+                    obs = tm.run_attach_image_to_chat(spec)
+                    last_tool = 'attach_image_to_chat'
                 elif name == 'load_skill':
                     if self.skill_manager:
                         ok, msg = self.skill_manager.load_skill(spec)
@@ -1674,6 +1805,10 @@ class AIEngine:
                     else:
                         obs = (f"SKILL LOAD REJECTED: '{spec}' — {msg}. "
                                f"Do NOT retry; continue with your task.")
+                    # Every action the agent takes gets a visible card — skill
+                    # load/unload used to be the only tools that ran invisibly.
+                    tm.emit_tool_card('skill_action', action='load', skill=spec,
+                                      ok=bool(ok), detail=str(msg or ''))
                     last_tool = 'skill'
                 elif name == 'unload_skill':
                     if self.skill_manager:
@@ -1686,6 +1821,8 @@ class AIEngine:
                     else:
                         obs = (f"SKILL UNLOAD REJECTED: '{spec}' — {msg}. "
                                f"Do NOT retry; continue with your task.")
+                    tm.emit_tool_card('skill_action', action='unload', skill=spec,
+                                      ok=bool(ok), detail=str(msg or ''))
                     last_tool = 'skill'
                 elif tm._legacy_keys_norm.get(tm._norm_key(name)):
                     obs = (f"The tool '{name}' is RETIRED and was NOT run. "
@@ -1695,13 +1832,20 @@ class AIEngine:
                         f"**NOTICE:** The model attempted the retired `{name}` "
                         f"tool; the call was NOT run.")
                 else:
+                    # List what is ACTUALLY offered in this context, not every
+                    # key in the registry — the old message advertised tools the
+                    # model was never given, which is how it kept re-trying them.
+                    _offered = tm.offered_tools(
+                        include_skills=bool(self.skill_manager),
+                        include_images=bool(getattr(self, 'include_image_tools', False)))
                     obs = (f"Tool '{name}' does not exist and was NOT run. "
-                           f"Available tools: {', '.join(tm._tool_keys)}.")
+                           f"Available tools: {', '.join(_offered)}.")
             except Exception as e:
                 obs = f"ERROR: {type(e).__name__}: {e}"
                 log.error(f"[AIEngine._run_tool_batch] '{name}' raised: {e}")
             results.append((name, obs))
-            # A tool called from INSIDE this python step (e.g. web_search) surfaces
+            # A tool called from INSIDE this python step (web_search,
+            # attach_image_to_chat) surfaces
             # its output as its OWN result, right after the interpreter's — so the
             # model sees it as a distinct tool call and the python card stays clean.
             if name == 'python_interpreter' and tm._interp_subresults:
@@ -2140,6 +2284,25 @@ class AIEngine:
             self._inject_memories_rag(user_message, memory_threshold, memory_max)
         # inject_all: memories already in system prompt, nothing to do here
 
+    def _recalled_memory_keys(self) -> set:
+        """Identities of every memory already attached to THIS session, read
+        back out of the conversation history (see the attach-once guard).
+        Falls back to the memory text for pre-guard sessions, whose stored
+        previews carry no id."""
+        keys = set()
+        for entry in self.conversation_history:
+            if (entry.get('role') != 'ui_event'
+                    or entry.get('_type') != 'memory_context'):
+                continue
+            for prev in (entry.get('_memories_preview') or []):
+                if isinstance(prev, dict):
+                    keys.add(prev.get('id') or prev.get('text'))
+                elif prev:
+                    keys.add(prev)          # legacy: plain strings
+        keys.discard(None)
+        keys.discard('')
+        return keys
+
     def _inject_memories_rag(self, user_message: str, threshold: float, max_results: int):
         """Perform semantic recall and store memory context as a persistent ui_event in history."""
         recalled = self.memory_manager.recall(
@@ -2149,6 +2312,33 @@ class AIEngine:
         )
 
         self._pending_memory_widget = None  # reset every call, not just when recalled
+
+        # ── Attach-once guard ────────────────────────────────────────────────
+        # Recall runs on EVERY user turn, so a memory that stays relevant across
+        # consecutive messages was re-attached each time: duplicate cards in the
+        # chat, the same text repeated several times in the context the model
+        # reads, and tokens paid for again per turn.
+        #
+        # The "already attached" set is DERIVED FROM HISTORY rather than kept as
+        # separate state, so it can never go stale: a session reload rebuilds it,
+        # and if the entry is later removed (compaction, revert) the memory
+        # becomes eligible again — correct, because at that point it is genuinely
+        # no longer in context.
+        already = self._recalled_memory_keys()
+        if recalled:
+            # Match on EITHER identity: pre-guard sessions stored only the text.
+            fresh = [m for m in recalled
+                     if m.get('id') not in already
+                     and m.get('text') not in already]
+            if not fresh:
+                log.info(f"[AIEngine._inject_memories] all {len(recalled)} recalled "
+                         f"memories are already attached to this session — skipped")
+                return
+            if len(fresh) != len(recalled):
+                log.info(f"[AIEngine._inject_memories] {len(recalled) - len(fresh)} "
+                         f"already-attached memory(ies) skipped")
+            recalled = fresh
+
         if recalled:
             import uuid as _uuid
             lines = "\n".join(f"- {m['text']}" for m in recalled)
@@ -2162,7 +2352,8 @@ class AIEngine:
             # Dicts carry the card's metadata (date + score); the card also
             # accepts plain strings so pre-upgrade sessions still replay fine.
             mem_dicts = [
-                {'text': m['text'],
+                {'id': m.get('id', ''),
+                 'text': m['text'],
                  'created_at': m.get('created_at', ''),
                  'similarity': m.get('similarity', 0.0)}
                 for m in recalled
@@ -2238,6 +2429,38 @@ class AIEngine:
                 return True
         log.warning("[AIEngine.remove_last_user_message] No user message found in history")
         return False
+
+    def discard_streamed_partial(self) -> bool:
+        """Drop the half-written turn left by a user Stop during streaming.
+
+        The worker is terminated mid-flight, so whatever it had already stored
+        for THIS turn (a partial assistant entry, and any thinking ui_event it
+        managed to persist alongside it) was never rendered as a finished
+        message — leaving it in history meant the aborted fragment came back on
+        the next reload and was re-sent to the provider as if it were a real
+        reply. Removes ONLY the trailing partial: completed earlier steps of a
+        work chain, and the user's own prompt, are untouched.
+
+        Returns True when something was removed.
+        """
+        removed = 0
+        h = self.conversation_history
+        while h:
+            last = h[-1]
+            role = last.get('role')
+            if role == 'assistant':
+                h.pop()
+                removed += 1
+                break                       # one assistant turn only
+            if role == 'ui_event' and last.get('_type') == 'thinking':
+                h.pop()                     # its reasoning card, same turn
+                removed += 1
+                continue
+            break                           # user / tool cards / system: keep
+        if removed:
+            log.info(f"[AIEngine.discard_streamed_partial] ✓ dropped {removed} "
+                     f"entry(ies) from the interrupted turn")
+        return bool(removed)
 
     def reset_python_interpreter(self):
         """Reset the Python interpreter state"""

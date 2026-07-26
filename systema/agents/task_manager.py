@@ -146,6 +146,11 @@ class TaskAIEngine:
             self._engine.provider_retry_backoff = 3.0
             perms = self._task.get('permissions', {})
             self._engine.tool_manager.allow_workmode = perms.get('allow_workmode', False)
+            # The task's native tool list must be gated by the SAME permission
+            # its prompt is gated by (build_task_system_prompt passes this into
+            # get_system_prompt) — otherwise the tasker is taught tools it was
+            # never handed, or handed tools it was never taught.
+            self._engine.include_image_tools = perms.get('inject_image_tools', False)
             # (allow_execute_code was retired with the execute_code tool; old
             # task dicts may still carry the key — it is simply ignored.)
             self._apply_supervision(perms)
@@ -220,21 +225,13 @@ class TaskAIEngine:
         run_full_ping timeout AND a silent PythonInterpreter.reset() from a
         killed code-execution timeout."""
         ns = self._engine.tool_manager.tools['python'].namespace
-
-        # Shared resources, delegated back to the main controller
-        ns['controller'] = self._controller
-        ns['notify'] = getattr(self._controller, 'notify', None)
-        ns['memorize'] = self._controller.memorize
-        ns['search_memory'] = self._controller.search_memory
-        ns['update_memory'] = self._controller.update_memory
-        ns['forget_memory'] = self._controller.forget_memory
-        ns['app_root'] = str(_APP_ROOT)
-        ns['skills_path'] = str(_APP_ROOT / "skills")
-
-        # Task-specific overrides — queue into _pending_context_images for
-        # run_full_ping's own chat_image() pipeline, not the main session's
-        # bridge_attach_image_signal flow.
         _task_ai_ref = self
+
+        # Task-specific bindings — the SAME capability names the main session
+        # uses, implemented for this context: images queue into this task's own
+        # _pending_context_images (not the main session's
+        # bridge_attach_image_signal flow), and send_message_main is the task's
+        # declared link back to the user.
 
         def _task_take_screenshot(save_path=None):
             import uuid
@@ -267,9 +264,6 @@ class TaskAIEngine:
             _task_ai_ref._queue_image(path)
             return f"[attach_image_to_context] Queued: {path}"
 
-        ns['take_screenshot'] = _task_take_screenshot
-        ns['attach_image_to_context'] = _attach_image_to_context
-
         # send_message_main — the ONE supported way for a task agent to message the
         # user's main chat. A plain namespace function so it works in BOTH tool
         # modes (the old "{"tool":"send_message_main",...}" JSON-in-text approach
@@ -285,11 +279,42 @@ class TaskAIEngine:
             except Exception as _e:
                 return f"[send_message_main ERROR] {_e}"
 
-        ns['send_message_main'] = _send_message_main
-
-        # Conditionally expose attach_image_to_chat for tasks with the permission
-        if self._task.get('permissions', {}).get('inject_image_tools', False):
-            ns['attach_image_to_chat'] = self._controller._agent_attach_image
+        # ── Build the namespace FROM the capability manifest ──────────────────
+        # Same names as the main session, task-appropriate bindings, and gated by
+        # the task's OWN permissions — which the prompt already honours. These
+        # used to be hand-injected unconditionally, so a task whose prompt hid
+        # notify/memory still had them sitting in its namespace.
+        from systema.execution import capabilities as caps
+        perms = self._task.get('permissions', {})
+        gates = caps.gates_for_task(
+            perms,
+            # TaskAIEngine has no skill manager of its own — skills belong to
+            # the owning TaskThread / controller.
+            has_skills=bool(getattr(self._engine, 'skill_manager', None)),
+            has_main_channel=self._send_main_callback is not None,
+        )
+        # attach_image_to_chat: a background task has no chat turn of its own, so
+        # its images land in the user's MAIN chat (declared divergence — see the
+        # manifest note). Both surfaces route through this one binding.
+        if gates.get(caps.G_IMAGES):
+            self._engine.tool_manager._attach_image_binding = \
+                self._controller._agent_attach_image
+        bindings = {
+            'controller': self._controller,
+            'notify': getattr(self._controller, 'notify', None),
+            'memorize': self._controller.memorize,
+            'search_memory': self._controller.search_memory,
+            'update_memory': self._controller.update_memory,
+            'forget_memory': self._controller.forget_memory,
+            'app_root': str(_APP_ROOT),
+            'skills_path': str(_APP_ROOT / "skills"),
+            'take_screenshot': _task_take_screenshot,
+            'attach_image_to_context': _attach_image_to_context,
+            'attach_image_to_chat': self._engine.tool_manager.interp_attach_image_to_chat,
+            'web_search': self._engine.tool_manager.interp_web_search,
+            'send_message_main': _send_message_main,
+        }
+        ns.update(caps.build_namespace(caps.TASK, gates, bindings))
 
     def _queue_image(self, path: str):
         with self._images_lock:
@@ -392,13 +417,14 @@ class TaskAIEngine:
             try:
                 pending = self._drain_images()
                 if pending:
-                    import os as _os
+                    from systema.common.data_paths import discard_temp_image
                     work_prompt = self._engine.tool_manager.get_work_prompt()
                     self._engine.conversation_history.append({'role': 'system', 'content': work_prompt})
                     ai_text = self._engine._call_provider(images=pending)
+                    # Clean up only OUR OWN temp captures — attach_image_to_context()
+                    # takes any path, and this used to delete the user's files.
                     for _p in pending:
-                        try: _os.remove(_p)
-                        except Exception: pass
+                        discard_temp_image(_p)
                     if not ai_text:
                         step_failed = True
                     else:
@@ -439,10 +465,11 @@ class TaskAIEngine:
         # the next one (covers max-iterations AND repeated-failure exits).
         self._reset_work()
 
-        # Cleanup any leftover queued images that never got flushed
+        # Cleanup any leftover queued images that never got flushed (app-made
+        # temp captures only — never a path the task AI was pointed at).
+        from systema.common.data_paths import discard_temp_image
         for _p in self._drain_images():
-            try: import os as _os; _os.remove(_p)
-            except Exception: pass
+            discard_temp_image(_p)
 
         final_text = '\n'.join(r for r in all_responses if r)
         return final_text or None, send_main_calls, list(self._engine.conversation_history)

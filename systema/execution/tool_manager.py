@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer
 from systema.execution.python_interpreter import PythonInterpreter
 from systema.execution import tool_registry
+from systema.execution import capabilities
 from systema.execution import file_journal
 from systema.common.logger import _make_logger, _NoOpLogger
 
@@ -158,6 +159,12 @@ class ApprovalSignal(QObject):
     timeout_signal   = pyqtSignal(int, object, object, object)  # elapsed, done_event, result_holder, user_event — timeout prompt
     work_code_active = pyqtSignal(bool)                          # True when code execution starts, False when it finishes
     work_narration   = pyqtSignal(str)               # a work step's narration → chat BEFORE its tool runs (ordering)
+    # ONE interpreter step finished: (code, output, annotation) for THAT step.
+    # Authoritative per-card pairing — emitted by run_python_interpreter the
+    # moment its own observation exists, so a multi-call batch can never
+    # mis-attribute outputs (each card is finalized from its own result rather
+    # than from the single-slot work.last_output the whole batch shares).
+    work_step_output = pyqtSignal(str, str, str)
     # ── Live streaming (provider contract v2) — emitted from the AIWorker
     # thread as chunks arrive; the chat window appends them to the in-flight
     # turn. stream_finished fires before the normal full-response path runs.
@@ -280,8 +287,12 @@ class ToolManager:
         self.approval_signal.stream_text.connect(self._deliver_stream_text)
         self.approval_signal.stream_thinking.connect(self._deliver_stream_thinking)
         self.approval_signal.stream_finished.connect(self._deliver_stream_finished)
+        self.approval_signal.work_step_output.connect(self._deliver_work_step_output)
         self._active_approval_dialog = None
         self._get_android_bridge = None
+        # Set by whoever owns the chat surface (controller for the main session,
+        # TaskAIEngine for a tasker). None = no chat to attach images to.
+        self._attach_image_binding = None
         log.debug("[ToolManager.__init__] ApprovalSignal connected")
 
         # ── Tool registry (single source of truth: tool_registry.py) ─────────
@@ -364,6 +375,8 @@ class ToolManager:
     _CARD_DISPATCH = {
         'web_search': 'add_web_search_card',   # search results sub-list
         'web_page':   'add_web_page_card',     # page content / links viewer
+        'image_attach': 'add_image_attach_card',  # image(s) shown to the user
+        'skill_action': 'add_skill_action_card',  # load_skill / unload_skill
     }
 
     def _deliver_tool_card(self, info: dict):
@@ -428,6 +441,24 @@ class ToolManager:
         if chat is not None:
             chat.on_stream_finished()
 
+    def _deliver_work_step_output(self, code: str, output: str, annotation: str):
+        """Slot (main thread) — freeze THIS interpreter step's card with THIS
+        step's own output. Runs after the step's work_code_active(False), so the
+        live card is still on screen and simply gets its true final output.
+
+        Before this existed, every card in a batch was finalized from whatever
+        the 120ms live poll had captured (usually nothing for a fast step) and
+        the LAST card was then overwritten with the whole combined observation.
+        """
+        chat = self._chat
+        if chat is None:
+            return
+        try:
+            chat.finalize_code_step(code, output, annotation)
+        except Exception:
+            log.warning("[ToolManager._deliver_work_step_output] card finalize failed",
+                        exc_info=True)
+
     def _deliver_system_message(self, text: str):
         """
         Slot — always runs on the main thread (connected via signal).
@@ -483,18 +514,29 @@ class ToolManager:
     # ─────────────────────────────────────────────────────────────────────────
     _CANONICAL_TOOLS = tool_registry.CANONICAL_TOOLS
 
-    def get_canonical_tools(self, include_skills: bool = True) -> list:
+    def offered_tools(self, include_skills: bool = True,
+                      include_images: bool = False,
+                      context: str = capabilities.CHAT) -> list:
+        """The tool NAMES offered right now, straight from the capability
+        manifest. Both advertised lists (native schemas here, the compat tool
+        table in prompts/compat.py) resolve through this ONE query, so they
+        cannot drift apart again — they did, and it cost native mode the entire
+        file subsystem (read_file/edit_file/write_file/grep were advertised only
+        in compat while the native prompt taught them anyway)."""
+        gates = capabilities.gates_for_chat(
+            allow_workmode=bool(self.allow_workmode),
+            has_skills=bool(include_skills),
+            include_image_tools=bool(include_images),
+        )
+        return capabilities.tools_for(context, gates)
+
+    def get_canonical_tools(self, include_skills: bool = True,
+                            include_images: bool = False,
+                            context: str = capabilities.CHAT) -> list:
         """Return the active tools as canonical schema dicts (name/description/
         parameters), gated by the same capability flags the prompt uses. Feed the
         result to systema.engine.native_adapters.to_<dialect>_tools() for native mode."""
-        active = []
-        if self.allow_workmode:
-            active.append('python_interpreter')
-            # web_search is a read-only native tool; rides with work mode so its
-            # native schema stays in parity with the compat tool table.
-            active.append('web_search')
-        if include_skills:
-            active += ['load_skill', 'unload_skill']
+        active = self.offered_tools(include_skills, include_images, context)
 
         out = []
         for name in active:
@@ -821,6 +863,7 @@ class ToolManager:
             'write_file': self.parse_write_file,
             'grep': self.parse_grep,
             'web_search': self.parse_web_search,
+            'attach_image_to_chat': self.parse_attach_image_to_chat,
             'load_skill': self.parse_load_skill,
             'unload_skill': self.parse_unload_skill,
         }
@@ -842,7 +885,11 @@ class ToolManager:
                 # caller's guard rails (malformed-step retry) can handle it.
                 break
             spec, remaining = parsed
-            batch.append({'tool': first, 'spec': spec, 'call_id': None})
+            # Each parser stores its own label in the single-slot
+            # work.interpreter.last_annotation; snapshot it per call so a later
+            # call in the same batch cannot relabel this one's card.
+            batch.append({'tool': first, 'spec': spec, 'call_id': None,
+                          'annotation': self.work.interpreter.last_annotation})
         # Opener-tolerance sweep: a typo'd/bracketless python_interpreter fence
         # the tag scan above could not resolve is still caught by its own
         # tolerant parser (order is lost — it lands last, which is also its
@@ -852,7 +899,8 @@ class ToolManager:
             if parsed:
                 spec, remaining = parsed
                 batch.append({'tool': 'python_interpreter', 'spec': spec,
-                              'call_id': None})
+                              'call_id': None,
+                              'annotation': self.work.interpreter.last_annotation})
         if batch:
             log.info(f"[ToolManager.parse_tool_batch] ✓ {len(batch)} call(s): "
                      f"{[c['tool'] for c in batch]}")
@@ -874,7 +922,7 @@ class ToolManager:
         r'line_numbers|before|after|context|only_matching|multiline|head_limit|'
         r'max|ignore_common)[ \t]*:[ \t]*(\S[^\n]*?)[ \t]*$', re.IGNORECASE)
     _WEB_OPT_RE = re.compile(
-        r'^[ \t]*(mode|max_results|max|fetch_top)[ \t]*:[ \t]*(\S[^\n]*?)[ \t]*$',
+        r'^[ \t]*(mode|max_results|max|fetch_top|offset)[ \t]*:[ \t]*(\S[^\n]*?)[ \t]*$',
         re.IGNORECASE)
 
     def _split_file_body(self, content, annotation, consume_options=True):
@@ -1214,6 +1262,8 @@ class ToolManager:
             'query': query,
             'max_results': _i(opts.get('max_results', opts.get('max')), 8),
             'fetch_top': _i(opts.get('fetch_top'), 0),
+            # open mode: where to start reading — how a long page is continued.
+            'offset': max(0, _i(opts.get('offset'), 0)),
             'annotation': annotation,
             'error': None,
         }
@@ -1262,14 +1312,25 @@ class ToolManager:
                 return f"Links on {query} ({len(items)}):\n{body or '(no links found)'}"
 
             if mode == 'open':
-                page = wr.open_page(query, config=cfg)
+                _off = int(spec.get('offset') or 0)
+                page = wr.open_page(query, config=cfg, offset=_off)
                 self.emit_tool_card('web_page', mode='open', url=page['url'],
                                     title=page.get('title') or query, text=page['text'])
                 head = f"Opened {page['url']}"
                 if page.get('title'):
                     head += f" — {page['title']}"
-                if page.get('truncated'):
-                    head += " (truncated)"
+                if _off:
+                    head += f" [chars {_off}-{_off + len(page['text'])} of {page.get('total_chars', '?')}]"
+                if page.get('next_offset') is not None:
+                    # Tell the model exactly how to get the rest — the old
+                    # "refine your query" note left the remainder unreachable.
+                    head += (f" (more available — call web_search again with "
+                             f"mode: open, the SAME url and offset: "
+                             f"{page['next_offset']})")
+                elif not page['text']:
+                    return (f"{head}\n\n(no more content — offset {_off} is past "
+                            f"the end of this page, which has "
+                            f"{page.get('total_chars', 0)} characters)")
                 return f"{head}\n\n{page['text']}"
 
             # search
@@ -1298,7 +1359,8 @@ class ToolManager:
             log.error(f"[ToolManager.run_web_search] {mode} failed: {e}")
             return f"web_search {mode} failed: {type(e).__name__}: {str(e)[:200]}"
 
-    def interp_web_search(self, query, mode='search', max_results=8, fetch_top=0):
+    def interp_web_search(self, query, mode='search', max_results=8, fetch_top=0,
+                          offset=0):
         """`web_search(...)` as exposed INSIDE the python interpreter namespace
         (compat mode). Runs the same tool, but its card is buffered (flushed
         after the interpreter's own card) and its full output is recorded as a
@@ -1312,6 +1374,7 @@ class ToolManager:
             m = 'search'
         spec = {'mode': m, 'query': str(query or ''),
                 'max_results': max_results or 8, 'fetch_top': fetch_top or 0,
+                'offset': max(0, int(offset or 0)),
                 'annotation': None, 'error': None}
         self._card_capture = True
         try:
@@ -1321,6 +1384,82 @@ class ToolManager:
         self._interp_subresults.append(('web_search', obs))
         return ("[web_search delivered its results as a separate tool result and "
                 "card — see below; do not reprint them here.]")
+
+    # ── attach_image_to_chat: the second DUAL-SURFACE capability ─────────────
+    # Same shape as web_search (see the capability manifest): one implementation
+    # reached by a direct tool call OR by the namespace function inside python,
+    # both producing the SAME card and the SAME observation. That equivalence is
+    # the whole reason a capability is allowed to exist on two surfaces.
+
+    def parse_attach_image_to_chat(self, text):
+        """```attach_image_to_chat: [label]  ->  (spec, remaining_text)
+        Body = one absolute image path per line."""
+        parsed = self._parse_fence(text, 'attach_image_to_chat')
+        if not parsed:
+            return None
+        body, remaining, annotation = parsed
+        paths = [ln.strip().strip('"\'') for ln in (body or '').splitlines()
+                 if ln.strip()]
+        self.work.interpreter.last_annotation = annotation or None
+        if annotation:
+            self.approval_signal.system_message.emit(
+                f"**Working:** ***{annotation}***")
+        spec = {'paths': paths, 'annotation': annotation,
+                'error': None if paths else
+                         "attach_image_to_chat needs at least one image path."}
+        return spec, remaining
+
+    def run_attach_image_to_chat(self, spec):
+        """Show image(s) to the user. Read-only w.r.t. the files — they are never
+        moved, rewritten or deleted. Returns the observation the model sees."""
+        if spec.get('error'):
+            return "ERROR:\n" + spec['error']
+        import os
+        paths = [str(p) for p in (spec.get('paths') or []) if str(p).strip()]
+        missing = [p for p in paths if not os.path.isfile(p)]
+        found = [p for p in paths if os.path.isfile(p)]
+        if not found:
+            return ("ERROR:\nNone of those image paths exist: "
+                    + ", ".join(missing or ['(none given)']))
+
+        delivered = False
+        try:
+            binder = getattr(self, '_attach_image_binding', None)
+            if callable(binder):
+                binder(found)
+                delivered = True
+        except Exception as e:
+            log.error(f"[ToolManager.run_attach_image_to_chat] delivery failed: {e}")
+            return f"ERROR:\nCould not attach the image(s): {e}"
+        if not delivered:
+            return ("ERROR:\nImage attachment is not available in this session "
+                    "(no chat to attach to).")
+
+        self.emit_tool_card('image_attach', paths=found,
+                            annotation=spec.get('annotation') or '')
+        out = f"Attached {len(found)} image(s) to the chat: " + ", ".join(
+            os.path.basename(p) for p in found)
+        if missing:
+            out += "\nNOT FOUND (skipped): " + ", ".join(missing)
+        return out
+
+    def interp_attach_image_to_chat(self, path_or_paths, annotation=None):
+        """`attach_image_to_chat(...)` as exposed INSIDE the python namespace.
+        Identical semantics to the tool call — the card is buffered so it lands
+        after the interpreter's own card, and the output is recorded as its own
+        tool result."""
+        if isinstance(path_or_paths, str):
+            paths = [path_or_paths]
+        else:
+            paths = [str(p) for p in path_or_paths]
+        spec = {'paths': paths, 'annotation': annotation, 'error': None}
+        self._card_capture = True
+        try:
+            obs = self.run_attach_image_to_chat(spec)
+        finally:
+            self._card_capture = False
+        self._interp_subresults.append(('attach_image_to_chat', obs))
+        return obs
 
     # ─────────────────────────────────────────────────────────────────────────
     # Native argument extraction — the native front-end's replacement for
@@ -1430,6 +1569,17 @@ class ToolManager:
                 spec['error'] = "grep needs a regex pattern in the 'pattern' argument."
             return spec
 
+        if name == 'attach_image_to_chat':
+            self.work.interpreter.last_annotation = annotation or None
+            raw = args.get('paths') or args.get('path') or ''
+            if isinstance(raw, str):
+                paths = [ln.strip().strip('"\'') for ln in raw.splitlines() if ln.strip()]
+            else:
+                paths = [str(p).strip() for p in raw if str(p).strip()]
+            return {'paths': paths, 'annotation': annotation,
+                    'error': None if paths else
+                             "attach_image_to_chat needs at least one image path."}
+
         if name == 'web_search':
             self.work.interpreter.last_annotation = annotation or None
             mode = str(args.get('mode') or 'search').strip().lower()
@@ -1439,6 +1589,7 @@ class ToolManager:
                     'query': str(args.get('query') or args.get('url') or '').strip(),
                     'max_results': self._native_int(args.get('max_results'), 8),
                     'fetch_top': self._native_int(args.get('fetch_top'), 0),
+                    'offset': max(0, self._native_int(args.get('offset'), 0) or 0),
                     'annotation': annotation,
                     'error': None}
             if not spec['query']:
@@ -2090,7 +2241,7 @@ class ToolManager:
         self._pending_interrupt_notice = None
         return False
 
-    def run_python_interpreter(self, code):
+    def run_python_interpreter(self, code, annotation=None):
         """
         Execute code in the python interpreter.
         AI will see the output and can chain more executions.
@@ -2098,9 +2249,30 @@ class ToolManager:
         Wraps PythonInterpreter.execute() with the work.interpreter.is_running flag
         and work.interpreter.last_code tracking for interrupt/UI state propagation.
 
+        `annotation` is THIS call's label, snapshotted into the batch entry at
+        parse time. It is re-applied here so the card opened for this step is
+        labelled with its own annotation and not with whichever label the
+        single-slot state happened to be holding (in a multi-call batch every
+        call is parsed before any of them runs, so that slot holds the LAST
+        call's label). Every return path emits work_step_output so the step's
+        card is finalized from its own observation.
+
         Returns:
             str: Formatted output for AI
         """
+        if annotation is not None:
+            self.work.interpreter.last_annotation = annotation or None
+        _step_annotation = self.work.interpreter.last_annotation or ""
+
+        def _done(observation):
+            """Hand this step's own (code, output, annotation) to its card."""
+            try:
+                self.approval_signal.work_step_output.emit(
+                    code, observation, _step_annotation)
+            except Exception:
+                pass
+            return observation
+
         code_preview = code.strip()[:80].replace('\n', '↵')
         log.info(f"[ToolManager.run_python_interpreter] ── Executing code | "
                  f"code_len={len(code)} | preview='{code_preview}' ──")
@@ -2113,7 +2285,7 @@ class ToolManager:
         # Capability gate — real enforcement, not just prompt text
         if not self.allow_workmode:
             log.warning("[ToolManager.run_python_interpreter] Blocked — allow_workmode is False for this session")
-            return "ERROR:\npython_interpreter is disabled for this session."
+            return _done("ERROR:\npython_interpreter is disabled for this session.")
 
         # Check supervised execution (now properly on main thread)
         log.debug("[ToolManager.run_python_interpreter] Checking supervised execution...")
@@ -2127,13 +2299,13 @@ class ToolManager:
             if policy_msg:
                 self._last_policy_block_msg = None
                 log.warning("[ToolManager.run_python_interpreter] ✗ Blocked by task security policy")
-                return "ERROR: " + policy_msg
+                return _done("ERROR: " + policy_msg)
             log.warning("[ToolManager.run_python_interpreter] ✗ Execution rejected by user")
             reason = getattr(self, '_last_reject_reason', '') or ''
             msg = "Code execution rejected by user"
             if reason:
                 msg += f"\nREASON: {reason}"
-            return "ERROR:\n" + msg
+            return _done("ERROR:\n" + msg)
 
         # Use modified code if user edited it
         if modified_code != code:
@@ -2209,12 +2381,12 @@ class ToolManager:
         try:
             ab = self._get_android_bridge() if callable(self._get_android_bridge) else None
             if ab and ab.isVisible():
-                ab.add_work_execution(code, combined, annotation=self.work.interpreter.last_annotation or "")
+                ab.add_work_execution(code, combined, annotation=_step_annotation)
         except Exception:
             pass
         # ─────────────────────────────────────────────────────────────────
 
-        return combined
+        return _done(combined)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Prompt helpers

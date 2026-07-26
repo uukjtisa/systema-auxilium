@@ -106,13 +106,15 @@ class CodeAgent:
     def _default_provider(self, messages: list) -> str:
         if self.ai is None:
             raise RuntimeError("no provider available")
-        # stream_ok=False: this agent runs inside the approval dialog — its
-        # tokens must never appear in the chat turn.
-        text = self.ai._provider_script(messages, stream_ok=False)
-        if not text and hasattr(self.ai, "_get_ai_response_internal"):
-            user = next((m["content"] for m in reversed(messages)
-                         if m["role"] == "user"), "")
-            text = self.ai._get_ai_response_internal(user)
+        # background_call + stream_ok=False: this agent runs inside the approval
+        # dialog while a chat turn is suspended mid-batch — its tokens must never
+        # appear in that turn, and it must not clobber the turn's scratch state.
+        with self.ai.background_call("code-agent"):
+            text = self.ai._provider_script(messages, stream_ok=False)
+            if not text and hasattr(self.ai, "_get_ai_response_internal"):
+                user = next((m["content"] for m in reversed(messages)
+                             if m["role"] == "user"), "")
+                text = self.ai._get_ai_response_internal(user)
         return text or ""
 
     def _ask(self, convo: list) -> str:

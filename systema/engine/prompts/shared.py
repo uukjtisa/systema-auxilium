@@ -343,9 +343,10 @@ Functions available in your Python execution namespace for working with images.
 
 attach_image_to_context(path)  — ANALYZE it yourself (private)
   Feeds ONE image into YOUR OWN context so you can look at it. The image is
-  passed to you on your NEXT step, then DELETED from disk and dropped from
-  context. YOU MUST DESCRIBE WHAT YOU SEE IN YOUR VERY NEXT REPLY — it is
-  removed right after, so if you don't note it now you will forget it.
+  passed to you on your NEXT step, then DETACHED FROM YOUR CONTEXT. The file on
+  disk is NEVER touched — this tool manages context, not the user's files.
+  YOU MUST DESCRIBE WHAT YOU SEE IN YOUR VERY NEXT REPLY — it leaves your
+  context right after, so if you don't note it now you will forget it.
   Requires a provider that supports image analysis; if it doesn't, the call
   tells you so.
   Example:  attach_image_to_context(r"C:\\some\\existing\\image.png")
@@ -358,8 +359,9 @@ take_screenshot(save_path=None)
   step.
 
 TASK CONTEXT: these images are passed to YOU (the task AI) — they never appear
-in the user's chat window. Each image is used once then deleted from disk. To
-tell the user what you saw, use send_message_main.
+in the user's chat window. Each image is used once, then detached from your
+context; the file itself stays on disk. To tell the user what you saw, use
+send_message_main.
 
 FLOW EXAMPLE — checking screen state during a task. """ + invoke_hint + """
     path = take_screenshot()
@@ -368,11 +370,13 @@ FLOW EXAMPLE — checking screen state during a task. """ + invoke_hint + """
 """
     else:
         variant = """
-attach_image_to_chat(path_or_paths)  — SHOW it to the user (pinned)
-  Pins one or more images to the chat input so they are sent with the next
-  user-visible message. Use when the USER should see the image.
-  Examples: attach_image_to_chat(r"C:\\Users\\user\\screenshot.png")
-            attach_image_to_chat([r"C:\\img1.png", r"C:\\img2.png"])
+attach_image_to_chat  — SHOW image(s) to the user
+  Available BOTH ways, with identical results: as a TOOL CALL (preferred when
+  you already know the path) and as a function inside python (use this when the
+  path is computed in the same step). Either way the user sees the image and you
+  get one result back. The source files are never modified or deleted.
+  In python: attach_image_to_chat(r"C:\\Users\\user\\screenshot.png")
+             attach_image_to_chat([r"C:\\img1.png", r"C:\\img2.png"])
 
 take_screenshot(save_path=None)
   Captures the screen, saves to data/temp/ with a unique filename, and returns
