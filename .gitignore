@@ -1,6 +1,10 @@
 # Maintainer notes stay in the working dir only — never in the repo.
-.dev-copy
 .dev/
+
+# Developer working-copy marker (systema/updater/service.py DEV_MARKER). Its
+# presence is what disables auto-update in a dev checkout, so it must never
+# reach a shipped one.
+.dev-copy
 
 # Python
 __pycache__/
@@ -20,8 +24,3 @@ venv/
 # that way — .gitignore does not untrack files. Anything genuinely new that
 # belongs in the repo under data/ needs an explicit `git add -f`.
 data/
-
-
-# Developer working-copy marker (systema/updater/service.py DEV_MARKER).
-# Local only — its presence is what disables auto-update in a dev checkout.
-.dev-copy
