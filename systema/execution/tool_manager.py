@@ -269,6 +269,11 @@ class ToolManager:
         # thread before the approval callback fires (happens-before the worker
         # read via the approval Event).
         self._last_reject_reason = ""
+        # Its mirror on the other button: an optional note the user typed when
+        # APPROVING, so a step can be steered without being stopped ("fine, but
+        # write to data/ not the desktop"). Same lifetime and same threading
+        # contract as the reject reason.
+        self._last_approval_note = ""
         # Capability gate — enforced by run_python_interpreter, not just narrated
         # in the system prompt. Set by TaskAIEngine from the task dict.
         self.allow_workmode = True
@@ -1099,8 +1104,9 @@ class ToolManager:
             return "ERROR:\n" + err
         path = ft.resolve_path(spec['path'])
         old_content = ft.read_current(path)
-        approved, final_content, reason = self._check_file_op_approval(
+        approved, final_content, message = self._check_file_op_approval(
             path, old_content, new_content, 'edit_file')
+        reason = '' if approved else message
         if not approved:
             msg = "File edit rejected by user" if not reason else reason
             self._emit_file_op_card('edit_file', path, rejected=True, detail=msg)
@@ -1117,7 +1123,8 @@ class ToolManager:
                                 detail=self._op_diff_text(old_content, final_content))
         self.last_file_op_journal_id = jid
         return (f"EDITED {path} | +{added} -{removed} lines"
-                f" | verify with read_file if the change was delicate")
+                f" | verify with read_file if the change was delicate"
+                + (message if approved else ""))
 
     def run_write_file(self, spec):
         """Create/overwrite with approval gate + journal. Returns observation."""
@@ -1127,8 +1134,9 @@ class ToolManager:
         path = ft.resolve_path(spec['path'])
         old_content = ft.read_current(path)
         new_content = spec.get('content', '')
-        approved, final_content, reason = self._check_file_op_approval(
+        approved, final_content, message = self._check_file_op_approval(
             path, old_content, new_content, 'write_file')
+        reason = '' if approved else message
         if not approved:
             msg = "File write rejected by user" if not reason else reason
             self._emit_file_op_card('write_file', path, rejected=True, detail=msg)
@@ -1146,7 +1154,7 @@ class ToolManager:
                                 detail=self._op_diff_text(old_content, final_content))
         self.last_file_op_journal_id = jid
         verb = "CREATED" if not existed else "OVERWROTE"
-        return f"{verb} {path} | +{added} -{removed} lines"
+        return f"{verb} {path} | +{added} -{removed} lines" + message
 
     def parse_grep(self, text):
         """Returns (spec, remaining) or None. Line 1 = the regex pattern; the rest
@@ -1626,7 +1634,10 @@ class ToolManager:
         _check_supervised_execution, with a synthesized file_create/file_edit
         finding and the per-hunk diff approval dialog).
 
-        Returns (approved, final_new_text, reject_reason)."""
+        Returns (approved, final_new_text, message) — `message` is the reject
+        REASON when refused, and the optional approval NOTE when approved (the
+        caller appends it to the success observation). Only one of the dialog's
+        two fields is ever sent, whichever button was pressed."""
         if self.bypass_security:
             self._audit_decision(f"{tool}: {path}", tool, 'auto', 'task-bypass')
             return True, new_text, ''
@@ -1689,6 +1700,7 @@ class ToolManager:
 
         # Prompt: the approval dialog opens in file-edit mode (per-hunk diff).
         self._last_reject_reason = ""
+        self._last_approval_note = ""
         try:
             approval_event = threading.Event()
             result = {'approved': False, 'modified': new_text}
@@ -1706,10 +1718,17 @@ class ToolManager:
             self._audit_decision(f"{tool}: {path}", tool,
                                  'approved' if result['approved'] else 'rejected',
                                  'user')
-            reason = '' if result['approved'] else (self._last_reject_reason or '')
+            if result['approved']:
+                note = (self._last_approval_note or '').strip()
+                self._last_approval_note = ""
+                if note:
+                    note = ("\nUSER NOTE (approved with a message — follow it): "
+                            + note)
+                return True, result['modified'], note
+            reason = self._last_reject_reason or ''
             if reason:
                 reason = "File change rejected by user\nREASON: " + reason
-            return result['approved'], result['modified'], reason
+            return False, result['modified'], reason
         except Exception as e:
             log.error(f"[ToolManager._check_file_op_approval] dialog error: {e}")
             return True, new_text, ''
@@ -1964,7 +1983,9 @@ class ToolManager:
 
         # Show approval dialog on main thread
         log.debug("[ToolManager._check_supervised_execution] Emitting request_approval signal to main thread")
-        self._last_reject_reason = ""   # cleared per run; set by the dialog on Reject
+        # Both cleared per run; the dialog sets exactly one of them.
+        self._last_reject_reason = ""
+        self._last_approval_note = ""
         try:
             # Create event to block worker thread until approval is received
             approval_event = threading.Event()
@@ -2063,7 +2084,9 @@ class ToolManager:
             _file_edit = self._pending_file_edit
             self._pending_file_edit = None
             dialog = CodeApprovalDialog(code, execution_type, self.ai_engine,
-                                        file_edit=_file_edit)
+                                        file_edit=_file_edit,
+                                        annotation=(self.work.interpreter
+                                                    .last_annotation or ""))
             self._active_approval_dialog = dialog
             dialog.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
             ctrl = getattr(self.ai_engine, 'controller', None)
@@ -2129,7 +2152,9 @@ class ToolManager:
 
             approved = dialog.result == 'accept'
             modified_code = dialog.modified_code if approved else code
-            if not approved:
+            if approved:
+                self._last_approval_note = getattr(dialog, 'accept_note', '') or ''
+            else:
                 self._last_reject_reason = getattr(dialog, 'reject_reason', '') or ''
             log.info(f"[ToolManager._show_approval_dialog_on_main_thread] Dialog closed | "
                      f"approved={approved} | code_was_modified={modified_code != code}")
@@ -2379,6 +2404,14 @@ class ToolManager:
 
         if result['error']:
             output_parts.append(f"ERROR:\n{result['error']}")
+
+        # The user approved but left a steer — its own labelled section, so the
+        # model reads it as an instruction rather than as program output.
+        _note = (getattr(self, '_last_approval_note', '') or '').strip()
+        self._last_approval_note = ""       # one-shot: this step only
+        if _note:
+            output_parts.append(
+                "USER NOTE (approved with a message — follow it):\n" + _note)
 
         # User interrupted the running code — append the notice so the partial
         # output above is preserved and the AI sees why it stopped.

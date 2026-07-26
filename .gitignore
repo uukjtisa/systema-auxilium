@@ -9,8 +9,15 @@ __pycache__/
 .venv/
 venv/
 
-# Runtime counters written by the app (and by any local test run). The rest of
-# data/ is user state that is never mirrored; these two kept getting staged by
-# accident after running the suite inside the repo copy.
-data/token_usage.json
-data/token_usage_output.json
+# data/ is USER STATE — sessions, memories, tasks, logs, the security audit
+# trail. None of it is ever mirrored into the repo. This used to list only the
+# two token counters, so anything ELSE the app wrote while the suite ran inside
+# the repo copy was still catchable by `git add -A` — data/security/audit.jsonl
+# reached a commit that way. Ignore the whole directory instead of naming files
+# one incident at a time.
+#
+# The shipped task templates under data/tasks/ are ALREADY TRACKED and stay
+# that way — .gitignore does not untrack files. Anything genuinely new that
+# belongs in the repo under data/ needs an explicit `git add -f`.
+data/
+

@@ -368,14 +368,20 @@ class CodeApprovalDialog(QDialog):
     _SEV_COLOR_KEY = {SEV_DANGER: "red", SEV_CAUTION: "yellow", SEV_INFO: "muted"}
 
     def __init__(self, code, execution_type, ai_engine, parent=None,
-                 file_edit=None):
+                 file_edit=None, annotation=""):
         super().__init__(parent)
         self.code = code
         self.execution_type = execution_type
         self.ai_engine = ai_engine
+        # The step's own one-line label ("Attaching ValleyMed logo for review").
+        # The model already wrote it to narrate the step, so it is the fastest
+        # way to see WHAT you are being asked to approve — shown as a band above
+        # the title rather than left buried in the code.
+        self.annotation = (annotation or "").strip()
         self.result = None                 # 'accept' | 'reject' | None
         self.modified_code = code
         self.reject_reason = ""            # optional text captured on Reject
+        self.accept_note = ""              # optional text captured on Accept
         self._last_findings = []           # latest static-scan findings
         # File-edit mode: reviewing a PROPOSED FILE CHANGE (read/edit/write
         # subsystem) instead of code to execute. `code` holds the proposed NEW
@@ -461,6 +467,24 @@ class CodeApprovalDialog(QDialog):
             desc_text = (f"The AI wants to run the code below ({where}). Review, edit if "
                          "needed, and approve. You can turn this prompt off in Settings.")
 
+        # ── What this step IS, first thing on the page ───────────────────────
+        # Above the title on purpose: the title only says "code execution
+        # approval" (always true, tells you nothing), while the annotation says
+        # what the model is actually trying to do. Accent band so it reads at a
+        # glance without opening the code. Omitted entirely when the step
+        # carried no annotation — an empty band is worse than none.
+        if self.annotation:
+            ann = QLabel(self.annotation)
+            ann.setWordWrap(True)
+            ann.setTextFormat(Qt.TextFormat.PlainText)
+            ann.setStyleSheet(
+                f"QLabel {{ color: {p['text']}; font-size: 13px; font-weight: 600;"
+                f" background: {p['glow']};"
+                f" border: 1px solid {p['accent_dk']}; border-left: 3px solid {p['accent']};"
+                f" border-radius: 6px; padding: 8px 12px; }}")
+            ann.setToolTip("What the AI said this step is for")
+            root.addWidget(ann)
+
         title = QLabel(title_text)
         title.setStyleSheet(f"color: {p['text']}; font-size: 15px; font-weight: 600;"
                             " background: transparent;")
@@ -483,7 +507,38 @@ class CodeApprovalDialog(QDialog):
             split.setSizes([680, 420])
             root.addWidget(split, stretch=1)
 
-        # footer: tag-based "don't ask again" controls + reason + Reject / Accept
+        # ── Optional messages to the AI, one per decision ────────────────────
+        # Two fields, not one: the reason explains a refusal ("that path is
+        # wrong"), the note steers an approval ("go ahead, but log to stderr").
+        # Only the one matching the button you press is sent, so a stale value
+        # in the other can never leak into the observation.
+        notes = QHBoxLayout()
+        notes.setSpacing(8)
+        _note_css = (f"QLineEdit {{ background: {p['bg']}; color: {p['text']}; "
+                     f"border: 1px solid {p['border']}; border-radius: 6px; "
+                     f"padding: 5px 8px; font-size: 11px; }}"
+                     f"QLineEdit:focus {{ border-color: {p['accent_dk']}; }}")
+
+        self.reason_edit = QLineEdit()
+        self.reason_edit.setPlaceholderText("Reason for rejecting (optional)")
+        self.reason_edit.setStyleSheet(_note_css)
+        self.reason_edit.setToolTip(
+            "Sent to the AI only if you Reject, so it knows WHY and can try "
+            "something else instead of repeating itself.")
+        self.reason_edit.returnPressed.connect(self.on_reject)
+        notes.addWidget(self.reason_edit, 1)
+
+        self.note_edit = QLineEdit()
+        self.note_edit.setPlaceholderText("Note to the AI when approving (optional)")
+        self.note_edit.setStyleSheet(_note_css)
+        self.note_edit.setToolTip(
+            "Sent to the AI only if you Approve — steer the step without "
+            "stopping it (\"fine, but write to data/ not the desktop\").")
+        self.note_edit.returnPressed.connect(self.on_accept)
+        notes.addWidget(self.note_edit, 1)
+        root.addLayout(notes)
+
+        # footer: tag-based "don't ask again" controls + Reject / Accept
         foot = QHBoxLayout()
         cb_css = (f"QCheckBox {{ color: {p['muted']}; font-size: 11px; background: transparent; }}"
                   f"QCheckBox::indicator {{ width: 14px; height: 14px; }}")
@@ -500,16 +555,6 @@ class CodeApprovalDialog(QDialog):
         foot.addWidget(self.session_allow_cb)
         foot.addWidget(self.persist_allow_cb)
         foot.addStretch()
-
-        self.reason_edit = QLineEdit()
-        self.reason_edit.setPlaceholderText("Reason for rejecting (optional)")
-        self.reason_edit.setFixedWidth(240)
-        self.reason_edit.setStyleSheet(
-            f"QLineEdit {{ background: {p['bg']}; color: {p['text']}; "
-            f"border: 1px solid {p['border']}; border-radius: 6px; "
-            f"padding: 4px 8px; font-size: 11px; }}")
-        self.reason_edit.returnPressed.connect(self.on_reject)
-        foot.addWidget(self.reason_edit)
 
         reject_btn = QPushButton("Reject")
         reject_btn.setStyleSheet(self._btn(kind="danger"))
@@ -996,6 +1041,7 @@ class CodeApprovalDialog(QDialog):
             self.reject_reason = self.reason_edit.text().strip()
         except Exception:
             self.reject_reason = ""
+        self.accept_note = ""        # only the pressed button's field is sent
         self.close()
 
     def on_accept(self):
@@ -1005,6 +1051,11 @@ class CodeApprovalDialog(QDialog):
         if self._file_edit is not None and self._review_active():
             self._finish_review(apply=True)
         self.result = 'accept'
+        try:
+            self.accept_note = self.note_edit.text().strip()
+        except Exception:
+            self.accept_note = ""
+        self.reject_reason = ""      # only the pressed button's field is sent
         self.modified_code = self.code_edit.toPlainText().strip()
         cats = self._risky_categories()
         if cats and self.session_allow_cb.isChecked():
