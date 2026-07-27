@@ -912,7 +912,7 @@ class BubblesMixin:
 
         # The thinking dots now live INSIDE this shell (not as a separate row),
         # so the group row always goes just above the trailing stretch.
-        self.chat_layout.insertWidget(self.chat_layout.count() - 1, row)
+        self._insert_chat_row(row)
         return g
 
     def _insert_turn_segment(self, widget, at_top: bool = False) -> dict:
@@ -1133,7 +1133,7 @@ class BubblesMixin:
 
         menu_btn.clicked.connect(lambda: self._show_message_menu(message_data))
 
-        self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
+        self._insert_chat_row(message_widget)
         # Scroll AFTER animation completes so sb.maximum() and widget.height()
         # are accurate — firing at 120ms (mid-animation) caused the clamp
         # min(target, sb.maximum()) to cut the target short on long chats.
@@ -1699,7 +1699,9 @@ class BubblesMixin:
             '_intro': bool(intro),
         })
 
-        self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
+        # intro=intro: the admin-privileges notice belongs TO the intro group
+        # and must not dismiss it; every other system message clears it.
+        self._insert_chat_row(message_widget, intro=bool(intro))
         self._animate_message_in(message_widget,
                                  on_settled=lambda: self.scroll_to_widget(message_widget))
         # The interjection just split the turn — carry the typing indicator down
@@ -1872,7 +1874,7 @@ class BubblesMixin:
             '_intro': True,          # dismissed by the first real message
         })
 
-        self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
+        self._insert_chat_row(message_widget, intro=True)   # IS the intro
         self._animate_message_in(message_widget)
         # The pill floats mid-window while the intro is up, but the overlay was
         # last positioned during init — BEFORE this banner existed — so it has
@@ -1903,6 +1905,38 @@ class BubblesMixin:
         except Exception:
             log.debug("[add_greeting_banner] signal collection failed", exc_info=True)
             return set()
+
+    def _insert_chat_row(self, widget, intro: bool = False):
+        """THE way a row enters the transcript.
+
+        Anything landing in the chat clears the empty-session intro first. The
+        greeting banner EXPANDS to fill the window, so a bubble arriving while
+        it is still up gets squeezed into whatever room the banner left.
+
+        THE BUG THIS EXISTS FOR
+        Dismissal used to be wired into add_user_message and the assistant
+        turn shell — the two paths that existed when the banner was written.
+        Attaching an image goes through NEITHER: it puts a bubble straight into
+        the transcript with no user message and no assistant turn, so it slid
+        in underneath a banner that just sat there. Every new card type had to
+        remember to dismiss, and the newest one did not.
+
+        Routing every insertion through one method is the whole point: a card
+        added next year cannot forget something it never has to know about.
+
+        `intro=True` is for the banner and the startup notices themselves,
+        which obviously must not dismiss the group they belong to.
+        """
+        # Skipped during a bulk replay: render_loaded_messages clears the whole
+        # chat first, so there is no intro left to dismiss — and dismissing
+        # scans message_widgets, which per-message would make a session load
+        # O(n^2). Same reason _refresh_msg_navigator sits out the replay.
+        if not intro and not getattr(self, '_bulk_render', False):
+            try:
+                self.dismiss_session_intro()
+            except (AttributeError, RuntimeError):
+                pass
+        self.chat_layout.insertWidget(self.chat_layout.count() - 1, widget)
 
     def dismiss_session_intro(self):
         """Drop the greeting banner and the startup notices.

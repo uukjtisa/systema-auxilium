@@ -637,6 +637,48 @@ def test_a_detached_tile_still_renders(widget_host, many_refs):
     assert widget_host.add_image_bubble(many_refs[:3], origin="user") is not None
 
 
+def test_attaching_an_image_dismisses_the_greeting(widget_host, tmp_path):
+    """THE BUG THIS EXISTS FOR
+
+    The greeting only went away on a sent message. Attaching an image puts a
+    bubble straight into the transcript with no user message and no assistant
+    turn, so it slid in UNDERNEATH a banner that just sat there — and the
+    banner expands to fill the window, so the new bubble got whatever was left.
+    """
+    widget_host.add_greeting_banner()
+    assert any(e.get("_intro") for e in widget_host.message_widgets)
+
+    ref = image_cache.store(_png(tmp_path / "att.png"), n=1)
+    try:
+        widget_host.add_image_bubble([ref], origin="user")
+        assert not any(e.get("_intro") for e in widget_host.message_widgets), \
+            "an image bubble must clear the empty-session intro"
+    finally:
+        image_cache.discard(ref, still_referenced=[])
+
+
+def test_every_row_enters_the_transcript_through_one_door():
+    """A card added next year must not have to REMEMBER to dismiss the intro.
+    Dismissal was wired per-add_* and the newest card type (image bubbles)
+    silently missed it; this keeps that impossible."""
+    from pathlib import Path
+
+    ui = Path(__file__).resolve().parents[3] / "systema" / "ui"
+    offenders = []
+    for path in ui.rglob("*.py"):
+        for i, line in enumerate(path.read_text(encoding="utf-8",
+                                                errors="replace").splitlines(), 1):
+            if "chat_layout.insertWidget" not in line:
+                continue
+            if path.name == "bubbles.py":
+                continue          # the helper itself lives here
+            offenders.append(f"{path.name}:{i}")
+
+    assert not offenders, (
+        "these insert into the chat directly instead of via _insert_chat_row, "
+        f"so they will not dismiss the greeting: {offenders}")
+
+
 def test_a_live_tile_follows_its_ref_without_being_rebuilt(widget_host, tmp_path):
     """The mechanism that makes an in-place detach possible, on real widgets:
     repaint the bubble and the eye must agree with the ref — and it must be the
@@ -796,19 +838,25 @@ def test_the_greeting_banner_builds_and_scales(widget_host):
     assert "font-size" in label.styleSheet()
 
 
-def test_the_intro_is_dismissed_by_the_first_message(widget_host):
+def test_the_intro_is_dismissed_by_the_first_real_content(widget_host):
     """The banner EXPANDS to fill an empty session, so leaving it in place once
-    messages arrive pushed the real conversation down and out of view. The
-    greeting and the startup notices go together, on the first user message."""
+    content arrives pushed the real conversation down and out of view.
+
+    The intro group is the banner plus the startup notices (intro=True). They
+    go together, and the first row that is NOT one of them clears them — a
+    message, a card, or an attached image, whichever arrives first. It used to
+    be "the first user message" only, which is how an attached image ended up
+    rendering underneath a banner that stayed put.
+    """
     from systema.ui.chat.bubbles import BubblesMixin
 
     BubblesMixin.add_greeting_banner(widget_host)
     BubblesMixin.add_system_message(widget_host, "Administrator Privileges Granted",
                                     intro=True)
-    BubblesMixin.add_system_message(widget_host, "a normal note")   # not intro
-    assert sum(1 for e in widget_host.message_widgets if e.get("_intro")) == 2
+    assert sum(1 for e in widget_host.message_widgets if e.get("_intro")) == 2, \
+        "the admin notice JOINS the intro rather than dismissing it"
 
-    BubblesMixin.dismiss_session_intro(widget_host)
+    BubblesMixin.add_system_message(widget_host, "a normal note")   # real content
 
     assert not any(e.get("_intro") for e in widget_host.message_widgets)
     assert len(widget_host.message_widgets) == 1, "a normal note must survive"

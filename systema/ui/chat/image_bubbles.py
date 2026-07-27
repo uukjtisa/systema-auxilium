@@ -269,8 +269,10 @@ class ImageBubblesMixin:
         })
 
         if origin == 'user':
-            self.chat_layout.insertWidget(self.chat_layout.count() - 1,
-                                          message_widget)
+            # Through the one door: an attached image is content arriving with
+            # no user message and no assistant turn, which is exactly how it
+            # used to slide in under a greeting banner that never dismissed.
+            self._insert_chat_row(message_widget)
             self._animate_message_in(
                 message_widget,
                 on_settled=lambda: self.scroll_to_widget(message_widget))

@@ -369,7 +369,7 @@ class EventCardsMixin:
         outer_layout.setContentsMargins(0, 2, 0, 2)
         outer_layout.addWidget(card)
 
-        self.chat_layout.insertWidget(self.chat_layout.count() - 1, outer)
+        self._insert_chat_row(outer)
         self._animate_message_in(outer, on_settled=lambda: self.scroll_to_widget(outer))
 
     def add_loaded_skills_card(self, save_to_history: bool = True):
