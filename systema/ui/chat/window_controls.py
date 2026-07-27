@@ -317,6 +317,10 @@ class WindowControlsMixin:
         act_files.triggered.connect(self._open_session_files_dialog)
         menu.addAction(act_files)
 
+        act_images = QAction("Image attachments", self)
+        act_images.triggered.connect(self._open_image_attachments_dialog)
+        menu.addAction(act_images)
+
         btn = getattr(self, '_session_tools_btn', None)
         if btn is not None:
             # Opens UPWARD — the button now sits at the bottom of the window.
@@ -365,3 +369,13 @@ class WindowControlsMixin:
             dlg.exec()
         except Exception as e:
             self.add_system_message(f"Could not open the files dialog: {e}")
+
+    def _open_image_attachments_dialog(self):
+        """Images attached this session — per-image detach/delete plus the
+        three bulk actions, and what they cost per request."""
+        try:
+            from systema.ui.dialogs.image_attachments_dialog import ImageAttachmentsDialog
+            dlg = ImageAttachmentsDialog(self)
+            dlg.exec()
+        except Exception as e:
+            self.add_system_message(f"Could not open the images dialog: {e}")

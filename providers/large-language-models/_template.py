@@ -22,9 +22,15 @@ Parameters:
                       tool turns arrive already shaped for your dialect —
                       see the native section below.)
 
-    images         -- None, or a list of absolute paths to image files the
-                      user attached (JPEG/PNG/GIF/WEBP). Ignore it if your
-                      provider has no vision support.
+                      A message may also carry its OWN images under an
+                      "images" key, but only if you declare
+                      SUPPORTS_INLINE_IMAGES = True. Otherwise the app strips
+                      them before calling you.
+
+    images         -- None, or a list of absolute paths to image files (the
+                      one-shot analysis queue). Attach them to the final user
+                      turn. Ignore it — and set SUPPORTS_VISION = False — if
+                      your provider has no vision support.
 
     tools          -- None, or a list of canonical tool definitions
                       (name/description/parameters). Only passed when native
@@ -248,7 +254,7 @@ file in one code block, ready to save.
 ────────────────────────────────────────────────────────────────────────────────
 
 ════════════════════════════════════════════════════════════════════════════════
-CONTRACT SPECIFICATION  (paste this along with this _tempalte.py into whichever prompt you chose and send it to an AI agent)
+CONTRACT SPECIFICATION  (paste this into whichever prompt you chose)
 ════════════════════════════════════════════════════════════════════════════════
 
 The script is a single self-contained .py file. The app imports it fresh on
@@ -273,9 +279,19 @@ Arguments:
                          your provider's native shape (real tool-call and
                          tool-result turns) — in that case forward them
                          verbatim; do not reshape or re-wrap them.
-  images        : None or list[str] — absolute paths to image files the user
-                         attached (JPEG/PNG/GIF/WEBP). If the provider has no
-                         vision, ignore this argument entirely.
+
+                         A message may ALSO carry its own images:
+                             {"role": "user", "content": "look at this",
+                              "images": [{"path": str, "n": int, "name": str}]}
+                         but ONLY if you declare SUPPORTS_INLINE_IMAGES = True
+                         (see INLINE IMAGES below). If you do not declare it,
+                         the app strips them out before you are called and you
+                         will never see an "images" key here.
+  images        : None or list[str] — absolute paths to image files (the
+                         one-shot queue: pictures the AI asked to analyse for a
+                         single turn). Attach these to the FINAL user turn. If
+                         the provider has no vision, ignore this argument
+                         entirely and set SUPPORTS_VISION = False.
   tools         : None or list — canonical tool definitions, each
                          {"name": str, "description": str, "parameters": {...}}
                          where parameters is a JSON Schema object. Only passed
@@ -407,6 +423,36 @@ NATIVE TOOL CALLING (only if the provider genuinely supports it):
   SUPPORTS_NATIVE_TOOLS = False — the app then drives tools through its
   universal prompt-based mode and nothing breaks.
 
+VISION AND INLINE IMAGES:
+
+      SUPPORTS_VISION        = True    # False if the model cannot see images
+      SUPPORTS_INLINE_IMAGES = True    # messages may carry their own images
+      IMAGE_FORMATS          = ("png", "jpg", "jpeg", "gif", "webp")
+      MAX_IMAGES             = 8       # optional cap; omit for unlimited
+
+  SUPPORTS_VISION is read BEFORE an attachment is made, so declaring it
+  honestly is what lets the app warn the user instead of sending pictures to a
+  model that cannot look at them. Never claim vision you do not have.
+
+  SUPPORTS_INLINE_IMAGES is the interesting one. Without it, every image in a
+  conversation gets stapled onto the NEWEST user turn on every request — so
+  the model cannot tell which picture came from which message, and an image
+  the user sent ten turns ago looks like it was just sent. With it, each image
+  stays on the message that owns it. Render them in one line:
+
+      from systema.engine import native_adapters as na
+      messages = na.render_inline_images(messages, _encode_image, "openai")
+
+  where `_encode_image(path)` is YOUR OWN encoder returning one content block
+  in your dialect (resize and payload limits differ per backend, so that part
+  stays with you). The helper places an "[Image N]" label before each picture
+  so the model can be told "look at image 3" and know which one that is.
+
+  Handle BOTH channels: inline images (history, positional) and the flat
+  `images=` argument (the one-shot analysis queue, final turn). If you declare
+  nothing, the app degrades inline images into the flat list with text markers
+  and your script keeps working exactly as before.
+
 HARD RULES:
   - Do NOT hardcode a request timeout. The app has its own response-timeout
     setting (0 = unlimited) and a hardcoded one fights it.
@@ -441,6 +487,15 @@ import requests
 
 CONTRACT_VERSION = 2
 
+# Vision. Set SUPPORTS_VISION = False if your model cannot see images — the app
+# reads it to warn the user BEFORE an attachment is made rather than sending
+# pictures nothing will look at. SUPPORTS_INLINE_IMAGES says each image stays
+# on the message that owns it (see chat() below); without it the app folds
+# them all onto the newest user turn with text markers instead.
+SUPPORTS_VISION        = True
+SUPPORTS_INLINE_IMAGES = True
+IMAGE_FORMATS          = ("png", "jpg", "jpeg", "gif", "webp")
+
 API_URL = "https://api.example.com/v1/chat/completions"
 API_KEY = "your-api-key-here"
 MODEL   = "your-model-name"
@@ -474,25 +529,43 @@ def _payload(system_prompt, messages, stream=False):
     }
 
 
-def _vision_messages(messages, image_paths):
-    """Rewrite the last user message into OpenAI-style image_url blocks."""
+def _encode_image(image_path):
+    """One image file -> one OpenAI-style image_url content block.
+
+    This is the encoder the app's inline-image renderer calls. Keep it as ONE
+    image in, ONE block out — resizing and compression policy belongs here,
+    because payload limits differ wildly between backends.
+    """
     import base64
     import mimetypes
 
+    mime_type, _ = mimetypes.guess_type(image_path)
+    mime_type = mime_type or "image/jpeg"
+    with open(image_path, "rb") as f:
+        image_b64 = base64.b64encode(f.read()).decode()
+    return {
+        "type": "image_url",
+        "image_url": {"url": f"data:{mime_type};base64,{image_b64}"},
+    }
+
+
+def _vision_messages(messages, image_paths):
+    """Rewrite the last user message into OpenAI-style image_url blocks.
+
+    This is the EPHEMERAL channel — the one-shot analysis queue, which by
+    design belongs to the current turn. Images that belong to the conversation
+    are handled by render_inline_images() in chat() instead.
+    """
     last_user_text = messages[-1]["content"] if messages else ""
     prior_messages = messages[:-1] if len(messages) > 1 else []
 
-    content_blocks = []
-    for image_path in image_paths:
-        mime_type, _ = mimetypes.guess_type(image_path)
-        mime_type = mime_type or "image/jpeg"
-        with open(image_path, "rb") as f:
-            image_b64 = base64.b64encode(f.read()).decode()
-        content_blocks.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:{mime_type};base64,{image_b64}"},
-        })
-    content_blocks.append({"type": "text", "text": last_user_text})
+    content_blocks = [_encode_image(p) for p in image_paths]
+    # The last turn's content is already a BLOCK LIST when it also carried
+    # inline images — splice rather than nest, or those blocks are lost.
+    if isinstance(last_user_text, list):
+        content_blocks.extend(last_user_text)
+    else:
+        content_blocks.append({"type": "text", "text": last_user_text})
     return prior_messages + [{"role": "user", "content": content_blocks}]
 
 
@@ -502,8 +575,14 @@ def chat(system_prompt: str, messages: list, *, images=None, tools=None, stream=
     This sample speaks the OpenAI-compatible chat/completions dialect. `tools`
     is ignored here (SUPPORTS_NATIVE_TOOLS is not set) — see the native
     section at the bottom for how to opt in.
+
+    Both image channels are handled: inline images stay on the message that
+    owns them, the one-shot `images` queue rides the final turn.
     """
-    msgs = _vision_messages(messages, images) if images else messages
+    from systema.engine import native_adapters as na
+    msgs = na.render_inline_images(messages, _encode_image, "openai")
+    if images:
+        msgs = _vision_messages(msgs, images)
 
     if stream:
         return _chat_stream(system_prompt, msgs)

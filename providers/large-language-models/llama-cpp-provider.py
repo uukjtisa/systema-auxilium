@@ -74,6 +74,13 @@ VERBOSE      = False     # True to print llama.cpp load/inference logs to consol
 SUPPORTS_NATIVE_TOOLS = False
 NATIVE_DIALECT        = "openai"
 
+# ── Vision: NO ────────────────────────────────────────────────────────────────
+# llama.cpp vision needs a separate mmproj projector file and a matching
+# multimodal build, which this script deliberately does not assume. Declaring
+# it honestly is what makes the app warn BEFORE an image is attached instead of
+# silently sending pictures nothing will look at.
+SUPPORTS_VISION = False
+
 CONTRACT_VERSION = 2
 
 Display = {

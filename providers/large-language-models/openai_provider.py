@@ -32,6 +32,13 @@ CONTRACT_VERSION = 2
 SUPPORTS_NATIVE_TOOLS = True
 NATIVE_DIALECT        = "openai"
 
+# Vision (contract v2.1). SUPPORTS_INLINE_IMAGES means a message may carry its
+# own `images`, so an attachment stays anchored to the turn it arrived in
+# instead of being re-stapled onto the newest user turn every request.
+SUPPORTS_VISION        = True
+SUPPORTS_INLINE_IMAGES = True
+IMAGE_FORMATS          = ("png", "jpg", "jpeg", "gif", "webp")
+
 Display = {
     "API_KEY": ("API Key", "secure_input",
                 {"tooltip": "From platform.openai.com/api-keys",
@@ -58,26 +65,41 @@ def _headers() -> dict:
 
 
 def _image_blocks(paths: list) -> list:
-    blocks = []
-    for path in paths:
-        mime, _ = mimetypes.guess_type(path)
-        with open(path, "rb") as f:
-            data = base64.b64encode(f.read()).decode()
-        blocks.append({"type": "image_url",
-                       "image_url": {"url": f"data:{mime or 'image/jpeg'};base64,{data}"}})
-    return blocks
+    return [_image_block(p) for p in paths]
+
+
+def _image_block(path: str) -> dict:
+    """One image file -> one OpenAI base64 image_url content block."""
+    mime, _ = mimetypes.guess_type(path)
+    with open(path, "rb") as f:
+        data = base64.b64encode(f.read()).decode()
+    return {"type": "image_url",
+            "image_url": {"url": f"data:{mime or 'image/jpeg'};base64,{data}"}}
 
 
 def _payload(system_prompt, messages, images=None, tools=None, stream=False) -> dict:
-    convo = list(messages)
+    # Inline images first (contract v2.1): a picture stays on the turn it was
+    # sent in, instead of every image being re-stapled onto the newest user
+    # turn on every request.
+    from systema.engine import native_adapters as na
+    convo = list(na.render_inline_images(messages, _image_block, "openai"))
+
     if images and convo:
-        # Rewrite the final user turn as multimodal content blocks.
+        # Rewrite the final user turn as multimodal content blocks. This is the
+        # EPHEMERAL one-shot queue (attach_image_to_context), which is why it
+        # still rides the last turn rather than being anchored.
         last = convo[-1]
         if last.get("role") == "user" and isinstance(last.get("content"), str):
             convo = convo[:-1] + [{
                 "role": "user",
                 "content": _image_blocks(images) + [{"type": "text",
                                                      "text": last["content"]}],
+            }]
+        elif last.get("role") == "user" and isinstance(last.get("content"), list):
+            # Turn already multimodal (it carried inline images) — prepend.
+            convo = convo[:-1] + [{
+                "role": "user",
+                "content": _image_blocks(images) + last["content"],
             }]
         else:
             convo = convo + [{"role": "user", "content": _image_blocks(images)}]

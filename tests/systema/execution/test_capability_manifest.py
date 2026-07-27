@@ -181,9 +181,16 @@ def test_namespace_capabilities_declare_a_binding():
 def test_both_surfaces_of_attach_image_produce_the_same_result(tm, tmp_path):
     """THE dual-surface bar: calling the tool directly and calling the namespace
     function from inside python must be indistinguishable — same observation,
-    same card. If they can diverge, the capability has no business on two
+    same delivery. If they can diverge, the capability has no business on two
     surfaces (that divergence is exactly what makes two ways to do one thing
-    confusing rather than convenient)."""
+    confusing rather than convenient).
+
+    Delivery is the BINDING, not a card. The binding renders the images as
+    numbered bubbles and writes their history entry; emitting the old
+    image_attach card as well produced a second ui_event for the same
+    attachment, so every agent-attached image appeared — and was counted —
+    twice.
+    """
     img = tmp_path / "preview.png"
     img.write_bytes(b"\x89PNG\r\n\x1a\n fake but present")
     delivered = []
@@ -200,13 +207,33 @@ def test_both_surfaces_of_attach_image_produce_the_same_result(tm, tmp_path):
 
     assert direct == in_python, "the two surfaces returned different observations"
     assert delivered == [[str(img)], [str(img)]], "both surfaces must deliver the image"
-    # The in-python call buffers its card (so it lands after the interpreter's
-    # own card) — same payload, just deferred.
-    assert cards and cards[0]['card_type'] == 'image_attach'
-    assert tm._interp_card_buffer[0]['card_type'] == 'image_attach'
-    assert cards[0]['paths'] == tm._interp_card_buffer[0]['paths']
+    # Exactly ONE record per attachment: the binding's. No duplicate card.
+    assert not cards, "attach_image must not also emit a card (duplicate entry)"
+    assert not tm._interp_card_buffer
     # ...and the model is told about it as its own tool result.
     assert tm._interp_subresults == [('attach_image_to_chat', in_python)]
+
+
+def test_attach_image_binding_may_take_an_annotation(tm, tmp_path):
+    """The binding is called with (paths, annotation) so the bubble can be
+    captioned, but a two-arg call must not break a tasker's simpler
+    paths-only binding."""
+    img = tmp_path / "shot.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n bytes")
+
+    rich = []
+    tm._attach_image_binding = lambda paths, annotation='': rich.append(
+        (list(paths), annotation))
+    tm.run_attach_image_to_chat({'paths': [str(img)], 'annotation': 'the diff',
+                                 'error': None})
+    assert rich == [([str(img)], 'the diff')]
+
+    simple = []
+    tm._attach_image_binding = simple.append          # accepts ONE argument
+    out = tm.run_attach_image_to_chat({'paths': [str(img)], 'annotation': 'x',
+                                       'error': None})
+    assert simple == [[str(img)]]
+    assert not out.startswith("ERROR")
 
 
 def test_attach_image_never_touches_the_file(tm, tmp_path):

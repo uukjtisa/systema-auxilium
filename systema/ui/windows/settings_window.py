@@ -2115,6 +2115,34 @@ class SettingsWindow(BaseWindow):
             "Providers without it automatically fall back to Compatibility."))
         sys_lay.addWidget(tc_group)
 
+        # ── Work Mode ────────────────────────────────────────────────────────
+        # The work-continuation ping is re-sent on EVERY step of a work loop, so
+        # its length is paid per step, not once. That is why the length is worth
+        # a setting of its own.
+        wm_group = QGroupBox("Work Mode")
+        wm_group.setStyleSheet(_GROUP)
+        wm_lay = QVBoxLayout(wm_group)
+        self.work_mode_prompt_style_combo = QComboBox()
+        self.work_mode_prompt_style_combo.addItem(
+            "Detailed continuation prompt — full guidance every step (recommended)",
+            'detailed')
+        self.work_mode_prompt_style_combo.addItem(
+            "Compact continuation prompt — shredded to the essentials",
+            'compact')
+        self.work_mode_prompt_style_combo.setStyleSheet(_COMBO)
+        wm_lay.addWidget(self.work_mode_prompt_style_combo)
+        wm_lay.addWidget(_info_box(
+            "What the assistant is told between steps of a multi-step task.\n"
+            "Detailed sends the full block: the decision checklist, the list of "
+            "tools it can chain, and the anti-patterns. Most reliable, and the "
+            "default.\n"
+            "Compact keeps only the 'this message is internal' warning and the "
+            "directory-safety rules, dropping the checklist and the tool list "
+            "(both of which the system prompt already covers). Saves roughly "
+            "375 tokens on every step of every task — but a weaker model may "
+            "chain less thoroughly without the checklist."))
+        sys_lay.addWidget(wm_group)
+
         # ── Code Execution (moved here from General) ─────────────────────────
         exec_group = QGroupBox("Code Execution")
         exec_group.setStyleSheet(_GROUP)
@@ -3187,6 +3215,10 @@ class SettingsWindow(BaseWindow):
         _tc_idx = self.tool_calling_mode_combo.findData(_tc_mode)
         self.tool_calling_mode_combo.setCurrentIndex(_tc_idx if _tc_idx >= 0 else 0)
 
+        _wm_style = self.controller.settings.get('work_mode_prompt_style', 'detailed')
+        _wm_idx = self.work_mode_prompt_style_combo.findData(_wm_style)
+        self.work_mode_prompt_style_combo.setCurrentIndex(_wm_idx if _wm_idx >= 0 else 0)
+
         # Load active LLM provider script (drop stale unsaved Display edits so
         # the form re-reads persisted values)
         self._prov_display_cache = {}
@@ -3845,6 +3877,7 @@ class SettingsWindow(BaseWindow):
         s['streaming_enabled'] = self.streaming_checkbox.isChecked()
         s['packet_port'] = self.packet_port_spin.value()
         s['tool_calling_mode'] = self.tool_calling_mode_combo.currentData()
+        s['work_mode_prompt_style'] = self.work_mode_prompt_style_combo.currentData()
 
         # Per-provider Display values — settings['provider_display_values']
         # keyed by script file name, so every provider keeps its OWN saved

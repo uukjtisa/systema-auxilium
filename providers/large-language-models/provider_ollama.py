@@ -28,6 +28,12 @@ NUM_CTX = 12288  # context window tokens (model supports up to 262k)
 SUPPORTS_NATIVE_TOOLS = True
 NATIVE_DIALECT = "openai"
 SUPPORTS_VISION = True
+# Contract v2.1: messages may carry their own `images`, so an attachment stays
+# anchored to the turn it arrived in rather than being moved onto the newest
+# user turn on every request. Requires a vision-capable local model (llava,
+# qwen-vl, llama3.2-vision, …) — a text-only model will simply ignore them.
+SUPPORTS_INLINE_IMAGES = True
+IMAGE_FORMATS = ("png", "jpg", "jpeg", "gif", "webp")
 
 CONTRACT_VERSION = 2
 
@@ -101,7 +107,15 @@ def _encode_image(path: str) -> dict:
 
 
 def _build_messages(system_prompt: str, messages: list, image_paths: list = None) -> list:
-    """Convert Systema messages into OpenAI-compatible messages for Ollama's API."""
+    """Convert Systema messages into OpenAI-compatible messages for Ollama's API.
+
+    Two image channels: INLINE images ride the message that owns them (contract
+    v2.1, rendered first), while the flat `image_paths` queue from
+    attach_image_to_context() is ephemeral and still rides the final user turn.
+    """
+    from systema.engine import native_adapters as na
+    messages = na.render_inline_images(messages, _encode_image, "openai")
+
     out = []
     if system_prompt:
         out.append({"role": "system", "content": system_prompt})
@@ -110,12 +124,16 @@ def _build_messages(system_prompt: str, messages: list, image_paths: list = None
         role = msg.get("role", "user")
         content = msg.get("content", "")
 
-        # Attach images only to the latest user message.
+        # Attach the ephemeral queue only to the latest user message.
         if image_paths and role == "user" and i == len(messages) - 1:
-            content_blocks = []
-            for path in image_paths:
-                content_blocks.append(_encode_image(path))
-            content_blocks.append({"type": "text", "text": content})
+            content_blocks = [_encode_image(path) for path in image_paths]
+            # `content` is already a block LIST when this turn also carried
+            # inline images — extend in that case, or the rendered blocks would
+            # end up nested inside a text block and silently lost.
+            if isinstance(content, list):
+                content_blocks.extend(content)
+            else:
+                content_blocks.append({"type": "text", "text": content})
             out.append({"role": role, "content": content_blocks})
         else:
             out.append({"role": role, "content": content})

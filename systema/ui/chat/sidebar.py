@@ -405,7 +405,12 @@ class SidebarMixin:
             self.controller.delete_session(session_id)
 
     def _animated_sidebar_scroll_to(self, target_value: int):
-        """Animate the sidebar scrollbar to target_value."""
+        """Glide the sidebar scrollbar to target_value.
+
+        Same rule as the chat viewport: the area's SmoothScroller owns the
+        position, so a wheel notch during a programmatic glide blends into it
+        instead of two animators stomping on one scrollbar.
+        """
         if not hasattr(self, 'sidebar_scroll'):
             return
 
@@ -414,20 +419,17 @@ class SidebarMixin:
         if abs(current - target_value) < 4:
             return
 
-        if self._sidebar_scroll_anim is not None:
-            if self._sidebar_scroll_anim.state() == QPropertyAnimation.State.Running:
-                self._sidebar_scroll_anim.stop()
+        from systema.ui.widgets.smooth_scroll import scroller_for, SMOOTH_TIME_PROGRAM
+        s = scroller_for(self.sidebar_scroll)
+        if s is None:
+            sb.setValue(int(target_value))
+            return
 
-        anim = QPropertyAnimation(sb, b"value")
         distance = abs(target_value - current)
-        duration = max(ANIM_SCROLL_MIN_MS, min(ANIM_SCROLL_MAX_MS, distance // 2))
-        anim.setDuration(duration)
-        anim.setStartValue(current)
-        anim.setEndValue(target_value)
-        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-
-        self._sidebar_scroll_anim = anim
-        anim.start()
+        span = max(1, ANIM_SCROLL_MAX_MS - ANIM_SCROLL_MIN_MS)
+        frac = min(1.0, max(0.0, (distance // 2 - ANIM_SCROLL_MIN_MS) / span))
+        s.scroll_to(target_value,
+                    smooth_time=SMOOTH_TIME_PROGRAM * (0.55 + 0.45 * frac))
 
     def _sidebar_inertia_tick(self):
         """Called ~70fps while inertia is active for sidebar."""

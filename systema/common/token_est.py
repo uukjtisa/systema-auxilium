@@ -21,8 +21,68 @@ def estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+# ── Image tokens ─────────────────────────────────────────────────────────────
+# The tile formula OpenAI and Anthropic both document, and which every serious
+# token counter implements: clamp the long side, then the short side, then
+# charge a flat base plus a per-512px-tile rate.
+#
+# This matters more than it looks. An attached image is re-sent on EVERY turn
+# for as long as it stays in context, so a handful of screenshots can quietly
+# become the largest line item in a request — and until now the token pill
+# counted exactly none of it.
+IMAGE_BASE_TOKENS = 85       # flat cost per image
+IMAGE_TILE_TOKENS = 170      # per 512x512 tile
+IMAGE_MAX_LONG = 2048        # long side is clamped to this first
+IMAGE_MAX_SHORT = 768        # then the short side to this
+IMAGE_TILE_PX = 512
+
+
+def estimate_image_tokens(width: int, height: int) -> int:
+    """Approximate token cost of one image at the given pixel dimensions.
+
+    Falls back to a single-tile estimate when dimensions are unknown (0), which
+    is the honest floor — better than reporting zero for an image that is
+    definitely costing something.
+    """
+    try:
+        w, h = int(width), int(height)
+    except (TypeError, ValueError):
+        return IMAGE_BASE_TOKENS + IMAGE_TILE_TOKENS
+    if w <= 0 or h <= 0:
+        return IMAGE_BASE_TOKENS + IMAGE_TILE_TOKENS
+
+    # Clamp the long side, preserving aspect.
+    if max(w, h) > IMAGE_MAX_LONG:
+        scale = IMAGE_MAX_LONG / max(w, h)
+        w, h = max(1, int(w * scale)), max(1, int(h * scale))
+    # Then the short side.
+    if min(w, h) > IMAGE_MAX_SHORT:
+        scale = IMAGE_MAX_SHORT / min(w, h)
+        w, h = max(1, int(w * scale)), max(1, int(h * scale))
+
+    tiles = -(-w // IMAGE_TILE_PX) * -(-h // IMAGE_TILE_PX)   # ceil-div both
+    return IMAGE_BASE_TOKENS + IMAGE_TILE_TOKENS * tiles
+
+
+def estimate_refs_tokens(refs) -> int:
+    """Total image tokens for a list of ImageRefs, counting only ATTACHED ones.
+
+    A detached image costs a one-line marker, not a picture — charging for it
+    would make the readout lie in the direction that matters least to the user.
+    """
+    total = 0
+    for ref in (refs or []):
+        if isinstance(ref, dict) and ref.get('attached'):
+            total += estimate_image_tokens(ref.get('w', 0), ref.get('h', 0))
+    return total
+
+
 def estimate_history_tokens(chat_history: list) -> int:
-    """Estimate total tokens for a list of {role, content} message dicts."""
+    """Estimate total tokens for a list of {role, content} message dicts.
+
+    Includes attached images (`_images`), since they ride the entry they belong
+    to and are re-sent with every request.
+    """
     total = 0
     for msg in chat_history:
         content = msg.get('content', '')
@@ -33,6 +93,7 @@ def estimate_history_tokens(chat_history: list) -> int:
                         block.get('text', '') or block.get('content', ''))
         elif isinstance(content, str):
             total += estimate_tokens(content)
+        total += estimate_refs_tokens(msg.get('_images'))
         total += 4   # per-message framing overhead
     return total
 

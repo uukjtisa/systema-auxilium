@@ -155,6 +155,11 @@ class TaskAIEngine:
             # task dicts may still carry the key — it is simply ignored.)
             self._apply_supervision(perms)
             self._apply_background_policy(perms)
+            # Same guarantee the main session gets: the interpreter re-binds the
+            # task's helpers itself on ANY reset, including the one execute()
+            # performs when it abandons a stuck thread. Without this, a task that
+            # hit a hard cancel stayed broken until its NEXT ping re-injected.
+            self._engine.tool_manager._namespace_injector = self._inject_task_namespace
             self._inject_task_namespace()
             log.info("[TaskAIEngine._init_engine] ✓ Dedicated AIEngine instance created")
         except Exception as e:
@@ -589,17 +594,67 @@ class TaskThread(threading.Thread):
 
     # ── Schedule helpers ──────────────────────────────────────────────────────
 
-    def _in_window(self) -> bool:
+    def _window_times(self):
+        """(start_time, end_time) from the schedule, or None when whole-day.
+
+        Never raises: an unparseable schedule is treated as whole-day, which is
+        the permissive answer — a task that cannot read its window should keep
+        running, not go silent.
+        """
         sched = self._task.get('daily_schedule', {})
         if sched.get('whole_day', False):
-            return True
+            return None
         try:
-            now = datetime.now().time()
             start = datetime.strptime(sched.get('start', '00:00'), '%H:%M').time()
-            end   = datetime.strptime(sched.get('end',   '23:59'), '%H:%M').time()
-            return start <= now <= end
+            end = datetime.strptime(sched.get('end', '23:59'), '%H:%M').time()
+            return start, end
         except Exception:
+            return None
+
+    def _window_wraps(self) -> bool:
+        """True when the window crosses midnight (22:00 -> 01:00)."""
+        times = self._window_times()
+        return bool(times and times[0] > times[1])
+
+    def _in_window(self, now: datetime | None = None) -> bool:
+        """Is `now` inside the daily schedule window?
+
+        A window whose end is EARLIER than its start crosses midnight, and the
+        obvious `start <= now <= end` cannot express that: for 22:00 -> 01:00 it
+        is false at 23:00, because 23:00 <= 01:00 is false. A sleep reminder set
+        for 22:00-01:00 is exactly the shape that wraps, so this is the case
+        most likely to be configured and the one that silently never ran.
+        """
+        times = self._window_times()
+        if times is None:
             return True
+        start, end = times
+        current = (now or datetime.now()).time()
+        if start <= end:
+            return start <= current <= end
+        return current >= start or current <= end
+
+    def _window_started_at(self, now: datetime | None = None) -> datetime | None:
+        """The datetime the CURRENTLY OPEN window began.
+
+        For a wrapping window in its after-midnight half, that is YESTERDAY's
+        start — which is the whole fix for pings dying at midnight. Returns
+        None when the window has not opened yet today.
+        """
+        times = self._window_times()
+        now = now or datetime.now()
+        if times is None:
+            return now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start, _end = times
+        start_today = now.replace(hour=start.hour, minute=start.minute,
+                                  second=0, microsecond=0)
+        if start_today <= now:
+            return start_today
+        # start is later today. If we are inside a wrapping window right now,
+        # this is its tail and it opened yesterday.
+        if self._window_wraps() and self._in_window(now):
+            return start_today - timedelta(days=1)
+        return None
 
     def _wait_seconds_until_start(self) -> float:
         sched = self._task.get('daily_schedule', {})
@@ -663,27 +718,30 @@ class TaskThread(threading.Thread):
           wait = 18:00 − 16:31 = 89 min = 5340 s
         """
         task = self._task
-        interval_sec = task.get('interval_minutes', 30) * 60
-        sched = task.get('daily_schedule', {})
+        interval_sec = max(1, task.get('interval_minutes', 30) * 60)
         now = datetime.now()
 
-        if sched.get('whole_day', False):
-            start_h, start_m = 0, 0
-        else:
-            try:
-                start_h, start_m = map(int, sched.get('start', '00:00').split(':'))
-            except Exception:
-                start_h, start_m = 0, 0
+        # The anchor is when the OPEN window began, which for a wrapping window
+        # after midnight is yesterday's start time. Anchoring to today's start
+        # unconditionally is what killed cross-midnight tasks: at 00:30 with a
+        # 22:00 start it measured to 22:00 TONIGHT and slept ~21 hours, so a
+        # 22:00-01:00 reminder went quiet the moment the date rolled over — and
+        # a restart appeared to fix it because that re-anchored the schedule.
+        window_start = self._window_started_at(now)
 
-        start_today = now.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
-
-        if now <= start_today:
-            # Haven't reached window start yet — first ping fires at window open
+        if window_start is None:
+            # Window has not opened yet today — first ping fires at open.
+            times = self._window_times()
+            start = times[0] if times else None
+            if start is None:
+                return float(interval_sec)
+            start_today = now.replace(hour=start.hour, minute=start.minute,
+                                      second=0, microsecond=0)
             return max(0.0, (start_today - now).total_seconds())
 
-        elapsed_sec = (now - start_today).total_seconds()
+        elapsed_sec = (now - window_start).total_seconds()
         slots_passed = math.floor(elapsed_sec / interval_sec)
-        next_ping = start_today + timedelta(seconds=(slots_passed + 1) * interval_sec)
+        next_ping = window_start + timedelta(seconds=(slots_passed + 1) * interval_sec)
         return max(0.0, (next_ping - now).total_seconds())
 
     def _get_ping_interval_mode(self) -> str:
@@ -1129,7 +1187,10 @@ class TaskThread(threading.Thread):
                 continue
 
             # ── If date rolled over, start fresh next iteration ──────────────
-            if date.today().isoformat() != today:
+            # A WRAPPING window (22:00 -> 01:00) is still open across midnight,
+            # so it must not be treated as "the day ended". Only roll the
+            # session over for ordinary same-day windows.
+            if date.today().isoformat() != today and not self._window_wraps():
                 continue
 
             # ── Run the ping through the unified pipeline ─────────────────────

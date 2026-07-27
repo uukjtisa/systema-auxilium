@@ -27,6 +27,13 @@ CONTRACT_VERSION = 2
 SUPPORTS_NATIVE_TOOLS = True
 NATIVE_DIALECT        = "gemini"
 
+# Vision (contract v2.1). SUPPORTS_INLINE_IMAGES means a message may carry its
+# own `images`, so an attachment stays anchored to the turn it arrived in
+# instead of being re-stapled onto the newest user turn every request.
+SUPPORTS_VISION        = True
+SUPPORTS_INLINE_IMAGES = True
+IMAGE_FORMATS          = ("png", "jpg", "jpeg", "gif", "webp")
+
 Display = {
     "API_KEY": ("API Key", "secure_input",
                 {"tooltip": "From aistudio.google.com/apikey",
@@ -61,9 +68,19 @@ def _inline_image(path: str) -> dict:
 
 
 def _body(system_prompt, messages, images=None, tools=None) -> dict:
+    # Inline images first (contract v2.1): a picture stays on the turn it was
+    # sent in. The renderer emits Gemini `parts`, which the loop below forwards
+    # verbatim, so positions survive.
+    from systema.engine import native_adapters as na
+    messages = na.render_inline_images(messages, _inline_image, "gemini")
+
     contents = []
     for msg in messages:
         role = "model" if msg.get("role") == "assistant" else "user"
+        if isinstance(msg.get("parts"), list):
+            # Already Gemini-shaped (inline images) — forward verbatim.
+            contents.append({"role": role, "parts": msg["parts"]})
+            continue
         content = msg.get("content")
         if isinstance(content, list):
             # Already dialect-shaped (tool turns) — forward verbatim.

@@ -37,6 +37,8 @@ from systema.ui.chat.sidebar import SidebarMixin
 from systema.ui.chat.input_dock import InputDockMixin, InlineStatus, _ChatBottomFade
 from systema.ui.chat.bubbles import BubblesMixin, make_circular_pixmap, _TypingDots
 from systema.ui.chat.event_cards import EventCardsMixin
+from systema.ui.chat.image_bubbles import ImageBubblesMixin
+from systema.ui.chat.commands import SlashCommandsMixin
 from systema.ui.chat.window_controls import WindowControlsMixin, PanelToggleButton
 
 import re
@@ -61,7 +63,7 @@ from systema.common import app_config as _app_config
 
 class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
                  SidebarMixin, InputDockMixin, BubblesMixin, EventCardsMixin,
-                 WindowControlsMixin):
+                 ImageBubblesMixin, SlashCommandsMixin, WindowControlsMixin):
     """Modern chat window with AI conversation"""
 
     # Smooth antialiased corners (no 1-bit mask): every corner-touching child
@@ -93,7 +95,9 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         self._sidebar_resize_start_w = 0          # sidebar width at drag start
 
         # ── Smooth scroll state (main chat) ───────────────────────────────
-        self._scroll_anim = None
+        # The chat viewport's position is owned by its SmoothScroller (see
+        # _chat_scroller); there is no separate scroll animation object any
+        # more, because two animators over one scrollbar fought each other.
         self._inertia_velocity = 0.0
         self._inertia_timer = QTimer()
         self._inertia_timer.setInterval(ANIM_INERTIA_INTERVAL_MS)
@@ -105,7 +109,7 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         self._stick_to_bottom = True
 
         # ── Smooth scroll state (sidebar) ─────────────────────────────────
-        self._sidebar_scroll_anim = None
+        # (sidebar position is likewise owned by its SmoothScroller)
         self._sidebar_inertia_velocity = 0.0
         self._sidebar_inertia_timer = QTimer()
         self._sidebar_inertia_timer.setInterval(ANIM_INERTIA_INTERVAL_MS)
@@ -137,8 +141,13 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
 
         # Image attachment (multi-image + persistent pinned images)
         self.attached_image = None  # backward compat — last added image
-        self.attached_images = []  # list of paths queued in input bar
-        self.pinned_images = []  # list of {path, widget, row_wrapper, auto_detach}
+        # Images no longer live in UI state. They are ImageRefs on the history
+        # entry that owns them (see ui/chat/image_bubbles.py) — which is what
+        # makes them survive a reload and a work-mode continuation. These two
+        # lists remain only so any straggling `getattr(chat, 'pinned_images')`
+        # reader sees an empty list instead of raising.
+        self.attached_images = []
+        self.pinned_images = []
 
         # Interrupt tracking
         self.last_sent_message = None  # Track last message for interrupt
@@ -437,30 +446,26 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         # Apply glass background from saved settings (deferred so widgets are ready)
         QTimer.singleShot(200, self._apply_glass_from_settings)
 
-        # Notify if admin privileges are available — deferred past theme init
-        QTimer.singleShot(210, self.check_admin_mode)
-
-        # Welcome message — deferred past theme init so _current_theme_key is set
-        QTimer.singleShot(220, self._show_welcome_message)
+        # Greeting banner — deferred past theme init so _current_theme_key is
+        # set. It carries the elevated-privileges note as its own subtitle now,
+        # so there is no second timer for that.
+        QTimer.singleShot(210, self._show_welcome_message)
 
     def _show_welcome_message(self):
-        """Show a time-appropriate greeting with the user's name if available."""
-        from datetime import datetime
-        hour = datetime.now().hour
-        if hour < 12:
-            greeting = "Good morning"
-        elif hour < 18:
-            greeting = "Good afternoon"
-        else:
-            greeting = "Good evening"
+        """Open the startup session with the greeting banner.
 
-        user_name = self.controller.get_user_name()
-        if user_name:
-            msg = f"**{greeting}, {user_name}!** Welcome to Systema Auxilium."
-        else:
-            msg = f"**{greeting}!** Welcome to Systema Auxilium."
+        Was a plain system line built from three hardcoded time buckets. It is
+        now the same banner a new session gets (four buckets, a rotating pool
+        of phrasings, painted glyph) so "fresh session" looks identical however
+        you arrived at one.
 
-        self.add_system_message(msg)
+        Suppressed when the transcript already has real messages: a restored
+        session must not get a greeting stapled to the BOTTOM of its history.
+        """
+        if any(m.get('role') in ('user', 'assistant')
+               for m in getattr(self, 'message_widgets', [])):
+            return
+        self.add_greeting_banner()
 
     # ═══════════════════════════════════════════════════════════
     # ANIMATION METHODS
@@ -1229,6 +1234,15 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         self._ai_turn_group = None   # widgets are gone — never append into them
         self._stream_seg = None      # ditto for any in-flight stream widgets
         self._stream_think_card = None
+        # Clearing removes the greeting banner too, so the empty-session state
+        # just ended — re-anchor the floating input. Without this the pill kept
+        # whatever position it last computed, which is why loading an existing
+        # session left it suspended in the middle of the window with no
+        # greeting in sight.
+        try:
+            self._position_input_overlay()
+        except (AttributeError, RuntimeError):
+            pass
         self._stream_active = False
         self._turn_thinking_card = None
         self._turn_thinking_group = None
@@ -1349,10 +1363,20 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
                              'detail': msg.get("_skill_detail", "")},
                             save_to_history=False)
                     elif msg.get("_type") == "image_attach":
-                        self.add_image_attach_card(
-                            {'paths': msg.get("_image_paths", []),
-                             'annotation': msg.get("_annotation", "")},
-                            save_to_history=False)
+                        # New shape: real ImageRefs, rendered as a bubble with
+                        # working detach/delete. Old sessions stored only a
+                        # list of paths under _image_paths and still render
+                        # through the original card — never break a session
+                        # file that was written before the redesign.
+                        if msg.get("_images"):
+                            self.add_image_bubble(msg["_images"],
+                                                  origin='agent',
+                                                  annotation=msg.get("_annotation", ""))
+                        else:
+                            self.add_image_attach_card(
+                                {'paths': msg.get("_image_paths", []),
+                                 'annotation': msg.get("_annotation", "")},
+                                save_to_history=False)
                     elif msg.get("_type") == "web_page":
                         self.add_web_page_card(
                             {'mode': msg.get("_web_mode", "open"),
@@ -1368,6 +1392,14 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
                             save_to_history=False,
                             annotation=msg.get("_annotation", ""),
                         )
+                elif msg.get("_images") and role == "user":
+                    # A user turn carrying images. The bubble comes first so it
+                    # keeps its place in the transcript; any text on the same
+                    # entry follows as its own bubble.
+                    self.add_image_bubble(msg["_images"], origin='user')
+                    if content:
+                        self.add_user_message(content)
+                    _flush_deferred_mem()
                 elif content:
                     if role == "user":
                         self.add_user_message(content)
@@ -1383,6 +1415,13 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
             _sp.__exit__(None, None, None)
         # ONE navigator rebuild for the whole replay (was once per message).
         self._refresh_msg_navigator()
+        # Re-anchor the floating pill against the transcript we just replayed.
+        # The empty-session position is computed from whether the greeting is
+        # up; after a load it never is, so this settles it back to the bottom.
+        try:
+            self._position_input_overlay()
+        except (AttributeError, RuntimeError):
+            pass
 
     def _remove_tool_usage_format(self, content):
         """Remove tool usage JSON blocks from AI message"""
@@ -1736,12 +1775,8 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         """Recompute the pin on scroll movement. Skipped while our own
         animated scroll is in flight — a programmatic glide to a centred
         message must not release the pin it is serving."""
-        anim = getattr(self, '_scroll_anim', None)
-        try:
-            if anim is not None and anim.state() == QPropertyAnimation.State.Running:
-                return
-        except RuntimeError:
-            pass
+        if self._chat_scroller_animating():
+            return
         try:
             sb = self.chat_scroll_area.verticalScrollBar()
         except (AttributeError, RuntimeError):
@@ -1755,11 +1790,45 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
             return
         self._stick_to_bottom = near_bottom
 
+    def _chat_scroller(self):
+        """The SmoothScroller owning the chat viewport's vertical position.
+
+        Every programmatic scroll goes through it rather than running its own
+        animation: one spring means a user wheel notch arriving mid-glide
+        blends into the motion instead of two animators fighting over
+        setValue().
+        """
+        try:
+            from systema.ui.widgets.smooth_scroll import scroller_for
+            return scroller_for(getattr(self, 'chat_scroll_area', None))
+        except (ImportError, RuntimeError):
+            return None
+
+    def _chat_scroller_animating(self) -> bool:
+        s = self._chat_scroller()
+        try:
+            return bool(s is not None and s.is_animating)
+        except RuntimeError:
+            return False
+
     def _on_scroll_range_changed(self, _min=0, _max=0):
-        """Content grew (streaming text / work cards): while sticky, re-pin to
-        the new bottom immediately so long AI streams stay glued."""
+        """Content grew (streaming text / work cards): while sticky, track the
+        new bottom so long AI streams stay glued.
+
+        This used to be a bare setValue(maximum()), which teleported the view
+        once per streamed chunk — the crawl of a long reply came out as a
+        stutter. follow_bottom() re-aims the spring at the live maximum every
+        frame instead, so growth reads as continuous motion.
+        """
         if not getattr(self, '_stick_to_bottom', True):
             return
+        s = self._chat_scroller()
+        if s is not None:
+            try:
+                s.follow_bottom()
+                return
+            except RuntimeError:
+                pass
         try:
             sb = self.chat_scroll_area.verticalScrollBar()
             sb.setValue(sb.maximum())
@@ -1842,7 +1911,15 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         self._animated_scroll_to(target)
 
     def _animated_scroll_to(self, target_value: int):
-        """Animate the chat scrollbar to target_value using QPropertyAnimation."""
+        """Glide the chat scrollbar to target_value.
+
+        Delegates to the viewport's SmoothScroller instead of running its own
+        QPropertyAnimation. Two animators over one scrollbar meant a wheel
+        notch during a scroll-to-message either got stomped or stomped the
+        glide; feeding the same spring makes them blend. The distance-scaled
+        duration is preserved as a distance-scaled SMOOTHING TIME so a long
+        jump still takes visibly longer than a short one.
+        """
         if not hasattr(self, 'chat_scroll_area'):
             return
 
@@ -1851,20 +1928,19 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         if abs(current - target_value) < 4:
             return
 
-        if self._scroll_anim is not None:
-            if self._scroll_anim.state() == QPropertyAnimation.State.Running:
-                self._scroll_anim.stop()
+        s = self._chat_scroller()
+        if s is None:
+            sb.setValue(int(target_value))
+            return
 
-        anim = QPropertyAnimation(sb, b"value")
+        from systema.ui.widgets.smooth_scroll import SMOOTH_TIME_PROGRAM
         distance = abs(target_value - current)
-        duration = max(ANIM_SCROLL_MIN_MS, min(ANIM_SCROLL_MAX_MS, distance // 2))
-        anim.setDuration(duration)
-        anim.setStartValue(current)
-        anim.setEndValue(target_value)
-        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-
-        self._scroll_anim = anim
-        anim.start()
+        # Map the old ANIM_SCROLL_MIN/MAX_MS envelope onto smoothing time: a
+        # near jump settles fast, a page-long one gets the full glide.
+        span = max(1, ANIM_SCROLL_MAX_MS - ANIM_SCROLL_MIN_MS)
+        frac = min(1.0, max(0.0, (distance // 2 - ANIM_SCROLL_MIN_MS) / span))
+        smooth = SMOOTH_TIME_PROGRAM * (0.55 + 0.45 * frac)
+        s.scroll_to(target_value, smooth_time=smooth)
 
 
     # ── Inertia scroll — main chat ─────────────────────────────────────────
@@ -1899,15 +1975,31 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
 
 
     def send_message(self):
-        """Send message — supports multi-image and persistent pinned images."""
+        """Send the typed message.
+
+        Images are NOT collected here any more. Attaching one puts it straight
+        into the conversation (its own bubble, its own history entry, its own
+        number), so by the time you press Enter every picture is already part
+        of the transcript. That is what killed the old "attached, pending send"
+        limbo: an image was only real for the single request it rode along
+        with, and any turn that did not go through this method lost it.
+        """
+        message = self.input_field.toPlainText().strip()
+        if not message:
+            return
+
+        # SLASH COMMANDS RUN BEFORE THE SEND GATE, deliberately. A command is a
+        # UI action, not a turn — and the ones you most need mid-turn are
+        # exactly the ones the gate would block (/shutdown, /restart). Each
+        # command carries its own mid-turn policy instead.
+        if self.try_run_command(message):
+            return
+
         # The text box stays typable while the assistant works (see
         # set_input_enabled), so the gate that used to be "the widget is
         # disabled" has to live here — otherwise Enter would fire a second
         # request into a turn already in flight.
         if not getattr(self, '_send_allowed', True):
-            return
-        message = self.input_field.toPlainText().strip()
-        if not message:
             return
 
         # Sending re-engages the pin: jump to your own message and follow the reply.
@@ -1916,45 +2008,15 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         # A send snaps any in-flight typing reveal to its full text.
         self._finish_active_reveals()
 
-        # ── Collect all images for this send ─────────────────────────────────
-        # pinned first (persistent context), then newly attached from input bar
-        provider = self.controller.get_ai_provider()
-        images_for_send = []
-        if provider in ('puter', 'custom_script'):
-            images_for_send = (
-                    [pi['path'] for pi in self.pinned_images] + list(self.attached_images)
-            )
-        # ─────────────────────────────────────────────────────────────────────
-
-        display_message = self.input_field.toPlainText().strip()
-        self.last_sent_message = display_message
-        self.add_user_message(display_message, image_paths=images_for_send if images_for_send else None)
+        self.last_sent_message = message
+        self.add_user_message(message)
 
         ab = getattr(getattr(self.controller, 'ui', None), 'android_bridge', None)
         if ab and ab.isVisible():
-            ab.add_user_message(display_message, image_paths=images_for_send if images_for_send else None)
+            ab.add_user_message(message)
 
-        # ── Pin newly attached images, then clear input bar ───────────────────
-        newly_attached = list(self.attached_images)  # snapshot before clear
         self.input_field.clear()   # collapses to one line (drops any drag floor)
-        self._clear_image_preview()
-
-        # Add newly attached images as persistent pinned widgets
-        if provider in ('puter', 'custom_script'):
-            for p in newly_attached:
-                self._add_pinned_image_widget(p, auto_detach=False)
-
-        # Remove any pinned images that were set to send-once (auto_detach=True)
-        # We already captured them in images_for_send above, so it's safe to remove now
-        for pi in list(self.pinned_images):
-            if pi.get('auto_detach', False):
-                self._remove_pinned_image(pi)
-        # ─────────────────────────────────────────────────────────────────────
-
-        if images_for_send:
-            self.controller.send_message_with_image(message, images_for_send)
-        else:
-            self.controller.send_message(message)
+        self.controller.send_message(message)
 
         # ── Auto-lock session list while AI is busy, then auto-unlock ────────
         QTimer.singleShot(600, self._start_session_lock_watcher)
@@ -2373,8 +2435,6 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         self._position_window_controls()
         self._raise_window_controls()
 
-        self._update_pinned_overlay()
-
         # Debounced content re-fit: bubbles/shells carry fixed widths computed
         # for the OLD window size — re-clamp them once the resize settles so
         # everything adapts to the new space (no overflow past the edge).
@@ -2445,11 +2505,6 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
                 if nav is not None:
                     nav.reposition()
 
-        # ── Reposition pinned overlay when input_container height changes ──
-        if hasattr(self, 'input_container') and obj is self.input_container:
-            if event.type() == QEvent.Type.Resize:
-                self._update_pinned_overlay()
-
         # ── Smooth inertia scroll — SIDEBAR viewport ───────────────────────
         if hasattr(self, 'sidebar_scroll') and obj is self.sidebar_scroll.viewport():
             if event.type() == QEvent.Type.Wheel:
@@ -2457,12 +2512,14 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
                 return False
 
             elif event.type() == QEvent.Type.MouseButtonPress:
-                if self._sidebar_scroll_anim is not None:
-                    try:
-                        if self._sidebar_scroll_anim.state() == QPropertyAnimation.State.Running:
-                            self._sidebar_scroll_anim.stop()
-                    except RuntimeError:
-                        pass
+                # A click takes the wheel — stop any glide dead.
+                try:
+                    from systema.ui.widgets.smooth_scroll import scroller_for
+                    s = scroller_for(self.sidebar_scroll)
+                    if s is not None:
+                        s.stop()
+                except (ImportError, RuntimeError):
+                    pass
 
         # ── Smooth inertia scroll — INPUT FIELD viewport ───────────────────
         if hasattr(self, 'input_field') and obj is self.input_field.text_input.viewport():
@@ -2506,11 +2563,13 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
                 return False
 
             elif event.type() == QEvent.Type.MouseButtonPress:
+                # A click is the user taking the wheel: kill any glide in
+                # flight so the view stops dead under the cursor.
                 self._user_scrolling = True
-                if self._scroll_anim is not None:
+                s = self._chat_scroller()
+                if s is not None:
                     try:
-                        if self._scroll_anim.state() == QPropertyAnimation.State.Running:
-                            self._scroll_anim.stop()
+                        s.stop()
                     except RuntimeError:
                         pass
 
@@ -2683,23 +2742,34 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         except Exception as e:
             self.add_system_message(f"⚠️ Could not open Memory window: {e}")
 
-    def check_admin_mode(self):
-        """Check if running as admin (Windows) / root (Linux) and notify user"""
-        is_elevated = False
+    def is_elevated(self) -> bool:
+        """Running as administrator (Windows) / root (POSIX)?
+
+        Cached: the greeting banner asks on every new session, and a WinAPI
+        call per banner is pointless — elevation cannot change without a
+        restart.
+        """
+        cached = getattr(self, '_is_elevated_cache', None)
+        if cached is not None:
+            return cached
+        elevated = False
         try:
             if sys.platform == "win32":
                 import ctypes
-                is_elevated = bool(ctypes.windll.shell32.IsUserAnAdmin())
+                elevated = bool(ctypes.windll.shell32.IsUserAnAdmin())
             else:
-                is_elevated = (os.geteuid() == 0)
+                elevated = (os.geteuid() == 0)
         except Exception:
-            log.warning("[ChatWindow.check_admin_mode] Elevated check failed", exc_info=True)
-            return
+            log.warning("[ChatWindow.is_elevated] Elevated check failed", exc_info=True)
+        self._is_elevated_cache = elevated
+        return elevated
 
-        if is_elevated:
-            label = "**Administrator Privileges Granted**" if sys.platform == "win32" else "**Root Privileges Granted**"
-            self.add_system_message(
-                f"{label}\n\n"
-                "Systema Auxilium has been booted with elevated system privileges. "
-                "Operate with discretion."
-            )
+    def check_admin_mode(self):
+        """Retained for callers that still ask; the notice itself now lives as
+        a varied subtitle inside the greeting banner (see add_greeting_banner).
+
+        It used to add its own grey system line under the banner. Two stacked
+        notices made the opener look cluttered and pushed the greeting
+        off-centre, and the line never varied.
+        """
+        return self.is_elevated()

@@ -611,6 +611,40 @@ have work to do, keep using python_interpreter and don't address the user
 mid-task.
 """
 
+# ── Compact work-continuation core (Settings ▸ System ▸ Work Mode) ────────────
+# Same three slots as the full core ({work_output}, {situation}, {options}) so
+# every caller that formats one can format the other — they are interchangeable
+# by construction, which is what lets the setting be a pure swap.
+#
+# What survives the shred, and why:
+#   * the internal-message warning, cut to two lines. Dropping it entirely is
+#     how models start reciting the system message at the user.
+#   * the anti-patterns, cut to two lines. These prevent real context floods
+#     (a 5000-entry directory listing, or walking the skills tree).
+# What goes:
+#   * the DECIDE checklist — the model re-derives it anyway;
+#   * the tool-chaining list — the same tools are already documented in full in
+#     the assembled system prompt, so this was a second copy per turn.
+# The FINISH rule is NOT restated here: it lives in {options}, once per mode,
+# and duplicating it would break the "stated exactly once" prompt invariant.
+#
+# This ping is re-sent on EVERY work turn, so its length is paid per step —
+# which is the whole reason a compact variant is worth having.
+WORK_CONTINUATION_CORE_COMPACT = """\
+INTERNAL — never quote this message, never answer it on the page, never narrate
+what you have or haven't got. The user sees only your own reply text, stitched
+around the tool cards as one flowing response.
+
+Previous execution output:
+{work_output}
+{situation}
+{options}
+
+NEVER list or walk a directory without checking len(os.listdir(path)) first —
+above ~200 entries use glob/rglob with a specific pattern instead. NEVER walk
+the skills directory at all.
+"""
+
 # Slim version stored in history for all but the latest work-mode ping.
 WORK_MODE_OUTPUT_ONLY_PROMPT = "<SYSTEM_MESSAGE>\n{work_output}\n</SYSTEM_MESSAGE>"
 

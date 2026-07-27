@@ -591,6 +591,25 @@ class EyeButton(GlyphButton):
                        QPointF(cx + 8.0 * u, cy - 6.0 * u))
 
 
+class ContextEyeButton(EyeButton):
+    """The same eye, meaning "the assistant can see this".
+
+    Used on image thumbnails for detach-from-context: checked = in context,
+    unchecked (struck through) = detached. EyeButton's own tooltip flips
+    between Show/Hide on every toggle, which is wrong here — the caller sets a
+    tooltip that explains what detaching an IMAGE does, and this keeps it.
+    """
+
+    def __init__(self, size=20, tooltip="", parent=None):
+        super().__init__(size=size, parent=parent)
+        self._fixed_tip = tooltip
+        self.setToolTip(tooltip)
+
+    def _sync_tip(self):
+        self.setToolTip(getattr(self, '_fixed_tip', '') or self.toolTip())
+        self.update()
+
+
 class ChevronCombo(QComboBox):
     """QComboBox that PAINTS its own ⌄ chevron.
 

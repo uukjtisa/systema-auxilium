@@ -33,15 +33,61 @@ class MultiLineInput(QTextEdit):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self.textChanged.connect(self.adjust_height)
 
+    def _chat(self):
+        """The ChatWindow hosting this input, if it can be reached."""
+        return self.get_chat_window() if hasattr(self, 'get_chat_window') else None
+
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter:
+        key = event.key()
+
+        # ── slash-command autocomplete ───────────────────────────────────────
+        # Only intercepted WHILE THE DROPDOWN IS OPEN, so none of these keys
+        # change meaning during ordinary typing.
+        chat = self._chat()
+        if chat is not None and getattr(chat, 'command_popup_visible', None) \
+                and chat.command_popup_visible():
+            if key in (Qt.Key.Key_Tab, Qt.Key.Key_Right):
+                if chat.accept_command_completion():
+                    event.accept()
+                    return
+            elif key == Qt.Key.Key_Down:
+                chat.move_command_selection(1)
+                event.accept()
+                return
+            elif key == Qt.Key.Key_Up:
+                chat.move_command_selection(-1)
+                event.accept()
+                return
+            elif key == Qt.Key.Key_Escape:
+                # CONSUMED here on purpose. Escape is bound to interrupt at the
+                # window level, so letting it through would stop the assistant
+                # merely because a dropdown was dismissed. A second Escape,
+                # with the popup closed, interrupts as normal.
+                chat.hide_command_completer()
+                event.accept()
+                return
+
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             if event.modifiers() == Qt.KeyboardModifier.ShiftModifier:
                 super().keyPressEvent(event)
             else:
+                # Enter ALWAYS runs the line as typed — it never doubles as
+                # "accept the completion", or a fully typed command would
+                # no-op instead of executing.
+                #
+                # The dropdown closes here regardless of what the line turns
+                # out to be. Leaving that to the command handler meant any
+                # early return down that path (a bare "/" parses to nothing)
+                # stranded the list on screen after the text was gone.
+                if chat is not None and hasattr(chat, 'hide_command_completer'):
+                    chat.hide_command_completer()
                 self.enterPressed.emit()
                 event.accept()
-        else:
-            super().keyPressEvent(event)
+            return
+
+        super().keyPressEvent(event)
+        if chat is not None and hasattr(chat, 'refresh_command_completer'):
+            chat.refresh_command_completer()
 
     def canInsertFromMimeData(self, source):
         # OS file drags carry URLs but often no text, so the default QTextEdit
@@ -51,57 +97,70 @@ class MultiLineInput(QTextEdit):
         # image via the dialog).
         return source.hasUrls() or super().canInsertFromMimeData(source)
 
+    IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif')
+
+    @classmethod
+    def _looks_like_image(cls, path: str) -> bool:
+        return path.lower().endswith(cls.IMAGE_EXTS)
+
+    def _route_dropped_paths(self, paths) -> bool:
+        """Offer to attach any image files among `paths`; insert the rest as text.
+
+        Returns True when it handled the paste. Written to take a LIST because
+        both entry points can carry several files at once and both used to
+        mishandle that: the URL branch returned after the FIRST image, and the
+        text branch tested the whole multi-line blob as one path — so pasting
+        two images (Windows "Copy as path" gives quoted, newline-separated
+        text) silently pasted raw paths instead of offering to attach them.
+        """
+        chat_window = self.get_chat_window()
+        if not chat_window or not paths:
+            return False
+
+        cleaned = [chat_window.clean_file_path(p) for p in paths if p]
+        images = [p for p in cleaned if self._looks_like_image(p)]
+        others = [p for p in cleaned if not self._looks_like_image(p)]
+
+        if images:
+            if len(images) == 1:
+                QTimer.singleShot(
+                    0, lambda p=images[0]: chat_window._handle_image_file_drop(p))
+            else:
+                QTimer.singleShot(
+                    0, lambda ps=list(images):
+                    chat_window._handle_multiple_image_files_dialog(ps))
+
+        for path in others:
+            if chat_window.should_quote_path(path):
+                path = f'"{path}"'
+            self.insertPlainText(path + ("\n" if len(others) > 1 else ""))
+
+        return bool(images or others)
+
     def insertFromMimeData(self, source):
-        """Override paste to handle file paths"""
+        """Override paste to handle file paths (one or many)."""
         if source.hasUrls():
-            # Handle file drops/pastes
-            for url in source.urls():
-                file_path = url.toLocalFile()
-                if file_path:
-                    # Get the chat window to use its helper methods
-                    chat_window = self.get_chat_window()
-                    if chat_window:
-                        cleaned_path = chat_window.clean_file_path(file_path)
-
-                        # Check if image — prompt user via dialog
-                        valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif']
-                        if any(cleaned_path.lower().endswith(ext) for ext in valid_extensions):
-                            QTimer.singleShot(0, lambda p=cleaned_path: chat_window._handle_image_file_drop(p))
-                            return
-
-                        # Quote non-image paths
-                        if chat_window.should_quote_path(cleaned_path):
-                            cleaned_path = f'"{cleaned_path}"'
-
-                        self.insertPlainText(cleaned_path)
-                    else:
-                        # Fallback if can't find chat window
-                        self.insertPlainText(file_path)
+            paths = [u.toLocalFile() for u in source.urls() if u.toLocalFile()]
+            if self._route_dropped_paths(paths):
+                return
+            for p in paths:                       # no chat window to ask
+                self.insertPlainText(p)
             return
-        elif source.hasText():
+
+        if source.hasText():
             text = source.text().strip()
-
-            # Get the chat window to use its helper methods
             chat_window = self.get_chat_window()
-            if chat_window:
-                cleaned_path = chat_window.clean_file_path(text)
-
-                # Check if it's a valid file path
-                if os.path.exists(cleaned_path):
-                    # Check if image — prompt user via dialog
-                    valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.jfif']
-                    if any(cleaned_path.lower().endswith(ext) for ext in valid_extensions):
-                        QTimer.singleShot(0, lambda p=cleaned_path: chat_window._handle_image_file_drop(p))
+            if chat_window and text:
+                # One path per line, each possibly quoted — that is exactly the
+                # shape Windows "Copy as path" produces for a multi-selection.
+                candidates = [ln.strip().strip('"').strip()
+                              for ln in text.splitlines() if ln.strip()]
+                resolved = [chat_window.clean_file_path(c) for c in candidates]
+                if resolved and all(os.path.exists(p) for p in resolved):
+                    if self._route_dropped_paths(candidates):
                         return
 
-                    # Quote non-image paths
-                    if chat_window.should_quote_path(cleaned_path):
-                        cleaned_path = f'"{cleaned_path}"'
-
-                    self.insertPlainText(cleaned_path)
-                    return
-
-            # If not a file path, paste normally
+            # If not file paths, paste normally
             super().insertFromMimeData(source)
         else:
             super().insertFromMimeData(source)

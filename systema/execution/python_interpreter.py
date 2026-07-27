@@ -126,6 +126,11 @@ class PythonInterpreter:
         # Create the interactive interpreter
         self.interpreter = CustomInterpreter(self.namespace)
         self.execution_count = 0
+        # Fired by reset() AFTER the namespace is rebuilt, so whoever owns the
+        # agent-level bindings (search_memory, memorize, web_search, notify, …)
+        # can put them back. Set by ToolManager; see reset() for why this is a
+        # hook rather than something the callers of reset() do themselves.
+        self.on_reset = None
         self._install_helpers()
         # Live-output buffers — point at the currently-executing code's capture
         # StringIOs so another thread (the GUI) can stream output as it runs.
@@ -567,7 +572,28 @@ class PythonInterpreter:
         }
 
     def reset(self):
-        """Reset the interpreter state"""
+        """Reset the interpreter state, then let the owner re-bind its helpers.
+
+        WHY on_reset EXISTS
+        -------------------
+        `_install_helpers` only knows about the helpers this module itself
+        defines. Everything the agent actually reaches for — search_memory,
+        memorize, update_memory, forget_memory, web_search, notify,
+        attach_image_to_chat, take_screenshot, controller — is injected from
+        OUTSIDE, by ToolManager's namespace injector.
+
+        ToolManager.reset_python() used to be the only place that re-injected,
+        and it claimed to cover "a reset from ANY path". It did not: execute()
+        resets the interpreter ITSELF when an interrupted thread is abandoned
+        or a killed timeout leaves the namespace inconsistent. Those resets
+        never went through ToolManager, so the namespace came back bare and
+        every later call died with `NameError: name 'search_memory' is not
+        defined` until the whole app was restarted.
+
+        Firing the hook from HERE — the one place the namespace is cleared —
+        makes it impossible to reset without re-injection, no matter which path
+        got here or how deep inside the supervisor loop it was.
+        """
         log.warning("[PythonInterpreter.reset] Resetting interpreter — ALL namespace state will be cleared")
         self.namespace.clear()
         self.namespace.update({
@@ -577,6 +603,15 @@ class PythonInterpreter:
         self.interpreter = CustomInterpreter(self.namespace)
         self.execution_count = 0
         self._install_helpers()
+        if callable(self.on_reset):
+            try:
+                self.on_reset()
+                log.info("[PythonInterpreter.reset] on_reset hook re-bound the agent namespace")
+            except Exception as e:
+                # A failed re-injection must not turn into a failed reset — the
+                # interpreter itself is already healthy at this point.
+                log.error(f"[PythonInterpreter.reset] on_reset hook failed: "
+                          f"{type(e).__name__}: {e}")
         log.info("[PythonInterpreter.reset] Reset complete — fresh interpreter attached, count=0")
 
     def _install_helpers(self):

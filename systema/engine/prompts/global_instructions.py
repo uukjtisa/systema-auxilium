@@ -50,6 +50,30 @@ WORK_MODE_PROMPT_NATIVE = ("<SYSTEM_MESSAGE>\n"
                            + _CORE.replace("{options}", native.WORK_OPTIONS)
                            + "</SYSTEM_MESSAGE>")
 
+# Compact twins, selected by `work_mode_prompt_style` (Settings ▸ System ▸
+# Work Mode). Built the same way from the same slots, so both styles stay
+# format-compatible with every caller — see shared.WORK_CONTINUATION_CORE_COMPACT.
+_CORE_COMPACT = shared.WORK_CONTINUATION_CORE_COMPACT
+WORK_MODE_PROMPT_COMPACT = ("<SYSTEM_MESSAGE>\n"
+                            + _CORE_COMPACT.replace("{options}", compat.WORK_OPTIONS)
+                            + "</SYSTEM_MESSAGE>")
+WORK_MODE_PROMPT_COMPACT_NATIVE = ("<SYSTEM_MESSAGE>\n"
+                                   + _CORE_COMPACT.replace("{options}", native.WORK_OPTIONS)
+                                   + "</SYSTEM_MESSAGE>")
+
+
+def work_mode_prompt(native_tools: bool, style: str = 'detailed') -> str:
+    """The work-continuation ping template for (mode, style).
+
+    Four constants, two axes: compat/native is a BEHAVIOURAL axis that must stay
+    at parity, detailed/compact is a LENGTH axis the user picks. Keeping the
+    selection in one function is what stops the two from being confused at a
+    call site.
+    """
+    if str(style).lower() == 'compact':
+        return WORK_MODE_PROMPT_COMPACT_NATIVE if native_tools else WORK_MODE_PROMPT_COMPACT
+    return WORK_MODE_PROMPT_NATIVE if native_tools else WORK_MODE_PROMPT
+
 # The skill-load/unload work variants are formatted by callers that supply only
 # skill_name + work_output, so their situation slot is resolved to empty here.
 _SKILL_CORE = _CORE.replace("{situation}", "")

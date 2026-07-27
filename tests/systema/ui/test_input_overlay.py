@@ -60,10 +60,17 @@ def _build(qapp, cc_h=500, cc_w=600):
 
     stub = types.SimpleNamespace(
         input_container=ic, _input_card=combined, _chat_container=cc, chat_layout=cl,
-        input_field=inp, _update_pinned_overlay=lambda: None,
+        input_field=inp,
         _position_input_handles=lambda: None,  # width grab-bars (no-op in the mock)
+        # Empty-session opener absent in the mock, so the pill anchors to the
+        # bottom edge exactly as it does in a session with messages.
+        _session_intro_showing=lambda: False,
         _chat_layout_host=inner,  # keep the layout's widget alive (GC → dead layout)
     )
+    # The geometry math lives in ONE place now (_measure_input_overlay); both
+    # the eager pass and the settle pass call it, so the mock binds it too.
+    stub._measure_input_overlay = types.MethodType(
+        ChatWindow._measure_input_overlay, stub)
     stub._position_input_overlay = types.MethodType(
         ChatWindow._position_input_overlay, stub)
     stub._position_input_overlay_settle = types.MethodType(

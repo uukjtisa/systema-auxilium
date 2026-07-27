@@ -114,6 +114,11 @@ def test_send_message_refuses_while_a_turn_is_in_flight():
         _send_allowed = False
         input_field = type("F", (), {"toPlainText": staticmethod(lambda: "hi")})()
 
+        # send_message now checks for a slash command BEFORE the send gate
+        # (see test_slash_commands). A plain message is not one.
+        def try_run_command(self, text):
+            return False
+
         def _finish_active_reveals(self):
             calls.append("ran")
 

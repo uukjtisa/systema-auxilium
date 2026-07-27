@@ -339,7 +339,10 @@ def _openai_turn(turn: dict) -> list:
                 for c in turn["tool_calls"]
             ],
         }]
-    return [{"role": _text_role(role), "content": _as_text(turn.get("content"))}]
+    out = {"role": _text_role(role), "content": _as_text(turn.get("content"))}
+    if turn.get("images"):
+        out["images"] = list(turn["images"])
+    return [out]
 
 
 def _anthropic_turn(turn: dict) -> list:
@@ -360,7 +363,10 @@ def _anthropic_turn(turn: dict) -> list:
             content.append({"type": "tool_use", "id": c["id"], "name": c["name"],
                             "input": c.get("arguments", {})})
         return [{"role": "assistant", "content": content}]
-    return [{"role": _text_role(role), "content": _as_text(turn.get("content"))}]
+    out = {"role": _text_role(role), "content": _as_text(turn.get("content"))}
+    if turn.get("images"):
+        out["images"] = list(turn["images"])
+    return [out]
 
 
 def _gemini_turn(turn: dict) -> list:
@@ -382,7 +388,13 @@ def _gemini_turn(turn: dict) -> list:
         for c in turn["tool_calls"]:
             parts.append({"functionCall": {"name": c["name"], "args": c.get("arguments", {})}})
         return [{"role": grole, "parts": parts}]
-    return [{"role": grole, "parts": [{"text": _as_text(turn.get("content"))}]}]
+    out = {"role": grole, "parts": [{"text": _as_text(turn.get("content"))}]}
+    if turn.get("images"):
+        # Kept under "images" (not folded into parts) so render_inline_images
+        # can place them with their [Image N] labels — the provider script owns
+        # encoding, this layer only carries the reference through.
+        out["images"] = list(turn["images"])
+    return [out]
 
 
 def _as_block_list(content) -> list:
@@ -401,18 +413,123 @@ def _merge_alternation(dialect: str, msgs: list) -> list:
         for m in msgs:
             if out and out[-1]["role"] == m["role"]:
                 out[-1]["content"] = _as_block_list(out[-1]["content"]) + _as_block_list(m["content"])
+                # Carry pending inline images across the merge — rebuilding the
+                # dict from role+content alone silently dropped them.
+                if m.get("images"):
+                    out[-1].setdefault("images", []).extend(m["images"])
             else:
-                out.append({"role": m["role"], "content": m["content"]})
+                merged = {"role": m["role"], "content": m["content"]}
+                if m.get("images"):
+                    merged["images"] = list(m["images"])
+                out.append(merged)
         return out
     if dialect == "gemini":
         out = []
         for m in msgs:
             if out and out[-1]["role"] == m["role"]:
                 out[-1]["parts"] = list(out[-1]["parts"]) + list(m["parts"])
+                if m.get("images"):
+                    out[-1].setdefault("images", []).extend(m["images"])
             else:
-                out.append({"role": m["role"], "parts": list(m["parts"])})
+                merged = {"role": m["role"], "parts": list(m["parts"])}
+                if m.get("images"):
+                    merged["images"] = list(m["images"])
+                out.append(merged)
         return out
     return msgs
+
+
+# ── Inline (positional) images — contract v2.1 ───────────────────────────────
+
+def render_inline_images(messages: list, encoder, dialect: str = "openai") -> list:
+    """Turn per-message `images` lists into dialect-native multimodal content.
+
+    Contract v2.1 lets a message carry the pictures that belong to IT:
+
+        {"role": "user", "content": "look at this",
+         "images": [{"path": "...", "n": 3, "name": "shot.png"}, ...]}
+
+    which is what makes an image stay at its real place in the conversation
+    instead of being stapled onto whatever the newest user turn happens to be.
+    A script opts in with `SUPPORTS_INLINE_IMAGES = True` and calls this once;
+    scripts that don't are handled by provider_contract.flatten_inline_images()
+    and never see an `images` key at all.
+
+    `encoder(path)` is the SCRIPT'S OWN image encoder, returning one ready
+    dialect-native block — resize policy, compression and payload limits differ
+    per backend (Cloudflare dies above ~4 MB base64, others do not), so that
+    stays with the provider. This function only handles placement.
+
+    Each picture is preceded by an `[Image N]` text block so the model can be
+    told "look at image 3" and know which one that is. An image whose encoder
+    raises is replaced by a text note rather than killing the whole request —
+    one unreadable file must not cost the user their turn.
+    """
+    out = []
+    for entry in messages or []:
+        if not isinstance(entry, dict) or not entry.get("images"):
+            out.append(entry)
+            continue
+
+        blocks = []
+        for img in entry["images"]:
+            path = img.get("path") if isinstance(img, dict) else img
+            if not path:
+                continue
+            n = img.get("n") if isinstance(img, dict) else None
+            label = f"[Image {n}]" if n is not None else "[Image]"
+            try:
+                block = encoder(path)
+            except Exception as e:                      # noqa: BLE001
+                blocks.append(_text_block(
+                    f"{label} could not be read ({type(e).__name__}).", dialect))
+                continue
+            blocks.append(_text_block(label, dialect))
+            blocks.append(block)
+
+        # Whatever the turn already held goes AFTER the pictures. Read it from
+        # the dialect's own field: a Gemini turn keeps its text in `parts`, and
+        # looking only at `content` silently dropped every word of it.
+        blocks.extend(_existing_blocks(entry, dialect))
+
+        if not blocks:
+            out.append({k: v for k, v in entry.items() if k != "images"})
+            continue
+
+        clone = {k: v for k, v in entry.items() if k not in ("images", "content", "parts")}
+        if dialect == "gemini":
+            clone["parts"] = blocks
+        else:
+            clone["content"] = blocks
+        out.append(clone)
+    return out
+
+
+def _text_block(text: str, dialect: str) -> dict:
+    """One text block in the dialect's content-block shape."""
+    if dialect == "gemini":
+        return {"text": text}
+    return {"type": "text", "text": text}
+
+
+def _existing_blocks(entry: dict, dialect: str) -> list:
+    """The turn's pre-existing content as a list of dialect blocks.
+
+    A turn reaching render_inline_images may already be shaped three ways:
+    plain string content, an OpenAI/Anthropic block list, or Gemini `parts`.
+    Reading only `content` loses the text of the last two.
+    """
+    if dialect == "gemini":
+        parts = entry.get("parts")
+        if isinstance(parts, list):
+            return list(parts)
+        text = str(entry.get("content") or "")
+        return [{"text": text}] if text else []
+    content = entry.get("content")
+    if isinstance(content, list):
+        return list(content)
+    text = str(content or "")
+    return [{"type": "text", "text": text}] if text else []
 
 
 def build_messages(dialect: str, neutral_convo: list) -> list:

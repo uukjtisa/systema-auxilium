@@ -147,6 +147,13 @@ Display = {
 SUPPORTS_NATIVE_TOOLS = True
 NATIVE_DIALECT        = "openai"   # Cloudflare Workers AI speaks the OpenAI dialect
 
+# Vision (contract v2.1). SUPPORTS_INLINE_IMAGES means a message may carry its
+# own `images`, so an attachment stays anchored to the turn it arrived in
+# instead of being re-stapled onto the newest user turn every request.
+SUPPORTS_VISION       = True
+SUPPORTS_INLINE_IMAGES = True
+IMAGE_FORMATS         = ("png", "jpg", "jpeg", "gif", "webp")
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Cache file lives next to this script so it persists across reloads/restarts.
@@ -353,6 +360,13 @@ def _build_vision_message(image_paths: list[str], user_text: str) -> dict:
 
     for image_path in image_paths:
         content_blocks.append(_encode_image(image_path))
+
+    # `user_text` is already a BLOCK LIST when this same turn also carried
+    # inline images (contract v2.1) — splice those blocks in rather than
+    # stuffing a list into a text field, which would silently drop them.
+    if isinstance(user_text, list):
+        content_blocks.extend(user_text)
+        return {"role": "user", "content": content_blocks}
 
     content_blocks.append({
         "type": "text",
@@ -600,8 +614,21 @@ def _call_accounts(
 # ── Public API (contract v2) ──────────────────────────────────────────────────
 
 def _build_full_messages(system_prompt: str, messages: list, image_paths=None) -> list:
-    """Assemble the wire messages; with images, the final user turn becomes a
-    multimodal message (one base64 image_url block per image + the text)."""
+    """Assemble the wire messages.
+
+    Two image channels, deliberately separate:
+
+    * INLINE (contract v2.1) — a message may carry its own `images`, which stay
+      at that message's position in the conversation. This is how attachments
+      persist: the picture belongs to the turn it was sent in, not to whatever
+      the newest user turn happens to be.
+    * FLAT `image_paths` — the one-shot queue from attach_image_to_context().
+      Ephemeral by design, so it still rides the FINAL user turn.
+    """
+    from systema.engine import native_adapters as na
+
+    messages = na.render_inline_images(messages, _encode_image, "openai")
+
     if image_paths:
         last_user_text = messages[-1]["content"] if messages else ""
         prior = messages[:-1] if len(messages) > 1 else []

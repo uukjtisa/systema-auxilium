@@ -47,6 +47,14 @@ MAX_TOKENS   = 16384
 SUPPORTS_NATIVE_TOOLS = True
 NATIVE_DIALECT        = "openai"
 
+# ── Vision: NO ────────────────────────────────────────────────────────────────
+# The curated OpenCode Zen catalog is text/coding models with no image input.
+# Declaring this honestly is load-bearing, not paperwork: the app reads it to
+# warn BEFORE an attachment is made, and provider_mixed_opencode.cloudflare.py
+# exists precisely because this backend cannot see pictures — it routes any
+# image turn to Cloudflare instead. Use that script if you need vision here.
+SUPPORTS_VISION = False
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 CONTRACT_VERSION = 2

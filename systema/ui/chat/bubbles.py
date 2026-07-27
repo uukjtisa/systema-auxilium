@@ -833,7 +833,19 @@ class BubblesMixin:
     def _ensure_ai_turn_group(self) -> dict:
         """Return the live turn group, building the shell row (avatar + name
         + segment body) on the first assistant item of a turn. The row itself
-        is not animated — segments animate in, the shell just appears."""
+        is not animated — segments animate in, the shell just appears.
+
+        Opening an assistant turn also clears the empty-session intro. Not
+        cosmetic: the greeting banner EXPANDS to fill the chat, so a message
+        arriving without a user turn first — a background task agent posting
+        into a fresh session is the real case — would be squeezed into
+        whatever the banner left over. Dismissing here means any real content,
+        from any source, gets the room it needs.
+        """
+        try:
+            self.dismiss_session_intro()
+        except (AttributeError, RuntimeError):
+            pass
         g = getattr(self, '_ai_turn_group', None)
         if g is not None:
             try:
@@ -1005,6 +1017,9 @@ class BubblesMixin:
 
     def add_user_message(self, message, image_paths=None):
         """Add user message with three-dot menu"""
+        # The empty-session opener (greeting + startup notices) goes the moment
+        # there is a real conversation to look at.
+        self.dismiss_session_intro()
         self._end_ai_turn_group()   # a user message always closes the AI turn
         message_widget = QFrame()
         message_widget.setObjectName("chatRow")
@@ -1623,8 +1638,14 @@ class BubblesMixin:
         cleaned = re.sub(r'[ \t]+\n', '\n', cleaned)
         return cleaned.strip()
 
-    def add_system_message(self, message):
-        """Add system message"""
+    def add_system_message(self, message, intro: bool = False):
+        """Add system message.
+
+        `intro=True` marks it as part of the empty-session opener (the startup
+        notices that sit under the greeting banner), so the first real message
+        clears it along with the banner instead of leaving it stranded at the
+        top of a live transcript.
+        """
         self._end_ai_turn_group()   # a system interjection closes the AI turn
         # ── Update work mode banner if this is a Working: annotation ─────────
         import re as _re
@@ -1675,6 +1696,7 @@ class BubblesMixin:
             'role': 'system',
             'content_wrapper': text_label,  # text_label IS the styled surface here
             'zoom_restyle': _sys_restyle,
+            '_intro': bool(intro),
         })
 
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
@@ -1683,6 +1705,257 @@ class BubblesMixin:
         # The interjection just split the turn — carry the typing indicator down
         # into the new shell so it rides the NEWEST bubble, not the old one.
         self._rehome_thinking_dots()
+
+    def add_greeting_banner(self):
+        """The session-opening greeting — a large, time-aware line.
+
+        Replaces the "**New Session Created**" system note. It is still a
+        system-message-class item in every way that matters: it lives in the
+        transcript flow, is NEVER written to conversation_history (so the model
+        never sees it and it costs no tokens), and disappears when the chat is
+        cleared for a new session. It is simply presented as a banner instead
+        of a faint grey line, because "you have a fresh session" is the one
+        system note worth looking at.
+
+        Deliberately NOT a floating empty-state overlay: an overlay would have
+        to be positioned against the input pill and torn down on the first
+        message, and it would fight the sticky-bottom scroll. A normal row in
+        the flow scrolls away on its own like everything else.
+        """
+        import sys
+
+        from systema.common.greeting import admin_note, greeting
+        from systema.ui.widgets.painted_icons import SparkleGlyph
+
+        try:
+            user_name = self.controller.get_user_name()
+        except Exception:
+            user_name = ""
+        text = greeting(user_name, signals=self._greeting_signals())
+
+        class _GreetingRow(QFrame):
+            """Re-measures itself whenever its width changes.
+
+            The only reliable way to stop a word-wrapped child being clipped is
+            to recompute the required height AT THE NEW WIDTH — a height that
+            was correct at 900px is wrong at 500px, and a static minimum cannot
+            know that. This closes the loop: resize -> re-measure -> new floor.
+            """
+
+            on_resize = None
+
+            def resizeEvent(self, event):
+                super().resizeEvent(event)
+                if callable(self.on_resize):
+                    try:
+                        self.on_resize()
+                    except RuntimeError:
+                        pass
+
+        message_widget = _GreetingRow()
+        message_widget.setObjectName("greetRow")
+        message_widget.setStyleSheet(
+            "QFrame#greetRow { background-color: transparent; }")
+        # CLIPPING, and why this policy is the fix.
+        #
+        # Expanding/Expanding let the row be shrunk below its sizeHint whenever
+        # something else in chat_layout also wanted the space — so the wrapped
+        # subtitle lost its last line. MinimumExpanding means "sizeHint is a
+        # FLOOR, grow if there is room": the layout is no longer permitted to
+        # cut the content, and the banner still fills an empty session.
+        message_widget.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                     QSizePolicy.Policy.MinimumExpanding)
+
+        # Stacked and centred, NOT glyph-beside-text: with the sparkle on the
+        # left, the title sits to the right of centre and the whole banner
+        # reads as misaligned. Above the line it is unambiguously centred.
+        #
+        # Stretches top and bottom keep the content centred in whatever extra
+        # height the row is given, WITHOUT the row having to be shrinkable.
+        col = QVBoxLayout(message_widget)
+        col.setContentsMargins(24, 22, 24, 18)
+        col.setSpacing(10)
+        col.addStretch(1)
+
+        # Resting sparkle — the same painted glyph the Thinking card uses, so
+        # the app has ONE house mark rather than a second invented one. Never
+        # started: this is decoration, not activity.
+        glyph = SparkleGlyph(28, color=self._t().get('accent', '#8AB4F8'))
+        col.addWidget(glyph, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        label = QLabel(text)
+        label.setTextFormat(Qt.TextFormat.PlainText)   # a name is not markup
+        # NOT word-wrapped. A wrapping QLabel reports a near-zero sizeHint
+        # width, so in a centring layout it collapses and breaks the greeting
+        # mid-phrase ("Good evening," / "Thirdy"). The line is short by design
+        # and the font size below already scales with the window.
+        label.setWordWrap(False)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # NO AlignHCenter flag: that hands the label its sizeHint width instead
+        # of the column's, and a word-wrapped QLabel's sizeHint width is
+        # deliberately tiny — which is what wrapped the subtitle at ~120px and
+        # then clipped it. Full width + AlignCenter TEXT centres it properly.
+        col.addWidget(label)
+
+        # Elevated-privileges note, folded in as a subtitle instead of the
+        # separate grey system line it used to be — two stacked notices made
+        # the opener look cluttered and off-centre.
+        subtitle = None
+        try:
+            if self.is_elevated():
+                subtitle = QLabel(admin_note(user_name, root=(sys.platform != "win32")))
+                subtitle.setTextFormat(Qt.TextFormat.PlainText)
+                subtitle.setWordWrap(True)
+                subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                col.addWidget(subtitle)          # full width — see note above
+        except Exception:
+            subtitle = None
+
+        col.addStretch(1)
+
+        def _greet_restyle(lbl=label, gl=glyph, sub=subtitle):
+            # Dynamically sized: the banner scales with the window so it stays
+            # a title at 1400px and does not overflow at 600px. Zoom rides on
+            # top via _card_z, like every other card.
+            try:
+                avail = max(320, self._bubble_max_width())
+            except Exception:
+                avail = 640
+            px = self._card_z(int(max(20, min(34, avail * 0.038))))
+            # House primary text colour — the theme dict carries surfaces and
+            # the accent, not type colours.
+            lbl.setStyleSheet(
+                f"QLabel {{ background: transparent; border: none; "
+                f"color: #E6EDF3; font-size: {px}px; font-weight: 300; "
+                f"letter-spacing: 0.2px; padding: 0; }}")
+            try:
+                gl.set_px(int(px * 0.85))
+                gl.set_color(self._t().get('accent', '#8AB4F8'))
+            except RuntimeError:
+                pass
+            if sub is not None:
+                try:
+                    # No maximum width: the label spans the column and wraps
+                    # against real space. Capping it was half of why it wrapped
+                    # into a narrow ribbon.
+                    sub.setStyleSheet(
+                        f"QLabel {{ background: transparent; border: none; "
+                        f"color: #8B949E; font-size: {self._card_z(11)}px; }}")
+                except RuntimeError:
+                    pass
+            # Belt and braces on top of the MinimumExpanding policy: pin the
+            # floor to what the content actually measures at the CURRENT width,
+            # so a wrapped subtitle can never be cut no matter how the parent
+            # layout distributes space.
+            try:
+                w = max(200, message_widget.width() or int(avail))
+                # BOTH measurements, whichever is larger. heightForWidth knows
+                # about the wrap at this width; sizeHint knows about spacing and
+                # margins the layout adds on top. Trusting either one alone left
+                # the floor a pixel or two short, and a pixel short still clips.
+                need = max(message_widget.layout().heightForWidth(w),
+                           message_widget.sizeHint().height(),
+                           message_widget.minimumSizeHint().height())
+                message_widget.setMinimumHeight(max(120, need + 12))
+            except (RuntimeError, AttributeError):
+                pass
+        _greet_restyle()
+        # Close the loop: any width change re-measures the wrap and lifts the
+        # height floor to match. Clipping cannot survive a resize.
+        message_widget.on_resize = _greet_restyle
+
+        self.message_widgets.append({
+            'widget': message_widget,
+            'role': 'system',
+            'content_wrapper': label,
+            'zoom_restyle': _greet_restyle,
+            '_intro': True,          # dismissed by the first real message
+        })
+
+        self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
+        self._animate_message_in(message_widget)
+        # The pill floats mid-window while the intro is up, but the overlay was
+        # last positioned during init — BEFORE this banner existed — so it has
+        # to be told the session is now an empty one. Deferred a tick so the
+        # row has been laid out and its real height is readable.
+        try:
+            QTimer.singleShot(0, self._position_input_overlay)
+        except (AttributeError, RuntimeError):
+            pass
+        return message_widget
+
+    def _greeting_signals(self) -> set:
+        """What the app can tell about your usage, from session TIMESTAMPS only.
+
+        Session ids are `%m_%d_%Y_%H_%M_%S_%f`-shaped, so prior start times are
+        already on hand — no content is read and nothing leaves the machine.
+        This is the whole "it noticed" feature: no model, no tokens, no network
+        call sitting behind the first thing on screen.
+
+        Never raises: a greeting must not be able to break opening a session.
+        """
+        from systema.common.greeting import collect_signals
+        try:
+            sessions = self.controller.session_manager.list_sessions() or []
+            ids = [s.get('id') for s in sessions if isinstance(s, dict)]
+            current = getattr(self.controller, 'current_session_id', None)
+            return collect_signals([i for i in ids if i and i != current])
+        except Exception:
+            log.debug("[add_greeting_banner] signal collection failed", exc_info=True)
+            return set()
+
+    def dismiss_session_intro(self):
+        """Drop the greeting banner and the startup notices.
+
+        They are an EMPTY-SESSION state, not transcript content: the banner
+        expands to fill the chat, so leaving it in place once messages arrive
+        pushed the real conversation down and out from under the reader. The
+        first user message clears the whole intro group at once.
+        """
+        # Re-entrant safety: this is now called from several places (a user
+        # message, an assistant turn opening, a background task posting into a
+        # fresh session), sometimes more than once for the same event. It must
+        # be a cheap no-op after the first call and must never raise — the
+        # greeting is decoration, and decoration is not allowed to break
+        # delivering a message.
+        if getattr(self, '_dismissing_intro', False):
+            return
+        survivors, dropped = [], []
+        for entry in getattr(self, 'message_widgets', []):
+            if entry.get('_intro'):
+                dropped.append(entry)
+            else:
+                survivors.append(entry)
+        if not dropped:
+            return
+        self._dismissing_intro = True
+        try:
+            self.message_widgets = survivors
+            for entry in dropped:
+                widget = entry.get('widget')
+                if widget is None:
+                    continue
+                try:
+                    # Detach the resize hook first: the row re-measures itself
+                    # on every resize, and setParent(None) triggers one on a
+                    # widget that is mid-teardown.
+                    widget.on_resize = None
+                except (AttributeError, RuntimeError):
+                    pass
+                try:
+                    self.chat_layout.removeWidget(widget)
+                    widget.setParent(None)
+                    widget.deleteLater()
+                except RuntimeError:
+                    pass
+            # The input pill floats mid-window while the intro is up; put it
+            # back on the bottom edge now that there is a transcript.
+            try:
+                self._position_input_overlay()
+            except (AttributeError, RuntimeError):
+                pass
+        finally:
+            self._dismissing_intro = False
 
     def copy_to_clipboard(self, text):
         """Copy text to clipboard"""

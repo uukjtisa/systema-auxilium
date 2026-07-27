@@ -408,6 +408,106 @@ def drain_stream(gen, on_text=None, on_thinking=None) -> dict:
             "tool_calls": tool_calls, "finish_reason": finish}
 
 
+def supports_inline_images(module) -> bool:
+    """Can this script take images POSITIONALLY, on the message they belong to?
+
+    Contract v2.1: a script that declares `SUPPORTS_INLINE_IMAGES = True`
+    receives messages whose entries may carry an `images` list, so a picture
+    sits at its real place in the conversation instead of being stapled onto
+    the newest user turn. Everything else goes through flatten_inline_images()
+    and sees exactly the payload it saw before — which is the entire reason
+    this is a flag and not a breaking change.
+    """
+    return bool(module is not None
+                and getattr(module, "SUPPORTS_INLINE_IMAGES", False)
+                and is_v2(module))
+
+
+def flatten_inline_images(messages: list) -> tuple[list, list]:
+    """Strip per-message images and return (messages, flat_paths).
+
+    For scripts that cannot place images positionally. Each message keeps a
+    TEXT marker where its pictures were, so the model can still tell which
+    image is which and roughly where it came from, and the paths come back as
+    the flat list the old `images=` kwarg carried.
+
+    Ordering is preserved: the flat list follows conversation order, which is
+    also the order the `[Image N]` markers appear in.
+    """
+    flat, out = [], []
+    for entry in messages or []:
+        if not isinstance(entry, dict) or not entry.get("images"):
+            out.append(entry)
+            continue
+        clone = {k: v for k, v in entry.items() if k != "images"}
+        labels = []
+        for img in entry["images"]:
+            path = img.get("path") if isinstance(img, dict) else img
+            if not path:
+                continue
+            flat.append(path)
+            n = img.get("n") if isinstance(img, dict) else None
+            labels.append(f"[Image {n}]" if n is not None else "[Image]")
+        if labels:
+            text = str(clone.get("content") or "")
+            clone["content"] = (" ".join(labels) + ("\n" + text if text else ""))
+        out.append(clone)
+    return out, flat
+
+
+class ImageCaps:
+    """What a provider script can actually do with images.
+
+    Built by image_capabilities(). Exists so the app can warn BEFORE an
+    attachment is made rather than failing inside a base64 encoder three
+    layers down.
+    """
+
+    __slots__ = ("vision", "inline", "formats", "max_images")
+
+    def __init__(self, vision: bool, inline: bool, formats, max_images):
+        self.vision = vision
+        self.inline = inline
+        self.formats = formats          # set of lowercase extensions, or None = any
+        self.max_images = max_images    # int, or None = unlimited
+
+    def accepts(self, ext: str) -> bool:
+        if not self.vision:
+            return False
+        if not self.formats:
+            return True
+        return str(ext).lower().lstrip(".") in self.formats
+
+    def __repr__(self):
+        return (f"ImageCaps(vision={self.vision}, inline={self.inline}, "
+                f"formats={self.formats}, max_images={self.max_images})")
+
+
+def image_capabilities(module) -> ImageCaps:
+    """Describe a script's image support. Never raises.
+
+    Declared flags win; everything falls back to the same answer the app gave
+    before these flags existed, so an undeclared third-party script keeps
+    working and simply reports "any format, no limit".
+    """
+    formats = getattr(module, "IMAGE_FORMATS", None)
+    if formats:
+        try:
+            formats = {str(f).lower().lstrip(".") for f in formats}
+        except TypeError:
+            formats = None
+    else:
+        formats = None
+    max_images = getattr(module, "MAX_IMAGES", None)
+    try:
+        max_images = int(max_images) if max_images else None
+    except (TypeError, ValueError):
+        max_images = None
+    return ImageCaps(vision=supports_images(module),
+                     inline=supports_inline_images(module),
+                     formats=formats, max_images=max_images)
+
+
 def supports_images(module) -> bool:
     """Can this provider script be handed images?
 
@@ -439,7 +539,22 @@ def invoke(module, system_prompt: str, messages: list, *,
     Returns a normalized result dict, a chunk generator (v2 script that honors
     stream=True), or None on failure. Exceptions from the script propagate to
     the caller (the engine's retry/timeout wrapper owns error policy).
+
+    Messages may carry per-entry `images` (contract v2.1). Scripts that declare
+    SUPPORTS_INLINE_IMAGES get them as-is; every other script gets the flat
+    `images=` list it has always received, with `[Image N]` text markers left
+    in place of the pictures. A caller therefore never has to ask what the
+    active provider supports — it just passes positional images and this
+    function degrades them.
     """
+    if not supports_inline_images(module):
+        messages, inline_paths = flatten_inline_images(messages)
+        if inline_paths:
+            # Positional images fold into the flat list, ahead of any the
+            # caller passed explicitly (attach_image_to_context's one-turn
+            # queue), because history comes before the current turn.
+            images = inline_paths + list(images or [])
+
     if is_v2(module):
         raw = module.chat(system_prompt or "", messages,
                           images=images, tools=tools, stream=stream)

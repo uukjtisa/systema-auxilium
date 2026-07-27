@@ -808,25 +808,28 @@ class FloatingWindow(QWidget):
             pass
         return True
 
+    # ── Exit: policy lives in the controller, mechanism lives here ───────────
+    # Both of these are thin. controller.request_exit() is the ONE gate that
+    # asks "a response is still generating, continue?" — asking in more than
+    # one place is what let a cancelled Restart restart anyway.
+
     def restart_app(self):
-        """Relaunch Systema Auxilium via the unified controller restart (which spawns
-        the detached relauncher, then runs the same clean shutdown as Shutdown)."""
-        if not self._confirm_exit_if_busy("Restart"):
-            return
-        self._exit_confirmed = True
-        try:
-            self.controller.restart_app()
-        except Exception:
-            # If the relauncher couldn't spawn, fall back to a plain shutdown so the
-            # menu action never leaves the app in a half-torn-down state.
-            self.shutdown_app()
+        """Menu/tray Restart. Routes through the single exit pipeline."""
+        return self.controller.request_exit("restart")
 
     def shutdown_app(self):
-        """Properly shutdown the application — close all child windows first."""
-        if not getattr(self, '_exit_confirmed', False) \
-                and not self._confirm_exit_if_busy("Shutdown"):
-            return
-        self._exit_confirmed = True
+        """Menu/tray Shutdown. Routes through the single exit pipeline."""
+        return self.controller.request_exit("shutdown")
+
+    def perform_teardown(self):
+        """MECHANISM ONLY — no prompting, no policy.
+
+        Saves settings, force-closes the child windows that swallow their own
+        close events, stops the tray, quits the app. Called by
+        controller.request_exit() once the exit has actually been agreed;
+        calling it directly skips the busy check, which is exactly the mistake
+        this split exists to prevent.
+        """
         self.save_settings()
         # Forcibly destroy child windows that use event.ignore() in closeEvent
         for attr in ('chat_window', 'settings_window', 'debug_window', 'appearance_window'):

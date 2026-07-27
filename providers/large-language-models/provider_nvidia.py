@@ -14,11 +14,21 @@ All three support extended reasoning. Reasoning is returned separately as
 never sends it back to the model. REASONING_EFFORT applies to the DeepSeek
 models only (GLM ignores it).
 
-Contract v2: unified chat() with streaming; editable settings via Display.
+Contract v2.1: unified chat() with streaming, native tool calling and inline
+(positional) images; editable settings via Display.
+
+The endpoint is OpenAI-compatible, so tools and vision both work at the
+TRANSPORT level — whether a given request succeeds depends on the model you
+picked in Settings. The curated GLM/DeepSeek defaults are reasoning models;
+select a vision-capable model via Custom… if you want to send images.
 
 Point this file at:
     Settings → AI → Custom Script Provider
 """
+
+import base64
+import mimetypes
+import os
 
 from openai import OpenAI
 
@@ -36,6 +46,22 @@ REASONING_EFFORT = "high"   # DeepSeek models only — "low" for speed
 
 CONTRACT_VERSION = 2
 BASE_URL = "https://integrate.api.nvidia.com/v1"
+
+# ── Native tool calling + vision ──────────────────────────────────────────────
+# integrate.api.nvidia.com is an OpenAI-compatible gateway, so it speaks both
+# the function-calling dialect and the image_url content-block format. Contract
+# v2 carries tools through chat(tools=...) — no separate chat_tools() needed.
+# If a chosen model ignores the tools channel, switch Settings -> System ->
+# Tool Calling Mode back to Compatibility; nothing breaks.
+SUPPORTS_NATIVE_TOOLS  = True
+NATIVE_DIALECT         = "openai"
+SUPPORTS_VISION        = True
+SUPPORTS_INLINE_IMAGES = True
+IMAGE_FORMATS          = ("png", "jpg", "jpeg", "gif", "webp")
+
+# Longest side an image is downscaled to before upload. Keeps the base64
+# payload sane on an endpoint that rejects oversized requests outright.
+MAX_IMAGE_DIMENSION = 1280
 
 Display = {
     "API_KEY": ("API Key", "secure_input",
@@ -73,15 +99,80 @@ def _chunks(completion):
     return stream_openai_chunks(completion)
 
 
+def _encode_image(image_path: str) -> dict:
+    """One image file -> an OpenAI-compatible base64 image_url content block.
+
+    Downscales past MAX_IMAGE_DIMENSION when Pillow is available; without
+    Pillow the file is sent as-is, since a missing optional dependency should
+    degrade quality, not break the feature.
+    """
+    mime_type, _ = mimetypes.guess_type(image_path)
+    mime_type = mime_type or "image/jpeg"
+
+    try:
+        import io as _io
+        from PIL import Image
+
+        with Image.open(image_path) as img:
+            if img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+                mime_type = "image/jpeg"
+            w, h = img.size
+            if max(w, h) > MAX_IMAGE_DIMENSION:
+                scale = MAX_IMAGE_DIMENSION / max(w, h)
+                img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+            buf = _io.BytesIO()
+            img.save(buf, format="JPEG", quality=85, optimize=True)
+            mime_type = "image/jpeg"
+            data = buf.getvalue()
+        print(f"[provider] Image encoded: {len(data) / 1024:.1f} KB "
+              f"({os.path.basename(image_path)})")
+    except ImportError:
+        with open(image_path, "rb") as f:
+            data = f.read()
+
+    return {
+        "type": "image_url",
+        "image_url": {"url": f"data:{mime_type};base64,"
+                             f"{base64.b64encode(data).decode()}"},
+    }
+
+
+def _build_full_messages(system_prompt: str, messages: list, image_paths=None) -> list:
+    """Assemble the wire messages.
+
+    INLINE images (contract v2.1) stay on the message that owns them, so an
+    attachment remains anchored to the turn it arrived in. The flat
+    `image_paths` queue from attach_image_to_context() is one-shot and rides
+    the final user turn instead.
+    """
+    from systema.engine import native_adapters as na
+    messages = na.render_inline_images(messages, _encode_image, "openai")
+
+    if image_paths:
+        tail_text = messages[-1].get("content", "") if messages else ""
+        prior = messages[:-1] if messages else []
+        blocks = [_encode_image(p) for p in image_paths]
+        if isinstance(tail_text, list):
+            blocks.extend(tail_text)
+        else:
+            blocks.append({"type": "text", "text": tail_text})
+        messages = prior + [{"role": "user", "content": blocks}]
+
+    return ([{"role": "system", "content": system_prompt}]
+            if system_prompt else []) + messages
+
+
 def chat(system_prompt: str, messages: list, *, images=None, tools=None, stream=False):
     """Unified v2 entry point — always streams from NVIDIA; yields chunks when
     stream=True, otherwise collapses them into the result dict."""
+    from systema.engine import native_adapters as na
 
-    full_messages = (
-        [{"role": "system", "content": system_prompt}] if system_prompt else []
-    ) + messages
+    if isinstance(images, str):
+        images = [images]
+    full_messages = _build_full_messages(system_prompt, messages, image_paths=images)
 
-    completion = _client().chat.completions.create(
+    kwargs = dict(
         model=MODEL,
         messages=full_messages,
         temperature=TEMPERATURE,
@@ -90,13 +181,24 @@ def chat(system_prompt: str, messages: list, *, images=None, tools=None, stream=
         extra_body={"chat_template_kwargs": _thinking_kwargs()},
         stream=True,
     )
+    if tools:
+        kwargs["tools"] = na.to_openai_tools(tools)
+        kwargs["tool_choice"] = "auto"
+
+    completion = _client().chat.completions.create(**kwargs)
 
     if stream:
         return _chunks(completion)
 
     from systema.engine.provider_contract import drain_stream
     result = drain_stream(_chunks(completion))
-    result["content"] = result["content"].strip() or "No response received."
+    # A native tool turn legitimately carries NO prose. Only call an empty
+    # reply a failure when there are no tool calls either — otherwise the
+    # placeholder would become the assistant's visible text for every
+    # tool-only response.
+    result["content"] = result["content"].strip()
+    if not result["content"] and not result.get("tool_calls"):
+        result["content"] = "No response received."
     return result
 
 

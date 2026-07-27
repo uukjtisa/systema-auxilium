@@ -66,8 +66,17 @@ class SessionManager:
         log.info(f"[SessionManager.create_session] Session created in memory: id='{session_id}'")
         return session_id
 
-    def save_session(self, session_id, chat_history, session_name=None):
-        """Save session to JSON file"""
+    def save_session(self, session_id, chat_history, session_name=None,
+                     next_image_n=None):
+        """Save session to JSON file.
+
+        `next_image_n` is the session's image counter. It is stored ALONGSIDE
+        the history rather than recomputed from it on load, because image
+        numbers must never be reused — deleting the highest-numbered image
+        would otherwise recycle its number on the next attachment. Optional and
+        additive: sessions written before it existed load fine and simply
+        derive a floor from their history.
+        """
         log.info(f"[SessionManager.save_session] Saving session id='{session_id}' | "
                  f"history_len={len(chat_history)} | name_override={repr(session_name)}")
 
@@ -90,6 +99,11 @@ class SessionManager:
             "id": session_id,
             "chat_history": chat_history
         }
+        if next_image_n is not None:
+            try:
+                session_data["next_image_n"] = int(next_image_n)
+            except (TypeError, ValueError):
+                pass
 
         # Get current filename
         session_file = self._get_session_file(session_id)

@@ -159,50 +159,84 @@ class _InputResizeHandle(QFrame):
 class InputDockMixin:
     """Floating input pill + attachment/preview subsystem (mixed into ChatWindow)."""
 
+    def _measure_input_overlay(self):
+        """(QRect, reserve_px) for the floating pill — the ONE place this
+        geometry is computed.
+
+        Both the eager pass and the deferred settle pass call it. They used to
+        carry SEPARATE COPIES of this arithmetic, and the copies drifted: the
+        empty-session mid-window position was applied by the eager pass and
+        then silently dragged back to the bottom edge by the settle pass a
+        frame later. Never reintroduce a second copy.
+
+        Returns None when the overlay is not wired up yet.
+        """
+        ic = getattr(self, 'input_container', None)
+        cc = getattr(self, '_chat_container', None)
+        if ic is None or cc is None:
+            return None
+
+        # Force the pill's SetMinimumSize layouts to recompute before we
+        # measure. invalidate() FIRST: activate() alone no-ops when the layout
+        # cache isn't marked dirty yet — Qt propagates a child setFixedHeight
+        # upward via posted events, so on a synchronous SHRINK (send → clear)
+        # the cached hints are still tall and the pill stays suspended
+        # mid-screen. Growth invalidates eagerly, which is why only the
+        # collapse direction ever stuck.
+        lay = ic.layout()
+        if lay is not None:
+            lay.invalidate()
+            lay.activate()
+        # Height comes DETERMINISTICALLY from the pill's own content + the
+        # container margins, rather than the container's sizeHint /
+        # minimumSizeHint (which a snap-resize could inflate, letting the pill
+        # balloon and clip off the bottom edge).
+        card = getattr(self, '_input_card', None)
+        if card is not None:
+            card.layout().invalidate()
+            card.layout().activate()
+            m = lay.contentsMargins() if lay is not None else None
+            pad = (m.top() + m.bottom()) if m is not None else 20
+            h = card.sizeHint().height() + pad
+        else:
+            h = max(ic.sizeHint().height(), ic.minimumSizeHint().height())
+        # A mid-relayout hint can momentarily read ~0 — never let the pill
+        # collapse to an invisible sliver at the bottom edge ("input box
+        # disappeared until I resized the window").
+        h = max(h, 44)
+        # Never let the top go negative (pill taller than the whole chat area).
+        top = max(0, cc.height() - h)
+        # EMPTY SESSION: float the pill in the middle of the window, just under
+        # the greeting, instead of parking it at the bottom with a screenful of
+        # dead space above it. It slides back to the bottom edge the moment the
+        # intro is dismissed by a real message.
+        if self._session_intro_showing():
+            top = min(max(0, int(cc.height() * 0.52)), max(0, cc.height() - h))
+        # Centred, width-resizable pill (2026-07 redesign): user width
+        # preference (input_box_geometry), clamped to the chat area.
+        w = min(max(420, int(getattr(self, '_input_box_width', 640))),
+                max(200, cc.width() - 24))
+        # Reserve the strip the pill covers, measured from its TOP rather than
+        # from its height: identical while it sits on the bottom edge, correct
+        # when it floats.
+        return QRect(max(0, (cc.width() - w) // 2), top, w, h), \
+            max(0, cc.height() - top) + 8
+
     def _position_input_overlay(self):
-        """Anchor the floating input container to the bottom of the chat area,
-        full width, and pad the message list so the last message can scroll
-        clear of it. No-op until the overlay is wired up."""
+        """Anchor the floating input container over the chat area and pad the
+        message list so the last message can scroll clear of it. No-op until
+        the overlay is wired up."""
         ic = getattr(self, 'input_container', None)
         cc = getattr(self, '_chat_container', None)
         if ic is None or cc is None:
             return
         try:
-            # Force the pill's SetMinimumSize layouts to recompute before we
-            # measure. invalidate() FIRST: activate() alone no-ops when the
-            # layout cache isn't marked dirty yet — Qt propagates a child
-            # setFixedHeight upward via posted events, so on a synchronous
-            # SHRINK (send → clear) the cached hints are still tall and the
-            # pill stays suspended mid-screen. Growth invalidates eagerly,
-            # which is why only the collapse direction ever stuck.
-            lay = ic.layout()
-            if lay is not None:
-                lay.invalidate()
-                lay.activate()
-            # Compute the overlay height DETERMINISTICALLY from the pill's own
-            # content + the container margins, rather than the container's
-            # sizeHint/minimumSizeHint (which a snap-resize could inflate, letting
-            # the pill balloon and clip off the bottom edge).
-            card = getattr(self, '_input_card', None)
-            if card is not None:
-                card.layout().invalidate()
-                card.layout().activate()
-                m = lay.contentsMargins() if lay is not None else None
-                pad = (m.top() + m.bottom()) if m is not None else 20
-                h = card.sizeHint().height() + pad
-            else:
-                h = max(ic.sizeHint().height(), ic.minimumSizeHint().height())
-            # A mid-relayout hint can momentarily read ~0 — never let the pill
-            # collapse to an invisible sliver at the bottom edge ("input box
-            # disappeared until I resized the window").
-            h = max(h, 44)
-            # Never let the top go negative (pill taller than the whole chat area).
-            top = max(0, cc.height() - h)
-            # Centred, width-resizable pill (2026-07 redesign): user width
-            # preference (input_box_geometry), clamped to the chat area.
-            w = min(max(420, int(getattr(self, '_input_box_width', 640))),
-                    max(200, cc.width() - 24))
-            ic.setGeometry(max(0, (cc.width() - w) // 2), top, w, h)
+            measured = self._measure_input_overlay()
+            if measured is None:
+                return
+            rect, reserve = measured
+            h = rect.height()
+            ic.setGeometry(rect)
             # Bottom fade stays anchored to the chat display's bottom edge —
             # independent of the pill's height; the pill floats on top of it.
             fade = getattr(self, '_chat_fade', None)
@@ -217,13 +251,10 @@ class InputDockMixin:
             try:
                 if hasattr(self, 'chat_layout'):
                     m = self.chat_layout.contentsMargins()
-                    if m.bottom() != h + 8:
-                        self.chat_layout.setContentsMargins(m.left(), m.top(), m.right(), h + 8)
+                    if m.bottom() != reserve:
+                        self.chat_layout.setContentsMargins(m.left(), m.top(), m.right(), reserve)
             except RuntimeError:
                 pass
-            # keep the pinned-image strip glued just above the moved input
-            if hasattr(self, '_update_pinned_overlay'):
-                self._update_pinned_overlay()
             # Self-correction net: one deferred re-anchor after the event loop
             # settles catches any hint that was still stale on this pass. It
             # re-measures and no-ops when the rect is already right.
@@ -250,24 +281,10 @@ class InputDockMixin:
         if ic is None or cc is None:
             return
         try:
-            lay = ic.layout()
-            if lay is not None:
-                lay.invalidate()
-                lay.activate()
-            card = getattr(self, '_input_card', None)
-            if card is not None:
-                card.layout().invalidate()
-                card.layout().activate()
-                m = lay.contentsMargins() if lay is not None else None
-                pad = (m.top() + m.bottom()) if m is not None else 20
-                h = card.sizeHint().height() + pad
-            else:
-                h = max(ic.sizeHint().height(), ic.minimumSizeHint().height())
-            h = max(h, 44)
-            top = max(0, cc.height() - h)
-            w = min(max(420, int(getattr(self, '_input_box_width', 640))),
-                    max(200, cc.width() - 24))
-            target = QRect(max(0, (cc.width() - w) // 2), top, w, h)
+            measured = self._measure_input_overlay()
+            if measured is None:
+                return
+            target, reserve = measured
             if ic.geometry() != target:
                 ic.setGeometry(target)
                 fade = getattr(self, '_chat_fade', None)
@@ -280,12 +297,10 @@ class InputDockMixin:
             try:
                 if hasattr(self, 'chat_layout'):
                     m = self.chat_layout.contentsMargins()
-                    if m.bottom() != h + 8:
-                        self.chat_layout.setContentsMargins(m.left(), m.top(), m.right(), h + 8)
+                    if m.bottom() != reserve:
+                        self.chat_layout.setContentsMargins(m.left(), m.top(), m.right(), reserve)
             except RuntimeError:
                 pass
-            if hasattr(self, '_update_pinned_overlay'):
-                self._update_pinned_overlay()
         except RuntimeError:
             pass
 
@@ -357,117 +372,19 @@ class InputDockMixin:
         except Exception:
             pass
 
-    def _show_image_preview(self, path):
-        """Attach an image — goes straight to the pinned card overlay above the input."""
-        self._add_pinned_image_widget(path, auto_detach=False)
+    def _session_intro_showing(self) -> bool:
+        """True while the empty-session opener (greeting banner) is up.
 
-    def _remove_one_image_preview(self, path, card_widget):
-        """Remove a single image card from the input-bar strip."""
-        if path in self.attached_images:
-            self.attached_images.remove(path)
-        self.attached_image = self.attached_images[-1] if self.attached_images else None
-        self._img_thumbs_layout.removeWidget(card_widget)
-        card_widget.deleteLater()
-        if not self.attached_images:
-            self._img_preview_bar.hide()
-
-    def _clear_image_preview(self):
-        """Remove ALL images from the input-bar strip."""
-        self.attached_images.clear()
-        self.attached_image = None
-        while self._img_thumbs_layout.count() > 1:  # keep trailing stretch
-            item = self._img_thumbs_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._img_preview_bar.hide()
-
-    def _add_pinned_image_widget(self, path, auto_detach=False):
-        """Add a persistent pinned-image card above the input area.
-
-        The card shows a thumbnail, filename, a 🔁 toggle (persistent vs send-once),
-        and an ✕ button to manually detach the image from context.
-        As long as the card is visible the image is re-sent with every message.
+        Drives the mid-window input position. Kept cheap — this runs on every
+        overlay reposition, which means every resize frame.
         """
-        import os
-        # No duplicates
-        for pi in self.pinned_images:
-            if pi['path'] == path:
-                return
-
-        _tc = self._t()
-        outer = QFrame()
-        outer.setObjectName("pinnedImgCard")
-        outer.setStyleSheet(f"""
-                        QFrame#pinnedImgCard {{
-                            background: {_tc['input_card']};
-                            border: 1px solid {_tc['input_card_border']};
-                            border-radius: 10px;
-                        }}
-                    """)
-        outer.setMaximumWidth(300)
-
-        row = QHBoxLayout(outer)
-        row.setContentsMargins(8, 6, 8, 6)
-        row.setSpacing(8)
-
-        # Thumbnail
-        thumb = QLabel()
-        thumb.setFixedSize(40, 40)
-        thumb.setStyleSheet(f"border-radius: 5px; background: {_tc['input_card_border']};")
-        thumb.setScaledContents(True)
-        pm = QPixmap(path)
-        if not pm.isNull():
-            thumb.setPixmap(pm.scaled(40, 40,
-                                      Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                                      Qt.TransformationMode.SmoothTransformation))
-        row.addWidget(thumb)
-
-        # Name + status
-        info_col = QVBoxLayout()
-        info_col.setSpacing(2)
-        name_lbl = QLabel(os.path.basename(path))
-        name_lbl.setStyleSheet("color: #C9D1D9; font-size: 10px; background: transparent;")
-        name_lbl.setWordWrap(True)
-        info_col.addWidget(name_lbl)
-        status_lbl = QLabel("Sending with every message")
-        status_lbl.setStyleSheet(f"color: {_tc['accent']}; font-size: 9px; background: transparent;")
-        info_col.addWidget(status_lbl)
-        row.addLayout(info_col, stretch=1)
-
-        pin_info = {'path': path, 'widget': outer, 'auto_detach': auto_detach}
-
-        # Repeat toggle (painted circular arrows; accent while checked)
-        from systema.ui.widgets.painted_icons import RepeatButton
-        toggle_btn = RepeatButton(
-            26, tooltip="Toggle: send every message / send once then detach")
-        toggle_btn.setChecked(not auto_detach)
-
-        def _on_toggle(checked, pi=pin_info, sl=status_lbl):
-            pi['auto_detach'] = not checked
-            sl.setText("Sending with every message" if checked
-                       else "Sending once (then detach)")
-
-        toggle_btn.toggled.connect(_on_toggle)
-        row.addWidget(toggle_btn)
-
-        # Painted detach button (icon overhaul: boxless ✕, glyph turns red)
-        from systema.ui.widgets.painted_icons import CloseButton as _XBtn
-        x_btn = _XBtn(22, tooltip="Detach image from context", pill=False)
-        x_btn.clicked.connect(lambda _, pi=pin_info: self._remove_pinned_image(pi))
-        row.addWidget(x_btn)
-
-        pin_info['row_wrapper'] = outer
-        self.pinned_images.append(pin_info)
-
-        # Insert before the trailing stretch so cards stay left-aligned
-        count = self._pinned_area_layout.count()
-        self._pinned_area_layout.insertWidget(count - 1, outer)
-        self._pinned_area.show()
-        QTimer.singleShot(10, self._update_pinned_overlay)
-        # ── Sync to Android ──────────────────────────────────────────────────
-        _ab = getattr(getattr(self.controller, 'ui', None), 'android_bridge', None)
-        if _ab and _ab.isVisible():
-            _ab.notify_image_attached(path, send_every=not auto_detach)
+        try:
+            for entry in self.message_widgets:
+                if entry.get('_intro'):
+                    return True
+        except (AttributeError, RuntimeError):
+            pass
+        return False
 
     def _position_input_handles(self):
         """Re-glue the two width-resize grab bars to the pill's side gutters.
@@ -482,64 +399,19 @@ class InputDockMixin:
         for hd in handles:
             hd.reposition()
 
-    def _update_pinned_overlay(self):
-        """Reposition the pinned-image overlay to float just above the input container."""
-        if not hasattr(self, '_pinned_area') or not hasattr(self, 'input_container'):
-            return
-        if not hasattr(self, 'container'):
-            return
-        if not self._pinned_area.isVisible():
-            return
-        try:
-            ic_pos = self.input_container.mapTo(
-                self.container, self.input_container.rect().topLeft()
-            )
-            pinned_h = self._pinned_area.height()
-            # Hug the (centered, resizable) pill: same x + width, glued to its
-            # top edge — not the old full-window strip that floated off to the
-            # window's left corner.
-            self._pinned_area.setGeometry(
-                ic_pos.x(),
-                ic_pos.y() - pinned_h,
-                self.input_container.width(),
-                pinned_h,
-            )
-            self._pinned_area.raise_()
-        except Exception:
-            pass
-
-    def _remove_pinned_image(self, pin_info, notify=True):
-        """Remove a single pinned image card.
-
-        notify=False when called from the Android bridge (detach initiated by
-        Android) so we don't echo image_detached back to the phone.
-        """
-        _detached_path = pin_info.get('path', '')
-        if pin_info in self.pinned_images:
-            self.pinned_images.remove(pin_info)
-        wrapper = pin_info.get('row_wrapper')
-        if wrapper:
-            self._pinned_area_layout.removeWidget(wrapper)
-            wrapper.deleteLater()
-        if not self.pinned_images:
-            self._pinned_area.hide()
-        else:
-            QTimer.singleShot(10, self._update_pinned_overlay)
-        # ── Sync to Android (only when host initiated the removal) ───────────
-        if notify and _detached_path:
-            _ab = getattr(getattr(self.controller, 'ui', None), 'android_bridge', None)
-            if _ab and _ab.isVisible():
-                _ab.notify_image_detached(_detached_path)
-
-    def clear_pinned_images(self):
-        """Remove ALL pinned image cards. Called on session switch or load."""
-        for pi in list(self.pinned_images):
-            wrapper = pi.get('row_wrapper')
-            if wrapper:
-                self._pinned_area_layout.removeWidget(wrapper)
-                wrapper.deleteLater()
-        self.pinned_images.clear()
-        self._pinned_area.hide()
+    # ── Retired: the pinned-image overlay ────────────────────────────────
+    # An "image attached" card used to float above the input box, holding the
+    # only record that a picture was live. It was pure UI state: nothing was
+    # written to the session, so a reload lost every image, and the model only
+    # ever received them because send_message() re-supplied the whole pinned
+    # list on each send — which is exactly why any turn that did not go through
+    # that path (every work-mode continuation) lost them mid-conversation.
+    #
+    # Images are now ImageRefs on the history entry that owns them, rendered as
+    # real bubbles in the transcript. See ui/chat/image_bubbles.py, which
+    # supplies attach_images() / detach_image() / delete_image() and the
+    # _show_image_preview() + clear_pinned_images() compatibility shims that
+    # used to live here.
 
     def _handle_image_file_drop(self, path):
         """Prompt the user to attach an image file or insert its path as text."""
@@ -691,8 +563,9 @@ class InputDockMixin:
             return
 
         if result["action"] == "image":
-            for p in selected:
-                self._show_image_preview(p)
+            # ONE call, not one per file — images picked together belong in one
+            # collage bubble, not several single-image bubbles stacked up.
+            self.attach_images(selected)
         else:
             lines = []
             for p in selected:
@@ -941,97 +814,13 @@ class InputDockMixin:
         self.send_btn.clicked.connect(self.send_message)
         bottom_row_layout.addWidget(self.send_btn)
 
-        # ── Image preview bar — multi-image scrollable strip ─────────────────
-        self._img_preview_bar = QFrame()
-        self._img_preview_bar.setObjectName("imgPreviewBar")
-        self._img_preview_bar.setFixedHeight(44)
-        self._img_preview_bar.setStyleSheet(
-            "QFrame#imgPreviewBar { background: transparent; border-top: 1px solid #2D333B; }")
-        _img_bar_outer = QHBoxLayout(self._img_preview_bar)
-        _img_bar_outer.setContentsMargins(10, 6, 10, 6)
-        _img_bar_outer.setSpacing(6)
-
-        from PyQt6.QtWidgets import QScrollArea as _SA
-        _thumb_scroll = _SA()
-        _thumb_scroll.setFixedHeight(38)
-        _thumb_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        _thumb_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        _thumb_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        _thumb_scroll.setWidgetResizable(True)
-
-        self._img_thumbs_widget = QWidget()
-        self._img_thumbs_widget.setStyleSheet("background: transparent;")
-        self._img_thumbs_layout = QHBoxLayout(self._img_thumbs_widget)
-        self._img_thumbs_layout.setContentsMargins(0, 0, 0, 0)
-        self._img_thumbs_layout.setSpacing(6)
-        self._img_thumbs_layout.addStretch()
-        _thumb_scroll.setWidget(self._img_thumbs_widget)
-        _img_bar_outer.addWidget(_thumb_scroll, stretch=1)
-
-        _img_clear_all_btn = QPushButton("Clear all")
-        _img_clear_all_btn.setFixedHeight(24)
-        _img_clear_all_btn.setToolTip("Remove all image attachments")
-        _img_clear_all_btn.setStyleSheet("""
-                    QPushButton {
-                        background: rgba(255,255,255,0.06);
-                        border: 1px solid rgba(255,255,255,0.12);
-                        border-radius: 6px;
-                        color: #8B949E; font-size: 10px; padding: 0 8px;
-                    }
-                    QPushButton:hover {
-                        background: rgba(234,67,53,0.25);
-                        color: #EA4335; border-color: rgba(234,67,53,0.5);
-                    }
-                """)
-        _img_clear_all_btn.clicked.connect(self._clear_image_preview)
-        _img_bar_outer.addWidget(_img_clear_all_btn)
-
-        self._img_preview_bar.hide()
-        combined_layout.addWidget(self._img_preview_bar)
-        # ─────────────────────────────────────────────────────────────────────
+        # Retired: the image preview strip and the floating pinned-image
+        # overlay. Both were UI-only records of an attachment; images now enter
+        # the transcript directly (ui/chat/image_bubbles.py), so there is
+        # nothing to preview before sending and nothing to pin above the box.
 
         combined_layout.addWidget(bottom_row)
         input_layout.addWidget(combined_container)
-
-        # ── Pinned images area: floating overlay, horizontal scrolling strip ──
-        self._pinned_area = QWidget(self.container)
-        self._pinned_area.setObjectName("pinnedArea")
-        self._pinned_area.setStyleSheet("QWidget#pinnedArea { background: transparent; }")
-        self._pinned_area.setFixedHeight(80)
-
-        _pa_outer_lay = QVBoxLayout(self._pinned_area)
-        _pa_outer_lay.setContentsMargins(0, 0, 0, 0)
-        _pa_outer_lay.setSpacing(0)
-
-        from PyQt6.QtWidgets import QScrollArea as _PinnedSA
-        self._pinned_scroll = _PinnedSA()
-        self._pinned_scroll.setWidgetResizable(True)
-        self._pinned_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self._pinned_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._pinned_scroll.setStyleSheet("""
-                    QScrollArea { background: transparent; border: none; }
-                    QScrollBar:horizontal {
-                        background: rgba(255,255,255,0.04); height: 6px;
-                        border: none; border-radius: 3px; margin: 0;
-                    }
-                    QScrollBar::handle:horizontal {
-                        background: rgba(255,255,255,0.15); border-radius: 3px; min-width: 20px;
-                    }
-                    QScrollBar::handle:horizontal:hover { background: rgba(255,255,255,0.30); }
-                    QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
-                """)
-
-        _pinned_inner = QWidget()
-        _pinned_inner.setStyleSheet("background: transparent;")
-        self._pinned_area_layout = QHBoxLayout(_pinned_inner)
-        self._pinned_area_layout.setContentsMargins(14, 6, 14, 6)
-        self._pinned_area_layout.setSpacing(8)
-        self._pinned_area_layout.addStretch()  # trailing stretch keeps cards left-aligned
-
-        self._pinned_scroll.setWidget(_pinned_inner)
-        _pa_outer_lay.addWidget(self._pinned_scroll)
-        self._pinned_area.hide()
-        # ─────────────────────────────────────────────────────────────────────
 
         self.input_container = input_container  # stored for glass background toggle
         self._input_card = combined_container    # pill; used to size the overlay

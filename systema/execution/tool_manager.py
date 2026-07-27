@@ -338,9 +338,14 @@ class ToolManager:
         self._interp_card_buffer = []     # buffered card payloads to flush
         self._interp_subresults = []      # [(tool_name, observation)] for the model
 
-        # Set by the controller to _inject_interpreter_namespaces — invoked on
-        # every reset_python() so agent namespaces survive an interpreter restart.
+        # Set by the controller (or the task engine) to its namespace-injection
+        # routine. Wired into the interpreter's OWN reset hook rather than only
+        # being called from reset_python(): execute() resets the interpreter
+        # itself when it abandons an uninterruptible thread, and that path never
+        # comes through here — which is exactly how the namespace used to come
+        # back bare after a hard cancel.
         self._namespace_injector = None
+        self.tools['python'].on_reset = self._reinject_namespaces
 
         log.info("[ToolManager.__init__] ✓ ToolManager initialization complete")
 
@@ -1442,11 +1447,17 @@ class ToolManager:
             return ("ERROR:\nNone of those image paths exist: "
                     + ", ".join(missing or ['(none given)']))
 
+        annotation = spec.get('annotation') or ''
         delivered = False
         try:
             binder = getattr(self, '_attach_image_binding', None)
             if callable(binder):
-                binder(found)
+                # Newer bindings caption the bubble with the annotation; a
+                # tasker's simpler binding still takes paths only.
+                try:
+                    binder(found, annotation)
+                except TypeError:
+                    binder(found)
                 delivered = True
         except Exception as e:
             log.error(f"[ToolManager.run_attach_image_to_chat] delivery failed: {e}")
@@ -1455,8 +1466,10 @@ class ToolManager:
             return ("ERROR:\nImage attachment is not available in this session "
                     "(no chat to attach to).")
 
-        self.emit_tool_card('image_attach', paths=found,
-                            annotation=spec.get('annotation') or '')
+        # NO emit_tool_card here. The binding itself now renders the images as
+        # real numbered bubbles and writes their history entry; emitting the
+        # old card as well produced a SECOND ui_event for the same attachment,
+        # so every agent-attached image appeared twice and was counted twice.
         out = f"Attached {len(found)} image(s) to the chat: " + ", ".join(
             os.path.basename(p) for p in found)
         if missing:
@@ -2449,29 +2462,37 @@ class ToolManager:
         """Get the prompt for work mode continuation. In native tool-calling mode
         the variant that instructs native tool calls (not fences) is used.
 
-        The static half is WORK_CONTINUATION_CORE; the situational half is built
-        here from live state (what just ran, whether it failed, which skills are
-        loaded and where their folders actually are, what the namespace holds).
-        Only the LATEST ping carries it — continue_work() slims the previous one
-        to output-only — so this costs its tokens once per turn, not once per
-        turn forever, which is why the emphasis lives here and not in the system
-        prompt."""
+        The static half is WORK_CONTINUATION_CORE (or its compact twin, per
+        `work_mode_prompt_style`); the situational half is built here from live
+        state (what just ran, whether it failed, which skills are loaded and
+        where their folders actually are, what the namespace holds). Only the
+        LATEST ping carries it — continue_work() slims the previous one to
+        output-only — so this costs its tokens once per turn, not once per turn
+        forever, which is why the emphasis lives here and not in the system
+        prompt.
+
+        Two independent axes, deliberately not conflated: compat vs native is
+        BEHAVIOURAL and must stay at parity; detailed vs compact is LENGTH and
+        is the user's choice."""
         log.debug(f"[ToolManager.get_work_prompt] Building work mode prompt | "
                   f"has_last_output={self.work.last_output is not None}")
-        from systema.engine.prompts.global_instructions import WORK_MODE_PROMPT, WORK_MODE_PROMPT_NATIVE
+        from systema.engine.prompts.global_instructions import work_mode_prompt
 
         native = False
+        style = 'detailed'
         try:
             s = self.settings_callback() if self.settings_callback else None
             native = (s or {}).get('tool_calling_mode', 'compat') == 'native'
+            style = (s or {}).get('work_mode_prompt_style', 'detailed')
         except Exception:
-            native = False
+            native, style = False, 'detailed'
 
-        template = WORK_MODE_PROMPT_NATIVE if native else WORK_MODE_PROMPT
+        template = work_mode_prompt(native, style)
         output = self.work.last_output or "No previous output"
         prompt = template.format(work_output=output,
                                  situation=self._work_situation(output))
-        log.debug(f"[ToolManager.get_work_prompt] Prompt built | native={native} | length={len(prompt)}")
+        log.debug(f"[ToolManager.get_work_prompt] Prompt built | native={native} | "
+                  f"style={style} | length={len(prompt)}")
         return prompt
 
     def _work_situation(self, output: str) -> str:
@@ -2545,19 +2566,29 @@ class ToolManager:
             names = [n for n in names if n != 'search_memory']
         return names
 
+    def _reinject_namespaces(self):
+        """Re-apply the agent namespace bindings (web_search, take_screenshot,
+        notify, the memory helpers, ...).
+
+        Installed as PythonInterpreter.on_reset, so it runs for EVERY reset —
+        including the ones execute() performs on itself deep inside the
+        interrupt-escalation loop, which no caller here ever sees."""
+        if not callable(self._namespace_injector):
+            return
+        try:
+            self._namespace_injector()
+            log.debug("[ToolManager._reinject_namespaces] namespaces re-injected")
+        except Exception as e:
+            log.error(f"[ToolManager._reinject_namespaces] namespace re-injection "
+                      f"failed: {type(e).__name__}: {e}")
+
     def reset_python(self):
-        """Reset Python interpreter state, then re-inject the agent namespaces
-        (web_search, take_screenshot, notify, memory helpers, ...) so a reset
-        from ANY path — the floating-window button, the tray, or the engine —
-        never leaves the interpreter with a bare namespace."""
+        """Reset Python interpreter state. The agent namespaces come back with
+        it via the interpreter's on_reset hook, so a reset from ANY path — this
+        method, the floating-window button, the tray, the engine, or the
+        interpreter abandoning a stuck thread — never leaves a bare namespace."""
         log.info("[ToolManager.reset_python] Resetting Python interpreter state")
         self.tools['python'].reset()
-        if callable(self._namespace_injector):
-            try:
-                self._namespace_injector()
-                log.debug("[ToolManager.reset_python] namespaces re-injected")
-            except Exception as e:
-                log.error(f"[ToolManager.reset_python] namespace re-injection failed: {e}")
         log.info("[ToolManager.reset_python] ✓ Python interpreter reset complete")
 
     def strip_tool_calls(self, text):

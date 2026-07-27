@@ -430,14 +430,19 @@ class AndroidBridge:
             log.error(f"[AndroidBridge] _send_sessions_page error: {e}")
 
     def _remove_pinned_by_path(self, chat, path: str):
-        """Remove a pinned image card from the PC chat window by path.
-        Passes notify=False so the removal is not echoed back to Android
-        (Android already removed the card locally before sending detach_image_path).
+        """Detach an image from context on the PC side, matched by path.
+
+        Detach rather than delete: the phone asking to unpin an image is the
+        reversible action, and the picture stays in the transcript as a marker
+        the user can put back. Deleting outright from a remote tap would be an
+        irreversible action taken at a distance.
         """
         try:
-            for pi in list(getattr(chat, 'pinned_images', [])):
-                if pi.get('path') == path:
-                    chat._remove_pinned_image(pi, notify=False)
+            from systema.common import image_refs
+            hist = getattr(self.controller.ai, 'conversation_history', [])
+            for ref in image_refs.all_refs(hist):
+                if ref.get('path') == path:
+                    chat.detach_image(ref.get('n'))
                     return
         except Exception as e:
             log.error(f"[AndroidBridge] _remove_pinned_by_path error: {e}")

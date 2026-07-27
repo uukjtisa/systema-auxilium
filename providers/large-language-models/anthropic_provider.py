@@ -27,6 +27,13 @@ CONTRACT_VERSION = 2
 SUPPORTS_NATIVE_TOOLS = True
 NATIVE_DIALECT        = "anthropic"
 
+# Vision (contract v2.1). SUPPORTS_INLINE_IMAGES means a message may carry its
+# own `images`, so an attachment stays anchored to the turn it arrived in
+# instead of being re-stapled onto the newest user turn every request.
+SUPPORTS_VISION        = True
+SUPPORTS_INLINE_IMAGES = True
+IMAGE_FORMATS          = ("png", "jpg", "jpeg", "gif", "webp")
+
 Display = {
     "API_KEY": ("API Key", "secure_input",
                 {"tooltip": "From console.anthropic.com",
@@ -68,24 +75,32 @@ def _merge_alternating(messages: list) -> list:
     return merged
 
 
-def _image_blocks(paths: list) -> list:
+_MEDIA_MAP = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+              ".gif": "image/gif", ".webp": "image/webp"}
+
+
+def _image_block(path: str) -> dict:
+    """One image file -> one Anthropic base64 image block."""
     import base64, os
-    blocks = []
-    media_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
-                 ".gif": "image/gif", ".webp": "image/webp"}
-    for path in paths:
-        if not os.path.isfile(path):
-            continue
-        media_type = media_map.get(os.path.splitext(path)[1].lower(), "image/jpeg")
-        with open(path, "rb") as f:
-            data = base64.standard_b64encode(f.read()).decode("utf-8")
-        blocks.append({"type": "image",
-                       "source": {"type": "base64", "media_type": media_type,
-                                  "data": data}})
-    return blocks
+    media_type = _MEDIA_MAP.get(os.path.splitext(path)[1].lower(), "image/jpeg")
+    with open(path, "rb") as f:
+        data = base64.standard_b64encode(f.read()).decode("utf-8")
+    return {"type": "image",
+            "source": {"type": "base64", "media_type": media_type, "data": data}}
+
+
+def _image_blocks(paths: list) -> list:
+    import os
+    return [_image_block(p) for p in paths if os.path.isfile(p)]
 
 
 def _kwargs(system_prompt, messages, images=None, tools=None) -> dict:
+    # Inline images first (contract v2.1): a picture stays on the turn it was
+    # sent in. _merge_alternating passes structured content through untouched,
+    # so rendering before the merge preserves those positions.
+    from systema.engine import native_adapters as na
+    messages = na.render_inline_images(messages, _image_block, "anthropic")
+
     convo = _merge_alternating(messages)
     if images:
         blocks = _image_blocks(images)

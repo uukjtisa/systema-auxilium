@@ -88,6 +88,14 @@ class AIEngine:
         if controller:
             log.debug(f"[AIEngine.__init__] Controller passed successfully! | {self.controller}")
         self.conversation_history = []
+        # Session-global image counter. Images carry an `n` the user and the AI
+        # refer to them by ("image 3"), assigned in attach order across BOTH
+        # sides. It is stored HERE rather than derived from max(n)+1 over the
+        # history because numbers must never be reused: deleting the highest
+        # image would otherwise hand its number to the next attachment, and
+        # every earlier reference to it in the transcript would start pointing
+        # at a different picture. Persisted as `next_image_n` in the session.
+        self.next_image_n = 1
         # Native tool-calling: the structured {text, tool_calls} the provider
         # returned for the CURRENT turn, stashed by _provider_script_native and
         # consumed by _append_assistant (attached as metadata to the assistant
@@ -463,18 +471,116 @@ class AIEngine:
             log.error(f"[AIEngine._load_session_prefilling] ✗ Failed: {type(e).__name__}: {e}")
             return []
 
+    def _image_caps(self):
+        """What the ACTIVE provider script can do with images. Cheap and safe to
+        call per request — the module is already loaded/cached by the caller."""
+        from systema.engine import provider_contract as pc
+        try:
+            return pc.image_capabilities(self._load_provider_module())
+        except Exception:
+            return pc.ImageCaps(vision=True, inline=False, formats=None,
+                                max_images=None)
+
+    def _render_entry_images(self, entry, caps=None):
+        """(images_for_provider, marker_text) for ONE history entry.
+
+        Splits an entry's ImageRefs into pictures the provider will actually
+        receive and TEXT the model reads instead. Every image that does not
+        travel gets a marker, because silence is what caused the original bug:
+        the model saw an image, then later did not, and had no way to know
+        anything had changed — so it claimed the user never sent one.
+
+        Four reasons an image becomes text instead:
+          * the user detached it from context (reversible, and said so);
+          * its cached bytes are gone (cache cleared, session moved machines);
+          * the active provider has no vision at all;
+          * the provider cannot read that format.
+        """
+        from systema.common import image_cache, image_refs
+        refs = entry.get('_images') or []
+        if not refs:
+            return [], ''
+        if caps is None:
+            caps = self._image_caps()
+
+        out, notes = [], []
+        for ref in refs:
+            if not isinstance(ref, dict):
+                continue
+            if not ref.get('attached'):
+                notes.append(image_refs.detached_marker(ref))
+                continue
+            if not image_cache.exists(ref):
+                notes.append(image_refs.missing_marker(ref))
+                continue
+            if not caps.vision:
+                notes.append(f"[Image {ref.get('n')} is attached to this "
+                             f"conversation, but the active model cannot see "
+                             f"images. Say so if asked about it.]")
+                continue
+            ext = str(ref.get('path', '')).rsplit('.', 1)[-1]
+            if not caps.accepts(ext):
+                notes.append(f"[Image {ref.get('n')} is in a format this model "
+                             f"cannot read (.{ext}).]")
+                continue
+            out.append({'path': ref['path'], 'n': ref.get('n'),
+                        'name': ref.get('name') or ''})
+        return out, ('\n'.join(notes) if notes else '')
+
+    def _with_images(self, entry, caps):
+        """Copy a history entry into API shape, carrying its images.
+
+        Returns a NEW dict — never the history entry itself. The old code
+        forwarded history entries by reference, so anything downstream that
+        touched `content` was editing the stored conversation.
+        """
+        images, notes = self._render_entry_images(entry, caps)
+        out = {'role': entry['role'], 'content': entry.get('content') or ''}
+        for k in ('_tool_calls', '_assistant_text', '_tool_results',
+                  '_is_work_prompt', '_work_output'):
+            if k in entry:
+                out[k] = entry[k]
+        if notes:
+            out['content'] = (f"{out['content']}\n{notes}" if out['content']
+                              else notes)
+        if images:
+            out['images'] = images
+        return out
+
     def _get_history_with_memory(self) -> list:
         """Return conversation_history ready for the API.
-        memory_context ui_events are promoted to system messages at their natural
-        position (right before the user message they belong to).
-        All other ui_event entries are stripped out."""
+
+        memory_context ui_events are promoted to system messages at their
+        natural position (right before the user message they belong to).
+        image_attach ui_events are promoted too, carrying their pictures — an
+        image the AGENT put in the chat is part of the conversation and must
+        come back to it, or the model cannot answer "what is wrong with image
+        5". All other ui_event entries are stripped out.
+
+        Images ride the entry that OWNS them. That is the whole fix for images
+        vanishing mid-conversation: they are no longer a per-call argument that
+        a work-mode continuation forgets to pass.
+        """
+        caps = self._image_caps()
         history_copy = []
         for m in self.conversation_history:
             if m.get('role') == 'ui_event':
                 if m.get('_type') == 'memory_context' and m.get('content'):
                     # Promote to a system message at this exact position
                     history_copy.append({'role': 'system', 'content': m['content']})
+                elif m.get('_type') == 'image_attach' and m.get('_images'):
+                    images, notes = self._render_entry_images(m, caps)
+                    if not images and not notes:
+                        continue
+                    turn = {'role': 'system',
+                            'content': notes or 'You attached the following '
+                                                'image(s) to the chat.'}
+                    if images:
+                        turn['images'] = images
+                    history_copy.append(turn)
                 # All other ui_event subtypes are silently dropped
+            elif m.get('_images'):
+                history_copy.append(self._with_images(m, caps))
             else:
                 history_copy.append(m)
         return history_copy
@@ -549,25 +655,38 @@ class AIEngine:
         """Split unified message list into (system_prompt, conversation_list).
         The first 'system' role becomes the system prompt string.
         Any subsequent 'system' role messages are wrapped as user turns.
-        Consecutive messages of the same role are merged (required by Anthropic)."""
+        Consecutive messages of the same role are merged (required by Anthropic).
+
+        Per-message `images` (contract v2.1) are CARRIED THROUGH, including
+        across a merge — dropping them here would silently undo positional
+        images for every compat-mode provider.
+        """
         system_prompt = None
         convo = []
         for msg in messages:
             role, content = msg['role'], msg['content']
+            images = msg.get('images')
             if role == 'system':
-                if system_prompt is None:
+                if system_prompt is None and not images:
                     system_prompt = content
-                else:
-                    # Inject as a user message so the conversation stays valid
-                    convo.append({'role': 'user', 'content': f'[SYSTEM]: {content}'})
+                    continue
+                # Inject as a user message so the conversation stays valid. A
+                # system entry carrying images has to become a real turn: the
+                # system prompt is a plain string and cannot hold pictures.
+                turn = {'role': 'user', 'content': f'[SYSTEM]: {content}'}
             else:
-                convo.append({'role': role, 'content': content})
+                turn = {'role': role, 'content': content}
+            if images:
+                turn['images'] = list(images)
+            convo.append(turn)
 
         # Merge consecutive same-role turns (Anthropic & Gemini both require alternation)
         merged = []
         for msg in convo:
             if merged and merged[-1]['role'] == msg['role']:
                 merged[-1]['content'] += '\n' + msg['content']
+                if msg.get('images'):
+                    merged[-1].setdefault('images', []).extend(msg['images'])
             else:
                 merged.append(dict(msg))
 
@@ -606,7 +725,11 @@ class AIEngine:
         system_prompt = None
         entries = []
         for m in messages:
-            if m.get('role') == 'system' and system_prompt is None:
+            # A system entry carrying images cannot become the system prompt —
+            # that is a plain string and has nowhere to put a picture. It falls
+            # through to the normal path and is injected as a real turn.
+            if (m.get('role') == 'system' and system_prompt is None
+                    and not m.get('images')):
                 system_prompt = m.get('content')
             else:
                 entries.append(m)
@@ -697,21 +820,31 @@ class AIEngine:
                 continue
 
             content = m.get('content') or ''
+            # Per-message images (contract v2.1) ride the turn that owns them.
+            # Only user-facing turns can carry pictures in every dialect, so a
+            # system entry with images becomes a user turn below and keeps them.
+            imgs = m.get('images')
             if role == 'assistant':
                 content = self.tool_manager.strip_tool_calls(content)
                 if content.strip():
                     neutral.append({'role': 'assistant', 'content': content})
             elif role == 'user':
-                neutral.append({'role': 'user', 'content': content})
+                turn = {'role': 'user', 'content': content}
+                if imgs:
+                    turn['images'] = list(imgs)
+                neutral.append(turn)
             elif role == 'system':
                 # A system entry not consumed as a tool result → inject as a user
                 # turn (mirrors _extract_system_and_convo's handling). Fence-
                 # stripped: old compat instructional prompts stored in history
                 # contain fence EXAMPLES that must not reach the native channel.
-                if content.strip():
+                if content.strip() or imgs:
                     content = self.tool_manager.strip_tool_calls(content)
-                    if content.strip():
-                        neutral.append({'role': 'user', 'content': f'[SYSTEM]: {content}'})
+                    if content.strip() or imgs:
+                        turn = {'role': 'user', 'content': f'[SYSTEM]: {content}'}
+                        if imgs:
+                            turn['images'] = list(imgs)
+                        neutral.append(turn)
             i += 1
         return system_prompt, neutral
 
@@ -1278,10 +1411,21 @@ class AIEngine:
         return self._process_ai_response(ai_text)
 
     def generate_response_with_image(self, user_message, image_paths):
-        """Generate response with one or more image attachments (Puter / custom_script).
+        """Generate a response for a message that arrives WITH its images.
 
         image_paths: str (single, backward compat) or list[str] (multi-image).
-        Puter only uses the first image; custom_script receives all of them.
+
+        The images are CACHED ONTO THE USER TURN rather than passed as a
+        per-call argument. That is the fix for images vanishing mid-conversation:
+        the old code handed them to exactly one provider call, so the moment the
+        model entered work mode — where continue_work() calls the provider with
+        no image argument — the picture was gone and it started insisting the
+        user had never sent one. Living on the history entry, an image is
+        re-sent on every subsequent call for free, until the user detaches it.
+
+        The chat UI attaches images the instant they are picked, so it does NOT
+        come through here. This path serves callers whose message and images
+        arrive together — the Android bridge, and any legacy caller.
         """
         if isinstance(image_paths, str):
             image_paths = [image_paths]
@@ -1292,12 +1436,14 @@ class AIEngine:
 
         # Same ordering rule as generate_response: user message first, then the
         # memory ui_event, so reload puts the recall card in the right turn.
-        self.conversation_history.append({'role': 'user', 'content': user_message})
+        entry = {'role': 'user', 'content': user_message}
+        self.conversation_history.append(entry)
+        self.attach_images(image_paths, origin='user', entry=entry)
         self._inject_memories(user_message)
         log.debug(f"[AIEngine.generate_response_with_image] User message appended | "
                   f"history_len={len(self.conversation_history)}")
 
-        ai_text = self._call_provider(images=image_paths)
+        ai_text = self._call_provider()
         if not ai_text:
             log.error("[AIEngine.generate_response_with_image] ✗ No AI text returned")
             return self._make_error_result("Error: No response from provider")
@@ -1335,6 +1481,14 @@ class AIEngine:
         log.debug(f"[AIEngine.continue_work] Work mode prompt appended (full) | "
                   f"prompt_len={len(work_prompt)} | history_len={len(self.conversation_history)}")
 
+        # NOTE — attached images are NOT handled here any more. They live on
+        # their history entry and are rebuilt into every provider call by
+        # _get_history_with_memory(), so a work-mode continuation keeps seeing
+        # them. This method used to call _call_provider() with no image
+        # argument at all, which is precisely how a picture went missing
+        # mid-conversation: the model saw it on the first turn and then, one
+        # tool step later, could not.
+        #
         # Ephemeral image context: if the AI queued image(s) via
         # attach_image_to_context() during the step it just ran, feed them to the
         # provider for THIS one continuation call. They are never pinned to the
@@ -2412,9 +2566,45 @@ class AIEngine:
                  f"was {len(self.conversation_history)} entries | "
                  f"is_working={self.tool_manager.work.is_working}")
         self.conversation_history = []
+        # A new conversation restarts image numbering at 1 — `n` is scoped to
+        # the session, not to the install.
+        self.next_image_n = 1
         self.tool_manager.work.reset()
         self.last_raw_response = None
         log.debug("[AIEngine.clear_history] ✓ History cleared, work mode reset, last_raw_response cleared")
+
+    # ── Image attachments ────────────────────────────────────────────────────
+
+    def allocate_image_number(self) -> int:
+        """Hand out the next image number and retire it from the pool."""
+        from systema.common.image_refs import next_number
+        n = next_number(self.conversation_history, self.next_image_n)
+        self.next_image_n = n + 1
+        return n
+
+    def attach_images(self, paths, *, origin: str = 'user', entry=None) -> list:
+        """Cache `paths`, allocate numbers, and return the new ImageRefs.
+
+        `entry` is the history entry the images belong to. Passing None means
+        the caller will place them itself (the UI does this when an attachment
+        arrives before the message it will ride on).
+        """
+        from systema.common import image_cache
+        refs = []
+        for p in (paths or []):
+            ref = image_cache.store(p, n=self.next_image_n, origin=origin)
+            if ref is None:
+                continue
+            # Only burn a number once the file actually made it into the cache.
+            ref['n'] = self.allocate_image_number()
+            ref['id'] = f"img_{ref['n']}"
+            refs.append(ref)
+        if entry is not None and refs:
+            entry.setdefault('_images', []).extend(refs)
+        if refs:
+            log.info(f"[AIEngine.attach_images] Cached {len(refs)} image(s) "
+                     f"as {[r['n'] for r in refs]} | origin={origin}")
+        return refs
 
     def remove_last_user_message(self):
         """Remove the last user message from conversation history"""

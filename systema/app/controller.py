@@ -45,7 +45,10 @@ from systema.common import app_config as _app_config
 from systema.common.relauncher import spawn_relauncher as _spawn_relauncher
 
 
-_PLACEHOLDER_NAMES = ("USER", "USERNAME", "NAME")
+# Single source of truth, shared with the greeting banner — two separate lists
+# of placeholder names WILL drift, and the failure is silent (the assistant
+# starts addressing somebody called "USER").
+from systema.common.greeting import PLACEHOLDER_NAMES as _PLACEHOLDER_NAMES
 
 
 def build_identity_block(assistant_name: str = "", user_name: str = "",
@@ -208,9 +211,13 @@ class AssistantController(QObject):
         # namespace so the AI can call them from code execution on any thread.
         # Uses bridge_attach_image_signal to safely hop to the main Qt thread.
 
-        def _agent_attach_image(path_or_paths):
-            """Attach image(s) to the chat input as pinned context images.
+        def _agent_attach_image(path_or_paths, annotation=''):
+            """Put image(s) INTO the chat as assistant-side attachments.
             Can be called from any thread (uses Qt signal for thread safety).
+
+            They become numbered images in the transcript, sharing ONE counter
+            with the user's own attachments — so "image 3" means the same
+            picture whoever added it.
 
             Usage inside code execution:
                 attach_image_to_chat(r"C:\\path\\to\\image.png")
@@ -220,7 +227,9 @@ class AssistantController(QObject):
                 paths = [path_or_paths]
             else:
                 paths = list(path_or_paths)
-            self.bridge_attach_image_signal.emit(paths)
+            self.bridge_attach_image_signal.emit(
+                {'paths': paths, 'origin': 'agent',
+                 'annotation': annotation or ''})
             return f"[attach_image] Queued {len(paths)} image(s) for attachment."
 
         def _agent_take_screenshot(save_path=None):
@@ -445,46 +454,112 @@ class AssistantController(QObject):
 
     # ── Software updates ───────────────────────────────────────────────────────
 
-    def restart_app(self):
-        """Relaunch Systema Auxilium and quit this instance — the ONE restart path
-        used by every caller (update apply, Manage apply, the floating-window menu).
+    # ═══════════════════════════════════════════════════════════════════════
+    # THE EXIT PIPELINE — one gate, one teardown, every caller
+    # ═══════════════════════════════════════════════════════════════════════
+    # Restart and Shutdown differ by exactly one step (spawning a relauncher),
+    # so they are ONE function with a mode rather than two flows that drifted.
+    #
+    # They HAD drifted, and it cost a cancelled restart: the old restart_app
+    # spawned the relauncher and armed a 3s os._exit BEFORE calling
+    # ui.shutdown_app(), which is where the "a response is still generating,
+    # continue?" prompt lived. Declining it returned early exactly as written —
+    # but a detached relauncher was already waiting on this pid and the kill
+    # timer was already ticking, so the app restarted anyway.
+    #
+    # RULE: nothing irreversible happens until the exit has been agreed.
+    #   1. re-entrancy guard   2. confirm ONCE   3. commit   4. tear down
 
-        The app is single-instance, so the new process must not start until this one
-        has EXITED and released the lock. We spawn the detached shell relauncher
-        (``_spawn_relauncher`` — waits for our pid to die, then execs run.sh/run.bat
-        from APP_ROOT with our SAME privileges), then shut down cleanly (save
-        settings, close child windows, stop the tray) so nothing lingers holding the
-        lock. A hard-exit fallback guarantees the pid actually dies even if some
-        thread would otherwise keep the interpreter alive, so the waiting relauncher
-        can always proceed.
+    def request_exit(self, mode: str = "shutdown", confirm: bool = True) -> bool:
+        """THE entry point for quitting. `mode` is 'shutdown' or 'restart'.
+
+        Returns True when the exit is going ahead. `confirm=False` is for
+        callers that have already asked (they own the decision); it never
+        skips the teardown, only the prompt.
         """
-        import os, threading
+        import os
         from pathlib import Path
+
         from systema import APP_ROOT
 
-        if not _spawn_relauncher(os.getpid(), Path(APP_ROOT)):
+        if getattr(self, "_exit_in_progress", False):
+            return True                     # already going down; don't re-ask
+        mode = "restart" if str(mode).lower() == "restart" else "shutdown"
+
+        # ── 1. Confirm, once, in one place ───────────────────────────────────
+        if confirm and not self._confirm_exit(mode):
+            log.info(f"[AssistantController.request_exit] {mode} cancelled at the "
+                     f"busy prompt — nothing spawned, nothing torn down")
             return False
-        log.info(f"[AssistantController.restart_app] relauncher spawned "
-                 f"(waits for pid {os.getpid()} to exit); shutting down")
-        # Belt-and-suspenders: if a lingering non-daemon thread or the tray keeps us
-        # alive past the graceful quit, force-exit so the relauncher isn't left
-        # waiting on a pid that never dies (which would block the single-instance
-        # relaunch). Daemon timer: it never keeps us up itself and is killed with us
-        # on a clean exit, so it only fires if the graceful path actually hung.
-        _t = threading.Timer(3.0, lambda: os._exit(0))
-        _t.daemon = True
-        _t.start()
-        # Graceful shutdown (settings save + child-window + tray teardown + quit).
+
+        # ── 2. Commit ────────────────────────────────────────────────────────
+        if mode == "restart":
+            # Single-instance: the new process must not start until this one has
+            # exited and released the lock, so the relauncher waits on our pid.
+            if not _spawn_relauncher(os.getpid(), Path(APP_ROOT)):
+                log.error("[AssistantController.request_exit] relauncher would not "
+                          "spawn — staying up rather than quitting into nothing")
+                return False
+            log.info(f"[AssistantController.request_exit] relauncher spawned "
+                     f"(waits for pid {os.getpid()} to exit)")
+            self._arm_force_exit()
+
+        self._exit_in_progress = True
+
+        # ── 3. Tear down (settings save + child windows + tray + quit) ───────
         try:
-            if getattr(self, "ui", None) is not None:
-                self.ui.shutdown_app()
+            ui = getattr(self, "ui", None)
+            if ui is not None and hasattr(ui, "perform_teardown"):
+                ui.perform_teardown()
             else:
                 from PyQt6.QtWidgets import QApplication
                 QApplication.quit()
         except Exception:
+            log.error("[AssistantController.request_exit] teardown raised — "
+                      "quitting anyway", exc_info=True)
             from PyQt6.QtWidgets import QApplication
             QApplication.quit()
         return True
+
+    def _arm_force_exit(self, delay: float = 3.0):
+        """Arm the fallback that hard-exits if the graceful quit stalls.
+
+        If a lingering non-daemon thread or the tray outlives the polite Qt
+        quit, the relauncher would sit forever waiting on a pid that never
+        dies. A daemon timer cannot keep the process up by itself, so this only
+        ever fires when something else already refused to.
+
+        ITS OWN METHOD, deliberately: armed inline, a real 3-second
+        `os._exit(0)` fires inside the TEST process too. It did — the suite was
+        killed partway through by its own exit-pipeline tests, and because
+        os._exit(0) reports success, the run looked like a clean pass while
+        silently skipping most of it. Overriding one method is how a test
+        asserts the fallback was armed without arming a live kill.
+        """
+        import os
+        import threading
+
+        timer = threading.Timer(delay, lambda: os._exit(0))
+        timer.daemon = True
+        timer.start()
+        return timer
+
+    def _confirm_exit(self, mode: str) -> bool:
+        """The busy prompt, asked in exactly one place. True to proceed."""
+        ui = getattr(self, "ui", None)
+        hook = getattr(ui, "_confirm_exit_if_busy", None) if ui else None
+        if not callable(hook):
+            return True                     # headless / tests
+        return bool(hook(mode.capitalize()))
+
+    def restart_app(self, confirm: bool = True):
+        """Relaunch and quit. Thin alias over the exit pipeline, kept because
+        the updater and older call sites use this name."""
+        return self.request_exit("restart", confirm=confirm)
+
+    def shutdown_app(self, confirm: bool = True):
+        """Quit. Thin alias over the exit pipeline."""
+        return self.request_exit("shutdown", confirm=confirm)
 
     def agent_activity(self):
         """Return (busy, reason) describing whether the AI is mid-task.
@@ -768,6 +843,9 @@ class AssistantController(QObject):
             'vad_silero_enabled': False,
             'vad_aggressiveness': 3,
             'vad_silero_threshold': 0.5,
+            # 'detailed' (full continuation ping) or 'compact' (shredded).
+            # Re-sent every work step, so this trades tokens for guidance.
+            'work_mode_prompt_style': 'detailed',
             'supervised_execution': True,  # Default ON for safety
             'memory_enabled': True,
             'memory_recall_mode': 'inject_all',  # 'inject_all' or 'rag'
@@ -962,30 +1040,38 @@ class AssistantController(QObject):
                         QTimer.singleShot(0, close_win.close)
             ab.request_manual_response(context, is_working, work_output, on_android_manual_response)
 
-    def _handle_bridge_attach_image(self, paths):
-        """Slot — always runs on main thread. Pins images sent from the Android app."""
+    def _handle_bridge_attach_image(self, payload):
+        """Slot — always runs on main thread. Puts images into the transcript.
+
+        Serves BOTH producers, which is why it takes a payload rather than a
+        bare list: the Android app (a plain list of paths, treated as the
+        user's own attachment) and the assistant's attach_image_to_chat (a dict
+        that also carries origin and the annotation to caption it with).
+        """
         if not self._chat:
             return
-        # If the incoming paths are agent screenshots, remove any previously
-        # pinned agent screenshots first so the old one doesn't keep getting sent.
-        if any('agent_screenshot_' in p for p in (paths or [])):
-            for pi in list(getattr(self._chat, 'pinned_images', [])):
-                if 'agent_screenshot_' in pi.get('path', ''):
-                    self._chat._remove_pinned_image(pi, notify=False)
-        for p in (paths or []):
-            try:
-                self._chat._show_image_preview(p)
-            except Exception as e:
-                log.error(f"[AssistantController._handle_bridge_attach_image] ✗ {e}")
+        if isinstance(payload, dict):
+            paths = payload.get('paths') or []
+            origin = payload.get('origin') or 'user'
+            annotation = payload.get('annotation') or ''
+        else:
+            paths, origin, annotation = list(payload or []), 'user', ''
+        try:
+            self._chat.attach_images(paths, origin=origin, annotation=annotation)
+        except Exception as e:
+            log.error(f"[AssistantController._handle_bridge_attach_image] ✗ {e}",
+                      exc_info=True)
 
     def _handle_bridge_detach_image(self, path):
-        """Slot — always runs on main thread. Removes a pinned image the Android app detached."""
+        """Slot — always runs on main thread. Detaches an image the Android app
+        dropped, by matching its cached path back to an image number."""
         if not self._chat or not path:
             return
         try:
-            for pi in list(getattr(self._chat, 'pinned_images', [])):
-                if pi.get('path') == path:
-                    self._chat._remove_pinned_image(pi, notify=False)
+            from systema.common import image_refs
+            for ref in image_refs.all_refs(self.ai.conversation_history):
+                if ref.get('path') == path or ref.get('name') == path:
+                    self._chat.detach_image(ref.get('n'))
                     break
         except Exception as e:
             log.error(f"[AssistantController._handle_bridge_detach_image] ✗ {e}")
@@ -1571,23 +1657,22 @@ class AssistantController(QObject):
         # Show thinking in UI
         self.ui.show_thinking()
 
-        # Collect pinned images so Android-sent messages also reach the AI with images
-        image_paths = []
-        if self.get_ai_provider() == 'custom_script' and self._chat:
-            image_paths = [pi['path'] for pi in getattr(self._chat, 'pinned_images', [])]
-            if image_paths:
-                log.debug(f"[AssistantController.send_message] Found {len(image_paths)} pinned image(s) — "
-                          f"upgrading to generate_with_image")
-
-        # Create worker thread — use the image operation when images are pinned
-        # (the bridge/phone path routes here, so it must pick the right method too)
-        if image_paths:
-            self._create_and_start_worker('generate_with_image', user_message, image_paths)
-        else:
-            self._create_and_start_worker('generate', user_message)
+        # No image collection here. Images already sit on the history entries
+        # that own them (see systema/ui/chat/image_bubbles.py), so a plain
+        # 'generate' carries every attached picture — the old "scan the pinned
+        # list and upgrade to generate_with_image" step was the mechanism that
+        # made images survive only the turns routed through this method.
+        self._create_and_start_worker('generate', user_message)
 
     def send_message_with_image(self, user_message, image_paths):
-        """Send user message with one or more image attachments."""
+        """Send a message whose images arrive WITH it.
+
+        The chat UI no longer uses this: attaching puts a picture into the
+        conversation immediately, so by send time it is already there. Kept for
+        callers whose text and images genuinely arrive together (the Android
+        bridge, and any external caller); it caches them onto the new user turn
+        rather than passing them as a one-shot argument.
+        """
         # Normalize: accept a single path string or a list
         if isinstance(image_paths, str):
             image_paths = [image_paths]
@@ -2421,7 +2506,8 @@ class AssistantController(QObject):
         # Save session
         success = self.session_manager.save_session(
             self.current_session_id,
-            chat_history
+            chat_history,
+            next_image_n=getattr(self.ai, 'next_image_n', None)
         )
 
         if success:
@@ -2450,7 +2536,11 @@ class AssistantController(QObject):
         # Refresh UI
         if self._chat:
             self._chat.refresh_session_list()
-            self._chat.add_system_message("**New Session Created**")
+            # The greeting banner IS the new-session notice now — it replaces
+            # the old "**New Session Created**" grey line rather than joining
+            # it. Same lifecycle: UI-only, never in history, cleared with the
+            # chat. The elevated-privileges notice stays its own separate line.
+            self._chat.add_greeting_banner()
             self._chat.warn_loaded_skills_if_any()
         log.info(f"[AssistantController.create_new_session] ✓ New session ready: '{self.current_session_id}'")
         ab = getattr(getattr(self, 'ui', None), 'android_bridge', None)
@@ -2497,6 +2587,17 @@ class AssistantController(QObject):
         for msg in session_data['chat_history']:
             self.ai.conversation_history.append(msg)
         log.debug(f"[AssistantController.load_session] {history_len} messages loaded into AI history")
+
+        # Restore the image counter. Sessions written before it existed fall
+        # back to a floor derived from their history, so old files still load;
+        # the stored value wins when present, which is what keeps a deleted
+        # image's number retired across a reload.
+        try:
+            from systema.common.image_refs import next_number
+            self.ai.next_image_n = next_number(
+                self.ai.conversation_history, session_data.get('next_image_n'))
+        except Exception:
+            self.ai.next_image_n = 1
 
         # Render messages in UI — strip tool call JSON from assistant messages
         if self._chat:
