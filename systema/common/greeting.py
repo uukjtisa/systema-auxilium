@@ -154,7 +154,11 @@ _TIME_LINES = {
         # midnight", and the user stopped to ask whether it was a bug. A
         # greeting that has to be parsed has already failed.)
         ("It's past midnight, {name}", "It's past midnight"),
-        ("Nothing but time tonight, {name}", "Nothing but time tonight"),
+        # A real fact, dryly delivered, that presumes NOTHING about why anyone
+        # is awake — "still up" and "just woke up at 2am" are equally likely,
+        # and a line that guesses wrong reads as a nag either way.
+        ("Melatonin peaks around now, {name}. Do with that what you will",
+         "Melatonin peaks around now. Do with that what you will"),
         ("Enjoy the quiet, {name}", "Enjoy the quiet"),
         ("Late, but let's be useful, {name}", "Late, but let's be useful"),
         ("Still here, {name}? Good", "Still here? Good"),
