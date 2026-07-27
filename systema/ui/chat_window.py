@@ -1900,6 +1900,12 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
 
     def send_message(self):
         """Send message — supports multi-image and persistent pinned images."""
+        # The text box stays typable while the assistant works (see
+        # set_input_enabled), so the gate that used to be "the widget is
+        # disabled" has to live here — otherwise Enter would fire a second
+        # request into a turn already in flight.
+        if not getattr(self, '_send_allowed', True):
+            return
         message = self.input_field.toPlainText().strip()
         if not message:
             return
@@ -2096,7 +2102,14 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
                 from PyQt6.QtWidgets import QDialog
                 from PyQt6.QtCore import QTimer
 
-                dialog = WorkmodeInterruptDialog(self)
+                # Name the step in the dialog — the annotation the model wrote
+                # for it if there is one ("digital signature check"), else the
+                # tool. Vague is what made the old copy read like it killed the
+                # whole turn.
+                _work = self.controller.ai.tool_manager.work
+                _label = (_work.interpreter.last_annotation
+                          or _work.last_tool or "")
+                dialog = WorkmodeInterruptDialog(self, tool_name=_label)
 
                 # Auto-dismiss if code finishes while dialog is open
                 _poll = QTimer()
@@ -2567,7 +2580,25 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         return not any(path.lower().endswith(ext) for ext in image_extensions)
 
     def keyPressEvent(self, event):
-        """Handle paste of file paths and zoom shortcuts"""
+        """Handle paste of file paths, zoom shortcuts and Esc-to-interrupt"""
+        # ── Esc interrupts whatever is in flight ────────────────────────────
+        # Same action as the Stop button, so it inherits its rules: mid-work it
+        # opens the interrupt dialog, otherwise it cancels the response. Gated
+        # on the button's own visible+enabled state, so Esc does nothing when
+        # there is nothing to stop (and never eats the key from a child).
+        # QTextEdit ignores Escape, so this still fires while you are typing
+        # ahead in the input box.
+        if event.key() == Qt.Key.Key_Escape:
+            btn = getattr(self, 'interrupt_btn', None)
+            try:
+                live = btn is not None and btn.isVisible() and btn.isEnabled()
+            except RuntimeError:
+                live = False
+            if live:
+                self.interrupt_response()
+                event.accept()
+                return
+
         # Ctrl++ / Ctrl+= → zoom in
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             if event.key() in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):

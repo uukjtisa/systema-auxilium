@@ -9,6 +9,32 @@ from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
 from PyQt6.QtCore import Qt, QTimer
 
 
+def _live_palette(widget) -> dict:
+    """The ACTIVE theme's palette, asked of the parent's controller.
+
+    Both dialogs in this module used to hardcode the obsidian-blue set, so they
+    stayed blue-grey under every other theme the user picked. Falls back to the
+    default palette when there is no parent to ask (standalone / tests).
+    """
+    from systema.ui import theme as _theme
+    try:
+        return _theme.current_palette(getattr(widget.parent(), 'controller', None))
+    except Exception:
+        return _theme.resolve_palette(_theme.THEMES[_theme.DEFAULT_THEME_KEY])
+
+
+def _mix(over: str, onto: str, amount: float) -> str:
+    """Blend `over` into `onto`. Hover states and the danger button's fill are
+    DERIVED from the theme rather than being literals, so they stay in family
+    whatever palette is active."""
+    from PyQt6.QtGui import QColor
+    a, b = QColor(over), QColor(onto)
+    return QColor(
+        round(b.red() + (a.red() - b.red()) * amount),
+        round(b.green() + (a.green() - b.green()) * amount),
+        round(b.blue() + (a.blue() - b.blue()) * amount)).name()
+
+
 class TimeoutDialog(QDialog):
     """Modal dialog shown when code execution times out."""
 
@@ -31,14 +57,18 @@ class TimeoutDialog(QDialog):
         self.setFixedSize(540, 210)
         self.setModal(True)
 
-        _BASE    = "#0D1117"
-        _SURFACE = "#161B22"
-        _ELEV    = "#21262D"
-        _BORDER  = "#30363D"
-        _ACCENT  = "#58A6FF"
-        _TEXT    = "#E6EDF3"
-        _MUTED   = "#8B949E"
-        _RED     = "#F85149"
+        _p = _live_palette(self)
+        _BASE    = _p['bg']
+        _SURFACE = _p['surface']
+        _ELEV    = _p['surface2']
+        _BORDER  = _p['border']
+        _ACCENT  = _p['accent']
+        _TEXT    = _p['text']
+        _MUTED   = _p['muted']
+        _RED     = _p['red']
+        _ELEV_HOVER = _mix(_TEXT, _ELEV, 0.10)
+        _RED_FILL   = _mix(_RED, _SURFACE, 0.14)
+        _RED_HOVER  = _mix(_RED, _SURFACE, 0.24)
 
         container = QWidget()
         container.setStyleSheet(f"""
@@ -99,11 +129,11 @@ class TimeoutDialog(QDialog):
                 font-weight: 500;
                 color: {_TEXT};
             }}
-            QPushButton:hover {{ background-color: #2D333B; border-color: {_ACCENT}; }}
+            QPushButton:hover {{ background-color: {_ELEV_HOVER}; border-color: {_ACCENT}; }}
         """
         _BTN_KILL = f"""
             QPushButton {{
-                background-color: #2D1517;
+                background-color: {_RED_FILL};
                 border: 1px solid {_RED};
                 border-radius: 6px;
                 padding: 8px 14px;
@@ -111,7 +141,7 @@ class TimeoutDialog(QDialog):
                 font-weight: 500;
                 color: {_RED};
             }}
-            QPushButton:hover {{ background-color: #3D1A1C; }}
+            QPushButton:hover {{ background-color: {_RED_HOVER}; }}
         """
 
         extend_30 = QPushButton("30s")
@@ -184,9 +214,12 @@ class WorkmodeInterruptDialog(QDialog):
     Auto-dismisses via 200ms poll when work.interpreter.is_running goes False.
     Returns reason_text on accept."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, tool_name: str = ""):
         super().__init__(parent)
         self._reason = ""
+        # What the agent is actually running right now, so the dialog can name
+        # it instead of talking about "work" in the abstract.
+        self._tool_name = (tool_name or "").strip()
         self._init_ui()
 
     def _init_ui(self):
@@ -196,16 +229,20 @@ class WorkmodeInterruptDialog(QDialog):
             Qt.WindowType.Dialog
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedSize(540, 260)
+        self.setFixedSize(560, 290)
         self.setModal(True)
 
-        _SURFACE = "#161B22"
-        _ELEV    = "#21262D"
-        _BORDER  = "#30363D"
-        _ACCENT  = "#58A6FF"
-        _TEXT    = "#E6EDF3"
-        _MUTED   = "#8B949E"
-        _RED     = "#F85149"
+        _p = _live_palette(self)
+        _SURFACE = _p['surface']
+        _ELEV    = _p['surface2']
+        _BORDER  = _p['border']
+        _ACCENT  = _p['accent']
+        _TEXT    = _p['text']
+        _MUTED   = _p['muted']
+        _RED     = _p['red']
+        _ELEV_HOVER = _mix(_TEXT, _ELEV, 0.10)
+        _RED_FILL   = _mix(_RED, _SURFACE, 0.14)
+        _RED_HOVER  = _mix(_RED, _SURFACE, 0.24)
 
         container = QWidget()
         container.setStyleSheet(f"""
@@ -232,15 +269,22 @@ class WorkmodeInterruptDialog(QDialog):
         icon_lbl = QLabel("\U0001F6D1")
         icon_lbl.setStyleSheet(f"font-size: 24px; background: transparent;")
         title_row.addWidget(icon_lbl)
-        title = QLabel("Stop ongoing work?")
+        _what = f"`{self._tool_name}`" if self._tool_name else "the tool call"
+        title = QLabel("Interrupt the running tool call?")
         title.setStyleSheet(f"font-size: 16px; font-weight: 600; color: {_TEXT}; background: transparent;")
         title_row.addWidget(title)
         title_row.addStretch()
         inner.addLayout(title_row)
 
-        # Description
+        # Description — says what actually happens. The old copy ("Stop ongoing
+        # work? / Write a reason for the Agent to exit") read like it killed the
+        # whole turn, when it stops only the step that is executing right now:
+        # the partial output is KEPT, handed to the agent with your reason, and
+        # the agent then wraps up on its own.
         desc = QLabel(
-            "(Optional) Write a reason for the Agent to exit."
+            f"This stops {_what} the agent is executing right now — not the "
+            "whole conversation. Whatever it produced so far is kept and handed "
+            "back to the agent along with your reason, and it wraps up from there."
         )
         desc.setWordWrap(True)
         desc.setStyleSheet(
@@ -250,7 +294,8 @@ class WorkmodeInterruptDialog(QDialog):
 
         # Reason input
         self._reason_input = QPlainTextEdit()
-        self._reason_input.setPlaceholderText("Why did you interrupt? (optional)")
+        self._reason_input.setPlaceholderText(
+            "Why? e.g. \"wrong folder — stop and re-check the path\" (optional)")
         self._reason_input.setFixedHeight(70)
         self._reason_input.setStyleSheet(f"""
             QPlainTextEdit {{
@@ -280,11 +325,11 @@ class WorkmodeInterruptDialog(QDialog):
                 font-weight: 500;
                 color: {_TEXT};
             }}
-            QPushButton:hover {{ background-color: #2D333B; border-color: {_ACCENT}; }}
+            QPushButton:hover {{ background-color: {_ELEV_HOVER}; border-color: {_ACCENT}; }}
         """
         _BTN_KILL = f"""
             QPushButton {{
-                background-color: #2D1517;
+                background-color: {_RED_FILL};
                 border: 1px solid {_RED};
                 border-radius: 6px;
                 padding: 8px 14px;
@@ -292,16 +337,22 @@ class WorkmodeInterruptDialog(QDialog):
                 font-weight: 500;
                 color: {_RED};
             }}
-            QPushButton:hover {{ background-color: #3D1A1C; }}
+            QPushButton:hover {{ background-color: {_RED_HOVER}; }}
         """
 
-        cancel_btn = QPushButton("Cancel")
+        cancel_btn = QPushButton("Let it finish")
         cancel_btn.setStyleSheet(_BTN_CANCEL)
+        cancel_btn.setToolTip("Close this and leave the agent running.")
         cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(cancel_btn)
 
-        kill_btn = QPushButton("Kill & Exit")
+        # "Kill & Exit" overstated it — nothing is killed but the current step,
+        # and the agent is not exited, it is told to wrap up.
+        kill_btn = QPushButton("Interrupt the tool call")
         kill_btn.setStyleSheet(_BTN_KILL)
+        kill_btn.setToolTip(
+            "Stop the step that is running now. Partial output is kept and "
+            "given to the agent with your reason.")
         kill_btn.clicked.connect(self._confirm)
         btn_row.addWidget(kill_btn)
 

@@ -283,6 +283,11 @@ class ThemingMixin:
                 sk.apply_palette(resolve_palette(t))
             except (RuntimeError, AttributeError):
                 pass
+        # ...and the chrome AROUND it (header, badge, body backdrop), which the
+        # section does not own.
+        _rs = getattr(self, '_restyle_skills_block', None)
+        if callable(_rs):
+            _rs()
 
     def apply_glass_background(self, enabled: bool, opacity: float = 0.75):
         """Apply or remove the glass (frosted-translucent) theme.

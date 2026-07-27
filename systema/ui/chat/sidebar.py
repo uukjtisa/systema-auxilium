@@ -446,6 +446,42 @@ class SidebarMixin:
         new_val = max(0, min(new_val, sb.maximum()))
         sb.setValue(new_val)
 
+    def _restyle_skills_block(self):
+        """Re-theme the sidebar's Skills header + body from the LIVE palette.
+
+        The rows inside are the SkillsSidebarSection's own job (apply_palette);
+        this is the chrome around them, which used to be styled inline from
+        local variables and so could never be reached again after construction.
+        Safe to call before the block exists — the sidebar builds in pieces.
+        """
+        hdr = getattr(self, '_skills_hdr', None)
+        body = getattr(self, '_skills_body', None)
+        chrome = getattr(self, '_skills_chrome', None)
+        if hdr is None or body is None or chrome is None:
+            return
+        try:
+            t = self._t()
+            from systema.ui.theme import resolve_palette
+            p = resolve_palette(t)
+            hdr.setStyleSheet(
+                "QWidget { background: transparent; }"
+                f"QWidget:hover {{ background: {t['surface']}; }}")
+            body.setStyleSheet(f"background: {t['base']};")
+            chrome['icon'].setStyleSheet(
+                f"font-size: 14px; background: transparent; color: {p['muted']};")
+            chrome['text'].setStyleSheet(
+                f"font-size: 11px; color: {p['text']}; background: transparent;")
+            # The badge carried the obsidian accent as a literal, so it stayed
+            # blue under every other theme — the "background that isn't
+            # following the theme" in the skills list.
+            chrome['count'].setStyleSheet(
+                f"background: {p['surface2']}; color: {p['accent']}; font-size: 9px;"
+                " border-radius: 4px; padding: 1px 6px;")
+            chrome['chevron'].setStyleSheet(
+                f"color: {p['border']}; font-size: 14px; background: transparent;")
+        except (RuntimeError, KeyError, AttributeError):
+            pass
+
     def _build_sidebar(self):
         """Build the sidebar overlay (hero, nav rows, skills, session history).
         Extracted verbatim from init_ui (full-split pass, 2026-07-17)."""
@@ -694,12 +730,14 @@ class SidebarMixin:
             sw_lay.setContentsMargins(0, 0, 0, 0)
             sw_lay.setSpacing(0)
 
-            # Header row — same layout as _side_row
+            # Header row — same layout as _side_row.
+            # Every widget here is kept on `self` and styled by
+            # _restyle_skills_block(), NOT inline: as locals styled once at
+            # construction they were unreachable from apply_theme, so the block
+            # kept whatever theme was active when the sidebar was built. The
+            # count badge was worse still — hardcoded #21262D/#58A6FF, i.e. the
+            # obsidian-blue accent, which stayed blue under every other theme.
             skills_hdr = QWidget()
-            skills_hdr.setStyleSheet(f"""
-                QWidget {{ background: transparent; }}
-                QWidget:hover {{ background: {_tc['surface']}; }}
-            """)
             skills_hdr.setCursor(Qt.CursorShape.PointingHandCursor)
             sh_lay = QHBoxLayout(skills_hdr)
             sh_lay.setContentsMargins(16, 8, 16, 8)
@@ -708,27 +746,28 @@ class SidebarMixin:
             sk_icon = QLabel("⚡")
             sk_icon.setFixedWidth(18)
             sk_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            sk_icon.setStyleSheet("font-size: 14px; background: transparent; color: #8B949E;")
             sh_lay.addWidget(sk_icon)
 
             sk_text = QLabel("Skills")
-            sk_text.setStyleSheet("font-size: 11px; color: #C9D1D9; background: transparent;")
             sh_lay.addWidget(sk_text, stretch=1)
 
             sk_count = QLabel("")
-            sk_count.setStyleSheet("background: #21262D; color: #58A6FF; font-size: 9px; border-radius: 4px; padding: 1px 6px;")
             sh_lay.addWidget(sk_count)
 
             sk_chevron = QLabel("›")
-            sk_chevron.setStyleSheet("color: #30363D; font-size: 14px; background: transparent;")
             sh_lay.addWidget(sk_chevron)
 
             sw_lay.addWidget(skills_hdr)
 
             # Body — hidden by default, contains the original SkillsSidebarSection internals
             skills_body = QWidget()
-            skills_body.setStyleSheet(f"background: {_tc['base']};")
             skills_body.hide()
+
+            self._skills_hdr = skills_hdr
+            self._skills_body = skills_body
+            self._skills_chrome = {'icon': sk_icon, 'text': sk_text,
+                                   'count': sk_count, 'chevron': sk_chevron}
+            self._restyle_skills_block()
             sb_lay = QVBoxLayout(skills_body)
             sb_lay.setContentsMargins(8, 4, 8, 8)
             sb_lay.setSpacing(4)

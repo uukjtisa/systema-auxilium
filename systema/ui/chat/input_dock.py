@@ -705,15 +705,24 @@ class InputDockMixin:
                 self.input_field.text_input.setPlainText(combined)
 
     def set_input_enabled(self, enabled):
-        """Enable/disable input"""
-        self.input_field.setEnabled(enabled)
+        """Gate SENDING, not typing.
+
+        The text box stays live while the assistant is working so you can draft
+        your next message instead of waiting with a dead cursor — the send
+        button is what actually holds the message back, and Enter is gated on
+        the same flag (see ChatWindow.send_message). Disabling the box as well
+        just threw away keystrokes and stole focus.
+        """
+        self._send_allowed = bool(enabled)
+        self.input_field.setEnabled(True)          # always typable
         self.send_btn.setEnabled(enabled)
         if enabled:
             self.input_field.setPlaceholderText("Send a message... (Shift+Enter for new line)")
             # Restore focus so the user can type immediately without clicking
             self.input_field.text_input.setFocus()
         else:
-            self.input_field.setPlaceholderText("Processing Request... please wait")
+            self.input_field.setPlaceholderText(
+                "Processing Request... you can type ahead; Esc interrupts")
         # Mirror to Android phone if connected
         _ab = getattr(getattr(self.controller, 'ui', None), 'android_bridge', None)
         if _ab and _ab.isVisible():
