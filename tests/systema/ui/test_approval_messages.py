@@ -130,6 +130,52 @@ def test_the_two_columns_are_symmetric(dialog):
     assert lay.columnStretch(0) == lay.columnStretch(1) != 0
 
 
+def test_both_fields_get_the_same_size_band(dialog):
+    """Equal stretch alone is not enough — a grid starts from each column's own
+    size hint, and the two placeholders are different lengths, so the columns
+    came out 209 vs 228. Identical bands make them identical."""
+    d = dialog()
+    assert (d.reason_edit.minimumWidth() == d.note_edit.minimumWidth()
+            == CodeApprovalDialog.DECIDE_COL_MIN_W)
+    assert (d.reason_edit.maximumWidth() == d.note_edit.maximumWidth()
+            == CodeApprovalDialog.DECIDE_COL_MAX_W)
+
+
+def test_the_block_does_not_stretch_across_the_window(dialog, qapp):
+    """The reported problem: on a wide dialog each control took ~590px — a
+    text box that big for a one-line reason, and a Reject button swimming in
+    empty space."""
+    d = dialog()
+    d.show()
+    d.resize(1600, 600)
+    for _ in range(3):
+        qapp.processEvents()
+
+    assert d._decide_box.width() <= CodeApprovalDialog.DECIDE_MAX_W
+    assert d._decide_box.width() < d.width(), "the block still spans the dialog"
+    d.hide()
+
+
+def test_the_block_is_centered(dialog, qapp):
+    """Both choices carry equal weight, so neither belongs in a corner."""
+    d = dialog()
+    d.show()
+    for _ in range(3):
+        qapp.processEvents()
+
+    left = d.reason_edit.mapTo(d, d.reason_edit.rect().topLeft()).x()
+    right_edge = (d.note_edit.mapTo(d, d.note_edit.rect().topLeft()).x()
+                  + d.note_edit.width())
+    assert abs(left - (d.width() - right_edge)) <= 3
+    d.hide()
+
+
+def test_it_can_still_shrink_on_a_narrow_window(dialog):
+    """Capped, not frozen — the columns may come down to their minimum."""
+    assert (CodeApprovalDialog.DECIDE_COL_MIN_W
+            < CodeApprovalDialog.DECIDE_COL_MAX_W)
+
+
 def test_the_buttons_share_a_height(dialog):
     d = dialog()
     assert d.reject_btn.minimumHeight() == d.accept_btn.minimumHeight() > 0

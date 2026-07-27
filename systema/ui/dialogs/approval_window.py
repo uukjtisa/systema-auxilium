@@ -34,7 +34,7 @@ from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                              QTextEdit, QListWidget, QListWidgetItem, QSplitter,
                              QWidget, QCheckBox, QFrame, QLineEdit, QStackedWidget,
-                             QScrollArea, QGridLayout)
+                             QScrollArea, QGridLayout, QSizePolicy)
 
 from systema.agents.code_agent import CodeAgent
 from systema.security.code_guard import (scan_code, refine_file_ops,
@@ -367,6 +367,16 @@ class CodeApprovalDialog(QDialog):
 
     _SEV_COLOR_KEY = {SEV_DANGER: "red", SEV_CAUTION: "yellow", SEV_INFO: "muted"}
 
+    # Size band for ONE decision column (a message box and the button under it).
+    # Both columns get the SAME band, which is what makes them equal regardless
+    # of their placeholders being different lengths — a grid with equal stretch
+    # still starts from each column's own size hint.
+    DECIDE_COL_MIN_W = 190
+    DECIDE_COL_MAX_W = 340
+    # Widest the whole block may grow: two columns plus the gap between them.
+    # Past this the controls only get emptier, not more usable.
+    DECIDE_MAX_W = DECIDE_COL_MAX_W * 2 + 10
+
     def __init__(self, code, execution_type, ai_engine, parent=None,
                  file_edit=None, annotation=""):
         super().__init__(parent)
@@ -537,9 +547,26 @@ class CodeApprovalDialog(QDialog):
         # both columns are exactly the same width. Strung along one row they
         # read as four unrelated controls, and it was not obvious that the left
         # box feeds Reject and the right one feeds Accept.
-        decide = QGridLayout()
+        # The pair is CENTERED and capped, not stretched across the window. On a
+        # 1200px dialog, full-width columns gave each control ~590px — a text
+        # box that wide for a one-line reason, and a "Reject" button with a
+        # field of empty space around its label. It still adapts: the cap is
+        # what it may grow TO, and the columns shrink below it on a narrow
+        # window.
+        self._decide_box = QWidget()
+        self._decide_box.setStyleSheet("background: transparent;")
+        self._decide_box.setMaximumWidth(self.DECIDE_MAX_W)
+        # Expanding UP TO the cap: without this the box settles on its size
+        # hint, and the two columns end up different widths because the two
+        # placeholders are different lengths. Taking the cap lets the equal
+        # column stretch actually split it into matching halves.
+        self._decide_box.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                       QSizePolicy.Policy.Preferred)
+        decide = QGridLayout(self._decide_box)
+        decide.setContentsMargins(0, 0, 0, 0)
         decide.setHorizontalSpacing(10)
         decide.setVerticalSpacing(6)
+        # Equal stretch INSIDE the capped box keeps the two halves symmetric.
         decide.setColumnStretch(0, 1)
         decide.setColumnStretch(1, 1)
 
@@ -555,6 +582,8 @@ class CodeApprovalDialog(QDialog):
             "Sent to the AI only if you Reject, so it knows WHY and can try "
             "something else instead of repeating itself.")
         self.reason_edit.returnPressed.connect(self.on_reject)
+        self.reason_edit.setMinimumWidth(self.DECIDE_COL_MIN_W)
+        self.reason_edit.setMaximumWidth(self.DECIDE_COL_MAX_W)
         decide.addWidget(self.reason_edit, 0, 0)
 
         self.note_edit = QLineEdit()
@@ -564,6 +593,8 @@ class CodeApprovalDialog(QDialog):
             "Sent to the AI only if you Approve — steer the step without "
             "stopping it (\"fine, but write to data/ not the desktop\").")
         self.note_edit.returnPressed.connect(self.on_accept)
+        self.note_edit.setMinimumWidth(self.DECIDE_COL_MIN_W)
+        self.note_edit.setMaximumWidth(self.DECIDE_COL_MAX_W)
         decide.addWidget(self.note_edit, 0, 1)
 
         self.reject_btn = QPushButton("Reject")
@@ -584,7 +615,16 @@ class CodeApprovalDialog(QDialog):
         self.accept_btn.setMinimumHeight(34)
         decide.addWidget(self.accept_btn, 1, 1)
 
-        root.addLayout(decide)
+        # Centered under the content rather than pinned to either edge — the
+        # two choices carry equal weight, so neither should sit in a corner.
+        # The box needs a stretch share of its own, or the two side stretches
+        # take everything and it collapses back to its size hint.
+        _decide_row = QHBoxLayout()
+        _decide_row.setContentsMargins(0, 0, 0, 0)
+        _decide_row.addStretch(1)
+        _decide_row.addWidget(self._decide_box, 10)
+        _decide_row.addStretch(1)
+        root.addLayout(_decide_row)
 
     def _build_code_side(self) -> QWidget:
         p = self.p

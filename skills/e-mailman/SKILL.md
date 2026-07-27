@@ -12,7 +12,7 @@ description: >
 |------|---------|
 | `e_mailman.py` | Main script |
 | `emails.json` | Account credentials — auto-generated if missing |
-| `account_notes.json` | Per-account notes for deciding which account to use |
+| `account_notes.json` | Per-account **operating instructions** — which account to use, AND how to behave while using it |
 
 ---
 
@@ -40,11 +40,22 @@ subprocess.run(
 
 ---
 
-## STEP 0 — Read notes first. Always.
+## STEP 0 — Read the notes. Always. Before anything else.
 
 ```bash
 python e_mailman.py notes
 ```
+
+This is **not just an account picker.** Each entry in `account_notes.json` is
+that account's standing instructions, and they cover two different things:
+
+1. **WHEN to use the account** — which kind of task it is for.
+2. **HOW to conduct yourself while using it** — who is speaking, what to always
+   check, what never to do.
+
+Nearly every failure with this skill is the same one: doing (1) and skipping (2).
+
+### Picking the account
 
 **If notes clearly match the task** → pick that account silently, no confirmation, just act.  
 **If notes are ambiguous** → reason from context and pick the best fit.  
@@ -58,6 +69,60 @@ python e_mailman.py notes
 > If yes → `python e_mailman.py notes --set "account" "their note"`. Drop it if they decline or ignore.
 
 Once resolved in a conversation, keep using it — don't re-ask.
+
+---
+
+## STEP 1 — The selected account's notes are ABSOLUTE
+
+Having chosen an account, **re-read its note and treat every line as a binding
+instruction for the rest of the interaction.** The notes are not background
+colour and not a hint. They outrank your own defaults, your habits, and your
+reading of how the user phrased the request.
+
+This matters most for **VOICE — who the email is coming from.**
+
+A note may establish any of these, and you follow whichever it says:
+
+- a personal account that writes **as its owner**;
+- a shared, assistant, or role account that writes **as itself**, delivering a
+  message on someone's behalf;
+- a team or business account that writes **as the organisation**.
+
+**Whatever the note says, that is who you are in the body of the email** — in
+the greeting, in every sentence, and in the sign-off.
+
+**If the note says nothing about voice**, then and only then fall back to the
+neutral default: write plainly on the user's behalf, and make clear who it is
+from. Never invent a persona a note did not ask for.
+
+### The failure this section exists to stop
+
+The note says the account speaks **as itself** — a messenger, a liaison, an
+assistant. The agent reads the note, uses it to *choose* the account, and then
+writes the body as though it were the user anyway: first person as the user, the
+user's name, the user's sign-off. The recipient receives a message claiming to
+be written by someone who did not write it.
+
+That is a real failure, not a stylistic quibble. It misrepresents the sender.
+
+### Before writing a single line of a body, answer these
+
+1. Which account is sending?
+2. What does **its note** say about who is speaking?
+3. Does the draft I am about to write actually sound like that person?
+
+If the answers disagree, the note wins. Rewrite the draft.
+
+### Never infer the voice from the user's phrasing
+
+> "Email my mom that I'll be late."
+
+This does **not** mean "write as the user." It means *deliver that message* — in
+whatever voice the sending account's note specifies. The user is telling you
+**what to convey**, not **who to be.** Who to be is the note's job.
+
+The same applies to "tell them…", "say that I…", "let her know I…". These
+describe the content. The account's note describes the speaker.
 
 ---
 
@@ -96,17 +161,26 @@ python e_mailman.py --account "gmail" download --uid 12345 --dir ./my_files
 
 ## SEND
 
-Show draft first, get **yes / edit / cancel**.
+**Compose in the voice the sending account's note establishes (STEP 1).** Do
+that before drafting, not as a pass afterwards — a body written in the wrong
+voice does not get fixed by swapping the sign-off.
+
+Show the draft first and get **yes / edit / cancel**. The draft states the voice
+in force, so a mis-applied persona is caught before it is sent rather than after:
 
 ```
 📨 Draft
-From    : sender@example.com
-To      : recipient@example.com
-Subject : ...
-Body    : ...
+From      : sender@example.com   (account: "label")
+Speaking as: <who the note says is speaking — or "the user (no voice set in notes)">
+To        : recipient@example.com
+Subject   : ...
+Body      : ...
 Attachments: none
 Send? (yes / edit / cancel)
 ```
+
+If the account's note sets no voice, say so on that line explicitly rather than
+leaving it blank — it tells the user a note is missing, and they can add one.
 
 On yes:
 
@@ -137,15 +211,24 @@ python e_mailman.py notes --add "account" "note"             # append a line to 
 python e_mailman.py notes --set-email "account" "addr@x.com" # set or update the email shown for an entry
 ```
 
-Each entry in `account_notes.json` now holds both the email address and the note:
+Each entry in `account_notes.json` holds the email address and the note:
 ```json
 {
-  "Thirdy's email": {
+  "personal inbox": {
     "email": "you@example.com",
-    "notes": "Personal Gmail. Use for reading emails..."
+    "notes": "Personal Gmail. Use for READING mail. When sending from here, write as me — first person, my name, my sign-off."
+  },
+  "assistant outbox": {
+    "email": "assistant@example.org",
+    "notes": "Use for SENDING unless told otherwise. Speak as YOURSELF, delivering a message on my behalf — a messenger, not me. Never write as if you were me, and don't quote me unless asked."
   }
 }
 ```
+
+Both halves of a note matter: the first sentence decides **when** the account is
+used, the rest decides **how you behave** while using it (see STEP 1). The second
+example above is exactly the case the agent keeps getting wrong — it picks that
+account correctly and then writes the body as the user anyway.
 
 When reading notes, the output clearly shows the label, email, and note for each entry — so the agent always knows which address it's dealing with. If an entry has no email set yet, it will say so and suggest the command to fix it.
 
@@ -153,7 +236,7 @@ When reading notes, the output clearly shows the label, email, and note for each
 
 ## CONTACTS
 
-`contacts.json` is a personal address book — separate from `account_notes.json`. It maps friendly labels (like "mom", "boss", "Kimi") to email addresses, so the agent can resolve names without asking every time.
+`contacts.json` is a personal address book — separate from `account_notes.json`. It maps friendly labels (like "mom", "boss", "landlord") to email addresses, so the agent can resolve names without asking every time.
 
 The `--to` flag on `send` accepts either a raw email address **or** a contact label. If a label is given, it is automatically resolved via `contacts.json`.
 
@@ -232,6 +315,10 @@ Run `account --add` with the gathered values. Confirm success, then offer to add
 
 | Situation | Action |
 |---|---|
+| Note sets a voice that isn't the user | Write the whole body as that voice. This is the note doing its job, not an error. |
+| Note sets no voice | Neutral default — plainly on the user's behalf, sender made clear. Say so on the draft's `Speaking as` line. |
+| User's wording implies "write as me", note says otherwise | **The note wins.** The user described the message, not the speaker. |
+| User overrides the voice for one message | Honour it for that message only; don't rewrite the note unless they ask. |
 | `account_notes.json` missing | Script auto-creates it with empty entries per account. If all empty + multiple accounts, ask user. |
 | `emails.json` missing | Script auto-creates it; prompt user to add an account |
 | Notes don't match any account in `emails.json` | Warn, run `--info`, ask to confirm |
@@ -245,8 +332,8 @@ Run `account --add` with the gathered values. Confirm success, then offer to add
 ## Usage summary
 
 ```bash
-# Account selection
-python e_mailman.py notes                                         # check notes → decide account
+# Account selection AND conduct — notes drive both (STEP 0 + STEP 1)
+python e_mailman.py notes                                         # ALWAYS first: which account, and who speaks
 python e_mailman.py notes --set "gmail" "personal, day-to-day"  # set a note
 python e_mailman.py notes --add "gmail" "also used for Drive"   # append to a note
 python e_mailman.py account --list                               # show all accounts
