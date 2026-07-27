@@ -41,7 +41,7 @@ AUTHORING RULES
 
 import random
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Hour ranges are inclusive of the start, exclusive of the end, walking
 # forward from 05:00. "night" is everything left over, which is why it wraps.
@@ -50,6 +50,10 @@ _BUCKETS = (
     ("afternoon", 12, 17),
     ("evening", 17, 22),
 )
+
+# When the small hours end. Before this, the calendar day has rolled over but
+# the NIGHT has not — see greeting_weekday().
+SMALL_HOURS_END = 5
 
 # Names that mean "not set". Shared with the identity-prompt builder in
 # app/controller.py, which imports this rather than keeping its own copy —
@@ -146,7 +150,10 @@ _TIME_LINES = {
         ("One more push, {name}?", "One more push?"),
         ("Keeping night owl hours, {name}?", "Keeping night owl hours?"),
         ("Working late, {name}?", "Working late?"),
-        ("It's gone midnight, {name}", "It's gone midnight"),
+        # (Was "It's gone midnight" — correct British English for "past
+        # midnight", and the user stopped to ask whether it was a bug. A
+        # greeting that has to be parsed has already failed.)
+        ("It's past midnight, {name}", "It's past midnight"),
         ("Nothing but time tonight, {name}", "Nothing but time tonight"),
         ("Enjoy the quiet, {name}", "Enjoy the quiet"),
         ("Late, but let's be useful, {name}", "Late, but let's be useful"),
@@ -635,6 +642,25 @@ def time_bucket(now: datetime | None = None) -> str:
     return "night"
 
 
+def greeting_weekday(now: datetime | None = None) -> int:
+    """Which weekday this greeting BELONGS to — not always today's.
+
+    THE BUG THIS EXISTS FOR
+    At 02:00 on a Tuesday the app said "Happy Tuesday night!". The calendar
+    agrees, and nobody else does: at 2am you are still living MONDAY night.
+    The night is the one span that outlives the date change, so anchoring a
+    night phrasing to `now.weekday()` names the wrong day for five hours every
+    single day.
+
+    Same defect the task scheduler had with a 22:00-01:00 window, and the same
+    answer: the after-midnight half belongs to the day it STARTED on.
+    """
+    now = now or datetime.now()
+    if now.hour < SMALL_HOURS_END:
+        return (now - timedelta(days=1)).weekday()
+    return now.weekday()
+
+
 # ── signals ──────────────────────────────────────────────────────────────────
 
 _SESSION_ID_RE = re.compile(r"^(\d{2})_(\d{2})_(\d{4})_(\d{2})_(\d{2})_(\d{2})")
@@ -705,9 +731,13 @@ def collect_signals(session_times, now: datetime | None = None) -> set:
 
     if 5 <= hour < 7:
         signals.add("early_bird")
-    if 1 <= hour < 5:
+    if hour < SMALL_HOURS_END:
+        # From midnight, not from 01:00 — 00:30 is the dead of night by any
+        # reading, and it used to fall through to ordinary night lines.
         signals.add("dead_of_night")
-    if now.weekday() >= 5:
+    if greeting_weekday(now) >= 5:
+        # Same rule as the day lines: 2am on Monday is still Sunday night, and
+        # "Happy weekend!" is right up until the user actually sleeps.
         signals.add("weekend")
     if now.month == 1 and now.day <= 2:
         signals.add("new_year")
@@ -724,7 +754,9 @@ def pool_for(now: datetime | None = None, signals=None) -> list:
     """
     now = now or datetime.now()
     signals = set(signals or ())
-    bucket, weekday = time_bucket(now), now.weekday()
+    # greeting_weekday, NOT now.weekday(): at 2am the night still belongs to
+    # yesterday, and every day-anchored line here is read as "tonight".
+    bucket, weekday = time_bucket(now), greeting_weekday(now)
 
     # A brand-new install gets ONLY welcome lines. The ordinary pools assume a
     # shared history — "Where were we?" is a strange thing to say to somebody

@@ -420,6 +420,73 @@ def test_the_day_of_the_week_shows_up_in_the_greeting():
     assert any("evening" in ln.lower() or "Evening" in ln for ln in lines)
 
 
+def test_the_night_belongs_to_the_day_it_started_on():
+    """THE BUG THIS EXISTS FOR
+
+    At 02:00 on a Tuesday the banner read "Happy Tuesday night, Thirdy." The
+    calendar agrees and nobody else does — at 2am you are still living MONDAY
+    night. Reported by the user at 2am, sleep-deprived, which is exactly the
+    audience for the small-hours lines this was crowding out.
+    """
+    from datetime import datetime
+
+    from systema.common.greeting import greeting_weekday
+
+    MON, TUE, SUN = 0, 1, 6
+
+    # 2am Tuesday is Monday night.
+    assert greeting_weekday(datetime(2026, 7, 28, 2, 0)) == MON
+    # ...right up to the edge of the small hours.
+    assert greeting_weekday(datetime(2026, 7, 28, 4, 59)) == MON
+    # 05:00 is morning: the new day has genuinely begun.
+    assert greeting_weekday(datetime(2026, 7, 28, 5, 0)) == TUE
+    # Late Tuesday evening is still Tuesday.
+    assert greeting_weekday(datetime(2026, 7, 28, 23, 30)) == TUE
+    # And it wraps across the week boundary too: 1am Monday is Sunday night.
+    assert greeting_weekday(datetime(2026, 7, 27, 1, 0)) == SUN
+
+
+def test_two_am_never_names_tomorrow():
+    """The whole pool, not just the helper: no line drawn at 2am on a Tuesday
+    may say "Tuesday", because that is the day the user has not lived yet."""
+    import random
+    from datetime import datetime
+
+    from systema.common.greeting import greeting
+
+    two_am_tuesday = datetime(2026, 7, 28, 2, 0)
+    rng = random.Random(0)
+    lines = {greeting("Thirdy", two_am_tuesday, rng) for _ in range(400)}
+
+    assert not any("Tuesday" in ln for ln in lines), \
+        "the small hours must not name the day that just started"
+    assert any("Monday" in ln for ln in lines), \
+        "the night it actually is should still be nameable"
+
+
+def test_the_weekend_signal_uses_the_same_rule():
+    """1am Monday is Sunday night — still the weekend to whoever is awake."""
+    from datetime import datetime
+
+    from systema.common.greeting import collect_signals
+
+    assert "weekend" in collect_signals([], datetime(2026, 7, 27, 1, 0))
+    assert "weekend" not in collect_signals([], datetime(2026, 7, 27, 10, 0))
+
+
+def test_midnight_counts_as_the_dead_of_night():
+    """00:30 used to fall through to ordinary night lines because the signal
+    started at 01:00."""
+    from datetime import datetime
+
+    from systema.common.greeting import collect_signals
+
+    for hour in (0, 1, 3, 4):
+        assert "dead_of_night" in collect_signals(
+            [], datetime(2026, 7, 28, hour, 30)), f"{hour}:30 is the small hours"
+    assert "dead_of_night" not in collect_signals([], datetime(2026, 7, 28, 5, 30))
+
+
 def test_day_lines_also_drop_the_name_cleanly():
     import random
     from datetime import datetime, timedelta
