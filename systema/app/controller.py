@@ -2519,6 +2519,32 @@ class AssistantController(QObject):
             log.error(f"[AssistantController._auto_save_session] ✗ Save failed: '{self.current_session_id}'")
             self.log(f"Failed to save session: {self.current_session_id}", "ERROR")
 
+    def _present_new_session(self):
+        """Put a freshly-created session on screen.
+
+        ONE implementation, shared by `create_new_session()` and the
+        delete-the-active-session path. Those two used to hand-roll this
+        separately and the copies drifted: deleting the current session posted
+        the retired "Session Deleted - New session created" grey line and never
+        showed the greeting banner, long after the banner replaced that line
+        everywhere else. Any future step in "start a fresh session" belongs
+        here, so it cannot go missing from one entry point.
+        """
+        if not self._chat:
+            return
+        self._chat.clear_chat_silent()
+        self._chat.clear_pinned_images()   # detach all pinned images on new session
+        self._chat.refresh_session_list()
+        # The greeting banner IS the new-session notice — it replaces the old
+        # "**New Session Created**" grey line rather than joining it. Same
+        # lifecycle: UI-only, never in history, cleared with the chat. The
+        # elevated-privileges notice stays its own separate line.
+        self._chat.add_greeting_banner()
+        self._chat.warn_loaded_skills_if_any()
+        ab = getattr(getattr(self, 'ui', None), 'android_bridge', None)
+        if ab and ab.isVisible():
+            ab.render_loaded_messages()
+
     def create_new_session(self):
         """Create new session (called from UI)"""
         log.info("[AssistantController.create_new_session] Creating new session from UI")
@@ -2528,24 +2554,8 @@ class AssistantController(QObject):
         # NOW clear AI history and UI (after the old session has been saved)
         log.debug("[AssistantController.create_new_session] Clearing AI history...")
         self.ai.clear_history()
-
-        if self._chat:
-            self._chat.clear_chat_silent()
-            self._chat.clear_pinned_images()  # detach all pinned images on new session
-
-        # Refresh UI
-        if self._chat:
-            self._chat.refresh_session_list()
-            # The greeting banner IS the new-session notice now — it replaces
-            # the old "**New Session Created**" grey line rather than joining
-            # it. Same lifecycle: UI-only, never in history, cleared with the
-            # chat. The elevated-privileges notice stays its own separate line.
-            self._chat.add_greeting_banner()
-            self._chat.warn_loaded_skills_if_any()
+        self._present_new_session()
         log.info(f"[AssistantController.create_new_session] ✓ New session ready: '{self.current_session_id}'")
-        ab = getattr(getattr(self, 'ui', None), 'android_bridge', None)
-        if ab and ab.isVisible():
-            ab.render_loaded_messages()
 
     def load_session(self, session_id):
         """Load a session"""
@@ -2628,23 +2638,26 @@ class AssistantController(QObject):
         # If deleting active session, create new one
         if session_id == self.current_session_id:
             log.debug("[AssistantController.delete_session] Deleting active session — clearing UI and creating new")
-            # Clear chat
-            if self._chat:
-                self._chat.clear_chat_silent()
-
-            # Clear AI history
             self.ai.clear_history()
-
-            # Delete the session
             self.session_manager.delete_session(session_id)
 
-            # Create new session
-            self._create_new_session()
+            # There is no current session any more — say so, and BOTH of
+            # _create_new_session()'s guards fall away cleanly:
+            #   * it will not _auto_save_session() the id we just deleted.
+            #     clear_history() empties the transcript but does NOT reset
+            #     session_has_messages, so without this it saw "has messages"
+            #     and re-wrote the JUST-DELETED session with the now-empty
+            #     history — the deleted session came back as an empty one.
+            #   * it will not run its "delete the empty current session" branch
+            #     either, which would delete the same id a second time.
+            self.current_session_id = None
+            self.session_has_messages = False
 
-            # Refresh UI
-            if self._chat:
-                self._chat.refresh_session_list()
-                self._chat.add_system_message("🗑️ **Session Deleted** - New session created")
+            self._create_new_session()
+            # Same presentation as any other new session — greeting banner
+            # included. This used to post a "Session Deleted" grey line instead
+            # and no banner at all.
+            self._present_new_session()
             log.info(f"[AssistantController.delete_session] ✓ Active session deleted and replaced")
         else:
             log.debug(f"[AssistantController.delete_session] Deleting non-active session '{session_id}'")
