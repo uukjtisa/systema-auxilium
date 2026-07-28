@@ -670,7 +670,7 @@ class FloatingWindow(QWidget):
         import pystray
 
         # Load the app icon
-        icon_path = _APP_ROOT / "assets" / "systema_auxilium.ico"
+        icon_path = _APP_ROOT / "resources" / "assets" / "systema_auxilium.ico"
         try:
             image = Image.open(icon_path).convert("RGBA")
             # pystray works best with 64x64

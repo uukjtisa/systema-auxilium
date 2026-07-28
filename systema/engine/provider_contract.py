@@ -3,7 +3,7 @@ engine/provider_contract.py
 The provider-script contract layer: ONE normalized way to call any LLM
 provider script, old or new.
 
-V2 contract (the current one — see providers/large-language-models/_template.py):
+V2 contract (the current one — see resources/providers/large-language-models/_template.py):
 
     CONTRACT_VERSION = 2
     SUPPORTS_NATIVE_TOOLS = bool          # optional capability flags

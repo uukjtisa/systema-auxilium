@@ -36,7 +36,7 @@ You ─▶ Chat / Voice / Android ─▶ AI Engine ─▶ LLM provider (your scr
 The code lives in the `systema/` package: `engine/` (the AI loop + prompts +
 `native_adapters`), `execution/` (tool manager + interpreter), `security/` (the
 code guard/policy), `memory/`, `voice/`, `agents/` (background tasks), `ui/`,
-`app/`, `common/`. Around it: `providers/` (LLM + TTS scripts), `skills/` (packs
+`app/`, `common/`. Around it: `resources/providers/` (LLM + TTS scripts), `skills/` (packs
 like this one), `data/` (runtime state), and `docs/` (the deep documentation).
 
 ## Tool calling — native vs compatibility

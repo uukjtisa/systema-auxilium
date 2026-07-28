@@ -380,7 +380,7 @@ def main():
     app.setApplicationName("Systema Auxilium - AI System Helper Agent")
     app.setOrganizationName("NicProjects")
     # ── App icon ──────────────────────────────────────────────────────────────
-    icon_path = Path(__file__).parent / "assets" / "systema_auxilium.ico"
+    icon_path = Path(__file__).parent / "resources" / "assets" / "systema_auxilium.ico"
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
     # ─────────────────────────────────────────────────────────────────────────

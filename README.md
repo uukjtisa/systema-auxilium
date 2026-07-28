@@ -109,11 +109,11 @@ strongly encouraged.
 
 Systema Auxilium uses a fully modular provider system for both AI inference and text-to-speech.
 There is no hardcoded provider list; each provider is a self-contained Python file in
-`providers/`.
+`resources/providers/`.
 
 Each provider implements a small contract:
 
-- **LLM providers** (`providers/large-language-models/`) declare `CONTRACT_VERSION = 2` and define
+- **LLM providers** (`resources/providers/large-language-models/`) declare `CONTRACT_VERSION = 2` and define
   ONE entry point:
   `chat(system_prompt, messages, *, images=None, tools=None, stream=False)`
   - Returns `{"content", "thinking", "tool_calls", "finish_reason"}` (a plain string also works)
@@ -121,7 +121,7 @@ Each provider implements a small contract:
     [Tool Calling](#tool-calling-native-and-compatibility)), `stream=True` to stream chunks
   - Optional `Display` dict → an auto-generated settings form (API key, model dropdown, …)
   - Legacy scripts (`chat(sys, msgs) -> str` + optional `chat_image` / `chat_tools`) still work
-- **TTS providers** (`providers/text-to-speech/`) define `speak(text, save_to) -> bool`
+- **TTS providers** (`resources/providers/text-to-speech/`) define `speak(text, save_to) -> bool`
 
 Drop a script in the right folder, hit Refresh in Settings, and it appears instantly. No codebase
 edits, no restart.
@@ -204,7 +204,7 @@ or **Settings -> General** (shortcut) -> **Check for Updates**:
 - **Preserves your local edits** — a 3-way merge folds upstream changes into files you have
   modified; genuine conflicts are marked for you to resolve rather than silently overwritten.
 - **Protects your configured accounts** — files that hold your provider accounts, API keys, or
-  tokens (e.g. under `providers/`) are flagged and auto-deselected, so an update can't wipe your
+  tokens (e.g. under `resources/providers/`) are flagged and auto-deselected, so an update can't wipe your
   configuration. A built-in **Manage** view lets you resolve these hunk-by-hunk (or line-by-line)
   yourself — keep your version, take the update, or hand-edit — before anything is written.
 - **Dependencies** — newly required Python packages are detected and installed automatically.

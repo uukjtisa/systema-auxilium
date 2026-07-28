@@ -390,10 +390,14 @@ class ToolManager:
     # ── Centralized tool-result card spawning ────────────────────────────────
     # ONE signal (tool_card) + ONE slot (_deliver_tool_card) + this map is the
     # single place every tool routes its result card through. Adding a card for
-    # a new tool = one entry here + the chat-side builder method. emit_tool_card()
-    # is the thread-safe entry point tools call; when _card_capture is on (a
-    # tool invoked from INSIDE the python interpreter) the payloads are buffered
-    # and flushed AFTER the interpreter's own card, so ordering stays python-first.
+    # a new tool = one entry here + a builder of that name on BOTH surfaces:
+    # ChatWindow (desktop) and AndroidBridge (phone). The method name is shared
+    # deliberately — one map drives both, so a card cannot reach the desktop and
+    # silently miss the phone. test_android_card_parity.py locks that.
+    # emit_tool_card() is the thread-safe entry point tools call; when
+    # _card_capture is on (a tool invoked from INSIDE the python interpreter)
+    # the payloads are buffered and flushed AFTER the interpreter's own card,
+    # so ordering stays python-first.
     _CARD_DISPATCH = {
         'web_search': 'add_web_search_card',   # search results sub-list
         'web_page':   'add_web_page_card',     # page content / links viewer
@@ -402,19 +406,29 @@ class ToolManager:
     }
 
     def _deliver_tool_card(self, info: dict):
-        """Slot — main thread. Route a tool-result card to the right chat builder."""
-        chat = self._chat
-        if chat is None:
-            return
+        """Slot — main thread. Route a tool-result card to the desktop chat
+        window AND mirror it to the Android client (if connected).
+
+        The phone leg does NOT depend on the desktop leg: a missing/closed chat
+        window must not silently cost the phone its card."""
         method = self._CARD_DISPATCH.get(info.get('card_type'))
-        if not method or not hasattr(chat, method):
+        if not method:
             return
-        try:
-            getattr(chat, method)(info)
-        except Exception as e:
-            import traceback
-            log.error(f"[ToolManager._deliver_tool_card] {info.get('card_type')} "
-                      f"card failed: {e}\n{traceback.format_exc()}")
+        chat = self._chat
+        if chat is not None and hasattr(chat, method):
+            try:
+                getattr(chat, method)(info)
+            except Exception as e:
+                import traceback
+                log.error(f"[ToolManager._deliver_tool_card] {info.get('card_type')} "
+                          f"card failed: {e}\n{traceback.format_exc()}")
+        ab = self._get_android_bridge() if callable(self._get_android_bridge) else None
+        if ab is not None and getattr(ab, '_conn', None) is not None and hasattr(ab, method):
+            try:
+                getattr(ab, method)(info)
+            except Exception as e:
+                log.debug(f"[ToolManager._deliver_tool_card] android mirror "
+                          f"skipped ({info.get('card_type')}): {e}")
 
     def emit_tool_card(self, card_type: str, **payload):
         """Thread-safe: spawn a tool-result card. Buffered (not emitted) while a

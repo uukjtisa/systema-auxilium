@@ -534,7 +534,7 @@ def draw_app_mark(p: QPainter, rect: QRectF, detail: bool = True,
                   companion: str = '#ECF0F3'):
     """Paint the Systema Auxilium mark — the north star on its orbit.
 
-    Vector twin of assets/systema_auxilium.ico, so anywhere the app shows its
+    Vector twin of resources/assets/systema_auxilium.ico, so anywhere the app shows its
     own mark it scales cleanly instead of blitting a fixed-size bitmap.
     `detail=False` drops the ring/companion for small sizes (the same tiering
     the .ico frames use).

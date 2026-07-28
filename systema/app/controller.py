@@ -794,11 +794,42 @@ class AssistantController(QObject):
         if self._chat:
             self._chat.add_user_message(text)
 
+    # Provider scripts moved from `providers/` to `resources/providers/` on
+    # 2026-07-28. The two script paths are stored ABSOLUTE, so an install that
+    # updates across the move keeps pointing at the old location and the
+    # provider silently stops loading. Repoint them on load, but only when the
+    # old path is actually gone and the new one exists — a user who deliberately
+    # keeps scripts outside the app must never be rewritten out from under.
+    _MOVED_PATH_KEYS = ('custom_script_path', 'tts_script_path')
+
+    def _adopt_moved_provider_paths(self, settings: dict) -> None:
+        import re
+        from pathlib import Path as _Path
+        _pat = re.compile(r"(?<!resources[\\/])\bproviders([\\/])", re.IGNORECASE)
+        changed = False
+        for key in self._MOVED_PATH_KEYS:
+            old = settings.get(key)
+            if not isinstance(old, str) or not old:
+                continue
+            if _Path(old).is_file():
+                continue                      # still resolves — leave it alone
+            new = _pat.sub(lambda m: f"resources{m.group(1)}providers{m.group(1)}", old)
+            if new != old and _Path(new).is_file():
+                settings[key] = new
+                changed = True
+                log.info(f"[AssistantController] Repointed {key} to resources/providers/")
+        if changed:
+            try:
+                _app_config.save_section('settings', settings)
+            except Exception as e:
+                log.debug(f"[AssistantController] provider-path adoption not persisted: {e}")
+
     def load_settings(self):
         log.debug(f"[AssistantController.load_settings] Loading from '{self.settings_file}'")
         try:
             settings = _app_config.load_section('settings')
             if settings:
+                self._adopt_moved_provider_paths(settings)
                 log.info(f"[AssistantController.load_settings] ✓ Settings loaded | "
                          f"provider='{settings.get('ai_provider')}' | "
                          f"has_api_key={bool(settings.get('api_key'))}")
@@ -1464,13 +1495,13 @@ class AssistantController(QObject):
 
     def get_llm_providers_folder(self):
         """Return absolute path to LLM providers folder, creating it if needed."""
-        folder = _APP_ROOT / 'providers' / 'large-language-models'
+        folder = _APP_ROOT / 'resources' / 'providers' / 'large-language-models'
         folder.mkdir(parents=True, exist_ok=True)
         return str(folder)
 
     def get_tts_providers_folder(self):
         """Return absolute path to TTS providers folder, creating it if needed."""
-        folder = _APP_ROOT / 'providers' / 'text-to-speech'
+        folder = _APP_ROOT / 'resources' / 'providers' / 'text-to-speech'
         folder.mkdir(parents=True, exist_ok=True)
         return str(folder)
 

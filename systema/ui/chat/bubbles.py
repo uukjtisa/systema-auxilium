@@ -240,6 +240,15 @@ class BubblesMixin:
         """Restyle every existing user/assistant bubble in place (live switch
         from Settings, and re-applied by apply_theme / glass toggles)."""
         style = style or self._bubble_style()
+        # Mirror to the phone. Needed HERE and not only in send_theme(): a
+        # bubble-style switch does not go through apply_theme, so without this
+        # the phone kept the old style until the next theme change or reconnect.
+        try:
+            _ab = getattr(getattr(self.controller, 'ui', None), 'android_bridge', None)
+            if _ab is not None and getattr(_ab, '_conn', None) is not None:
+                _ab.send_theme()
+        except Exception:
+            pass
         t = self._t()
         glass = getattr(self, '_glass_enabled', False)
         seen_shells = set()

@@ -9,7 +9,7 @@ assistant's replies are synthesized through your configured TTS provider.
 ## TTS providers
 
 Like LLM backends, text-to-speech is a **modular provider script** — drop a file
-in `providers/text-to-speech/` and select it in Settings. A TTS provider defines:
+in `resources/providers/text-to-speech/` and select it in Settings. A TTS provider defines:
 
 ```python
 def speak(text: str, save_to: str) -> bool
@@ -31,7 +31,7 @@ all configuration (keys, URLs, voice IDs) lives in the script.
 
 ### Add your own
 
-`providers/text-to-speech/_template.py` is a ready-to-use skeleton for any TTS
+`resources/providers/text-to-speech/_template.py` is a ready-to-use skeleton for any TTS
 service (a cloud API or a local HTTP server) and includes a paste-ready prompt you
 can give an AI to generate the script for your provider. It uses only `requests`
 and is fully self-contained.

@@ -1945,7 +1945,11 @@ class EventCardsMixin:
         })
 
     def _save_thinking_event(self, text: str):
-        """Persist a thinking card as a ui_event (reload-visible, never sent)."""
+        """Persist a thinking card as a ui_event (reload-visible, never sent).
+
+        Also the ONE place the phone learns about reasoning: this fires once per
+        response on both the streaming finalize and the non-streaming path, so
+        mirroring here needs no second hook and cannot double-send."""
         text = (text or "").strip()
         if not text:
             return
@@ -1956,6 +1960,12 @@ class EventCardsMixin:
             })
         except Exception:
             pass
+        _ab = getattr(getattr(self.controller, 'ui', None), 'android_bridge', None)
+        if _ab is not None and getattr(_ab, '_conn', None) is not None:
+            try:
+                _ab.add_reasoning_card(text)
+            except Exception as e:
+                log.debug(f"[_save_thinking_event] android mirror skipped: {e}")
 
     def add_web_page_card(self, info: dict, save_to_history: bool = True):
         """Card B — an opened page's clean text, or a links list, in a compact

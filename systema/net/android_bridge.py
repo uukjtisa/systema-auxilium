@@ -577,7 +577,20 @@ class AndroidBridge:
             keys = ('base', 'surface', 'elevated', 'border',
                     'accent', 'deep', 'input_card', 'input_card_border')
             payload = {k: theme.get(k, '') for k in keys}
-            self._dispatch({"cmd": "theme_data", "theme": payload})
+            # Bubble style rides with the theme rather than getting its own
+            # command: it is the same "how does chat look" decision, pushed at
+            # the same two moments (connect + apply_theme), and the phone
+            # deliberately has no local toggle — parity is the point.
+            try:
+                from systema.ui.chat.bubbles import BUBBLE_STYLE_DEFAULT
+                _style = (self.controller.settings or {}).get(
+                    'chat_bubble_style', BUBBLE_STYLE_DEFAULT)
+            except Exception:
+                _style = 'blend'
+            if _style not in ('blend', 'compact'):
+                _style = 'blend'
+            self._dispatch({"cmd": "theme_data", "theme": payload,
+                            "bubble_style": _style})
         except Exception as e:
             log.error(f"[AndroidBridge] send_theme error: {e}")
 
@@ -720,26 +733,22 @@ class AndroidBridge:
         except Exception:
             return ""
 
-    def notify_image_attached(self, path: str, send_every: bool = True):
-        """Tell Android a new image card was pinned on the PC side."""
-        self._dispatch({
-            "cmd": "image_attached",
-            "path": path,
-            "send_every": send_every,
-            "thumb_b64": self._make_thumb_b64(path),
-        })
-
-    def notify_image_detached(self, path: str):
-        """Tell Android an image card was removed on the PC side."""
-        self._dispatch({"cmd": "image_detached", "path": path})
+    # notify_image_attached / notify_image_detached were REMOVED 2026-07-28.
+    # They pushed the pinned-image overlay, which the 2026-07-27 image round
+    # retired — leaving both methods with zero callers while still reading like
+    # a working feature (a handoff duly recorded images as "covered by a
+    # different path"). Images now reach the phone via add_image_attach_card()
+    # and the image_attach branch of _replay_ui_event(). Do not resurrect these.
 
     def add_user_message(self, text: str, image_paths: list | None = None):
-        if text.strip():
-            if image_paths:
-                thumbs = [t for t in (self._make_thumb_b64(p) for p in image_paths) if t]
+        # An image-only turn has no text and must still render — the old
+        # `if text.strip()` gate dropped it silently.
+        if image_paths:
+            thumbs = [t for t in (self._make_thumb_b64(p) for p in image_paths) if t]
+            if thumbs or text.strip():
                 self._dispatch({"cmd": "add_user", "text": text, "images": thumbs})
-            else:
-                self._dispatch({"cmd": "add_user", "text": text})
+        elif text.strip():
+            self._dispatch({"cmd": "add_user", "text": text})
 
     def add_ai_message(self, text: str):
         if text.strip():
@@ -816,25 +825,11 @@ class AndroidBridge:
 
                 content = tm.strip_tool_calls(raw)
                 if role == "ui_event":
-                    if msg.get("_type") == "memory_context":
-                        # Phone app expects plain strings — flatten the PC-side
-                        # dict payloads ({text, created_at, similarity}) here.
-                        _mems = [m.get('text', '') if isinstance(m, dict) else str(m)
-                                 for m in msg.get("_memories_preview", [])]
-                        self._dispatch({
-                            "cmd": "add_memory_context",
-                            "context_id": msg.get("_memory_context_id", ""),
-                            "memories": _mems,
-                        })
-                    elif msg.get("_type") == "file_op":
-                        self.add_file_op(msg.get("_file_op") or {})
-                    else:
-                        self._dispatch({
-                            "cmd": "add_work_execution",
-                            "code": msg.get("_code", ""),
-                            "output": msg.get("_output", ""),
-                            "annotation": msg.get("_annotation", ""),
-                        })
+                    self._replay_ui_event(msg)
+                elif role == "user" and msg.get("_images"):
+                    # A user turn carrying images — the bubble keeps its place in
+                    # the transcript, matching chat_window.render_loaded_messages.
+                    self.add_user_message(content, self._ref_paths(msg.get("_images")))
                 elif content:
                     if role == "user":
                         self._dispatch({"cmd": "add_user", "text": content})
@@ -842,6 +837,92 @@ class AndroidBridge:
                         self._dispatch({"cmd": "add_ai", "text": content})
         except Exception as e:
             log.error(f"[AndroidBridge] render_loaded_messages error: {e}")
+
+    # Every ui_event `_type` the desktop can persist. The value names the
+    # _replay_ui_event branch that handles it; None means "deliberately shows
+    # nothing on the phone" (the desktop no-ops it too). An UNLISTED type is
+    # skipped and logged — never rendered as something else.
+    #
+    # This used to fall through to add_work_execution, so every typed event
+    # (thinking, web_search, web_page, skill_action, image_attach) replayed as a
+    # work-execution card with empty code and empty output. Reloading a session
+    # that used any of them painted a column of blank cards.
+    _UI_EVENT_TYPES = {
+        None:             'work_execution',   # untyped legacy: _code/_output
+        '':               'work_execution',
+        'memory_context': 'memory_context',
+        'file_op':        'file_op',
+        'web_search':     'web_search',
+        'web_page':       'web_page',
+        'skill_action':   'skill_action',
+        'image_attach':   'image_attach',
+        'thinking':       'thinking',
+        'skills_card':    None,   # RETIRED 2026-07-17 — desktop renders nothing
+    }
+
+    def _ref_paths(self, refs) -> list:
+        """Cache paths out of a list of ImageRefs (see common/image_refs.py)."""
+        return [str(r.get('path', '')) for r in (refs or [])
+                if isinstance(r, dict) and r.get('path')]
+
+    def _replay_ui_event(self, msg: dict):
+        """Replay ONE persisted ui_event onto the phone.
+
+        Split out of render_loaded_messages so it can be tested without a
+        socket, and so the type taxonomy sits in one readable place next to
+        _UI_EVENT_TYPES."""
+        _type = msg.get("_type")
+        if _type not in self._UI_EVENT_TYPES:
+            log.debug(f"[AndroidBridge] ui_event type {_type!r} has no phone "
+                      f"representation — skipped")
+            return
+        kind = self._UI_EVENT_TYPES[_type]
+        if kind is None:
+            return
+
+        if kind == 'work_execution':
+            # Only a real interpreter step qualifies. An untyped ui_event with
+            # no code is not a work step and must not paint an empty card.
+            if msg.get("_code") or msg.get("_output"):
+                self.add_work_execution(msg.get("_code", "") or "",
+                                        msg.get("_output", "") or "",
+                                        msg.get("_annotation", "") or "")
+        elif kind == 'memory_context':
+            # Phone app expects plain strings — flatten the PC-side dict
+            # payloads ({text, created_at, similarity}) here.
+            _mems = [m.get('text', '') if isinstance(m, dict) else str(m)
+                     for m in msg.get("_memories_preview", [])]
+            self._dispatch({
+                "cmd": "add_memory_context",
+                "context_id": msg.get("_memory_context_id", ""),
+                "memories": _mems,
+            })
+        elif kind == 'file_op':
+            self.add_file_op(msg.get("_file_op") or {})
+        elif kind == 'web_search':
+            self.add_web_search_card({'query': msg.get("_web_query", ""),
+                                      'results': msg.get("_web_results", [])})
+        elif kind == 'web_page':
+            self.add_web_page_card({'mode':  msg.get("_web_mode", "open"),
+                                    'url':   msg.get("_web_url", ""),
+                                    'title': msg.get("_web_title", ""),
+                                    'text':  msg.get("_web_text", ""),
+                                    'links': msg.get("_web_links", [])})
+        elif kind == 'skill_action':
+            self.add_skill_action_card({'skill':  msg.get("_skill", ""),
+                                        'action': msg.get("_skill_action", "load"),
+                                        'ok':     msg.get("_skill_ok", True),
+                                        'detail': msg.get("_skill_detail", "")})
+        elif kind == 'image_attach':
+            # New shape stores real ImageRefs under _images; sessions written
+            # before the 2026-07-27 image round only have _image_paths. Both
+            # must replay — never break an old session file.
+            _paths = (self._ref_paths(msg.get("_images"))
+                      or [str(p) for p in (msg.get("_image_paths") or [])])
+            self.add_image_attach_card({'paths': _paths,
+                                        'annotation': msg.get("_annotation", "")})
+        elif kind == 'thinking':
+            self.add_reasoning_card(msg.get("_thinking", ""))
 
     def refresh_session_list(self):
         self._send_sessions_page(0, "")
@@ -904,6 +985,99 @@ class AndroidBridge:
             "read_range": info.get("read_range", "") or "",
             "detail": (info.get("detail") or "")[:20000],
         })
+
+    # ── Tool-result cards ─────────────────────────────────────────────────────
+    # These method NAMES are load-bearing: they are the values in
+    # ToolManager._CARD_DISPATCH, which routes each card to the chat window AND
+    # to this bridge by the same name. A card type in that map without a method
+    # here fails tests/systema/net/test_android_card_parity.py — that is the
+    # whole point, so do not rename one side alone.
+    #
+    # Payloads travel as JSON and are parsed as JSON on the phone
+    # (ChatMessage.extra holds the raw object string). The older cards
+    # (work_exec / file_op / memory_ctx) still use "|||" packing; anything NEW
+    # uses JSON, because these payloads carry nested lists that a flat
+    # delimiter cannot represent and a stray "|||" inside a search snippet
+    # would silently corrupt.
+
+    _MAX_RESULTS = 20        # search rows per card
+    _MAX_SNIPPET = 400       # chars of each result body
+    _MAX_PAGE_TEXT = 20000   # chars of an opened page (matches add_file_op)
+    _MAX_LINKS = 200
+
+    def add_web_search_card(self, info: dict):
+        """Mirror chat_window.add_web_search_card — query + result rows."""
+        rows = []
+        for r in list(info.get('results') or [])[:self._MAX_RESULTS]:
+            if not isinstance(r, dict):
+                continue
+            rows.append({
+                "title": str(r.get('title') or '(untitled)'),
+                "href":  str(r.get('href') or ''),
+                "body":  str(r.get('body') or '')[:self._MAX_SNIPPET],
+            })
+        self._dispatch({
+            "cmd": "add_web_search",
+            "query": str(info.get('query') or ''),
+            "results": rows,
+        })
+
+    def add_web_page_card(self, info: dict):
+        """Mirror chat_window.add_web_page_card — opened page text, or links."""
+        mode = str(info.get('mode') or 'open')
+        links = []
+        if mode == 'links':
+            for it in list(info.get('links') or [])[:self._MAX_LINKS]:
+                if not isinstance(it, dict):
+                    continue
+                links.append({
+                    "text": str(it.get('text') or '(no text)'),
+                    "href": str(it.get('href') or ''),
+                })
+        url = str(info.get('url') or '')
+        self._dispatch({
+            "cmd": "add_web_page",
+            "mode": mode,
+            "url": url,
+            "title": str(info.get('title') or url or 'Web page'),
+            "text": str(info.get('text') or '')[:self._MAX_PAGE_TEXT],
+            "links": links,
+        })
+
+    def add_skill_action_card(self, info: dict):
+        """Mirror chat_window.add_skill_action_card — load_skill / unload_skill.
+        `detail` matters most when a load was REJECTED; send it verbatim."""
+        self._dispatch({
+            "cmd": "add_skill_action",
+            "action": str(info.get('action') or 'load'),
+            "skill": str(info.get('skill') or ''),
+            "ok": bool(info.get('ok')),
+            "detail": str(info.get('detail') or ''),
+        })
+
+    def add_image_attach_card(self, info: dict):
+        """Mirror chat_window.add_image_attach_card — images the agent attached.
+
+        Thumbnails are generated here rather than sending the originals: a phone
+        on LAN wifi should not pull full-resolution screenshots down a socket
+        that also carries the live chat."""
+        paths = [str(p) for p in (info.get('paths') or [])]
+        thumbs = [t for t in (self._make_thumb_b64(p) for p in paths) if t]
+        self._dispatch({
+            "cmd": "add_image_attach",
+            "annotation": str(info.get('annotation') or ''),
+            "count": len(paths),
+            "thumbs": thumbs,
+        })
+
+    def add_reasoning_card(self, text: str):
+        """Mirror chat_window.add_thinking_card. NOT in _CARD_DISPATCH — the
+        desktop's thinking card is UI state rather than a tool result, so it is
+        pushed from _save_thinking_event (the one per-response persist point,
+        which covers both the streaming and non-streaming paths)."""
+        text = (text or "").strip()
+        if text:
+            self._dispatch({"cmd": "add_reasoning", "text": text})
 
     # ── Live work-mode output streaming (mirrors chat_window) ─────────────────
 

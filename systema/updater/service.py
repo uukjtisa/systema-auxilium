@@ -66,10 +66,18 @@ _EXCLUDES = [
 # (data/** itself is the strongest tier: it's in _EXCLUDES above, so the user's
 # runtime — sessions, memory, tasks, logs — never even appears in a plan and can
 # never be overwritten or proposed for deletion.)
+#
+# `providers/` moved under `resources/` on 2026-07-28. The pre-move glob stays
+# listed so an install updating ACROSS that move still treats its old-layout
+# provider scripts as protected — dropping it would let the first update after
+# the move propose overwriting them as ordinary source.
 _SENSITIVE_GLOBS = [
-    "providers/**",
+    "resources/providers/**",
+    "providers/**",              # pre-2026-07-28 layout
     "skills/**",
 ]
+
+_SENSITIVE_PREFIXES = ("resources/providers/", "providers/", "skills/")
 
 
 def is_sensitive_path(relpath: str) -> bool:
@@ -80,7 +88,7 @@ def is_sensitive_path(relpath: str) -> bool:
         from gitplucker.fsutil import glob_match
         return glob_match(rp, _SENSITIVE_GLOBS)
     except Exception:
-        return rp.startswith("providers/") or rp.startswith("skills/")
+        return rp.startswith(_SENSITIVE_PREFIXES)
 
 
 def make_updater(branch: str = DEFAULT_BRANCH, token: str | None = None,

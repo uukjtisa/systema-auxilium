@@ -168,7 +168,7 @@ class AIEngine:
 
         self.last_raw_response = None
 
-        # Provider settings — all providers are now external scripts in providers/
+        # Provider settings — all providers are now external scripts in resources/providers/
         # 'manual' is the only special built-in provider; everything else uses custom_script_path
         self.ai_provider = 'custom_script'
         self.tts_provider = 'edge-tts'

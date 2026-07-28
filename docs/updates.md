@@ -20,7 +20,7 @@ no git knowledge required. Open it under **Settings → System** (full controls)
 - **Your data is never touched.** Settings and the `data/` folder are excluded
   from updates.
 - **Protected files.** Files you own and configure — your provider scripts under
-  `providers/**` and your `skills/**` — stay visible in a plan but are
+  `resources/providers/**` and your `skills/**` — stay visible in a plan but are
   auto-unselected and flagged `PROTECTED`; applying a change to one takes an
   explicit opt-in and a warning, so an update can never silently overwrite your
   API keys or your work. (A brand-new file in those folders is only additive and

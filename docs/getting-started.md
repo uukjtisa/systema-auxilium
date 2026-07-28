@@ -65,9 +65,9 @@ python main.py
 ## First run: configure a provider
 
 Before you can chat you must configure at least one LLM provider. Providers are
-plain Python scripts under `providers/large-language-models/`.
+plain Python scripts under `resources/providers/large-language-models/`.
 
-1. Open `providers/large-language-models/` and pick an included script (or copy
+1. Open `resources/providers/large-language-models/` and pick an included script (or copy
    `_template.py`).
 2. Edit it and fill in your API key / model / endpoint — all clearly marked
    constants at the top of the file.
@@ -79,7 +79,7 @@ different fields. See [Providers](providers.md) for the full contract and for a
 paste-ready prompt that lets any AI generate a provider for your API.
 
 > Tip: every included provider has a `__main__` block. Run it directly
-> (`python providers/large-language-models/<your_provider>.py`) to verify your key
+> (`python resources/providers/large-language-models/<your_provider>.py`) to verify your key
 > and connection before selecting it in the app.
 
 ## Choose a tool-calling mode

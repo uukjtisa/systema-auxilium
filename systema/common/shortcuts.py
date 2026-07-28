@@ -36,7 +36,7 @@ IS_LINUX = not IS_WIN and not IS_MAC
 APP_NAME = "Systema Auxilium"
 # Project root = two levels up from this file (systema/common/shortcuts.py).
 ROOT = Path(__file__).resolve().parents[2]
-ICON_ICO = ROOT / "assets" / "systema_auxilium.ico"
+ICON_ICO = ROOT / "resources" / "assets" / "systema_auxilium.ico"
 
 _NO_WINDOW = 0x08000000 if IS_WIN else 0   # CREATE_NO_WINDOW for quiet subprocess
 

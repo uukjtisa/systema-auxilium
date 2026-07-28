@@ -413,21 +413,136 @@ class InputDockMixin:
     # _show_image_preview() + clear_pinned_images() compatibility shims that
     # used to live here.
 
+    # ── Image attach dialogs ─────────────────────────────────────────────────
+    # The single-file and multi-file prompts are a PAIR and must look like one.
+    # They shared nothing until 2026-07-28: the multi-file one was a styled
+    # QDialog while the single-file one was a bare QMessageBox wearing whatever
+    # the OS decided, and both hardcoded a dark palette that ignored the user's
+    # theme. One stylesheet, built from _t(), now serves both.
+
+    def _image_dialog_qss(self) -> str:
+        t = self._t()
+        return f"""
+            QDialog {{ background: {t['base']}; color: #E6EDF3; }}
+            QLabel  {{ color: #E6EDF3; font-size: 12px; background: transparent; }}
+            QLabel#dimLabel {{ color: #8B949E; font-size: 11px; }}
+            QCheckBox {{ color: #E6EDF3; font-size: 12px; padding: 3px 0; }}
+            QPushButton {{
+                background: {t['elevated']}; border: 1px solid {t['border']};
+                border-radius: 6px; color: #E6EDF3;
+                padding: 6px 14px; font-size: 12px;
+            }}
+            QPushButton:hover {{ background: {t['surface']}; }}
+            QPushButton#primaryBtn {{
+                background: {t['accent']}; border-color: {t['accent']};
+                font-weight: 600;
+            }}
+            QPushButton#primaryBtn:hover {{ background: {t['accent']}; }}
+            QScrollArea {{
+                border: 1px solid {t['border']}; border-radius: 6px;
+                background: {t['surface']};
+            }}
+        """
+
+    @staticmethod
+    def _image_thumb(path, size: int):
+        """Square-ish thumbnail QLabel for `path`, or None if unreadable.
+
+        Returns the label AND the source pixmap's dimensions so the caller can
+        report them without loading the file twice.
+        """
+        from PyQt6.QtWidgets import QLabel
+        from PyQt6.QtGui import QPixmap
+        from PyQt6.QtCore import Qt as _Qt
+        pm = QPixmap(str(path))
+        if pm.isNull():
+            return None, (0, 0)
+        dims = (pm.width(), pm.height())
+        lbl = QLabel()
+        lbl.setPixmap(pm.scaled(size, size,
+                                _Qt.AspectRatioMode.KeepAspectRatio,
+                                _Qt.TransformationMode.SmoothTransformation))
+        lbl.setAlignment(_Qt.AlignmentFlag.AlignCenter)
+        lbl.setStyleSheet("background: transparent; border: none;")
+        return lbl, dims
+
+    @staticmethod
+    def _human_size(num: float) -> str:
+        for unit in ("B", "KB", "MB", "GB"):
+            if num < 1024 or unit == "GB":
+                return f"{num:.0f} {unit}" if unit == "B" else f"{num:.1f} {unit}"
+            num /= 1024
+        return f"{num:.1f} GB"
+
     def _handle_image_file_drop(self, path):
-        """Prompt the user to attach an image file or insert its path as text."""
-        from PyQt6.QtWidgets import QMessageBox
+        """Prompt to attach ONE image file, or insert its path as text."""
+        from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
+                                     QPushButton, QLabel)
+        from PyQt6.QtCore import Qt as _Qt
         import os
+
         file_name = os.path.basename(path)
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Attach as Image?")
-        msg.setText(f'Attach "{file_name}" as an image?')
-        msg.setInformativeText(
-            "Yes — send as image to the AI\n"
-            "No — insert file path as text instead")
-        msg.setStandardButtons(
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        msg.setDefaultButton(QMessageBox.StandardButton.Yes)
-        if msg.exec() == QMessageBox.StandardButton.Yes:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Attach Image")
+        dlg.setMinimumWidth(360)
+        dlg.setStyleSheet(self._image_dialog_qss())
+
+        lay = QVBoxLayout(dlg)
+        lay.setSpacing(10)
+        lay.setContentsMargins(16, 14, 16, 14)
+
+        # Preview first — with a single image there is room for it, and seeing
+        # the picture is the whole question being asked.
+        thumb, (w, h) = self._image_thumb(path, 200)
+        if thumb is not None:
+            lay.addWidget(thumb, alignment=_Qt.AlignmentFlag.AlignCenter)
+
+        name_lbl = QLabel(file_name)
+        name_lbl.setWordWrap(True)
+        name_lbl.setAlignment(_Qt.AlignmentFlag.AlignCenter)
+        name_lbl.setStyleSheet("font-weight: 600;")
+        lay.addWidget(name_lbl)
+
+        bits = []
+        if w and h:
+            bits.append(f"{w} × {h}")
+        try:
+            bits.append(self._human_size(os.path.getsize(path)))
+        except OSError:
+            pass
+        ext = os.path.splitext(file_name)[1].lstrip(".").upper()
+        if ext:
+            bits.append(ext)
+        meta = QLabel("  ·  ".join(bits))
+        meta.setObjectName("dimLabel")
+        meta.setAlignment(_Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(meta)
+
+        if thumb is None:
+            warn = QLabel("Preview unavailable — this may not be a readable image.")
+            warn.setObjectName("dimLabel")
+            warn.setWordWrap(True)
+            warn.setAlignment(_Qt.AlignmentFlag.AlignCenter)
+            lay.addWidget(warn)
+
+        btn_row = QHBoxLayout()
+        path_btn = QPushButton("Insert path as text")
+        img_btn = QPushButton("Attach as Image")
+        img_btn.setObjectName("primaryBtn")
+        img_btn.setDefault(True)
+        btn_row.addWidget(path_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(img_btn)
+        lay.addLayout(btn_row)
+
+        result = {"action": None}
+        img_btn.clicked.connect(lambda: (result.__setitem__("action", "image"), dlg.accept()))
+        path_btn.clicked.connect(lambda: (result.__setitem__("action", "path"), dlg.accept()))
+
+        if dlg.exec() != QDialog.DialogCode.Accepted or result["action"] is None:
+            return
+
+        if result["action"] == "image":
             self._show_image_preview(path)
         else:
             quoted = f'"{path}"' if self.should_quote_path(path) else path
@@ -480,48 +595,60 @@ class InputDockMixin:
         dlg = QDialog(self)
         dlg.setWindowTitle("Attach Images")
         dlg.setMinimumWidth(480)
-        dlg.setStyleSheet("""
-            QDialog { background: #0D1117; color: #E6EDF3; }
-            QLabel  { color: #E6EDF3; font-size: 12px; }
-            QCheckBox { color: #E6EDF3; font-size: 12px; padding: 3px 0; }
-            QPushButton {
-                background: #21262D; border: 1px solid #30363D;
-                border-radius: 6px; color: #E6EDF3;
-                padding: 6px 14px; font-size: 12px;
-            }
-            QPushButton:hover { background: #30363D; }
-            QPushButton#primaryBtn {
-                background: #1F6FEB; border-color: #388BFD;
-            }
-            QPushButton#primaryBtn:hover { background: #388BFD; }
-        """)
+        dlg.setStyleSheet(self._image_dialog_qss())
         lay = QVBoxLayout(dlg)
         lay.setSpacing(10)
         lay.setContentsMargins(16, 14, 16, 14)
 
         lay.addWidget(QLabel(f"Found {len(image_paths)} image file(s). Choose how to attach:"))
 
-        # Scroll area with checkboxes
+        # Scroll area with a thumbnail + checkbox per row. The thumbnails are
+        # the point: a list of bare filenames makes you guess which picture is
+        # which, and screenshots are all named screenshot_<timestamp>.
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setMaximumHeight(280)
-        scroll.setStyleSheet("QScrollArea { border: 1px solid #21262D; border-radius: 6px; background: #161B22; }")
+        scroll.setMaximumHeight(300)
+        # No sideways scrolling: a long filename must elide, not push a
+        # horizontal bar in and eat a row's height.
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         inner = QWidget()
         inner.setStyleSheet("background: transparent;")
         inner_lay = QVBoxLayout(inner)
         inner_lay.setContentsMargins(10, 8, 10, 8)
-        inner_lay.setSpacing(4)
+        inner_lay.setSpacing(6)
         scroll.setWidget(inner)
 
         import os
         checkboxes = []
         for p in image_paths:
+            row = QWidget()
+            row.setStyleSheet("background: transparent;")
+            row_lay = QHBoxLayout(row)
+            row_lay.setContentsMargins(0, 0, 0, 0)
+            row_lay.setSpacing(10)
+
+            thumb, (w, h) = self._image_thumb(p, 44)
+            if thumb is not None:
+                thumb.setFixedSize(44, 44)
+                row_lay.addWidget(thumb)
+
             cb = QCheckBox(os.path.basename(p))
             cb.setChecked(True)
             cb.setProperty("filepath", p)
+            cb.setToolTip(p)          # full path on hover; the label may elide
+            cb.setSizePolicy(QSizePolicy.Policy.Ignored,
+                             QSizePolicy.Policy.Preferred)
             checkboxes.append(cb)
-            inner_lay.addWidget(cb)
+            row_lay.addWidget(cb, 1)
 
+            if w and h:
+                dim = QLabel(f"{w} × {h}")
+                dim.setObjectName("dimLabel")
+                row_lay.addWidget(dim)
+
+            inner_lay.addWidget(row)
+
+        inner_lay.addStretch()
         lay.addWidget(scroll)
 
         # Select all / none row

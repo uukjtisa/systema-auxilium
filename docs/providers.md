@@ -5,8 +5,8 @@ drop into a folder. Nothing is hardcoded: no provider list in the codebase, no
 edits, no restart. Drop a script in the right folder, hit Refresh in Settings,
 and it appears instantly.
 
-- LLM providers live in `providers/large-language-models/`.
-- TTS providers live in `providers/text-to-speech/`.
+- LLM providers live in `resources/providers/large-language-models/`.
+- TTS providers live in `resources/providers/text-to-speech/`.
 
 Each folder ships a `_template.py` skeleton with full docstrings and a
 paste-ready prompt you can hand to any AI to generate a working provider.
@@ -153,5 +153,5 @@ directly to test your key and connection, and — if it declares native support 
 to confirm the model returns real tool calls:
 
 ```bash
-python providers/large-language-models/provider_opencode_zen.py
+python resources/providers/large-language-models/provider_opencode_zen.py
 ```

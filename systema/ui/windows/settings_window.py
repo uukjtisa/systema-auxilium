@@ -1192,7 +1192,7 @@ class SettingsWindow(BaseWindow):
         _tts_combo_row.addWidget(_tts_refresh_btn)
         tts_lay.addLayout(_tts_combo_row)
         tts_lay.addWidget(_info_box(
-            "Custom TTS scripts live in  providers/text-to-speech/\n"
+            "Custom TTS scripts live in  resources/providers/text-to-speech/\n"
             "Each .py must define:  speak(text: str, save_to: str) -> bool\n"
             "When a custom script is selected the voice dropdown below is hidden "
             "(voice config lives inside the script)."
@@ -2349,7 +2349,7 @@ class SettingsWindow(BaseWindow):
         self._streaming_unsupported_note = _info_box(
             "This provider script does not support streaming, so replies "
             "arrive all at once. Scripts using the current provider contract "
-            "(see providers/large-language-models/_template.py) can stream.")
+            "(see resources/providers/large-language-models/_template.py) can stream.")
         rp_lay.addWidget(self._streaming_unsupported_note)
         sys_lay.addWidget(resp_group)
 
@@ -2822,7 +2822,7 @@ class SettingsWindow(BaseWindow):
             self.pf_session_combo.addItem(f"(error: {e})", "")
 
     def _refresh_llm_provider_scripts(self):
-        """Populate the LLM provider script combo from providers/large-language-models/."""
+        """Populate the LLM provider script combo from resources/providers/large-language-models/."""
         scripts = self.controller.get_llm_provider_scripts()
         current = self.provider_script_combo.currentData() if self.provider_script_combo.count() else ''
         self.provider_script_combo.blockSignals(True)
@@ -2837,7 +2837,7 @@ class SettingsWindow(BaseWindow):
         self.provider_script_combo.blockSignals(False)
 
     def _refresh_tts_provider_scripts(self):
-        """Populate TTS combo: built-in Edge TTS + scripts from providers/text-to-speech/."""
+        """Populate TTS combo: built-in Edge TTS + scripts from resources/providers/text-to-speech/."""
         scripts = self.controller.get_tts_provider_scripts()
         current = self.tts_provider_combo.currentData() if self.tts_provider_combo.count() else 'edge-tts'
         self.tts_provider_combo.blockSignals(True)

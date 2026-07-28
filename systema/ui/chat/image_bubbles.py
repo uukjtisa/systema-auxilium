@@ -111,6 +111,25 @@ class ImageBubblesMixin:
 
         ai.conversation_history.append(entry)
         self.add_image_bubble(refs, origin=origin, annotation=annotation)
+        # Mirror to the phone. Deliberately here and not in add_image_bubble():
+        # that one is also the reload path, which would double-send against
+        # render_loaded_messages.
+        #
+        # BOTH origins mirror. The phone has no local "attached, pending send"
+        # state any more (it was the same retired model this module replaced on
+        # the desktop) — it renders only what the PC sends back, so a
+        # phone-initiated attach cannot echo into a duplicate bubble.
+        _ab = getattr(getattr(self.controller, 'ui', None), 'android_bridge', None)
+        if _ab is not None and getattr(_ab, '_conn', None) is not None:
+            _paths = [r.get('path', '') for r in refs]
+            try:
+                if origin == 'agent':
+                    _ab.add_image_attach_card({'paths': _paths,
+                                               'annotation': annotation})
+                else:
+                    _ab.add_user_message('', _paths)
+            except Exception as e:
+                log.debug(f"[attach_images] android mirror skipped: {e}")
         self._warn_if_provider_is_blind(refs)
         try:
             self.controller._auto_save_session()

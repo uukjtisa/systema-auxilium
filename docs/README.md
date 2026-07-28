@@ -39,7 +39,7 @@ You  ─▶  Chat / Voice / Android  ─▶  AI Engine  ─▶  LLM provider (yo
                                     approve/deny → audit)
 ```
 
-- **Providers** are self-contained scripts under `providers/`. No provider is
+- **Providers** are self-contained scripts under `resources/providers/`. No provider is
   hardcoded; drop a file in and select it in Settings.
 - **Tool calling** runs in one of two modes — Native (through the provider's
   function-calling API) or Compatibility (fenced tool calls in the prompt, works

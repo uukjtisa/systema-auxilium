@@ -315,7 +315,7 @@ def test_bundled_providers_are_callable_and_v2_ones_expose_display():
     a Display form. Legacy scripts are deliberately still supported, so this
     must NOT demand v2 everywhere."""
     from systema import APP_ROOT
-    folder = APP_ROOT / "providers" / "large-language-models"
+    folder = APP_ROOT / "resources" / "providers" / "large-language-models"
     scripts = sorted(p for p in folder.glob("*.py"))
     if not scripts:
         pytest.skip("no provider scripts installed")
@@ -344,6 +344,6 @@ def test_bundled_providers_do_no_network_at_import(monkeypatch):
     monkeypatch.setattr(socket.socket, "connect", _blocked)
     monkeypatch.setattr(socket.socket, "connect_ex", _blocked)
 
-    for path in sorted((APP_ROOT / "providers" / "large-language-models").glob("*.py")):
+    for path in sorted((APP_ROOT / "resources" / "providers" / "large-language-models").glob("*.py")):
         assert pc.load_module(str(path)) is not None, f"{path.name} failed to import"
     assert not calls
