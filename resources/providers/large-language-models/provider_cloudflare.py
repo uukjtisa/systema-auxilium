@@ -38,8 +38,14 @@ API notes:
     - Multiple images per request: YES (pass a list via images=)
 
 Setup:
-    Add each Cloudflare account as a dict in ACCOUNTS below:
-        {"account_id": "...", "api_token": "...", "label": "..."}
+    Nothing to edit for normal use. Open
+        Settings -> AI -> Provider Settings
+    and paste your Account ID and API token — both come from
+    dash.cloudflare.com (Workers AI).
+
+    Own several Cloudflare accounts? Change ACCOUNTS below from 1 to how many
+    you have, save this file, then reopen Settings: that many ID/token pairs
+    appear in the form.
 
     Point this file at:
         Settings -> AI -> Custom Script Provider
@@ -57,26 +63,66 @@ from openai import OpenAI, RateLimitError
 
 # ── Configure here ────────────────────────────────────────────────────────────
 
-ACCOUNTS = [
-    # ── FILL THIS IN ────────────────────────────────────────────────────────
-    # One entry per Cloudflare account. Get both values from
-    # dash.cloudflare.com (Workers AI):
-    #   account_id -- your account ID (the hex string in the dashboard URL)
-    #   api_token  -- an API token with Workers AI access
-    #   label      -- any name you like; it only appears in the log
-    # Add as many as you want: they are tried in order, and an account that
-    # hits its daily free neuron limit is skipped automatically for 24 hours.
-    {
-        "account_id": "YOUR_CLOUDFLARE_ACCOUNT_ID",
-        "api_token":  "YOUR_CLOUDFLARE_API_TOKEN",
-        "label":      "my account",
-    },
-    # {
-    #     "account_id": "SECOND_ACCOUNT_ID",
-    #     "api_token":  "SECOND_API_TOKEN",
-    #     "label":      "backup account",
-    # },
-]
+# HOW MANY CLOUDFLARE ACCOUNTS TO USE.
+#
+# One is all you need, and one is the default. You fill it in from
+# Settings ▸ AI ▸ Provider Settings — no need to touch this file at all.
+#
+# If you happen to own several Cloudflare accounts, change this number to how
+# many you have, save the file, and reopen Settings: that many "Account N ID"
+# + "Account N token" pairs appear in the form. They are tried in order, and
+# an account that hits its daily free neuron limit is skipped automatically
+# for 24 hours — so extra accounts simply stretch the free tier further.
+#
+# Turning the number back down never loses anything: the app keeps values it
+# already saved, so raising it again brings those pairs back exactly as they
+# were.
+ACCOUNTS = 1
+
+# The variables the Settings form fills in — ACCOUNT_1_ID, ACCOUNT_1_TOKEN,
+# ACCOUNT_2_ID, ACCOUNT_2_TOKEN, ... — created from the number above so that
+# number stays the only thing you ever edit. They start empty on purpose: the
+# app applies your saved values to this module before every request.
+for _slot in range(1, int(ACCOUNTS) + 1):
+    globals()[f"ACCOUNT_{_slot}_ID"] = ""
+    globals()[f"ACCOUNT_{_slot}_TOKEN"] = ""
+
+
+def _accounts() -> list:
+    """The slots you actually filled in, in order, as dicts.
+
+    Read fresh on every call, never at import: the app applies saved Settings
+    values to this module AFTER importing it, so reading them any earlier
+    would only ever see the empty strings above.
+    """
+    found = []
+    for i in range(1, int(ACCOUNTS) + 1):
+        account_id = str(globals().get(f"ACCOUNT_{i}_ID") or "").strip()
+        api_token  = str(globals().get(f"ACCOUNT_{i}_TOKEN") or "").strip()
+        if account_id and api_token:   # a half-filled pair is skipped, not sent
+            found.append({
+                "account_id": account_id,
+                "api_token":  api_token,
+                "label":      f"Account {i}",   # only ever appears in the log
+            })
+    return found
+
+
+def _account_rows() -> dict:
+    """Sister of the loop above: one Settings row per slot variable it made."""
+    rows = {}
+    for i in range(1, int(ACCOUNTS) + 1):
+        rows[f"ACCOUNT_{i}_ID"] = (
+            f"Account {i} ID", "input",
+            {"tooltip": "dash.cloudflare.com ▸ Workers AI — the hex string in "
+                        "the dashboard URL",
+             "placeholder": "32-character hex account id"})
+        rows[f"ACCOUNT_{i}_TOKEN"] = (
+            f"Account {i} token", "secure_input",
+            {"tooltip": "An API token with Workers AI access, from the same "
+                        "dashboard",
+             "placeholder": "cfut_..."})
+    return rows
 
 MODEL          = "@cf/moonshotai/kimi-k2.6"
 MAX_TOKENS     = 16384   # Raise up to 16384 if needed — watch your neuron budget
@@ -125,15 +171,20 @@ Display = {
     "MAX_TOKENS": ("Max tokens", "number",
                    {"tooltip": "Response cap — higher burns the daily free "
                                "neuron budget faster"}),
-    "NOTE_1": ("NOTE: accounts are NOT set here. Open this script "
-               "(providers/large-language-models/provider_cloudflare.py) and "
-               "fill in the ACCOUNTS list near the top — one entry per "
-               "Cloudflare account: account_id, api_token, label. Get both "
-               "from dash.cloudflare.com (Workers AI). Add as many as you "
-               "like: they are tried in order and an account that hits its "
-               "daily free neuron limit is skipped automatically for 24h.",
+    # One ID + token pair per slot, generated from ACCOUNTS at the top.
+    **_account_rows(),
+    "NOTE_1": ("NOTE: both account values come from dash.cloudflare.com ▸ "
+               "Workers AI — the Account ID is the hex string in the "
+               "dashboard URL, and the token is an API token with Workers AI "
+               "access. Free tier, no credit card.", "info_box"),
+    "NOTE_2": ("NOTE: got more than one Cloudflare account? Open this script "
+               "(providers/large-language-models/provider_cloudflare.py), "
+               "change ACCOUNTS near the top from 1 to how many you have, "
+               "then reopen this window — that many ID/token pairs appear "
+               "right here. They are tried in order and an account that hits "
+               "its daily free neuron limit is skipped automatically for 24h.",
                "info_box"),
-    "NOTE_2": ("NOTE: vision needs a vision-capable model — Kimi, "
+    "NOTE_3": ("NOTE: vision needs a vision-capable model — Kimi, "
                "Llama-4-Scout, Gemma-4, Mistral-Small or Llama-3.2-Vision.",
                "info_box"),
 }
@@ -561,7 +612,18 @@ def _call_accounts(
     raw_messages = raw_messages or []
     last_error   = None
 
-    for account in ACCOUNTS:
+    accounts = _accounts()
+    if not accounts:
+        return (
+            "No Cloudflare account is set up yet.\n\n"
+            "Open Settings ▸ AI ▸ Provider Settings and fill in "
+            "\"Account 1 ID\" and \"Account 1 token\". Both come from "
+            "dash.cloudflare.com ▸ Workers AI: the account ID is the hex "
+            "string in the dashboard URL, and the token is an API token with "
+            "Workers AI access. The free tier needs no credit card."
+        )
+
+    for account in accounts:
         label = account.get("label", account["account_id"])
 
         if not _is_account_available(account):
@@ -600,14 +662,15 @@ def _call_accounts(
             raise
 
     # All accounts exhausted — no verbose dump needed, just a friendly message
-    exhausted = ", ".join(a.get("label", a["account_id"]) for a in ACCOUNTS)
+    exhausted = ", ".join(a["label"] for a in accounts)
     return (
-        f"All {len(ACCOUNTS)} Cloudflare Workers AI account(s) have reached "
+        f"All {len(accounts)} Cloudflare Workers AI account(s) have reached "
         f"their daily free neuron limit.\n\n"
         f"Exhausted accounts: {exhausted}\n\n"
         f"Last error: {last_error}\n\n"
-        "Quota resets 24 hours after hitting the limit. You can add more free "
-        "accounts to the ACCOUNTS list in the provider script, or upgrade to Workers Paid."
+        "Quota resets 24 hours after hitting the limit. You can add another "
+        "free account — raise ACCOUNTS at the top of the provider script and "
+        "fill in the new pair in Settings — or upgrade to Workers Paid."
     )
 
 
@@ -719,11 +782,33 @@ def _chunks(completion):
 if __name__ == "__main__":
     import sys
 
+    # Running this file directly means the app is not here to apply your saved
+    # Settings values, so the slots are empty. Fill them from the environment
+    # instead — e.g. on Windows:
+    #     set CF_ACCOUNT_1_ID=...
+    #     set CF_ACCOUNT_1_TOKEN=...
+    # Inside Systema Auxilium none of this applies; Settings supplies them.
+    for _i in range(1, int(ACCOUNTS) + 1):
+        for _part in ("ID", "TOKEN"):
+            if not globals().get(f"ACCOUNT_{_i}_{_part}"):
+                globals()[f"ACCOUNT_{_i}_{_part}"] = os.environ.get(
+                    f"CF_ACCOUNT_{_i}_{_part}", "")
+
+    _configured = _accounts()
+
     print("Testing Cloudflare Workers AI — Kimi (sequential + disk cache)")
     print(f"Model:    {MODEL}")
-    print(f"Accounts: {len(ACCOUNTS)} configured")
+    print(f"Accounts: {len(_configured)} filled of {ACCOUNTS} slot(s)")
     print(f"Cache:    {_CACHE_FILE}")
     print("-" * 60)
+
+    if not _configured:
+        print("No account credentials found.")
+        print("Set CF_ACCOUNT_1_ID and CF_ACCOUNT_1_TOKEN in your environment "
+              "to test this script standalone,")
+        print("or just fill them in under Settings ▸ AI ▸ Provider Settings "
+              "and test from inside the app.")
+        sys.exit(1)
 
     # ── Show current cache state ───────────────────────────────────────────
     cache = _load_cache()
@@ -733,7 +818,7 @@ if __name__ == "__main__":
             reset_str = datetime.datetime.fromtimestamp(
                 ts, tz=datetime.timezone.utc
             ).strftime("%Y-%m-%d %H:%M UTC")
-            label = next((a["label"] for a in ACCOUNTS if a["account_id"] == aid), aid)
+            label = next((a["label"] for a in _configured if a["account_id"] == aid), aid)
             hrs = _hours_left(ts)
             print(f"  - {label}: resets at {reset_str} ({hrs} from now)")
         print("-" * 60)
