@@ -483,6 +483,52 @@ class TerminalButton(GlyphButton):
                    QPointF(cx + 6.2 * u, cy + 4.2 * u))
 
 
+class LogsButton(GlyphButton):
+    """A painted log-page glyph — a document with a folded corner and three
+    ruled lines. Opens the session log browser.
+
+    Deliberately NOT the terminal `>_`: that one toggles the live console, and
+    two buttons sharing a glyph in the same header is how you end up clicking
+    the wrong one. A page of written lines reads as "files already written",
+    which is exactly what this opens.
+    """
+
+    def draw_glyph(self, p, w, h, hp):
+        cx, cy = w / 2.0, h / 2.0
+        u = min(w, h) / 30.0
+        pen = self._pen(hp, 1.6)
+        p.setPen(pen)
+
+        # Page outline with the top-right corner folded off.
+        left, right = cx - 5.6 * u, cx + 5.6 * u
+        top, bottom = cy - 7.2 * u, cy + 7.2 * u
+        fold = 3.4 * u
+
+        body = QPainterPath()
+        body.moveTo(right - fold, top)
+        body.lineTo(left, top)
+        body.lineTo(left, bottom)
+        body.lineTo(right, bottom)
+        body.lineTo(right, top + fold)
+        body.closeSubpath()
+        p.drawPath(body)
+
+        # The fold itself, drawn as its own stroke so it reads as a corner
+        # rather than a notch.
+        fold_path = QPainterPath()
+        fold_path.moveTo(right - fold, top)
+        fold_path.lineTo(right - fold, top + fold)
+        fold_path.lineTo(right, top + fold)
+        p.drawPath(fold_path)
+
+        # Three ruled lines, the last one short — a page of log entries.
+        p.setPen(self._pen(hp, 1.3))
+        for i, extent in enumerate((3.2, 3.2, 1.8)):
+            y = cy - 1.2 * u + i * 2.9 * u
+            p.drawLine(QPointF(left + 1.8 * u, y),
+                       QPointF(left + 1.8 * u + extent * 2.0 * u, y))
+
+
 def draw_app_mark(p: QPainter, rect: QRectF, detail: bool = True,
                   star: str = '#88DCC7', ring: str = '#34685F',
                   companion: str = '#ECF0F3'):

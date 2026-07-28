@@ -122,13 +122,22 @@ def write_crash_dump(bucket: str, reason: str, exc_text=None,
 
 
 def _write_log_tail(d: Path, tail_bytes: int = 64 * 1024):
-    """Tail of the newest session log — the last thing the app said."""
+    """Tail of THIS run's session log — the last thing the app said.
+
+    Asks `run_context` for the file rather than guessing the newest `*.txt` by
+    mtime. The guess was wrong exactly when it mattered most: a second instance,
+    or a relauncher child that had already opened its own log, made the newest
+    file belong to a different process than the one that just died.
+    """
     try:
-        logs = sorted((APP_ROOT / "data" / "logs").glob("*.txt"),
-                      key=lambda p: p.stat().st_mtime)
-        if not logs:
-            return
-        src = logs[-1]
+        from systema.common import run_context
+        src = run_context.log_path()
+        if src is None or not src.exists():
+            logs = sorted((APP_ROOT / "data" / "logs").glob("*.txt"),
+                          key=lambda p: p.stat().st_mtime)
+            if not logs:
+                return
+            src = logs[-1]
         with open(src, "rb") as f:
             f.seek(max(0, src.stat().st_size - tail_bytes))
             data = f.read()

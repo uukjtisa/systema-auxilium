@@ -20,14 +20,29 @@ def reload_module(module_path: str) -> tuple[bool, str]:
     Returns (success: bool, detail_message: str).
     On failure the old module stays live — nothing breaks.
     """
-    if module_path not in sys.modules:
-        return False, (
-            f"Module '{module_path}' not in sys.modules.\n"
-            "Was it ever imported, or is the path wrong?"
-        )
+    mod = sys.modules.get(module_path)
+
+    if mod is None:
+        # Not imported YET — not an error. Several windows are imported lazily,
+        # the first time they are opened (settings_window at
+        # floating_window.py:655, for one), so in a run where you never opened
+        # Settings there is simply nothing loaded to replace. The old message
+        # asked "was it ever imported, or is the path wrong?", which sent you
+        # hunting a typo in a path that was perfectly correct.
+        #
+        # Importing it IS the reload: it reads the current file from disk, which
+        # is the entire point of the button, and the post-hook then runs against
+        # a real module.
+        try:
+            importlib.import_module(module_path)
+        except Exception:
+            tb = traceback.format_exc()
+            ts = datetime.now().strftime("%H:%M:%S")
+            return False, f"Failed to import at {ts}\n\n{tb}"
+        ts = datetime.now().strftime("%H:%M:%S")
+        return True, f"Loaded at {ts} (was not imported yet)"
 
     try:
-        mod = sys.modules[module_path]
         importlib.reload(mod)
         ts = datetime.now().strftime("%H:%M:%S")
         return True, f"Reloaded at {ts}"

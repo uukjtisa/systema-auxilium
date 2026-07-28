@@ -230,6 +230,19 @@ def _cmd_debug(chat, arg):
     return None
 
 
+def _cmd_logs(chat, arg):
+    """Open the log browser for this session.
+
+    Deliberately a window, not printed text: the useful answer is usually "which
+    files does this session span, and what does the end of that one say", and a
+    chat bubble is the wrong shape for both.
+    """
+    if not hasattr(chat, '_open_logs_window'):
+        return "The logs window is not available."
+    chat._open_logs_window()
+    return None
+
+
 def _cmd_memory(chat, arg):
     # Lives on the chat window itself, not the controller.
     if not hasattr(chat, '_open_memory_window'):
@@ -288,6 +301,8 @@ COMMANDS = [
     Command("memory", "Open the Memory window", "Meta", _cmd_memory,
             mid_turn=ALWAYS, readonly=True),
     Command("debug", "Open the Debug window", "Meta", _cmd_debug,
+            mid_turn=ALWAYS, readonly=True),
+    Command("logs", "Browse this session's log files", "Meta", _cmd_logs,
             mid_turn=ALWAYS, readonly=True),
     Command("update", "Check for updates", "Meta", _cmd_update,
             mid_turn=ALWAYS, readonly=True),

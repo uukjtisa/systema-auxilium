@@ -2742,6 +2742,24 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         except Exception as e:
             self.add_system_message(f"⚠️ Could not open Memory window: {e}")
 
+    def _open_logs_window(self):
+        """Open the session log browser (`/logs`, and the Debug window's button).
+
+        Reuses one instance and reloads it, so reopening reflects a session
+        switch or a restart that started a new log file.
+        """
+        try:
+            from systema.ui.windows.logs_window import LogsWindow
+            if getattr(self, '_logs_window', None) is None:
+                self._logs_window = LogsWindow(self.controller)
+            else:
+                self._logs_window.reload()
+            self._logs_window.show()
+            self._logs_window.raise_()
+            self._logs_window.activateWindow()
+        except Exception as e:
+            self.add_system_message(f"Could not open the Logs window: {e}")
+
     def is_elevated(self) -> bool:
         """Running as administrator (Windows) / root (POSIX)?
 

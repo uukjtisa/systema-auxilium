@@ -101,6 +101,7 @@ def test_every_command_target_exists():
         ("settings", 'floating', 'open_settings'),
         ("debug", 'floating', 'open_debug_window'),
         ("memory", 'chat', '_open_memory_window'),
+        ("logs", 'chat', '_open_logs_window'),
         ("update", 'controller', 'open_update_window'),
     ]
 

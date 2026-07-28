@@ -932,8 +932,17 @@ def test_the_admin_notice_lives_inside_the_banner(widget_host):
     # The subtitle is one of the elevated-privileges phrasings (not every one
     # of them contains the word "privileges" — "Admin mode — I can reach
     # anything on this machine" is in the pool too).
-    from systema.common.greeting import _ADMIN_LINES
-    stems = [named.split("{name}")[0].strip(" ,") for named, _ in _ADMIN_LINES]
+    #
+    # BOTH pools, deliberately: add_greeting_banner calls admin_note with
+    # root=(sys.platform != "win32"), so this is "Running as root…" on Linux and
+    # "Running with administrator privileges…" on Windows. Checking only
+    # _ADMIN_LINES passed locally and failed in CI. This test is about the
+    # notice living INSIDE the banner as one widget, not about which pool the
+    # platform selects — re-encoding that branch here would just duplicate
+    # production logic into the test.
+    from systema.common.greeting import _ADMIN_LINES, _ROOT_LINES
+    stems = [named.split("{name}")[0].strip(" ,")
+             for named, _ in _ADMIN_LINES + _ROOT_LINES]
     assert any(any(t.startswith(stem) for stem in stems) for t in texts)
 
     # ...and only ONE intro entry, not a banner plus a separate system line.

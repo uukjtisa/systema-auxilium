@@ -284,7 +284,15 @@ def search(query: str, max_results: int = 8, config=None) -> list:
     query = (query or "").strip()
     if not query:
         return []
-    ckey = (query, max_results, _cfg(config, "searxng_url", "") or "")
+    # The key must cover every input that changes WHICH backend answers, or a
+    # newly-added API key looks broken: the chain would pick Brave/Tavily, but
+    # the cached keyless result from minutes ago is served instead. Key
+    # PRESENCE, not the secret itself — a credential must never sit in a cache
+    # key, and presence is all that reorders `_engine_chain`.
+    ckey = (query, max_results,
+            _cfg(config, "searxng_url", "") or "",
+            bool(_cfg(config, "brave_api_key")),
+            bool(_cfg(config, "tavily_api_key")))
     hit = _SEARCH_CACHE.get(ckey)
     if hit and (time.time() - hit[0]) < _CACHE_TTL:
         return hit[1]
@@ -333,30 +341,78 @@ def _filter_noise(text: str) -> str:
     return "\n".join(clean).strip()
 
 
+# Flipped the first time a render attempt fails, so a machine where the browser
+# binary was never downloaded does not pay a failed launch on every fetch.
+_PLAYWRIGHT_DISABLED = False
+
+
 def playwright_available() -> bool:
+    """Is the playwright PACKAGE importable?
+
+    Note this says nothing about whether a browser binary was ever downloaded
+    (`playwright install`) — that failure only shows up at launch time and is
+    handled by the circuit breaker in `fetch_html`.
+    """
     import importlib.util
     return importlib.util.find_spec("playwright") is not None
 
 
 def _render_with_playwright(url: str) -> str:
-    from playwright.sync_api import sync_playwright
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        try:
-            page = browser.new_page(user_agent=random.choice(USER_AGENTS))
-            page.goto(url, wait_until="networkidle", timeout=30000)
-            return page.content()
-        finally:
-            browser.close()
+    """Render a JS-heavy page in headless Chromium.
+
+    `duckduckgo_search` sets `WindowsSelectorEventLoopPolicy` at IMPORT time (see
+    its `__init__.py`), and a Selector loop cannot spawn subprocesses on Windows
+    — which is exactly what Playwright's node driver needs. DuckDuckGo is the
+    FIRST entry in `_engine_chain`, so any session that had run a search already
+    swapped the policy, and this raised `NotImplementedError` every single time.
+
+    Force a Proactor policy for the duration, then restore whatever was there so
+    DuckDuckGo keeps the loop it wants.
+    """
+    import asyncio
+    import sys as _sys
+
+    _prev_policy = None
+    if _sys.platform == "win32":
+        _prev_policy = asyncio.get_event_loop_policy()
+        if not isinstance(_prev_policy, asyncio.WindowsProactorEventLoopPolicy):
+            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            try:
+                page = browser.new_page(user_agent=random.choice(USER_AGENTS))
+                page.goto(url, wait_until="networkidle", timeout=30000)
+                return page.content()
+            finally:
+                browser.close()
+    finally:
+        if _prev_policy is not None:
+            asyncio.set_event_loop_policy(_prev_policy)
 
 
 def fetch_html(url: str, config=None) -> str:
     """Return raw HTML. Uses Playwright (JS render) when enabled + installed,
     else trafilatura's fetcher (good bot-detection handling)."""
-    if _cfg(config, "use_playwright") and playwright_available():
-        html = _render_with_playwright(url)
-        if html:
-            return html
+    global _PLAYWRIGHT_DISABLED
+    if (_cfg(config, "use_playwright") and not _PLAYWRIGHT_DISABLED
+            and playwright_available()):
+        # The renderer is an OPTIONAL enhancement: a missing browser binary, a
+        # sandbox refusal or a render timeout must degrade to the plain fetch,
+        # never kill the whole page read. It used to propagate and take the
+        # entire web_search call down with it.
+        try:
+            html = _render_with_playwright(url)
+            if html:
+                return html
+        except Exception:
+            # Stop trying for the rest of the process. The usual cause is the
+            # browser never having been downloaded (`playwright install`) —
+            # the Python package being importable says nothing about that —
+            # and it will not start working mid-run, so retrying only spends
+            # a multi-second failed launch on every single fetch.
+            _PLAYWRIGHT_DISABLED = True
     import trafilatura
     html = trafilatura.fetch_url(url)
     if not html:

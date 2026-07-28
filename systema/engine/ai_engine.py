@@ -12,6 +12,7 @@ import threading as _threading
 from contextlib import contextmanager as _contextmanager
 
 from systema.common.logger import _make_logger, _NoOpLogger
+from systema.common.run_context import StampedHistory as _StampedHistory
 from systema.execution.tool_manager import ToolManager
 import concurrent.futures as _cf
 
@@ -87,7 +88,10 @@ class AIEngine:
         self.controller = controller
         if controller:
             log.debug(f"[AIEngine.__init__] Controller passed successfully! | {self.controller}")
-        self.conversation_history = []
+        # StampedHistory, not a plain list: every appended entry records which
+        # log file it was written during (systema/common/run_context.py), which
+        # is what makes a session cross-referenceable against the logs.
+        self.conversation_history = _StampedHistory()
         # Session-global image counter. Images carry an `n` the user and the AI
         # refer to them by ("image 3"), assigned in attach order across BOTH
         # sides. It is stored HERE rather than derived from max(n)+1 over the
@@ -2543,12 +2547,12 @@ class AIEngine:
     def detach_memory_context(self, context_id: str) -> bool:
         """Remove a memory_context ui_event from conversation history by its ID."""
         before = len(self.conversation_history)
-        self.conversation_history = [
+        self.conversation_history = _StampedHistory(
             m for m in self.conversation_history
             if not (m.get('role') == 'ui_event'
                     and m.get('_type') == 'memory_context'
                     and m.get('_memory_context_id') == context_id)
-        ]
+        )
         removed = len(self.conversation_history) < before
         if removed:
             log.info(f"[AIEngine.detach_memory_context] ✓ Detached id={context_id}")
@@ -2565,7 +2569,7 @@ class AIEngine:
         log.info(f"[AIEngine.clear_history] Clearing conversation history | "
                  f"was {len(self.conversation_history)} entries | "
                  f"is_working={self.tool_manager.work.is_working}")
-        self.conversation_history = []
+        self.conversation_history = _StampedHistory()
         # A new conversation restarts image numbering at 1 — `n` is scoped to
         # the session, not to the install.
         self.next_image_n = 1

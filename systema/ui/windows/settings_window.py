@@ -78,6 +78,35 @@ class _SettingsSaveWorker(QThread):
         self.done.emit()
 
 
+class _WebBackendTestWorker(QThread):
+    """Runs ONE live web_search query off the GUI thread, so probing a key can
+    never freeze the settings window.
+
+    It reports WHICH backend answered, because that is the only thing that tells
+    the user a key actually took effect — a result list looks identical whether
+    it came from Brave or from the keyless DuckDuckGo fallback.
+    """
+    done = pyqtSignal(str)
+
+    def __init__(self, config, parent=None):
+        super().__init__(parent)
+        self._config = config
+
+    def run(self):
+        try:
+            from systema.net import web_research as wr
+            results = wr.search("systema auxilium connectivity check",
+                                max_results=3, config=self._config)
+        except Exception as e:
+            self.done.emit(f"Failed — {type(e).__name__}: {str(e)[:140]}")
+            return
+        if not results:
+            self.done.emit("No results: every backend returned empty.")
+            return
+        engine = results[0].get('engine') or 'an unnamed backend'
+        self.done.emit(f"OK — answered by {engine} ({len(results)} results).")
+
+
 class _SegmentedTabs(QWidget):
     """Stretch-to-fill segmented tab bar + stacked pages. Drop-in for the parts of
     QTabWidget this window uses (addTab / setCurrentIndex / currentIndex / count).
@@ -881,6 +910,8 @@ class SettingsWindow(BaseWindow):
             ("Glass Overlay",             3, "Glass Overlay"),
             ("Android Packet Port",       6, "Android Packet"),
             ("Start at Login",            0, "Start at Login"),
+            ("Web Search backends",       6, "Web Search"),
+            ("Work Mode prompt",          6, "Work Mode"),
         ]
 
         def _make_jump(target, anchor):
@@ -2143,6 +2174,98 @@ class SettingsWindow(BaseWindow):
             "chain less thoroughly without the checklist."))
         sys_lay.addWidget(wm_group)
 
+        # ── Web Search ───────────────────────────────────────────────────────
+        # These four are the ONLY keys ToolManager._web_config() reads. Until
+        # now none of them was reachable from the UI at all — the values could
+        # be set only by hand-editing data/settings.json, so in practice the
+        # optional backends were unusable.
+        ws_group = QGroupBox("Web Search")
+        ws_group.setStyleSheet(_GROUP)
+        ws_lay = QVBoxLayout(ws_group)
+
+        def _secret_row(label, placeholder):
+            """A masked key field + painted eye reveal.
+
+            Mirrors the provider Display form's `secure_input`: masking is
+            explicit, and the reveal is an EyeButton because a text Show/Hide
+            button clips its letters at this row width.
+            """
+            roww = QWidget()
+            row = QHBoxLayout(roww)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.addWidget(_label(label))
+            field = QLineEdit()
+            field.setStyleSheet(_INPUT)
+            field.setPlaceholderText(placeholder)
+            field.setEchoMode(QLineEdit.EchoMode.Password)
+            row.addWidget(field, stretch=1)
+            try:
+                from systema.ui.widgets.painted_icons import EyeButton
+                eye = EyeButton()
+                eye.toggled.connect(
+                    lambda on, _f=field: _f.setEchoMode(
+                        QLineEdit.EchoMode.Normal if on
+                        else QLineEdit.EchoMode.Password))
+                row.addWidget(eye)
+            except Exception:
+                pass          # reveal is a convenience; never block the field
+            ws_lay.addWidget(roww)
+            return field
+
+        self.web_brave_key_input = _secret_row("Brave API key:", "optional")
+        self.web_tavily_key_input = _secret_row("Tavily API key:", "optional")
+
+        _searx_roww = QWidget()
+        _searx_row = QHBoxLayout(_searx_roww)
+        _searx_row.setContentsMargins(0, 0, 0, 0)
+        _searx_row.addWidget(_label("SearXNG URL:"))
+        self.web_searxng_url_input = QLineEdit()
+        self.web_searxng_url_input.setStyleSheet(_INPUT)
+        self.web_searxng_url_input.setPlaceholderText("https://searx.example.org")
+        _searx_row.addWidget(self.web_searxng_url_input, stretch=1)
+        ws_lay.addWidget(_searx_roww)
+
+        # Probe row — runs one live query with the values currently in the FORM,
+        # so a key can be verified before it is committed.
+        _wstest_roww = QWidget()
+        _wstest_row = QHBoxLayout(_wstest_roww)
+        _wstest_row.setContentsMargins(0, 0, 0, 0)
+        self.web_test_btn = QPushButton("Test backends")
+        self.web_test_btn.setStyleSheet(_BTN)
+        self.web_test_btn.clicked.connect(self._test_web_backends)
+        _wstest_row.addWidget(self.web_test_btn)
+        self.web_test_status = _label("", muted=True)
+        _wstest_row.addWidget(self.web_test_status, stretch=1)
+        ws_lay.addWidget(_wstest_roww)
+
+        # Playwright toggle — dependent visibility: hidden entirely while the
+        # package is absent (house rule: hidden, never greyed out). The probe is
+        # importlib.find_spec, so playwright itself is never imported here.
+        _pw_roww = QWidget()
+        _pw_row = QHBoxLayout(_pw_roww)
+        _pw_row.setContentsMargins(0, 0, 0, 0)
+        self.web_use_playwright_checkbox = QCheckBox(
+            "Render JavaScript-heavy pages with Playwright")
+        self.web_use_playwright_checkbox.setStyleSheet(_CHECK)
+        _pw_row.addWidget(self.web_use_playwright_checkbox)
+        ws_lay.addWidget(_pw_roww)
+        self._web_playwright_row = _pw_roww
+        try:
+            from systema.net import web_research as _wr_probe
+            _pw_roww.setVisible(_wr_probe.playwright_available())
+        except Exception:
+            _pw_roww.setVisible(False)
+
+        ws_lay.addWidget(_info_box(
+            "Web search works with none of this filled in: it falls back to keyless "
+            "scrapers (DuckDuckGo, Bing, Brave). That is the default and it needs no "
+            "account — an empty section here is not a broken one.\n"
+            "Add a backend only for better result quality or more privacy. Brave and "
+            "Tavily are API services you supply a key for; SearXNG is an instance you "
+            "host and point at by URL. Anything configured is tried FIRST, with the "
+            "keyless scrapers as fallback."))
+        sys_lay.addWidget(ws_group)
+
         # ── Code Execution (moved here from General) ─────────────────────────
         exec_group = QGroupBox("Code Execution")
         exec_group.setStyleSheet(_GROUP)
@@ -2733,6 +2856,31 @@ class SettingsWindow(BaseWindow):
         self.tts_provider_combo.blockSignals(False)
         self.on_tts_provider_changed(self.tts_provider_combo.currentIndex())
 
+    def _test_web_backends(self):
+        """Probe the web-search chain with the values currently IN the form.
+
+        Deliberately reads the widgets rather than controller.settings so a key
+        can be checked BEFORE saving it — testing only what is already committed
+        would make the button useless for the case it exists for.
+        """
+        cfg = {
+            'brave_api_key': self.web_brave_key_input.text().strip() or None,
+            'tavily_api_key': self.web_tavily_key_input.text().strip() or None,
+            'searxng_url': self.web_searxng_url_input.text().strip() or None,
+        }
+        self.web_test_btn.setEnabled(False)
+        self.web_test_status.setText("Testing…")
+        self._web_test_worker = _WebBackendTestWorker(cfg, self)
+        self._web_test_worker.done.connect(self._on_web_test_done)
+        self._web_test_worker.start()
+
+    def _on_web_test_done(self, message: str):
+        try:
+            self.web_test_status.setText(message)
+            self.web_test_btn.setEnabled(True)
+        except RuntimeError:
+            pass          # settings window closed while the probe was in flight
+
     def _update_memory_rows_visibility(self):
         """Show only the memory rows that matter right now: nothing while memory
         is disabled; threshold+max in RAG mode; the inject cap in inject_all;
@@ -3218,6 +3366,13 @@ class SettingsWindow(BaseWindow):
         _wm_style = self.controller.settings.get('work_mode_prompt_style', 'detailed')
         _wm_idx = self.work_mode_prompt_style_combo.findData(_wm_style)
         self.work_mode_prompt_style_combo.setCurrentIndex(_wm_idx if _wm_idx >= 0 else 0)
+
+        _ws = self.controller.settings
+        self.web_brave_key_input.setText(_ws.get('web_brave_api_key', '') or '')
+        self.web_tavily_key_input.setText(_ws.get('web_tavily_api_key', '') or '')
+        self.web_searxng_url_input.setText(_ws.get('web_searxng_url', '') or '')
+        self.web_use_playwright_checkbox.setChecked(
+            bool(_ws.get('web_use_playwright', False)))
 
         # Load active LLM provider script (drop stale unsaved Display edits so
         # the form re-reads persisted values)
@@ -3878,6 +4033,15 @@ class SettingsWindow(BaseWindow):
         s['packet_port'] = self.packet_port_spin.value()
         s['tool_calling_mode'] = self.tool_calling_mode_combo.currentData()
         s['work_mode_prompt_style'] = self.work_mode_prompt_style_combo.currentData()
+
+        # Web-search backends. NO _build_side_effect_queue entry is needed here,
+        # and that is deliberate rather than an oversight: ToolManager._web_config()
+        # re-reads controller.settings on EVERY search, so a saved value applies to
+        # the very next query with no extra wiring.
+        s['web_brave_api_key'] = self.web_brave_key_input.text().strip()
+        s['web_tavily_api_key'] = self.web_tavily_key_input.text().strip()
+        s['web_searxng_url'] = self.web_searxng_url_input.text().strip()
+        s['web_use_playwright'] = self.web_use_playwright_checkbox.isChecked()
 
         # Per-provider Display values — settings['provider_display_values']
         # keyed by script file name, so every provider keeps its OWN saved

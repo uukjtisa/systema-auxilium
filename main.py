@@ -142,6 +142,17 @@ def _setup_session_logger():
     sink = _LogSink()
     log_path = sink.path
 
+    # Publish the log file so the rest of the app can NAME it: session history
+    # stamps each entry with it (see systema/common/run_context.py) and the crash
+    # watcher tails it instead of guessing the newest file in data/logs.
+    # run_context is stdlib-only and imports nothing from the package, so this is
+    # safe here — before the heavy imports, alongside the logger it describes.
+    try:
+        from systema.common import run_context
+        run_context.set_log_path(log_path)
+    except Exception:
+        pass        # logging must never be what stops the app from starting
+
     sink.write(
         f"=== Systema Auxilium — Session Log ===\n"
         f"Started : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"

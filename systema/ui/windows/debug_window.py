@@ -147,10 +147,10 @@ class DebugWindow(BaseWindow):
             QPushButton:hover {{ background: {_SURFACE2}; color: {_TEXT}; }}
         """
 
-        # Painted chrome (icon overhaul 2026-07-21): ⌫ >_ − □ × → glyph buttons
+        # Painted chrome (icon overhaul 2026-07-21): ⌫ >_ − × → glyph buttons.
+        # No MaximizeButton — this window dropped maximize 2026-07-28.
         from systema.ui.widgets.painted_icons import (
-            ClearButton, TerminalButton, MinimizeButton, MaximizeButton,
-            CloseButton)
+            ClearButton, TerminalButton, MinimizeButton, CloseButton, LogsButton)
         clear_btn = ClearButton(32, tooltip="Clear debug log")
         clear_btn.clicked.connect(self.clear_debug)
         header_layout.addWidget(clear_btn)
@@ -163,13 +163,17 @@ class DebugWindow(BaseWindow):
             self.cmd_toggle_btn.clicked.connect(self.toggle_cmd_window)
             header_layout.addWidget(self.cmd_toggle_btn)
 
+        self.logs_btn = LogsButton(32, tooltip="Session log files")
+        self.logs_btn.clicked.connect(self.open_logs_window)
+        header_layout.addWidget(self.logs_btn)
+
         minimize_btn = MinimizeButton(32, tooltip="Minimize")
         minimize_btn.clicked.connect(self.showMinimized)
         header_layout.addWidget(minimize_btn)
 
-        self.maximize_btn = MaximizeButton(32, tooltip="Maximize / restore")
-        self.maximize_btn.clicked.connect(self.toggle_maximize)
-        header_layout.addWidget(self.maximize_btn)
+        # NO maximize button (removed 2026-07-28, user's call). BaseWindow's
+        # toggle_maximize guards on hasattr(self, 'maximize_btn'), so dropping
+        # the attribute is safe and leaves nothing dangling.
 
         close_btn = CloseButton(32, tooltip="Close", pill=True)
         close_btn.clicked.connect(self.hide)
@@ -408,21 +412,28 @@ class DebugWindow(BaseWindow):
         # Patch the name captured by `from systema.ui.chat_window import ChatWindow`
         fw_mod.ChatWindow = cw_mod.ChatWindow
 
+        # `ui.chat_window`, NOT `systema.ui.chat_window`: the live instance is an
+        # attribute of the FloatingWindow (floating_window.py:74). The module
+        # path was left here by the core/ -> systema/ rename, and since the
+        # imports above bind `cw_mod`/`fw_mod` rather than `systema`, every one
+        # of these lines raised NameError — so hot-reloading chat_window.py
+        # never actually swapped the live window. Same fix in the two hooks
+        # below.
         ui = controller.ui
         was_visible = False
-        if hasattr(ui, 'chat_window') and systema.ui.chat_window is not None:
+        if getattr(ui, 'chat_window', None) is not None:
             try:
-                was_visible = systema.ui.chat_window.isVisible()
-                systema.ui.chat_window.hide()
-                systema.ui.chat_window.deleteLater()
+                was_visible = ui.chat_window.isVisible()
+                ui.chat_window.hide()
+                ui.chat_window.deleteLater()
             except RuntimeError:
                 pass
-            systema.ui.chat_window = None
+            ui.chat_window = None
 
         if was_visible:
             def _reopen():
                 new_win = cw_mod.ChatWindow(controller)
-                systema.ui.chat_window = new_win
+                ui.chat_window = new_win
                 new_win.show()
                 new_win.raise_()
                 new_win.activateWindow()
@@ -440,13 +451,13 @@ class DebugWindow(BaseWindow):
         fw_mod.SettingsWindow = sw_mod.SettingsWindow
 
         ui = controller.ui
-        if hasattr(ui, 'settings_window') and systema.ui.windows.settings_window is not None:
+        if getattr(ui, 'settings_window', None) is not None:
             try:
-                systema.ui.windows.settings_window.hide()
-                systema.ui.windows.settings_window.deleteLater()
+                ui.settings_window.hide()
+                ui.settings_window.deleteLater()
             except RuntimeError:
                 pass
-            systema.ui.windows.settings_window = None
+            ui.settings_window = None
 
     def _post_debug_window(self, controller):
         """
@@ -454,13 +465,13 @@ class DebugWindow(BaseWindow):
         but at least close and re-open so next open uses the new class.
         """
         ui = controller.ui
-        if hasattr(ui, 'debug_window') and systema.ui.windows.debug_window is not None:
+        if getattr(ui, 'debug_window', None) is not None:
             try:
-                systema.ui.windows.debug_window.hide()
-                systema.ui.windows.debug_window.deleteLater()
+                ui.debug_window.hide()
+                ui.debug_window.deleteLater()
             except RuntimeError:
                 pass
-            systema.ui.windows.debug_window = None
+            ui.debug_window = None
             # Re-open with the new class
             QTimer.singleShot(150, ui.open_debug_window)
 
@@ -826,6 +837,21 @@ class DebugWindow(BaseWindow):
         """Clear debug display"""
         self.debug_display.clear()
         self.add_message("system", "╔══ DEBUG LOG CLEARED ══╗")
+
+    def open_logs_window(self):
+        """Open the session log browser — the same window `/logs` opens, not a
+        second copy of the UI."""
+        try:
+            from systema.ui.windows.logs_window import LogsWindow
+        except Exception:
+            return
+        if getattr(self, '_logs_window', None) is None:
+            self._logs_window = LogsWindow(self.controller)
+        else:
+            self._logs_window.reload()
+        self._logs_window.show()
+        self._logs_window.raise_()
+        self._logs_window.activateWindow()
 
     def closeEvent(self, event):
         """Handle window close - just hide, don't close app"""

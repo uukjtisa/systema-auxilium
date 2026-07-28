@@ -874,8 +874,14 @@ class FloatingWindow(QWidget):
         if code and tm_output:
             if self.chat_window:
                 self.chat_window.add_code_execution_note(code, tm_output)
-            if self.android_bridge and self.android_bridge.isVisible():
-                self.android_bridge.add_work_execution(code, tm_output)
+            # NO android_bridge.add_work_execution() here. ToolManager already
+            # mirrors the step to the phone at the end of run_python_interpreter
+            # (tool_manager.py, "Mirror code + output to Android bridge"), so
+            # sending it again here rendered every tool card TWICE on the phone
+            # while the desktop showed one. That path is the correct survivor:
+            # it carries the step annotation and fires per CALL, so a batch with
+            # several interpreter steps reports each one — this path sees only
+            # the last combined observation and would under-report the batch.
         # Flush any tool cards spawned from inside that python step (web_search)
         # AFTER the interpreter card, so ordering is python-first then tool card.
         try:

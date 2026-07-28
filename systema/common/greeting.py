@@ -8,9 +8,13 @@ Pure text and pure stdlib — the banner widget lives in `ui/chat/bubbles.py`.
 Kept separate so the wording can be tested and edited without standing up a
 window.
 
-FOUR POOLS, merged per session
+FIVE POOLS, merged per session
   * `_TIME_LINES[bucket]`      — morning / afternoon / evening / night.
-  * `_DAY_LINES[weekday]`      — Monday..Sunday, valid at any hour.
+  * `_DAY_LINES[weekday]`      — Monday..Sunday, valid at any hour. Genuinely
+                                 any hour: see `_DAY_OPENING_LINES`.
+  * `_DAY_OPENING_LINES[wd]`   — day-of-week lines that assume the day is
+                                 STARTING ("A fresh week"). Morning and
+                                 afternoon only.
   * `_DAY_TIME_LINES[(d, b)]`  — combinations worth saying out loud
                                  ("Friday night", "Monday morning").
   * `_SIGNAL_LINES[signal]`    — what your usage says: first session ever,
@@ -170,24 +174,29 @@ _TIME_LINES = {
 
 # ── day of week (Monday = 0, matching datetime.weekday()) ────────────────────
 # The registers you asked for, mixed: plain, empathetic, and forward-looking.
+#
+# _DAY_LINES is genuinely valid AT ANY HOUR — that is now true rather than
+# merely claimed. Lines that assume the day is just BEGINNING ("A fresh week",
+# "Back to it") live in _DAY_OPENING_LINES below.
+#
+# THE BUG THIS SPLIT EXISTS FOR
+# They used to share one bucket. At 04:00 on a Tuesday, greeting_weekday()
+# correctly rolled back to Monday (you are still living Monday night) and then
+# the pool happily offered "A fresh week" about a Monday that had been over for
+# four hours. Roughly a third of every night greeting came from this bucket.
+# Nothing was deleted to fix it — the two registers are simply filed apart, so
+# each line still appears wherever it is actually true.
 _DAY_LINES = {
     0: (
         ("Happy Monday, {name}", "Happy Monday"),
-        ("Monday again, {name}", "Monday again"),
-        ("A fresh week, {name}", "A fresh week"),
-        ("Let's ease into it, {name}", "Let's ease into it"),
-        ("New week, new page, {name}", "New week, new page"),
         ("Monday. Take it gently, {name}", "Monday. Take it gently"),
         ("Mondays are heavy, {name}. Let's go slow",
          "Mondays are heavy. Let's go slow"),
-        ("Whole week ahead, {name}", "A whole week ahead"),
-        ("Back to it, {name}", "Back to it"),
         ("Monday. One thing at a time, {name}", "Monday. One thing at a time"),
     ),
     1: (
         ("Happy Tuesday, {name}", "Happy Tuesday"),
         ("Happy Tuesday, {name}. Steady one", "Happy Tuesday. A steady one"),
-        ("Into the week proper, {name}", "Into the week proper"),
         ("Tuesday's a good day for it, {name}", "Tuesday's a good day for it"),
         ("Monday's behind us, {name}", "Monday's behind us"),
         ("Tuesday. The week has started properly, {name}",
@@ -228,21 +237,15 @@ _DAY_LINES = {
         ("Friday. You've earned the weekend, {name}",
          "Friday. You've earned the weekend"),
         ("Last one before the weekend, {name}", "The last one before the weekend"),
-        ("Happy Friday! Let's finish well, {name}",
-         "Happy Friday! Let's finish well"),
-        ("Friday. Whatever's left, let's clear it, {name}",
-         "Friday. Whatever's left, let's clear it"),
     ),
     5: (
         ("Happy Saturday, {name}", "Happy Saturday"),
         ("Weekend mode, {name}. Enjoy it", "Weekend mode. Enjoy it"),
         ("Happy Saturday, {name}! Enjoy it", "Happy Saturday! Enjoy it"),
         ("No alarms today, {name}", "No alarms today"),
-        ("Weekend project, {name}?", "Weekend project?"),
         ("Saturday. Nothing owed to anyone, {name}",
          "Saturday. Nothing owed to anyone"),
         ("Happy weekend, {name}!", "Happy weekend!"),
-        ("Saturday. Build something fun, {name}", "Saturday. Build something fun"),
         ("Happy Saturday, {name}. The good one", "Happy Saturday. The good one"),
         ("Saturday. Take your time, {name}", "Saturday. Take your time"),
     ),
@@ -253,12 +256,50 @@ _DAY_LINES = {
         ("Sunday reset, {name}", "Sunday reset"),
         ("Last day of the weekend, {name}", "The last day of the weekend"),
         ("Sunday. Tomorrow can wait, {name}", "Sunday. Tomorrow can wait"),
-        ("Sunday. Tidy something up, {name}", "Sunday. Tidy something up"),
         ("Big week ahead, {name}", "A big week ahead"),
         ("Sunday. No pressure, {name}", "Sunday. No pressure"),
         ("Easing into the week, {name}", "Easing into the week"),
     ),
 }
+
+# Lines that assume the day is STARTING. Offered in the morning and afternoon
+# only — "Back to it" is as wrong at 22:30 as it is at 04:00, so this is not
+# merely a small-hours patch.
+#
+# Wednesday and Thursday are deliberately empty: every one of their lines
+# ("Halfway through the week", "One more sleep to Friday") is a statement about
+# where the week stands, which stays true at any hour.
+_DAY_OPENING_LINES = {
+    0: (
+        ("Monday again, {name}", "Monday again"),
+        ("A fresh week, {name}", "A fresh week"),
+        ("Let's ease into it, {name}", "Let's ease into it"),
+        ("New week, new page, {name}", "New week, new page"),
+        ("Whole week ahead, {name}", "A whole week ahead"),
+        ("Back to it, {name}", "Back to it"),
+    ),
+    1: (
+        ("Into the week proper, {name}", "Into the week proper"),
+    ),
+    2: (),
+    3: (),
+    4: (
+        ("Happy Friday! Let's finish well, {name}",
+         "Happy Friday! Let's finish well"),
+        ("Friday. Whatever's left, let's clear it, {name}",
+         "Friday. Whatever's left, let's clear it"),
+    ),
+    5: (
+        ("Weekend project, {name}?", "Weekend project?"),
+        ("Saturday. Build something fun, {name}", "Saturday. Build something fun"),
+    ),
+    6: (
+        ("Sunday. Tidy something up, {name}", "Sunday. Tidy something up"),
+    ),
+}
+
+#: Buckets in which a day is still plausibly "beginning".
+_OPENING_BUCKETS = ("morning", "afternoon")
 
 # ── every day x every part of the day ────────────────────────────────────────
 # All 28 cells are filled. A half-populated table meant Tuesday afternoon fell
@@ -485,7 +526,12 @@ _SIGNAL_LINES = {
         ("That was quick, {name}", "That was quick"),
         ("Miss me, {name}?", "Miss me?"),
         ("Forgot something, {name}?", "Forgot something?"),
-        ("Good afternoon, {name}. Round two", "Good afternoon. Round two"),
+        # NOT "Good afternoon, {name}. Round two" — `back_soon` fires purely on
+        # a <30min gap and is deliberately NOT hour-gated, so that line
+        # announced the afternoon at breakfast and at 2am. Signal lines are
+        # weighted SIGNAL_WEIGHT times, so it was not a rare glitch either.
+        # Every other line in this pool is time-neutral; this one now is too.
+        ("Round two, {name}", "Round two"),
     ),
     "back_after_hours": (
         ("Welcome back, {name}", "Welcome back"),
@@ -725,9 +771,22 @@ def collect_signals(session_times, now: datetime | None = None) -> set:
         elif len(today) >= 3:
             signals.add("many_today")
 
-        # Three or more of the last five sessions started in the small hours.
+        # Three or more of the last five sessions started in the small hours,
+        # AND it is night right now.
+        #
+        # The hour gate is not optional. Every line in this pool is present
+        # tense — "Another late one", "Late again. Sleep is also a feature" —
+        # so firing it from history alone announced that the user was up late
+        # at 10:36 in the MORNING, after a night of leaving the app running.
+        # And because signal lines are weighted SIGNAL_WEIGHT times, it did not
+        # merely appear, it dominated. The streak is a true observation; the
+        # phrasing is only true at night. Same defect the day lines had, one
+        # pool over: `dead_of_night` and `early_bird` below were already gated
+        # this way — this one was the outlier.
         recent = times[-5:]
-        if len(recent) >= 3 and sum(1 for t in recent if t.hour < 5) >= 3:
+        if (len(recent) >= 3
+                and sum(1 for t in recent if t.hour < 5) >= 3
+                and time_bucket(now) == "night"):
             signals.add("late_night_streak")
 
         if all(t.month != now.month or t.year != now.year for t in times[-40:]):
@@ -770,6 +829,10 @@ def pool_for(now: datetime | None = None, signals=None) -> list:
 
     pool = list(_TIME_LINES[bucket])
     pool += list(_DAY_LINES.get(weekday, ()))
+    # Day-opening phrasings only while the day could still be starting. Evening
+    # and night get the any-hour day lines plus their own combos instead.
+    if bucket in _OPENING_BUCKETS:
+        pool += list(_DAY_OPENING_LINES.get(weekday, ()))
     pool += list(_DAY_TIME_LINES.get((weekday, bucket), ()))
     for sig in sorted(signals):
         pool += list(_SIGNAL_LINES.get(sig, ())) * SIGNAL_WEIGHT
@@ -779,6 +842,8 @@ def pool_for(now: datetime | None = None, signals=None) -> list:
 def all_phrasings():
     """Every pair in every pool — for the test that walks them."""
     for pairs in _TIME_LINES.values():
+        yield from pairs
+    for pairs in _DAY_OPENING_LINES.values():
         yield from pairs
     for pairs in _DAY_LINES.values():
         yield from pairs

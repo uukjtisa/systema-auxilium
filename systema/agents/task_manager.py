@@ -376,8 +376,14 @@ class TaskAIEngine:
         # Ensure the task's supervision policy persists after sync
         self._apply_supervision()
 
-        # Restore session history into the engine
-        self._engine.conversation_history = list(history)
+        # Restore session history into the engine. StampedHistory, same as the
+        # main session: a task agent's own session file gets the same log
+        # cross-referencing, since a background task failing at 3am is exactly
+        # the case where you cannot just remember what happened.
+        # The constructor never re-stamps, so restored entries keep the run they
+        # were actually written during.
+        from systema.common.run_context import StampedHistory
+        self._engine.conversation_history = StampedHistory(history)
 
         import time
         all_responses = []

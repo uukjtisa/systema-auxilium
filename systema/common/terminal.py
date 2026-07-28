@@ -96,7 +96,19 @@ _log_terminal: "subprocess.Popen | None" = None
 
 
 def latest_log() -> "Path | None":
-    """Newest ``log_*.txt`` under ``<root>/data/logs`` by mtime, or None."""
+    """THIS run's log file, falling back to the newest ``log_*.txt`` by mtime.
+
+    Prefers `run_context` over the mtime scan: with a relauncher child or a
+    second instance running, the newest file on disk belongs to a different
+    process, and the log terminal would then tail somebody else's output.
+    """
+    try:
+        from systema.common import run_context
+        active = run_context.log_path()
+        if active is not None and active.exists():
+            return active
+    except Exception:
+        pass
     logs = _app_root() / "data" / "logs"
     try:
         files = [p for p in logs.glob("log_*.txt") if p.is_file()]

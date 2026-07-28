@@ -2583,9 +2583,14 @@ class AssistantController(QObject):
         # Clear AI history
         self.ai.clear_history()
 
-        # Load chat history into AI
+        # Load chat history into AI. append_loaded, NOT append: these entries
+        # were written during earlier runs and already carry (or predate) their
+        # own log stamp. Re-stamping them with today's log would be a confident
+        # lie about where to look for them.
         for msg in session_data['chat_history']:
-            self.ai.conversation_history.append(msg)
+            _append = getattr(self.ai.conversation_history, 'append_loaded',
+                              self.ai.conversation_history.append)
+            _append(msg)
         log.debug(f"[AssistantController.load_session] {history_len} messages loaded into AI history")
 
         # Restore the image counter. Sessions written before it existed fall
