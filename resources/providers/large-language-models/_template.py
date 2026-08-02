@@ -3,11 +3,10 @@ _template.py
 ============================
 Copy this file, rename it, and point the Custom Script Provider at it in Settings.
 
-CONTRACT (version 2)
---------------------
-Declare the contract version and define ONE function:
-
-    CONTRACT_VERSION = 2
+CONTRACT
+--------
+Define ONE function. That is the whole requirement — there is nothing to
+declare and no version to set:
 
     def chat(system_prompt: str, messages: list, *,
              images=None, tools=None, stream=False):
@@ -140,9 +139,6 @@ NOTES
   governs how long a response may take (0 = unlimited).
 - Keep module top-level import-light: no network calls at import time (the
   Settings window imports this file just to read Display).
-- The OLD contract (chat(sys, msgs)->str, chat_image, chat_tools) still works
-  unchanged — existing custom scripts need no edits. This template documents
-  the current, preferred contract.
 
 ════════════════════════════════════════════════════════════════════════════════
 NOT FAMILIAR WITH PYTHON? LET AN AI WRITE THIS FOR YOU
@@ -261,9 +257,7 @@ The script is a single self-contained .py file. The app imports it fresh on
 every request, so it must be safe to import repeatedly and must do NO network
 calls at import time.
 
-REQUIRED — a version marker and exactly one entry point:
-
-    CONTRACT_VERSION = 2
+REQUIRED — exactly one entry point, and nothing else:
 
     def chat(system_prompt: str, messages: list, *,
              images=None, tools=None, stream=False):
@@ -469,12 +463,6 @@ HARD RULES:
   - Handle errors usefully: raise with a clear message, or return a dict whose
     "content" explains what went wrong.
 
-BACKWARD COMPATIBILITY (context only — do not use for new scripts):
-  Older scripts defined `chat(system_prompt, messages) -> str` plus optional
-  `chat_image(system_prompt, messages, image_paths)` and
-  `chat_tools(system_prompt, messages, tools, images=None)`. The app still
-  accepts those, but new scripts must use the single chat() above.
-
 ════════════════════════════════════════════════════════════════════════════════
 """
 
@@ -485,16 +473,29 @@ import requests
 
 # ── Configure your provider here (editable from Settings via Display) ────────
 
-CONTRACT_VERSION = 2
-
-# Vision. Set SUPPORTS_VISION = False if your model cannot see images — the app
+# Vision. SUPPORTS_VISION may also be a FUNCTION when one backend hosts models
+# with different capabilities — the app calls it after applying your Settings
+# choices, so it describes the model actually selected:
+#
+#     _VISION_MODELS = frozenset({"some-vl-model", "another-vision-model"})
+#
+#     def SUPPORTS_VISION():
+#         return MODEL in _VISION_MODELS
+#
+# Set SUPPORTS_VISION = False if your model cannot see images — the app
 # reads it to warn the user BEFORE an attachment is made rather than sending
 # pictures nothing will look at. SUPPORTS_INLINE_IMAGES says each image stays
 # on the message that owns it (see chat() below); without it the app folds
 # them all onto the newest user turn with text markers instead.
 SUPPORTS_VISION        = True
 SUPPORTS_INLINE_IMAGES = True
-IMAGE_FORMATS          = ("png", "jpg", "jpeg", "gif", "webp")
+# Everything Pillow can DECODE, not just what the endpoint accepts: the encoder
+# re-encodes every picture to JPEG/PNG on the way out, so the input extension
+# only has to be readable. A narrow list refused a .jfif at the attach dialog
+# for no reason at all.
+IMAGE_FORMATS          = ("png", "jpg", "jpeg", "jfif", "jpe", "gif", "webp", "bmp",
+                         "dib", "tif", "tiff", "ico", "tga", "ppm", "pgm",
+                         "pbm", "avif", "heic", "heif")
 
 API_URL = "https://api.example.com/v1/chat/completions"
 API_KEY = "your-api-key-here"

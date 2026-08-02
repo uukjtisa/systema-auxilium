@@ -19,7 +19,6 @@ where the OLD root file is restored from a backup after the new one exists.
 import json
 import threading
 
-import pytest
 
 from systema.common import app_config
 

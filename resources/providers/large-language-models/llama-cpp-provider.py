@@ -81,7 +81,6 @@ NATIVE_DIALECT        = "openai"
 # silently sending pictures nothing will look at.
 SUPPORTS_VISION = False
 
-CONTRACT_VERSION = 2
 
 Display = {
     "MODEL_PATH": ("Model file (.gguf)", "file_path",

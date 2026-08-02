@@ -17,7 +17,6 @@ so it drifted from `create_new_session`:
 
 Both entry points share `_present_new_session()` now.
 """
-import pytest
 
 from systema.app.controller import AssistantController
 

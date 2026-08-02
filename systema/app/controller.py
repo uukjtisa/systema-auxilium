@@ -12,14 +12,8 @@ from systema.agents.skill_manager import SkillManager
 from systema.ui.windows.floating_window import FloatingWindow
 from systema.engine.ai_worker import AIWorker
 from systema.memory.session_manager import SessionManager
-from pathlib import Path
 import os
-import json
-import random
-import socket
 import threading
-import subprocess
-import sys
 import tkinter as tk
 from systema.common.logger import _make_logger, _NoOpLogger
 
@@ -1382,17 +1376,17 @@ class AssistantController(QObject):
         # form since they can't call a Python function.
         if _any_code:
             send_main_block = (
-                f"Sending a message to the main chat session:\n"
-                f"  Call the send_message_main(message) function from inside python_interpreter. "
-                f"It is available in your Python namespace. Example:\n"
-                f"    send_message_main(\"Your Discord friend just messaged you.\")\n"
-                f"  Delivers immediately. Do NOT write it as a code fence or JSON in your reply "
-                f"text — just call the function in your executed code.\n\n"
+                "Sending a message to the main chat session:\n"
+                "  Call the send_message_main(message) function from inside python_interpreter. "
+                "It is available in your Python namespace. Example:\n"
+                "    send_message_main(\"Your Discord friend just messaged you.\")\n"
+                "  Delivers immediately. Do NOT write it as a code fence or JSON in your reply "
+                "text — just call the function in your executed code.\n\n"
             )
         else:
             send_main_block = (
-                f"To send a message to the main chat session, emit EXACTLY this JSON on its own line:\n"
-                f'{{"tool": "send_message_main", "input": "your message to the user"}}\n\n'
+                "To send a message to the main chat session, emit EXACTLY this JSON on its own line:\n"
+                '{"tool": "send_message_main", "input": "your message to the user"}\n\n'
             )
 
         task_section = (
@@ -1545,14 +1539,14 @@ class AssistantController(QObject):
         """Set voice input device"""
         self.settings['voice_input_device'] = device_id
         self.save_settings()
-        self.log(f"Voice input device SAVED", "SUCCESS")
+        self.log("Voice input device SAVED", "SUCCESS")
 
     def set_voice_output_device(self, device_id):
         """Set voice output device"""
         self.log(f"{self.settings}", "DEBUG")
         self.settings['voice_output_device'] = device_id
         self.save_settings()
-        self.log(f"Voice output device SAVED", "SUCCESS")
+        self.log("Voice output device SAVED", "SUCCESS")
 
     def set_ai_provider(self, provider):
         """Set AI provider"""
@@ -2689,7 +2683,7 @@ class AssistantController(QObject):
             # included. This used to post a "Session Deleted" grey line instead
             # and no banner at all.
             self._present_new_session()
-            log.info(f"[AssistantController.delete_session] ✓ Active session deleted and replaced")
+            log.info("[AssistantController.delete_session] ✓ Active session deleted and replaced")
         else:
             log.debug(f"[AssistantController.delete_session] Deleting non-active session '{session_id}'")
             # Just delete the session
@@ -2698,7 +2692,7 @@ class AssistantController(QObject):
             # Refresh UI
             if self._chat:
                 self._chat.refresh_session_list()
-            log.info(f"[AssistantController.delete_session] ✓ Session deleted")
+            log.info("[AssistantController.delete_session] ✓ Session deleted")
 
     def set_session_name(self, name, manual: bool = False):
         """Rename the current session. manual=True marks it user-set so the
@@ -2724,7 +2718,7 @@ class AssistantController(QObject):
                 self._chat.refresh_session_list()
         else:
             log.error(f"[AssistantController.set_session_name] ✗ Failed to rename to '{name}'")
-            self.log(f"Failed to rename session", "ERROR")
+            self.log("Failed to rename session", "ERROR")
 
     def _on_turn_complete(self):
         """A conversation turn just finished — refresh the input token pill (the
@@ -3056,7 +3050,7 @@ class AssistantController(QObject):
             ab = getattr(getattr(self, 'ui', None), 'android_bridge', None)
             if ab and ab.isVisible():
                 ab.remove_memory_context_card(context_id)
-            log.info(f"[AssistantController.detach_memory_context] ✓ Done")
+            log.info("[AssistantController.detach_memory_context] ✓ Done")
         else:
             log.warning(f"[AssistantController.detach_memory_context] Entry id='{context_id}' not found in history — session saved anyway")
 

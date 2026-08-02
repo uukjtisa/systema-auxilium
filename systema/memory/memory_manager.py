@@ -23,7 +23,6 @@ Threading note:
     issues and fast enough for any realistic number of memories.
 """
 
-import os
 import re
 import uuid
 import json

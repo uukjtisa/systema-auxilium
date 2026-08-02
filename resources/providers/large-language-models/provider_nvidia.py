@@ -14,8 +14,8 @@ All three support extended reasoning. Reasoning is returned separately as
 never sends it back to the model. REASONING_EFFORT applies to the DeepSeek
 models only (GLM ignores it).
 
-Contract v2.1: unified chat() with streaming, native tool calling and inline
-(positional) images; editable settings via Display.
+Unified chat() with streaming, native tool calling and inline (positional)
+images; editable settings via Display.
 
 The endpoint is OpenAI-compatible, so tools and vision both work at the
 TRANSPORT level — whether a given request succeeds depends on the model you
@@ -44,20 +44,42 @@ REASONING_EFFORT = "high"   # DeepSeek models only — "low" for speed
 
 # ─────────────────────────────────────────────────────────────────────────────
 
-CONTRACT_VERSION = 2
 BASE_URL = "https://integrate.api.nvidia.com/v1"
 
 # ── Native tool calling + vision ──────────────────────────────────────────────
 # integrate.api.nvidia.com is an OpenAI-compatible gateway, so it speaks both
-# the function-calling dialect and the image_url content-block format. Contract
-# v2 carries tools through chat(tools=...) — no separate chat_tools() needed.
+# the function-calling dialect and the image_url content-block format. Tools
+# ride the one chat(tools=...) entry point — there is no second one.
 # If a chosen model ignores the tools channel, switch Settings -> System ->
 # Tool Calling Mode back to Compatibility; nothing breaks.
 SUPPORTS_NATIVE_TOOLS  = True
 NATIVE_DIALECT         = "openai"
-SUPPORTS_VISION        = True
+
+# Vision is PER MODEL. The gateway speaks the image_url format at the TRANSPORT
+# level, which is what the old blanket `SUPPORTS_VISION = True` was really
+# describing — but the three curated defaults are REASONING models that cannot
+# see, so the app cheerfully accepted attachments and the request failed
+# upstream. Prefix-matched: NVIDIA's catalog versions fast and an exact-id set
+# would silently rot. Pick a VLM via Custom… to send images.
+# (Catalog checked 2026-08-02 — https://build.nvidia.com/models.)
+_VISION_MODEL_MARKERS = ("vl", "vision", "omni", "multimodal", "nano-omni")
+
+
+def SUPPORTS_VISION() -> bool:
+    """True when the selected model id looks like a vision/multimodal one."""
+    m = (MODEL or "").lower()
+    tail = m.split("/")[-1]
+    return any(mark in tail for mark in _VISION_MODEL_MARKERS)
+
+
 SUPPORTS_INLINE_IMAGES = True
-IMAGE_FORMATS          = ("png", "jpg", "jpeg", "gif", "webp")
+# Everything Pillow can DECODE, not just what the endpoint accepts: the encoder
+# re-encodes every picture to JPEG/PNG on the way out, so the input extension
+# only has to be readable. A narrow list refused a .jfif at the attach dialog
+# for no reason at all.
+IMAGE_FORMATS          = ("png", "jpg", "jpeg", "jfif", "jpe", "gif",
+                          "webp", "bmp", "dib", "tif", "tiff", "ico", "tga",
+                          "ppm", "pgm", "pbm", "avif", "heic", "heif")
 
 # Longest side an image is downscaled to before upload. Keeps the base64
 # payload sane on an endpoint that rejects oversized requests outright.
@@ -68,14 +90,16 @@ Display = {
                 {"tooltip": "Free key at build.nvidia.com",
                  "placeholder": "nvapi-..."}),
     "MODEL": ("Model", "list_dropdown", [
-        "z-ai/glm-5.1",
-        "deepseek-ai/deepseek-v4-pro",
-        "deepseek-ai/deepseek-v4-flash"],
-        {"tooltip": "Editable — type any model id from the NVIDIA catalog",
+        ("GLM 5.1",             "z-ai/glm-5.1"),
+        ("DeepSeek V4 Pro",     "deepseek-ai/deepseek-v4-pro"),
+        ("DeepSeek V4 Flash",   "deepseek-ai/deepseek-v4-flash")],
+        {"tooltip": "Editable — type any model id from the NVIDIA catalog. None "
+                    "of the three curated defaults accept images; pick a "
+                    "vision/VL/omni model via Custom… if you need that.",
          "item_tooltips": [
-             "GLM-5.1 — strong all-round reasoning flagship",
-             "DeepSeek V4 Pro — deepest reasoning, slower",
-             "DeepSeek V4 Flash — fast, lighter reasoning"]}),
+             "z-ai/glm-5.1 — strong all-round reasoning flagship. Text only.",
+             "deepseek-ai/deepseek-v4-pro — deepest reasoning, slower. Text only.",
+             "deepseek-ai/deepseek-v4-flash — fast, lighter reasoning. Text only."]}),
     "REASONING_EFFORT": ("Reasoning effort", "list_dropdown", ["low", "high"],
         {"tooltip": "DeepSeek models only — GLM ignores this"}),
 }
@@ -141,7 +165,7 @@ def _encode_image(image_path: str) -> dict:
 def _build_full_messages(system_prompt: str, messages: list, image_paths=None) -> list:
     """Assemble the wire messages.
 
-    INLINE images (contract v2.1) stay on the message that owns them, so an
+    INLINE images stay on the message that owns them, so an
     attachment remains anchored to the turn it arrived in. The flat
     `image_paths` queue from attach_image_to_context() is one-shot and rides
     the final user turn instead.
@@ -164,7 +188,7 @@ def _build_full_messages(system_prompt: str, messages: list, image_paths=None) -
 
 
 def chat(system_prompt: str, messages: list, *, images=None, tools=None, stream=False):
-    """Unified v2 entry point — always streams from NVIDIA; yields chunks when
+    """The one entry point — always streams from NVIDIA; yields chunks when
     stream=True, otherwise collapses them into the result dict."""
     from systema.engine import native_adapters as na
 

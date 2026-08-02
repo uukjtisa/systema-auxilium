@@ -169,7 +169,7 @@ class HitchMonitor(QObject):
                 f"GUI thread blocked ~{blocked_ms:.0f} ms "
                 f"(hitch #{self._hitches} this run, worst {self._worst_ms:.0f} ms)",
                 f"Stack samples: {len(samples)} at ~{int(self._WATCH_TICK*1000)} ms cadence",
-                f"Culprit (deepest app frame of the most-sampled stack):",
+                "Culprit (deepest app frame of the most-sampled stack):",
                 f"    {culprit}",
                 "",
             ]

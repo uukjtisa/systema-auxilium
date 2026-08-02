@@ -55,7 +55,6 @@ class _Engine:
 
 def _v2_module(gen_factory, supports_native=False):
     m = types.ModuleType("streaming_provider")
-    m.CONTRACT_VERSION = 2
     m.SUPPORTS_NATIVE_TOOLS = supports_native
 
     def chat(system_prompt, messages, *, images=None, tools=None, stream=False):
@@ -119,16 +118,21 @@ def test_stream_ok_false_forces_non_streaming():
     assert log == []
 
 
-def test_legacy_script_never_streams():
-    log = []
-    eng = _Engine(settings={'streaming_enabled': True}, sig_log=log)
-    legacy = types.ModuleType("legacy")
-    legacy.chat = lambda sp, msgs: "legacy reply"
+def test_a_script_written_for_the_retired_contract_raises():
+    """The retired contract (`chat(sys, msgs) -> str`) is GONE, shim included —
+    the user's explicit call, since there are no external users to protect.
 
-    out = eng._run_provider_call(legacy, "", [])
+    The accepted cost is stated here so it cannot regress into a surprise: such
+    a script now fails loudly on the unexpected keyword instead of being
+    silently shimmed. That is strictly better than what the marker did, which
+    was to downgrade a CORRECT script that merely forgot one line — no images,
+    no tools, no streaming, and no error at all."""
+    eng = _Engine(settings={'streaming_enabled': True})
+    retired = types.ModuleType("retired")
+    retired.chat = lambda sp, msgs: "old reply"
 
-    assert out["content"] == "legacy reply"
-    assert log == []
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        eng._run_provider_call(retired, "", [])
 
 
 def test_tool_calls_arrive_complete_at_end_of_stream():
@@ -231,7 +235,6 @@ def test_memory_context_ui_event_still_promoted():
 def _fake_provider(tmp_path, name, default_model="default-model"):
     script = tmp_path / name
     script.write_text(textwrap.dedent(f'''
-        CONTRACT_VERSION = 2
         API_KEY = "placeholder"
         MODEL = "{default_model}"
         Display = {{
@@ -309,11 +312,11 @@ def test_undeclared_key_in_saved_values_is_ignored(tmp_path):
     assert not hasattr(mod, "SECRET_BACKDOOR")
 
 
-def test_bundled_providers_are_callable_and_v2_ones_expose_display():
-    """Every shipped LLM provider script must import and be invokable — either
-    contract v2, or legacy (which the shim wraps). v2 scripts must also expose
-    a Display form. Legacy scripts are deliberately still supported, so this
-    must NOT demand v2 everywhere."""
+def test_bundled_providers_are_callable_and_expose_display():
+    """Every shipped LLM provider script must import, define the ONE entry
+    point, and expose a Display form — and must NOT carry a CONTRACT_VERSION
+    marker, which no longer exists (a stray one is harmless at runtime but
+    would teach the next author to copy it)."""
     from systema import APP_ROOT
     folder = APP_ROOT / "resources" / "providers" / "large-language-models"
     scripts = sorted(p for p in folder.glob("*.py"))
@@ -323,9 +326,10 @@ def test_bundled_providers_are_callable_and_v2_ones_expose_display():
         mod = pc.load_module(str(path))
         assert mod is not None, f"{path.name} failed to import"
         assert callable(getattr(mod, "chat", None)), f"{path.name} defines no chat()"
-        if pc.is_v2(mod):
-            assert pc.validate_display(mod), \
-                f"{path.name} is v2 but exposes no Display fields"
+        assert not hasattr(mod, "CONTRACT_VERSION"), \
+            f"{path.name} still declares the retired CONTRACT_VERSION marker"
+        assert pc.validate_display(mod), \
+            f"{path.name} exposes no Display fields"
 
 
 def test_bundled_providers_do_no_network_at_import(monkeypatch):

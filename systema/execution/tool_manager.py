@@ -9,13 +9,11 @@ runs on the main thread via Qt signals; the exec policy caps a turn at ONE
 python_interpreter call (other tools batch freely).
 """
 
-import json
 import keyword
 import re
 import threading
-import os
 from dataclasses import dataclass, field
-from PyQt6.QtCore import QObject, pyqtSignal, QTimer
+from PyQt6.QtCore import QObject, pyqtSignal
 from systema.execution.python_interpreter import PythonInterpreter
 from systema.execution import tool_registry
 from systema.execution import capabilities
@@ -165,7 +163,7 @@ class ApprovalSignal(QObject):
     # mis-attribute outputs (each card is finalized from its own result rather
     # than from the single-slot work.last_output the whole batch shares).
     work_step_output = pyqtSignal(str, str, str)
-    # ── Live streaming (provider contract v2) — emitted from the AIWorker
+    # ── Live streaming — emitted from the AIWorker
     # thread as chunks arrive; the chat window appends them to the in-flight
     # turn. stream_finished fires before the normal full-response path runs.
     stream_started   = pyqtSignal()                   # a streamed turn begins
@@ -2267,8 +2265,8 @@ class ToolManager:
         if self.supervised_execution is False:
             # Unattended context (background task) — nothing will ever answer
             # this dialog. Fail closed: kill the execution.
-            log.warning(f"[ToolManager._handle_execution_timeout] Unattended context — "
-                        f"killing execution (no dialog to show)")
+            log.warning("[ToolManager._handle_execution_timeout] Unattended context — "
+                        "killing execution (no dialog to show)")
             return 0
 
         result_holder = []       # main thread will append decision

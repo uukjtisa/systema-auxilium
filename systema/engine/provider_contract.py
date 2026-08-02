@@ -1,11 +1,11 @@
 """
 engine/provider_contract.py
 The provider-script contract layer: ONE normalized way to call any LLM
-provider script, old or new.
+provider script.
 
-V2 contract (the current one — see resources/providers/large-language-models/_template.py):
+There is exactly one contract — see
+resources/providers/large-language-models/_template.py:
 
-    CONTRACT_VERSION = 2
     SUPPORTS_NATIVE_TOOLS = bool          # optional capability flags
     NATIVE_DIALECT = "openai"             # "openai" | "anthropic" | "gemini"
     Display = {"VAR_NAME": ("Label", "type"[, extra]), ...}   # optional
@@ -18,9 +18,14 @@ V2 contract (the current one — see resources/providers/large-language-models/_
         #   {"type": "text"|"thinking"|"tool_call"|"done",
         #    "content": ..., "finish_reason": None|...}
 
-Legacy contract (chat(sys, msgs)->str, optional chat_image()->str, optional
-chat_tools()->{"text","tool_calls"}) keeps working forever: invoke() wraps it
-into the same normalized result. Third-party custom scripts never break.
+A script is valid if it defines a callable `chat` — that is the whole check.
+There is no version marker and nothing to declare: the retired first contract
+(`chat(sys, msgs) -> str` plus optional `chat_image()` / `chat_tools()`) and
+the `CONTRACT_VERSION` variable that selected it are GONE, deliberately. That
+marker defaulted to the retired path when absent, so a correct script that
+merely forgot one line was silently downgraded — no images, no tools, no
+streaming, and no error. A leftover `CONTRACT_VERSION = 2` in someone's old
+script is simply ignored, never an error.
 
 `Display` drives the auto-generated per-provider settings form (Settings ▸ AI
 Provider): the app persists values per script and setattr()s them onto the
@@ -68,21 +73,12 @@ def load_module(path):
         return None
 
 
-def is_v2(module) -> bool:
-    """True when the script declares the unified contract."""
-    return (
-        module is not None
-        and int(getattr(module, "CONTRACT_VERSION", 1) or 1) >= 2
-        and callable(getattr(module, "chat", None))
-    )
-
-
 def supports_native(module) -> bool:
-    """Script can carry native tool calls (v2 chat(tools=...) or legacy chat_tools)."""
+    """Script can carry native tool calls through chat(tools=...)."""
     return (
         module is not None
         and bool(getattr(module, "SUPPORTS_NATIVE_TOOLS", False))
-        and (is_v2(module) or callable(getattr(module, "chat_tools", None)))
+        and callable(getattr(module, "chat", None))
     )
 
 
@@ -166,14 +162,12 @@ def is_secret_type(ftype: str) -> bool:
 # ── result normalization ─────────────────────────────────────────────────────
 
 def normalize_result(raw) -> dict | None:
-    """Coerce a provider return (v2 dict or legacy str / chat_tools dict) into
+    """Coerce a provider return (the result dict, or a plain string reply) into
     {"content", "thinking", "tool_calls", "finish_reason"}. None on garbage."""
     if isinstance(raw, str):
         return {"content": raw, "thinking": None, "tool_calls": [], "finish_reason": None}
     if isinstance(raw, dict):
         content = raw.get("content")
-        if content is None:
-            content = raw.get("text")  # legacy chat_tools key
         return {
             "content": content if isinstance(content, str) else ("" if content is None else str(content)),
             "thinking": raw.get("thinking") or None,
@@ -411,16 +405,15 @@ def drain_stream(gen, on_text=None, on_thinking=None) -> dict:
 def supports_inline_images(module) -> bool:
     """Can this script take images POSITIONALLY, on the message they belong to?
 
-    Contract v2.1: a script that declares `SUPPORTS_INLINE_IMAGES = True`
-    receives messages whose entries may carry an `images` list, so a picture
-    sits at its real place in the conversation instead of being stapled onto
-    the newest user turn. Everything else goes through flatten_inline_images()
-    and sees exactly the payload it saw before — which is the entire reason
-    this is a flag and not a breaking change.
+    A script that declares `SUPPORTS_INLINE_IMAGES = True` receives messages
+    whose entries may carry an `images` list, so a picture sits at its real
+    place in the conversation instead of being stapled onto the newest user
+    turn. Everything else goes through flatten_inline_images() and sees the
+    flat `images=` list — which is the entire reason this is a flag and not a
+    breaking change.
     """
     return bool(module is not None
-                and getattr(module, "SUPPORTS_INLINE_IMAGES", False)
-                and is_v2(module))
+                and getattr(module, "SUPPORTS_INLINE_IMAGES", False))
 
 
 def flatten_inline_images(messages: list) -> tuple[list, list]:
@@ -511,42 +504,63 @@ def image_capabilities(module) -> ImageCaps:
 def supports_images(module) -> bool:
     """Can this provider script be handed images?
 
-    Contract v2 takes them through the ONE `chat(..., images=...)` entry point,
-    so every v2 script qualifies unless it opts out with `SUPPORTS_VISION =
-    False`. Only LEGACY scripts still need a separate `chat_image()`.
+    Images ride the ONE `chat(..., images=...)` entry point, so every script
+    qualifies unless it opts out with `SUPPORTS_VISION = False`. Declaring
+    vision honestly matters: provider_opencode_zen and llama-cpp set it False
+    on purpose, and the mixed script's whole design depends on it.
 
-    This used to be an unconditional `hasattr(module, 'chat_image')` — a check
-    left over from before the contract was unified. After the unification no v2
-    script defines chat_image() any more, so it answered False for EVERY modern
-    provider and image analysis was reported as unsupported across the board.
+    **`SUPPORTS_VISION` may be a CALLABLE**, which is how a script answers
+    PER MODEL rather than per provider. One backend hosts models with
+    different capabilities — declaring the whole provider vision-capable
+    fails inside the encoder when the user picks a text-only model, and
+    declaring it blind hides the models that can actually see. A script
+    therefore writes:
+
+        def SUPPORTS_VISION():
+            return MODEL in _VISION_MODELS
+
+    and it is evaluated HERE, per call, after `apply_display_overrides()` has
+    setattr'd the user's chosen `MODEL` onto the module — so the answer always
+    describes the model that is actually selected right now. A plain bool
+    keeps working unchanged; a callable that raises is treated as "no vision"
+    rather than taking the app down over a capability probe.
     """
     if module is None:
         return False
-    declared = getattr(module, "SUPPORTS_VISION", None)
-    if declared is not None:
-        return bool(declared)
-    if is_v2(module):
-        return True
-    return callable(getattr(module, "chat_image", None))
+    declared = getattr(module, "SUPPORTS_VISION", True)
+    if callable(declared):
+        try:
+            return bool(declared())
+        except Exception as e:
+            log.warning(f"[provider_contract.supports_images] SUPPORTS_VISION() "
+                        f"raised, assuming no vision: {e}")
+            return False
+    return bool(declared)
 
 
 # ── the ONE call site ────────────────────────────────────────────────────────
 
 def invoke(module, system_prompt: str, messages: list, *,
            images=None, tools=None, stream=False):
-    """Call a provider script, any contract version.
+    """Call a provider script. THE single call path — main engine and
+    sub-agents alike; there is no second convention to pick between.
 
-    Returns a normalized result dict, a chunk generator (v2 script that honors
-    stream=True), or None on failure. Exceptions from the script propagate to
-    the caller (the engine's retry/timeout wrapper owns error policy).
+    Returns a normalized result dict, a chunk generator (script honored
+    stream=True), or None when the script defines no callable chat().
+    Exceptions from the script propagate to the caller (the engine's
+    retry/timeout wrapper owns error policy).
 
-    Messages may carry per-entry `images` (contract v2.1). Scripts that declare
-    SUPPORTS_INLINE_IMAGES get them as-is; every other script gets the flat
-    `images=` list it has always received, with `[Image N]` text markers left
-    in place of the pictures. A caller therefore never has to ask what the
-    active provider supports — it just passes positional images and this
-    function degrades them.
+    Messages may carry per-entry `images`. Scripts that declare
+    SUPPORTS_INLINE_IMAGES get them as-is; every other script gets a flat
+    `images=` list with `[Image N]` text markers left in place of the
+    pictures. A caller therefore never has to ask what the active provider
+    supports — it just passes positional images and this function degrades
+    them.
     """
+    if not callable(getattr(module, "chat", None)):
+        log.error("[provider_contract.invoke] ✗ Script defines no callable chat()")
+        return None
+
     if not supports_inline_images(module):
         messages, inline_paths = flatten_inline_images(messages)
         if inline_paths:
@@ -555,20 +569,8 @@ def invoke(module, system_prompt: str, messages: list, *,
             # queue), because history comes before the current turn.
             images = inline_paths + list(images or [])
 
-    if is_v2(module):
-        raw = module.chat(system_prompt or "", messages,
-                          images=images, tools=tools, stream=stream)
-        if hasattr(raw, "__next__"):     # generator — engine consumes chunks
-            return raw
-        return normalize_result(raw)
-
-    # Legacy shim — never streams.
-    if tools is not None and callable(getattr(module, "chat_tools", None)):
-        raw = module.chat_tools(system_prompt or "", messages, tools, images=images)
-        return normalize_result(raw)
-    if images and callable(getattr(module, "chat_image", None)):
-        return normalize_result(module.chat_image(system_prompt or "", messages, images))
-    if callable(getattr(module, "chat", None)):
-        return normalize_result(module.chat(system_prompt or "", messages))
-    log.error("[provider_contract.invoke] ✗ Script defines no callable chat()")
-    return None
+    raw = module.chat(system_prompt or "", messages,
+                      images=images, tools=tools, stream=stream)
+    if hasattr(raw, "__next__"):     # generator — engine consumes chunks
+        return raw
+    return normalize_result(raw)

@@ -18,9 +18,15 @@ import sys
 from pathlib import Path
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QListWidget,
-                             QListWidgetItem, QPlainTextEdit, QPushButton,
-                             QVBoxLayout, QWidget)
+from PyQt6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QPlainTextEdit,
+    QPushButton,
+    QVBoxLayout,
+    QWidget)
 
 from systema import APP_ROOT
 from systema.common import run_context

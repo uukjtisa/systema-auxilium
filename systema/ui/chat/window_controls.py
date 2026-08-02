@@ -8,7 +8,7 @@ New for the 2026-07 chat window redesign (visual spec: Desktop\\chat-window-mock
 """
 from PyQt6.QtWidgets import QPushButton
 from PyQt6.QtCore import Qt, QRectF, QPointF, QVariantAnimation, QEasingCurve
-from PyQt6.QtGui import QPainter, QPen, QColor, QPainterPath
+from PyQt6.QtGui import QPainter, QPen, QPainterPath
 
 # Canonical copy lives in the shared painted-icon module (2026-07-21 icon
 # overhaul); re-exported here so existing `from window_controls import

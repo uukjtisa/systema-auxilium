@@ -627,7 +627,6 @@ class CodeApprovalDialog(QDialog):
         root.addLayout(_decide_row)
 
     def _build_code_side(self) -> QWidget:
-        p = self.p
         w = QWidget(); w.setStyleSheet("background: transparent;")
         lay = QVBoxLayout(w); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(6)
         lay.addWidget(self._h("Code to run"))

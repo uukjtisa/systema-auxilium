@@ -46,7 +46,8 @@ Two modes (Settings → System → Tool Calling Mode):
   model.
 - **Native** — I call tools through the provider's real function-calling API, so
   there are no fences to parse. A provider opts in with `SUPPORTS_NATIVE_TOOLS =
-  True` and a `chat_tools(...)` function; `systema/engine/native_adapters.py`
+  True` and by handling the `tools` argument of its `chat(...)` function;
+  `systema/engine/native_adapters.py`
   converts my canonical tools to the openai / anthropic / gemini dialect and parses
   the reply back. If a model ignores the tools channel, switch back to Compatibility
   and nothing breaks.

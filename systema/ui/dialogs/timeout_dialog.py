@@ -58,7 +58,6 @@ class TimeoutDialog(QDialog):
         self.setModal(True)
 
         _p = _live_palette(self)
-        _BASE    = _p['bg']
         _SURFACE = _p['surface']
         _ELEV    = _p['surface2']
         _BORDER  = _p['border']
@@ -93,7 +92,7 @@ class TimeoutDialog(QDialog):
         title_row = QHBoxLayout()
         title_row.setSpacing(10)
         icon_lbl = QLabel("\u23F1")  # stopwatch emoji
-        icon_lbl.setStyleSheet(f"font-size: 24px; background: transparent;")
+        icon_lbl.setStyleSheet("font-size: 24px; background: transparent;")
         title_row.addWidget(icon_lbl)
         title = QLabel("Execution Timeout")
         title.setStyleSheet(f"font-size: 16px; font-weight: 600; color: {_TEXT}; background: transparent;")
@@ -267,7 +266,7 @@ class WorkmodeInterruptDialog(QDialog):
         title_row = QHBoxLayout()
         title_row.setSpacing(10)
         icon_lbl = QLabel("\U0001F6D1")
-        icon_lbl.setStyleSheet(f"font-size: 24px; background: transparent;")
+        icon_lbl.setStyleSheet("font-size: 24px; background: transparent;")
         title_row.addWidget(icon_lbl)
         _what = f"`{self._tool_name}`" if self._tool_name else "the tool call"
         title = QLabel("Interrupt the running tool call?")

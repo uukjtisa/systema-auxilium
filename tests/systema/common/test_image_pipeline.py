@@ -192,8 +192,7 @@ def test_a_script_without_the_flag_sees_exactly_the_old_shape():
 
     seen = {}
 
-    class Legacy:
-        CONTRACT_VERSION = 2
+    class Flat:
 
         @staticmethod
         def chat(sp, msgs, *, images=None, tools=None, stream=False):
@@ -204,7 +203,7 @@ def test_a_script_without_the_flag_sees_exactly_the_old_shape():
     convo = [{"role": "user", "content": "first",
               "images": [{"path": "/c/a.png", "n": 1}]},
              {"role": "user", "content": "second"}]
-    pc.invoke(Legacy, "sys", convo, images=["/tmp/oneshot.png"])
+    pc.invoke(Flat, "sys", convo, images=["/tmp/oneshot.png"])
 
     assert not any("images" in m for m in seen["msgs"])
     assert seen["msgs"][0]["content"].startswith("[Image 1]")
@@ -218,7 +217,6 @@ def test_a_script_with_the_flag_gets_positions():
     seen = {}
 
     class Inline:
-        CONTRACT_VERSION = 2
         SUPPORTS_INLINE_IMAGES = True
 
         @staticmethod
@@ -240,7 +238,6 @@ def test_a_provider_that_declares_no_vision_is_believed():
     from systema.engine import provider_contract as pc
 
     class Blind:
-        CONTRACT_VERSION = 2
         SUPPORTS_VISION = False
 
         @staticmethod
@@ -256,7 +253,6 @@ def test_format_support_is_enforced_from_the_declaration():
     from systema.engine import provider_contract as pc
 
     class Picky:
-        CONTRACT_VERSION = 2
         SUPPORTS_VISION = True
         IMAGE_FORMATS = ("png",)
 
@@ -289,7 +285,7 @@ def test_images_survive_a_work_mode_continuation(tmp_path, monkeypatch):
     ref = image_cache.store(src, n=1)
 
     module = types.SimpleNamespace(
-        CONTRACT_VERSION=2, chat=lambda *a, **k: None,
+        chat=lambda *a, **k: None,
         SUPPORTS_VISION=True, SUPPORTS_INLINE_IMAGES=True)
 
     class Stub:
@@ -341,7 +337,7 @@ def test_the_history_entry_is_never_mutated_while_building_a_payload(tmp_path):
 
     class Stub:
         _load_provider_module = lambda self: types.SimpleNamespace(
-            CONTRACT_VERSION=2, chat=lambda *a, **k: None, SUPPORTS_VISION=True)
+            chat=lambda *a, **k: None, SUPPORTS_VISION=True)
         _image_caps = AIEngine._image_caps
         _render_entry_images = AIEngine._render_entry_images
         _with_images = AIEngine._with_images

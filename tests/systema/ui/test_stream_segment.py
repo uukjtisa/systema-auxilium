@@ -34,6 +34,7 @@ class _Host(BubblesMixin, QWidget):
         self.message_widgets = []
         self.saved_thinking = []
         self.segments = []
+        self.discarded = []
         self.chat_layout = QVBoxLayout(self)
         self.chat_layout.addStretch()
 
@@ -71,8 +72,14 @@ class _Host(BubblesMixin, QWidget):
             state['done'] = True
             return state['text']
 
+        def _discard(keep=0):
+            self._turn_thinking_card = None
+            self.segments.remove(holder)
+            self.discarded.append(holder)
+            return True
+
         card = {'widget': holder, 'append': _append, 'finish': _finish,
-                'state': state}
+                'discard': _discard, 'state': state}
         self._turn_thinking_card = card
         return card if live else holder
 
@@ -177,6 +184,69 @@ def test_finish_without_thinking_saves_nothing(host):
     host.on_stream_text("plain reply")
     host.on_stream_finished()
     assert host.saved_thinking == []
+
+
+# ── the empty-card gap (a blank strip above the reply) ───────────────────────
+
+def test_an_empty_reasoning_delta_builds_no_card(host):
+    """A provider that emits a present-but-blank reasoning field must not cost
+    a card. live=True bypasses add_thinking_card's 'no thinking → no card'
+    guard, so creating on the first EVENT froze an empty card into the turn
+    shell — a blank strip between the name and the reply, present live but
+    absent from the saved session and gone again after a reload."""
+    host.on_stream_thinking("")
+    assert host._stream_think_card is None
+    assert host.segments == []
+
+    host.on_stream_thinking("   \n\t ")
+    assert host._stream_think_card is None
+    assert host.segments == []
+
+
+def test_empty_deltas_are_buffered_until_content_arrives(host):
+    """Buffered, not dropped: whatever precedes the first real content still
+    belongs to the reasoning."""
+    host.on_stream_thinking("")
+    host.on_stream_thinking("  ")
+    host.on_stream_thinking("actual reasoning")
+    assert host._stream_think_card is not None
+    assert host._stream_think_card['state']['text'] == "actual reasoning"
+    assert len(host.segments) == 1
+
+
+def test_a_stream_with_only_blank_reasoning_leaves_nothing_behind(host):
+    host.on_stream_started()
+    host.on_stream_thinking("")
+    host.on_stream_text("the reply")
+    host.on_stream_finished()
+    assert host._stream_think_card is None
+    assert host.saved_thinking == []
+    assert host.discarded == []           # never built, so nothing to remove
+    assert len(host.segments) == 1        # the reply stub only
+
+
+def test_an_empty_card_is_removed_not_frozen(host):
+    """Belt-and-braces to the buffering above: if a card somehow reaches the
+    finish path with no text, it is discarded rather than left reserving
+    header height in the shell."""
+    host._stream_think_card = host.add_thinking_card('', save_to_history=False,
+                                                     live=True)
+    assert len(host.segments) == 1
+    host.on_stream_finished()
+    assert host._stream_think_card is None
+    assert len(host.discarded) == 1
+    assert host.segments == []
+    assert host.saved_thinking == []
+
+
+def test_the_pending_buffer_resets_between_turns(host):
+    """A blank delta left over from a previous turn must not prepend itself to
+    the next turn's reasoning."""
+    host.on_stream_thinking("  ")
+    host.on_stream_finished()
+    host._turn_thinking_card = None        # new turn shell
+    host.on_stream_thinking("fresh")
+    assert host._stream_think_card['state']['text'] == "fresh"
 
 
 # ── hand-off ─────────────────────────────────────────────────────────────────

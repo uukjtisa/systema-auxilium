@@ -43,9 +43,8 @@ class _Sig:
 
 
 def _streaming_module(text="Streamed Title", thinking="secret reasoning"):
-    """A contract-v2 script that streams when asked to."""
+    """A provider script that streams when asked to."""
     m = types.ModuleType("streaming_provider")
-    m.CONTRACT_VERSION = 2
 
     def chat(system_prompt, messages, *, images=None, tools=None, stream=False):
         if stream:

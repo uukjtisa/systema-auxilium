@@ -11,13 +11,12 @@ and it appears instantly.
 Each folder ships a `_template.py` skeleton with full docstrings and a
 paste-ready prompt you can hand to any AI to generate a working provider.
 
-## LLM provider contract (version 2)
+## LLM provider contract
 
-An LLM provider script declares the contract version and defines ONE function:
+An LLM provider script defines ONE function. That is the whole requirement —
+there is no version marker and nothing else to declare:
 
 ```python
-CONTRACT_VERSION = 2
-
 def chat(system_prompt: str, messages: list, *,
          images=None, tools=None, stream=False)
 ```
@@ -98,19 +97,11 @@ Then handle the `tools` argument inside `chat()`. See
 canonical tools to your dialect and parses responses back, so this is a few
 lines.
 
-### Legacy contract (still supported)
-
-Scripts written against the old contract — `chat(system_prompt, messages) -> str`
-plus optional `chat_image(...)` / `chat_tools(...)` — keep working untouched.
-The loader wraps them into the same normalized result. They simply cannot
-stream. New scripts should use the v2 contract above.
-
 ## Included LLM providers
 
 All of these ship configured with placeholder keys — add your own key and select
-the script. All are contract v2 with streaming, and support native tool calling
-unless noted. Model choice is a dropdown in Settings, so ONE script covers a
-whole backend.
+the script. All stream, and support native tool calling unless noted. Model
+choice is a dropdown in Settings, so ONE script covers a whole backend.
 
 | Script | Backend | Notes |
 | --- | --- | --- |

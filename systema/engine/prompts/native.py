@@ -10,7 +10,6 @@ tool calls, executed sequentially in emitted order with ONE batched result
 turn; only python_interpreter is capped at one call per response.
 '''
 
-from systema.execution.tool_registry import CANONICAL_TOOLS
 
 # Frames a shared-core code example for native invocation (see shared.py).
 INVOKE_HINT = "make a python_interpreter tool call whose code argument is:"

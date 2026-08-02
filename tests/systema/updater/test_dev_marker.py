@@ -10,7 +10,6 @@ file to every user.
 The marker is now `.dev-copy` — neutral, purpose-named, and the UI says only
 WHAT was detected, never which file gave it away.
 """
-import pytest
 
 from systema.updater import service
 

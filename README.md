@@ -113,14 +113,13 @@ There is no hardcoded provider list; each provider is a self-contained Python fi
 
 Each provider implements a small contract:
 
-- **LLM providers** (`resources/providers/large-language-models/`) declare `CONTRACT_VERSION = 2` and define
+- **LLM providers** (`resources/providers/large-language-models/`) define exactly
   ONE entry point:
   `chat(system_prompt, messages, *, images=None, tools=None, stream=False)`
   - Returns `{"content", "thinking", "tool_calls", "finish_reason"}` (a plain string also works)
   - `images` for vision, `tools` for native function calling (see
     [Tool Calling](#tool-calling-native-and-compatibility)), `stream=True` to stream chunks
   - Optional `Display` dict → an auto-generated settings form (API key, model dropdown, …)
-  - Legacy scripts (`chat(sys, msgs) -> str` + optional `chat_image` / `chat_tools`) still work
 - **TTS providers** (`resources/providers/text-to-speech/`) define `speak(text, save_to) -> bool`
 
 Drop a script in the right folder, hit Refresh in Settings, and it appears instantly. No codebase

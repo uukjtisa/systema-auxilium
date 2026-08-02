@@ -3,13 +3,24 @@ ui/floating_window_settings.py
 Appearance Settings Window - Configure floating window appearance
 """
 
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-                             QPushButton, QLineEdit, QSlider, QRadioButton,
-                             QButtonGroup, QGroupBox, QCheckBox, QGridLayout,
-                             QScrollArea, QFrame, QComboBox, QFontComboBox,
-                             QStackedWidget)
-from PyQt6.QtCore import Qt, QTimer, QPoint, QRect, QRectF, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPen, QFont, QRegion, QImage, QPolygonF, QBrush, QLinearGradient
+from PyQt6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QLineEdit,
+    QSlider,
+    QRadioButton,
+    QButtonGroup,
+    QCheckBox,
+    QGridLayout,
+    QScrollArea,
+    QFrame,
+    QFontComboBox,
+    QStackedWidget)
+from PyQt6.QtCore import Qt, QPoint, QRect, QRectF, pyqtSignal
+from PyQt6.QtGui import QColor, QPainter, QPen, QFont, QImage, QPolygonF
 import math
 from systema.ui.base_window import BaseWindow
 from systema.ui import theme as _theme

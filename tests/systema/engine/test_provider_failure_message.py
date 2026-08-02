@@ -11,7 +11,6 @@ Now every silent-failure path records a NAMED, actionable message.
 """
 import types
 
-import pytest
 
 from systema.engine.ai_engine import AIEngine
 
@@ -36,7 +35,6 @@ def _engine(module=None, settings=None):
 
 def _module(returns):
     m = types.ModuleType("provider_opencode_zen")
-    m.CONTRACT_VERSION = 2
     m.chat = lambda sp, msgs, **kw: returns
     return m
 
@@ -81,7 +79,6 @@ def test_the_failure_is_logged_for_debugging():
 
 def test_a_raising_provider_is_named_too():
     mod = types.ModuleType("provider_opencode_zen")
-    mod.CONTRACT_VERSION = 2
 
     def _boom(sp, msgs, **kw):
         raise ConnectionError("connection reset by peer")

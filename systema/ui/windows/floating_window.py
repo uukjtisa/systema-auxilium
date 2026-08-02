@@ -3,15 +3,12 @@ ui/floating_window.py
 Floating Window - Main chat interface with configurable appearance
 Based on the prototype test_accessing_app.py
 """
-import threading
 
-from PyQt6.QtWidgets import QWidget, QPushButton, QVBoxLayout, QMenu, QLabel, QApplication, QMessageBox
+from PyQt6.QtWidgets import QWidget, QPushButton, QMenu, QApplication, QMessageBox
 from PyQt6.QtGui import QAction, QCursor, QPainter, QColor, QPen, QLinearGradient, QBrush
 from PyQt6.QtCore import Qt, QTimer, QPoint, QRect, QRectF
 from systema.ui.windows.floating_window_settings import AppearanceSettingsWindow
 from systema.ui.windows.debug_window import DebugWindow
-import json
-import os
 import math
 from systema.common.logger import _make_logger, _NoOpLogger
 from systema.ui import theme as _theme
@@ -19,7 +16,6 @@ from systema.ui import theme as _theme
 
 _verbose = True
 log = _make_logger("FloatingWindow") if _verbose else _NoOpLogger()
-from pathlib import Path
 
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -91,8 +87,6 @@ class FloatingWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
         # Set size from bg dimensions (the visual footprint that the widget occupies)
-        bg_w = self.settings.get('bg_width', self.settings['size'])
-        bg_h = self.settings.get('bg_height', self.settings['size'])
         # The widget must be large enough to contain both the bg shape AND the hitbox (which can extend beyond)
         self._recalc_widget_size()
 
@@ -281,7 +275,6 @@ class FloatingWindow(QWidget):
 
     def paintEvent(self, event):
         """Draw the background shape + hitbox debug overlay."""
-        from PyQt6.QtGui import QPainterPath
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -856,8 +849,6 @@ class FloatingWindow(QWidget):
         """Handle tool mode updates"""
         # ── Show code + output block in chat window when code ran ──────────────
         code   = result.get('code', '')
-        output = getattr(getattr(self, '_controller_ref', None), '_last_work_output_snapshot', '') \
-                 if not code else ''
         # Grab output from the tool_manager directly
         try:
             tm_output = self.controller.ai.tool_manager.work.last_output or ''

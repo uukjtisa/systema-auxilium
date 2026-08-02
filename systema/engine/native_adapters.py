@@ -439,12 +439,12 @@ def _merge_alternation(dialect: str, msgs: list) -> list:
     return msgs
 
 
-# ── Inline (positional) images — contract v2.1 ───────────────────────────────
+# ── Inline (positional) images ──────────────────────────────────────────
 
 def render_inline_images(messages: list, encoder, dialect: str = "openai") -> list:
     """Turn per-message `images` lists into dialect-native multimodal content.
 
-    Contract v2.1 lets a message carry the pictures that belong to IT:
+    A message may carry the pictures that belong to IT:
 
         {"role": "user", "content": "look at this",
          "images": [{"path": "...", "n": 3, "name": "shot.png"}, ...]}

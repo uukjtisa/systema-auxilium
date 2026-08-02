@@ -1,16 +1,16 @@
 """
 tests/systema/engine/test_provider_contract.py
 
-The unified provider-script contract layer (engine/provider_contract.py):
-v2 detection, the legacy shim (chat / chat_image / chat_tools -> normalized
-result), Display validation incl. the extended opts forms, override
-application, secret-name masking heuristic, <think>-tag splitting (whole and
+The provider-script contract layer (engine/provider_contract.py): the ONE
+call path (a script is valid if it defines a callable chat, with NO version
+marker), Display validation incl. the extended opts forms, override
+application, explicit secret typing, <think>-tag splitting (whole and
 incremental/streamed), the shared OpenAI-events chunk generator, and
 drain_stream collapse.
 """
+import inspect
 import types
 
-import pytest
 
 from systema.engine import provider_contract as pc
 
@@ -22,51 +22,94 @@ def _mod(**attrs):
     return m
 
 
-# ── contract detection ───────────────────────────────────────────────────────
+# ── one contract, no version marker ──────────────────────────────────────────
 
-def test_is_v2_requires_marker_and_chat():
-    assert pc.is_v2(_mod(CONTRACT_VERSION=2, chat=lambda *a, **k: "x"))
-    assert not pc.is_v2(_mod(chat=lambda *a, **k: "x"))            # no marker
-    assert not pc.is_v2(_mod(CONTRACT_VERSION=2))                  # no chat
-    assert not pc.is_v2(None)
+def _v2_chat(sp, msgs, *, images=None, tools=None, stream=False):
+    return {"content": "ok"}
 
 
-def test_supports_native_v2_and_legacy():
-    v2 = _mod(CONTRACT_VERSION=2, chat=lambda *a, **k: {}, SUPPORTS_NATIVE_TOOLS=True)
-    legacy = _mod(SUPPORTS_NATIVE_TOOLS=True, chat_tools=lambda *a, **k: {})
-    plain = _mod(chat=lambda *a, **k: "x")
-    assert pc.supports_native(v2)
-    assert pc.supports_native(legacy)
-    assert not pc.supports_native(plain)
+def test_a_marker_less_script_gets_the_full_treatment():
+    """THE regression this whole removal is about.
+
+    `CONTRACT_VERSION` used to default to the retired contract when absent, so a
+    correctly written script that merely forgot one line was silently downgraded
+    — no images, no tools, no streaming, reported as vision-less, and never an
+    error. A script is now valid on `chat` alone.
+    """
+    seen = {}
+
+    def chat(sp, msgs, *, images=None, tools=None, stream=False):
+        seen.update(images=images, tools=tools, stream=stream)
+        return {"content": "ok"}
+
+    m = _mod(chat=chat, SUPPORTS_NATIVE_TOOLS=True)     # no marker anywhere
+    assert pc.supports_native(m)
+    assert pc.supports_images(m)
+    out = pc.invoke(m, "s", [], images=["i"], tools=[{"name": "x"}])
+    assert out["content"] == "ok"
+    assert seen == {"images": ["i"], "tools": [{"name": "x"}], "stream": False}
 
 
-# ── legacy shim via invoke ───────────────────────────────────────────────────
-
-def test_invoke_legacy_chat_string_normalized():
-    m = _mod(chat=lambda sp, msgs: "hello")
-    out = pc.invoke(m, "sys", [{"role": "user", "content": "hi"}])
-    assert out == {"content": "hello", "thinking": None,
-                   "tool_calls": [], "finish_reason": None}
-
-
-def test_invoke_legacy_chat_image_preferred_with_images():
-    m = _mod(chat=lambda sp, msgs: "text-path",
-             chat_image=lambda sp, msgs, paths: f"img-path:{len(paths)}")
-    out = pc.invoke(m, "", [], images=["a.png", "b.png"])
-    assert out["content"] == "img-path:2"
+def test_a_leftover_version_marker_is_ignored_never_an_error():
+    """Someone's old script may still carry the line. It means nothing now."""
+    m = _mod(CONTRACT_VERSION=2, chat=_v2_chat)
+    assert pc.invoke(m, "", [])["content"] == "ok"
+    m99 = _mod(CONTRACT_VERSION=99, chat=_v2_chat)
+    assert pc.invoke(m99, "", [])["content"] == "ok"
 
 
-def test_invoke_legacy_chat_tools_text_key_mapped_to_content():
-    m = _mod(SUPPORTS_NATIVE_TOOLS=True,
-             chat_tools=lambda sp, msgs, tools, images=None: {
-                 "text": "reply", "tool_calls": [{"id": "1", "name": "t",
-                                                  "arguments": {}}]})
-    out = pc.invoke(m, "", [], tools=[{"name": "t"}])
-    assert out["content"] == "reply"
-    assert out["tool_calls"][0]["name"] == "t"
+def test_supports_native_is_the_flag_plus_a_chat():
+    assert pc.supports_native(_mod(chat=_v2_chat, SUPPORTS_NATIVE_TOOLS=True))
+    assert not pc.supports_native(_mod(chat=_v2_chat))          # no flag
+    assert not pc.supports_native(_mod(SUPPORTS_NATIVE_TOOLS=True))   # no chat
+    assert not pc.supports_native(None)
 
 
-def test_invoke_v2_passes_kwargs_and_returns_dict():
+def test_supports_images_defaults_true_and_opts_out_explicitly():
+    assert pc.supports_images(_mod(chat=_v2_chat))
+    assert not pc.supports_images(_mod(chat=_v2_chat, SUPPORTS_VISION=False))
+    assert not pc.supports_images(None)
+
+
+def test_supports_vision_may_be_a_callable_for_per_model_answers():
+    """One backend hosts models with different capabilities. A per-PROVIDER
+    flag either hides the models that can see or fails inside the encoder on
+    the ones that can't, so a script may answer per selected model."""
+    m = _mod(chat=_v2_chat, MODEL="text-only")
+    m.SUPPORTS_VISION = lambda: m.MODEL.endswith("-vl")
+    assert not pc.supports_images(m)
+    m.MODEL = "big-vl"                      # what the settings form setattrs
+    assert pc.supports_images(m)
+
+
+def test_a_raising_vision_probe_means_no_vision_not_a_crash():
+    """A capability probe must never take the app down."""
+    def boom():
+        raise RuntimeError("bad model id")
+
+    m = _mod(chat=_v2_chat)
+    m.SUPPORTS_VISION = boom
+    assert pc.supports_images(m) is False
+
+
+def test_supports_inline_images_is_the_flag_alone():
+    assert pc.supports_inline_images(_mod(chat=_v2_chat,
+                                          SUPPORTS_INLINE_IMAGES=True))
+    assert not pc.supports_inline_images(_mod(chat=_v2_chat))
+
+
+def test_the_retired_entry_points_are_gone():
+    """No second calling convention may come back: two of them is what let
+    code_agent call chat_tools() on a module that never defines it."""
+    assert not hasattr(pc, "is_v2")
+    src = inspect.getsource(pc)
+    assert "chat_tools" not in src.split('"""', 2)[2]   # docstring may name it
+    assert "chat_image" not in src.split('"""', 2)[2]
+
+
+# ── invoke ───────────────────────────────────────────────────────────────────
+
+def test_invoke_passes_kwargs_and_returns_dict():
     seen = {}
 
     def chat(sp, msgs, *, images=None, tools=None, stream=False):
@@ -74,23 +117,30 @@ def test_invoke_v2_passes_kwargs_and_returns_dict():
         return {"content": "ok", "thinking": "why", "tool_calls": [],
                 "finish_reason": "stop"}
 
-    m = _mod(CONTRACT_VERSION=2, chat=chat)
+    m = _mod(chat=chat)
     out = pc.invoke(m, "s", [], images=["i"], tools=[{"name": "x"}])
     assert out["content"] == "ok" and out["thinking"] == "why"
     assert seen == {"images": ["i"], "tools": [{"name": "x"}], "stream": False}
 
 
-def test_invoke_v2_stream_returns_generator():
+def test_invoke_stream_returns_generator():
     def chat(sp, msgs, *, images=None, tools=None, stream=False):
         def gen():
             yield {"type": "text", "content": "a", "finish_reason": None}
             yield {"type": "done", "content": "", "finish_reason": "stop"}
         return gen() if stream else {"content": "a"}
 
-    m = _mod(CONTRACT_VERSION=2, chat=chat)
+    m = _mod(chat=chat)
     out = pc.invoke(m, "", [], stream=True)
     assert hasattr(out, "__next__")
     assert pc.drain_stream(out)["content"] == "a"
+
+
+def test_invoke_plain_string_reply_normalized():
+    m = _mod(chat=lambda sp, msgs, **kw: "hello")
+    out = pc.invoke(m, "sys", [{"role": "user", "content": "hi"}])
+    assert out == {"content": "hello", "thinking": None,
+                   "tool_calls": [], "finish_reason": None}
 
 
 def test_invoke_no_chat_returns_none():
@@ -253,6 +303,8 @@ def test_drain_stream_collapses_and_fires_callbacks():
 
 def test_normalize_result_shapes():
     assert pc.normalize_result("s")["content"] == "s"
-    legacy = pc.normalize_result({"text": "t", "tool_calls": [1]})
-    assert legacy["content"] == "t" and legacy["tool_calls"] == [1]
+    d = pc.normalize_result({"content": "t", "tool_calls": [1]})
+    assert d["content"] == "t" and d["tool_calls"] == [1]
+    # "text" was the retired chat_tools key — it is NOT content any more.
+    assert pc.normalize_result({"text": "t"})["content"] == ""
     assert pc.normalize_result(42) is None

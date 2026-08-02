@@ -6,7 +6,6 @@ Session Manager - Handles session save/load/delete operations
 import json
 from systema.common.logger import _make_logger, _NoOpLogger
 from datetime import datetime
-from pathlib import Path
 import re
 
 
@@ -48,12 +47,6 @@ class SessionManager:
         log.debug(f"[SessionManager.create_session] Generated session_id: '{session_id}' | "
                   f"creation_time: '{creation_time}'")
 
-        session_data = {
-            "session_name": "New Session",
-            "creation_time_and_date": creation_time,
-            "id": session_id,
-            "chat_history": []
-        }
 
         # Don't save empty session yet - will be saved when first message is sent
         self.session_metadata[session_id] = {
@@ -61,8 +54,8 @@ class SessionManager:
             "date": creation_time,
             "id": session_id
         }
-        log.debug(f"[SessionManager.create_session] Metadata cached for new session — "
-                  f"NOT persisted to disk yet (waiting for first message)")
+        log.debug("[SessionManager.create_session] Metadata cached for new session — "
+                  "NOT persisted to disk yet (waiting for first message)")
         log.info(f"[SessionManager.create_session] Session created in memory: id='{session_id}'")
         return session_id
 
@@ -130,7 +123,7 @@ class SessionManager:
             log.warning(f"[SessionManager.load_session] File not found: '{session_file}' — returning None")
             return None
 
-        log.debug(f"[SessionManager.load_session] File exists — reading JSON")
+        log.debug("[SessionManager.load_session] File exists — reading JSON")
         try:
             with open(session_file, 'r', encoding='utf-8') as f:
                 session_data = json.load(f)
@@ -210,7 +203,7 @@ class SessionManager:
         log.debug(f"[SessionManager.delete_session] Target file: '{session_file}'")
 
         if session_file.exists():
-            log.debug(f"[SessionManager.delete_session] File confirmed — proceeding with unlink")
+            log.debug("[SessionManager.delete_session] File confirmed — proceeding with unlink")
             try:
                 session_file.unlink()
                 if session_id in self.session_metadata:
@@ -253,7 +246,7 @@ class SessionManager:
 
             # Update name in data
             session_data['session_name'] = new_name
-            log.debug(f"[SessionManager.rename_session] session_name updated in data object")
+            log.debug("[SessionManager.rename_session] session_name updated in data object")
 
             # Save to new filename
             with open(new_file, 'w', encoding='utf-8') as f:

@@ -5,7 +5,7 @@ Local Ollama provider — any locally pulled model (vision + tools + thinking +
 streaming, model-dependent). Default: qwen3.5:9b. Set the model name in
 Settings to whatever `ollama list` shows.
 
-Contract v2: unified chat() with streaming; editable settings via Display.
+Unified chat() with streaming; editable settings via Display.
 Inline <think>...</think> reasoning is split out as "thinking" — the app
 renders it in a collapsible card and never sends it back to the model.
 
@@ -27,15 +27,38 @@ NUM_CTX = 12288  # context window tokens (model supports up to 262k)
 # Tell Systema this provider supports native tool calling and vision.
 SUPPORTS_NATIVE_TOOLS = True
 NATIVE_DIALECT = "openai"
-SUPPORTS_VISION = True
-# Contract v2.1: messages may carry their own `images`, so an attachment stays
+
+# Vision is PER MODEL — you choose what Ollama has pulled locally, and most
+# local models are text-only. The old blanket True meant the app accepted an
+# attachment for a text-only model and the picture was silently ignored by the
+# runtime, which reads as "vision is broken" rather than "wrong model".
+# Name-matched against the vision-capable families Ollama ships, because there
+# is no local capability API to ask and the tag is all we have.
+_VISION_NAME_MARKERS = ("llava", "vision", "-vl", "bakllava", "moondream",
+                        "minicpm-v", "gemma3", "qwen2.5vl", "qwen3-vl")
+
+
+def SUPPORTS_VISION() -> bool:
+    """True when the local model's name marks it as vision-capable."""
+    m = (MODEL or "").lower()
+    return any(mark in m for mark in _VISION_NAME_MARKERS)
+
+
+# Longest side an image is downscaled to before upload.
+MAX_IMAGE_DIMENSION = 1280
+
+# Messages may carry their own `images`, so an attachment stays
 # anchored to the turn it arrived in rather than being moved onto the newest
 # user turn on every request. Requires a vision-capable local model (llava,
 # qwen-vl, llama3.2-vision, …) — a text-only model will simply ignore them.
 SUPPORTS_INLINE_IMAGES = True
-IMAGE_FORMATS = ("png", "jpg", "jpeg", "gif", "webp")
-
-CONTRACT_VERSION = 2
+# Everything Pillow can DECODE, not just what the endpoint accepts: the encoder
+# re-encodes every picture to JPEG/PNG on the way out, so the input extension
+# only has to be readable. A narrow list refused a .jfif at the attach dialog
+# for no reason at all.
+IMAGE_FORMATS = ("png", "jpg", "jpeg", "jfif", "jpe", "gif", "webp", "bmp",
+                 "dib", "tif", "tiff", "ico", "tga", "ppm", "pgm", "pbm",
+                 "avif", "heic", "heif")
 
 Display = {
     "BASE_URL": ("Ollama URL", "input",
@@ -47,7 +70,10 @@ Display = {
     "NUM_CTX":  ("Context tokens", "number",
                  {"tooltip": "Context window per request — bigger uses more RAM/VRAM"}),
     "NOTE_1":   ("NOTE: requires a running local Ollama install. Vision/tools/"
-                 "thinking depend on the chosen model.", "info_box"),
+                 "thinking depend on the chosen model. Image attachments are "
+                 "offered only for models whose name marks them vision-capable "
+                 "(llava, *-vl, gemma3, moondream, minicpm-v, *vision*).",
+                 "info_box"),
 }
 
 
@@ -96,10 +122,40 @@ def _warm_up_once():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _encode_image(path: str) -> dict:
+    """One image file -> an OpenAI-compatible base64 image_url content block.
+
+    Re-encodes through Pillow rather than shipping the file's own bytes, which
+    is what makes the odd extensions work: a .jfif, .bmp, .tif or a CMYK jpeg
+    is decoded and written back out as plain RGB JPEG (or PNG when it has an
+    alpha channel), so the runtime only ever sees a format it accepts. Falls
+    back to the raw bytes when Pillow is absent — a missing optional dependency
+    should cost quality, not the feature.
+    """
     mime_type, _ = mimetypes.guess_type(path)
     mime_type = mime_type or "image/jpeg"
-    with open(path, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode()
+    try:
+        import io as _io
+        from PIL import Image
+
+        with Image.open(path) as img:
+            if img.mode in ("RGBA", "LA", "P"):
+                img, fmt, mime_type = img.convert("RGBA"), "PNG", "image/png"
+            else:
+                img, fmt, mime_type = img.convert("RGB"), "JPEG", "image/jpeg"
+            w, h = img.size
+            if max(w, h) > MAX_IMAGE_DIMENSION:
+                scale = MAX_IMAGE_DIMENSION / max(w, h)
+                img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+            buf = _io.BytesIO()
+            if fmt == "JPEG":
+                img.save(buf, format="JPEG", quality=85, optimize=True)
+            else:
+                img.save(buf, format="PNG", optimize=True)
+            data = buf.getvalue()
+    except ImportError:
+        with open(path, "rb") as f:
+            data = f.read()
+    b64 = base64.b64encode(data).decode()
     return {
         "type": "image_url",
         "image_url": {"url": f"data:{mime_type};base64,{b64}"},
@@ -109,8 +165,8 @@ def _encode_image(path: str) -> dict:
 def _build_messages(system_prompt: str, messages: list, image_paths: list = None) -> list:
     """Convert Systema messages into OpenAI-compatible messages for Ollama's API.
 
-    Two image channels: INLINE images ride the message that owns them (contract
-    v2.1, rendered first), while the flat `image_paths` queue from
+    Two image channels: INLINE images ride the message that owns them
+    (rendered first), while the flat `image_paths` queue from
     attach_image_to_context() is ephemeral and still rides the final user turn.
     """
     from systema.engine import native_adapters as na
@@ -157,7 +213,7 @@ def _payload(system_prompt: str, messages: list, image_paths=None, tools=None,
 
 
 def chat(system_prompt: str, messages: list, *, images=None, tools=None, stream=False):
-    """Unified v2 entry point for the local Ollama model (text/vision/tools).
+    """The one entry point for the local Ollama model (text/vision/tools).
     No hardcoded timeout — the app's "AI Response" timeout setting governs."""
     _warm_up_once()
     payload = _payload(system_prompt, messages, image_paths=images,

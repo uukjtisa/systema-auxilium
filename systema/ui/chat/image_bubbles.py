@@ -102,7 +102,7 @@ class ImageBubblesMixin:
         entry = {'role': 'user', 'content': '',
                  '_images': []} if origin == 'user' else {
             'role': 'ui_event', '_type': 'image_attach',
-            'content': f'Attached image(s)', '_annotation': annotation,
+            'content': 'Attached image(s)', '_annotation': annotation,
             '_images': []}
 
         refs = ai.attach_images(paths, origin=origin, entry=entry)

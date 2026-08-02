@@ -41,7 +41,7 @@ def _get_location_info() -> dict:
                 "ip":          d.get("query", "Unknown"),
                 "status":      "ok",
             }
-    except Exception as e:
+    except Exception:
         pass
     return {"status": "unavailable", "reason": "Could not reach IP geolocation service."}
 

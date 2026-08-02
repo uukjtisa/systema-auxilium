@@ -190,7 +190,7 @@ class AIEngine:
         self.include_notify_tool = False
 
         # Ephemeral image analysis: paths queued by attach_image_to_context() are
-        # fed to the provider's chat_image() on the NEXT work-mode step, exactly
+        # fed to the provider's chat(images=...) on the NEXT work-mode step, exactly
         # once, then deleted — never pinned, never stored in history (token-cheap).
         self._pending_context_images = []
         self._images_lock = _threading.Lock()
@@ -214,10 +214,9 @@ class AIEngine:
         """True if the active provider script can be handed images — the
         capability attach_image_to_context() needs. Never raises.
 
-        Delegates to the contract (see provider_contract.supports_images): v2
-        scripts take images through chat(images=...), legacy ones need
-        chat_image(). Checking for chat_image() directly — as this did — locked
-        every post-unification provider out of image analysis.
+        Delegates to the contract (see provider_contract.supports_images):
+        images ride the one chat(images=...) entry point, so a script qualifies
+        unless it declares SUPPORTS_VISION = False.
         """
         try:
             return pc.supports_images(self._load_provider_module())
@@ -447,7 +446,6 @@ class AIEngine:
         Only user and assistant turns are kept — system messages (work mode prompts,
         memory injections, etc.) are stripped so they don't pollute the prefill."""
         import json
-        from pathlib import Path
         from systema import APP_ROOT as _APP_ROOT
         sessions_dir = _APP_ROOT / "data" / "sessions"
         session_file = None
@@ -661,9 +659,9 @@ class AIEngine:
         Any subsequent 'system' role messages are wrapped as user turns.
         Consecutive messages of the same role are merged (required by Anthropic).
 
-        Per-message `images` (contract v2.1) are CARRIED THROUGH, including
-        across a merge — dropping them here would silently undo positional
-        images for every compat-mode provider.
+        Per-message `images` are CARRIED THROUGH, including across a merge —
+        dropping them here would silently undo positional images for every
+        compat-mode provider.
         """
         system_prompt = None
         convo = []
@@ -824,7 +822,7 @@ class AIEngine:
                 continue
 
             content = m.get('content') or ''
-            # Per-message images (contract v2.1) ride the turn that owns them.
+            # Per-message images ride the turn that owns them.
             # Only user-facing turns can carry pictures in every dialect, so a
             # system entry with images becomes a user turn below and keeps them.
             imgs = m.get('images')
@@ -925,7 +923,7 @@ class AIEngine:
 
     def _native_provider_supported(self, module) -> bool:
         """True if the active mode is native AND the provider script opts in
-        (v2 chat(tools=...) or legacy chat_tools)."""
+        (SUPPORTS_NATIVE_TOOLS, served through chat(tools=...))."""
         return self._tool_mode() == 'native' and pc.supports_native(module)
 
     def _setting(self, key, default=None):
@@ -946,7 +944,7 @@ class AIEngine:
             return 0
 
     def _streaming_on(self, module) -> bool:
-        """Stream when the setting is on (default) AND the script is v2.
+        """Stream when the setting is on (default) AND the script has a chat().
         Sub-agents / background callers opt out via self.allow_streaming or,
         structurally, by running inside background_call()."""
         # getattr, not the in_background_call property: this method is also
@@ -956,7 +954,7 @@ class AIEngine:
             getattr(self, 'allow_streaming', True)
             and getattr(self, '_background_depth', 0) <= 0
             and bool(self._setting('streaming_enabled', True))
-            and pc.is_v2(module)
+            and callable(getattr(module, 'chat', None))
         )
 
     @property
@@ -1190,8 +1188,7 @@ class AIEngine:
     def _provider_script(self, messages, images=None, module=None,
                          stream_ok=True) -> str | None:
         """Custom script provider — reimports the user's .py file on every call
-        and invokes its unified chat() (legacy chat/chat_image/chat_tools are
-        shimmed). `images` routes to the vision path.
+        and invokes its chat(). `images` routes to the vision path.
 
         `stream_ok=False` forces a non-streaming call: callers whose output is
         NOT the visible chat turn (the in-dialog code agent, compaction, the
@@ -1262,8 +1259,10 @@ class AIEngine:
         messages = self._build_messages()
 
         try:
-            from systema.common.token_est import log_tokens, estimate_history_tokens
+            from systema.common.token_est import (log_tokens, log_request,
+                                                  estimate_history_tokens)
             log_tokens(estimate_history_tokens(messages))
+            log_request()
         except Exception:
             pass
 
@@ -1284,7 +1283,7 @@ class AIEngine:
                 _native_module = self._load_provider_module()
                 if not self._native_provider_supported(_native_module):
                     log.info("[AIEngine._call_provider] Native mode requested but provider "
-                             "lacks chat_tools/SUPPORTS_NATIVE_TOOLS — falling back to compat")
+                             "lacks SUPPORTS_NATIVE_TOOLS — falling back to compat")
                     _native_module = None
 
             # Debug transport label (the native path sets its own 'native' label;
@@ -1325,8 +1324,10 @@ class AIEngine:
                 _t.sleep(wait)
             if result:
                 try:
-                    from systema.common.token_est import log_output_tokens, estimate_tokens
+                    from systema.common.token_est import (log_output_tokens,
+                                                          log_response, estimate_tokens)
                     log_output_tokens(estimate_tokens(result))
+                    log_response()
                 except Exception:
                     pass
             return result
@@ -1348,8 +1349,10 @@ class AIEngine:
             if m.get('role') in ('user', 'assistant')
         )
         try:
-            from systema.common.token_est import log_tokens, estimate_history_tokens
+            from systema.common.token_est import (log_tokens, log_request,
+                                                  estimate_history_tokens)
             log_tokens(estimate_history_tokens(messages))
+            log_request()
         except Exception:
             pass
         # Background/one-shot callers (task agents, compaction, session naming):
@@ -1359,8 +1362,10 @@ class AIEngine:
             result = self._provider_script(messages, stream_ok=False)
         if result:
             try:
-                from systema.common.token_est import log_output_tokens, estimate_tokens
+                from systema.common.token_est import (log_output_tokens, log_response,
+                                                      estimate_tokens)
                 log_output_tokens(estimate_tokens(result))
+                log_response()
             except Exception:
                 pass
         return result

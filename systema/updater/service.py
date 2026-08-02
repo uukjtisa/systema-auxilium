@@ -181,7 +181,6 @@ class UpdaterService(QObject):
     @property
     def available(self) -> bool:
         try:
-            import gitplucker  # noqa: F401
             return True
         except Exception as e:
             log.warning(f"[UpdaterService.available] gitplucker not importable: {e}")

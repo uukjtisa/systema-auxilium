@@ -7,16 +7,20 @@ icon on it again said nothing. `±` sat on every edit whether it added 91 lines
 or removed 116, and load_skill and unload_skill both showed `▤`, so two
 OPPOSITE events were indistinguishable in the transcript.
 
-Sharing a glyph is allowed where the action really is the same (⌕ searching, ▤
-a page you read, ⊘ refused). What is not allowed is one glyph across opposite
-actions — the tests below pin exactly that line.
+Sharing an icon is allowed where the action really is the same (the painted
+magnifier = searching, ▤ a page you read, ⊘ refused). What is not allowed is
+one glyph across opposite actions — the tests below pin exactly that line.
 
 Both rules are pure functions of the card's own persisted data, which is what
 makes reloads free: a card rebuilt from a session file derives the identical
-glyph, so there is no icon state to save and none that can drift.
+icon, so there is no icon state to save and none that can drift. `None` means
+the icon is PAINTED rather than typed — the card builds the widget.
 """
+import inspect
+
 import pytest
 
+from systema.ui.chat import event_cards
 from systema.ui.chat.event_cards import file_op_glyph, skill_action_glyph
 
 
@@ -65,7 +69,10 @@ def test_a_read_is_a_page():
 
 
 def test_a_grep_is_a_search():
-    assert file_op_glyph('grep') == '⌕'
+    """None = 'this op's icon is PAINTED, not typed' — add_file_op_card builds
+    a SearchGlyph. The decision still lives in file_op_glyph, so there is one
+    place that answers which icon an op gets."""
+    assert file_op_glyph('grep') is None
 
 
 def test_a_read_never_takes_a_write_glyph():
@@ -92,9 +99,21 @@ def test_a_refused_skill_load_matches_a_refused_file_op():
 
 # ── the shared-glyph policy, stated once ─────────────────────────────────────
 
-def test_searching_shares_one_glyph_on_purpose():
-    """grep and web_search are both a search — the web-search card uses ⌕ too."""
-    assert file_op_glyph('grep') == '⌕'
+def test_searching_shares_one_icon_on_purpose():
+    """grep and web_search are both a search, so both paint the SAME icon —
+    painted_icons.SearchGlyph. Neither uses a text character any more: U+2315
+    depended on the system font and could not follow the zoom cleanly."""
+    from systema.ui.widgets import painted_icons
+    assert file_op_glyph('grep') is None          # → painted, not typed
+    assert hasattr(painted_icons, 'SearchGlyph')
+    src = inspect.getsource(event_cards)
+    assert src.count('SearchGlyph(') == 2, "grep and web_search, no more no less"
+    assert '⌕' not in src, "the text magnifier is retired"
+
+
+def test_a_rejected_grep_still_reads_as_refused():
+    """The painted-icon branch must not outrank the 'it did not happen' signal."""
+    assert file_op_glyph('grep', rejected=True) == '⊘'
 
 
 def test_no_glyph_spans_two_opposite_actions():

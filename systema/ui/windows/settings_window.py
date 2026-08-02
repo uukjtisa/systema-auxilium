@@ -4,12 +4,24 @@ Settings Window - Configure API key, AI provider, Puter.js settings, Google Gemi
 FIXED: Voice settings now actually work - VAD and TTS voice selection are functional
 """
 
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-                             QLineEdit, QPushButton, QTextEdit, QComboBox, QGroupBox,
-                             QCheckBox, QScrollArea, QFrame, QSlider, QSpinBox, QDoubleSpinBox,
-                             QPlainTextEdit, QFileDialog, QStackedWidget, QMessageBox,
-                             QInputDialog)
-from PyQt6.QtCore import Qt, QPoint, QTimer, QRect, QRectF, QThread, pyqtSignal
+from PyQt6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QTextEdit,
+    QComboBox,
+    QGroupBox,
+    QCheckBox,
+    QScrollArea,
+    QFrame,
+    QSpinBox,
+    QStackedWidget,
+    QMessageBox,
+    QInputDialog)
+from PyQt6.QtCore import Qt, QTimer, QRectF, QThread, pyqtSignal
 from PyQt6.QtGui import QRegion, QPainter, QColor, QFont, QPen
 from systema.ui.base_window import BaseWindow
 from systema.ui import theme as _theme
@@ -171,12 +183,14 @@ class _SegmentedTabs(QWidget):
 
 
 class _TokenGraphCanvas(QWidget):
-    """Simple bar graph for token usage data."""
+    """Simple bar graph for a time-bucketed series (tokens, API calls, ...)."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, empty_text=None):
         super().__init__(parent)
         self._data = []
         self._mode = "Daily"
+        self._empty_text = empty_text or ("No token data yet.\n"
+                                          "Send a message to start tracking.")
         # Paint palette (overridden by set_palette to follow the active theme).
         self._c_bg = "#161B22"
         self._c_grid = "#21262D"
@@ -209,8 +223,7 @@ class _TokenGraphCanvas(QWidget):
             painter.setPen(QColor(self._c_muted))
             painter.setFont(QFont("Segoe UI", 9))
             painter.drawText(QRectF(0, 0, w, h),
-                             Qt.AlignmentFlag.AlignCenter,
-                             "No token data yet.\nSend a message to start tracking.")
+                             Qt.AlignmentFlag.AlignCenter, self._empty_text)
             painter.end()
             return
 
@@ -413,7 +426,7 @@ class SettingsWindow(BaseWindow):
 
     def init_ui(self):
         """Initialize tabbed settings UI"""
-        from PyQt6.QtWidgets import QTabWidget, QSlider, QRadioButton, QButtonGroup, QGridLayout
+        from PyQt6.QtWidgets import QSlider, QRadioButton, QButtonGroup, QGridLayout
         from PyQt6.QtCore import Qt as _Qt
 
         # ── Palette (from the active theme) ─────────────────────────────────
@@ -722,7 +735,6 @@ class SettingsWindow(BaseWindow):
         pf_lay.addWidget(self.prefilling_checkbox)
 
         # Source radios
-        from PyQt6.QtWidgets import QRadioButton, QButtonGroup
         self.pf_source_group = QButtonGroup(self)
         self.pf_radio_premade = QRadioButton("Use premade script  (PREFILLING in engine/prompts/compat.py, native.py)")
         self.pf_radio_session = QRadioButton("Use a saved session as prefilling history")
@@ -827,14 +839,73 @@ class SettingsWindow(BaseWindow):
         self._tok_out_summary_lbl.setStyleSheet(f"color: {_MUTED}; font-size: 9px;")
         tg_lay.addWidget(self._tok_out_summary_lbl)
 
+        # ── API Requests Graph ───────────────────────────────────────────────
+        # Same shape as the token graphs, different question: tokens say what a
+        # turn COST, these say whether the provider is actually answering. The
+        # gap between the two series is the signal — a request with no response
+        # is a failure, a timeout or a retry.
+        req_group = QGroupBox("API Requests")
+        req_group.setStyleSheet(_GROUP)
+        rg_lay = QVBoxLayout(req_group)
+        rg_lay.addWidget(_label(
+            "Calls sent to the provider, and replies actually received back.",
+            muted=True))
+
+        _req_mode_row = QHBoxLayout()
+        self._req_mode_btns = {}
+        self._req_graph_mode = "Daily"
+        for _m in _tok_modes:
+            _mb = QPushButton(_m)
+            _mb.setFixedHeight(22)
+            _mb.setCheckable(True)
+            _mb.setChecked(_m == "Daily")
+            _mb.setStyleSheet(f"""
+                QPushButton {{
+                    background: {_ELEV}; border: 1px solid {_BORDER};
+                    border-radius: 4px; font-size: 9px; color: {_MUTED}; padding: 0 6px;
+                }}
+                QPushButton:checked {{
+                    background: {_ACCENT}; border-color: {_ACCENT}; color: #000;
+                }}
+                QPushButton:hover:!checked {{ border-color: {_ACCENT}; color: {_TEXT}; }}
+            """)
+            _mb.clicked.connect(lambda _checked, m=_m: self._set_req_graph_mode(m))
+            _req_mode_row.addWidget(_mb)
+            self._req_mode_btns[_m] = _mb
+        rg_lay.addLayout(_req_mode_row)
+
+        rg_lay.addWidget(_label("Requests Sent", muted=True))
+        self._req_canvas = _TokenGraphCanvas(
+            empty_text="No API requests logged yet.\nSend a message to start tracking.")
+        self._req_canvas.setMinimumHeight(160)
+        self._req_canvas.setMaximumHeight(320)
+        self._req_canvas.setStyleSheet(f"background: {_ELEV}; border-radius: 6px;")
+        rg_lay.addWidget(self._req_canvas)
+        self._req_summary_lbl = QLabel("Open this tab to load data.")
+        self._req_summary_lbl.setStyleSheet(f"color: {_MUTED}; font-size: 9px;")
+        rg_lay.addWidget(self._req_summary_lbl)
+
+        rg_lay.addWidget(_label("Responses Received", muted=True))
+        self._resp_canvas = _TokenGraphCanvas(
+            empty_text="No responses logged yet.\nSend a message to start tracking.")
+        self._resp_canvas.setMinimumHeight(160)
+        self._resp_canvas.setMaximumHeight(320)
+        self._resp_canvas.setStyleSheet(f"background: {_ELEV}; border-radius: 6px;")
+        rg_lay.addWidget(self._resp_canvas)
+        self._resp_summary_lbl = QLabel("")
+        self._resp_summary_lbl.setStyleSheet(f"color: {_MUTED}; font-size: 9px;")
+        rg_lay.addWidget(self._resp_summary_lbl)
+
         # Theme the graph canvases (bg / grid / bars) to the active palette.
         # All values must be hex — QColor() can't parse CSS rgba() strings.
         _grid = _theme.lighten(_ELEV, 0.10)
         _accent_dim = _theme.darken(_ACCENT, 0.60)
-        for _cv in (self._tok_canvas, self._tok_out_canvas):
+        for _cv in (self._tok_canvas, self._tok_out_canvas,
+                    self._req_canvas, self._resp_canvas):
             _cv.set_palette(_ELEV, _grid, _ACCENT, _accent_dim, _MUTED)
 
         ai_lay.addWidget(tok_group)
+        ai_lay.addWidget(req_group)
 
         ai_lay.addStretch()
 
@@ -1783,10 +1854,10 @@ class SettingsWindow(BaseWindow):
             lambda _=None: self._update_memory_rows_visibility())
 
         open_mem_btn = QPushButton("Open Memory Manager")
-        open_mem_btn.setStyleSheet(f"""
-            QPushButton {{ background:#0E1F0E; border:1px solid #1E4A1E; border-radius:6px;
-                          color:#3FB950; padding:7px 14px; font-size:11px; }}
-            QPushButton:hover {{ background:#122712; }}
+        open_mem_btn.setStyleSheet("""
+            QPushButton { background:#0E1F0E; border:1px solid #1E4A1E; border-radius:6px;
+                          color:#3FB950; padding:7px 14px; font-size:11px; }
+            QPushButton:hover { background:#122712; }
         """)
         open_mem_btn.clicked.connect(self._open_memory_window)
         mg_lay.addWidget(open_mem_btn)
@@ -2544,8 +2615,9 @@ class SettingsWindow(BaseWindow):
             self._update_streaming_visibility()
 
     def _active_provider_streams(self) -> bool:
-        """True when the selected provider script can stream (contract v2).
-        Legacy scripts and the Manual provider cannot."""
+        """True when the selected provider script can stream — i.e. it defines
+        a callable chat(), which is the whole contract. The Manual provider
+        cannot."""
         from systema.engine import provider_contract as pc
         path = self.provider_script_combo.currentData()
         if not path:
@@ -2553,7 +2625,7 @@ class SettingsWindow(BaseWindow):
         cached = getattr(self, '_stream_support_cache', {})
         if path in cached:
             return cached[path]
-        ok = pc.is_v2(pc.load_module(path))
+        ok = callable(getattr(pc.load_module(path), 'chat', None))
         cached[path] = ok
         self._stream_support_cache = cached
         return ok
@@ -2629,9 +2701,16 @@ class SettingsWindow(BaseWindow):
         """One form row for a Display entry. Registers the editor widget in
         self._prov_display_widgets for collection on Save. `dopts` is the
         optional per-entry dict: tooltip / placeholder / item_tooltips."""
-        from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLineEdit,
-                                     QPlainTextEdit, QComboBox, QCheckBox,
-                                     QPushButton, QLabel, QFileDialog)
+        from PyQt6.QtWidgets import (
+            QWidget,
+            QHBoxLayout,
+            QVBoxLayout,
+            QLineEdit,
+            QPlainTextEdit,
+            QCheckBox,
+            QPushButton,
+            QLabel,
+            QFileDialog)
         from PyQt6.QtCore import Qt as _Qt
         from systema.engine import provider_contract as pc
         st = self._prov_form_styles
@@ -2675,9 +2754,22 @@ class SettingsWindow(BaseWindow):
             # Custom… is picked (see the memory embed-model rows).
             w = ChevronCombo()
             w.setStyleSheet(st.get('combo_edit') or st['combo'])
-            opts = [str(o) for o in (extra or [])]
-            for opt in opts:
-                w.addItem(opt, opt)
+            # An option is either a plain value, or a ("Label", "value") pair so
+            # the list can READ well while still storing what the provider
+            # needs — "Gemma 4 26B (Vision)" instead of a bare @cf/... id. The
+            # combo already stored value in itemData and read currentData(), so
+            # this only changes what is DISPLAYED; plain strings are unchanged
+            # and third-party scripts keep working.
+            opts, labels = [], []
+            for o in (extra or []):
+                if isinstance(o, (tuple, list)) and len(o) >= 2:
+                    labels.append(str(o[0]))
+                    opts.append(str(o[1]))
+                else:
+                    labels.append(str(o))
+                    opts.append(str(o))
+            for lab, val in zip(labels, opts):
+                w.addItem(lab, val)
             w.addItem("Custom…", _CUSTOM_SENTINEL)
             item_tips = dopts.get('item_tooltips') or []
             for i, tip in enumerate(item_tips[:len(opts)]):
@@ -4308,6 +4400,39 @@ class SettingsWindow(BaseWindow):
         except Exception:
             pass
 
+    def _set_req_graph_mode(self, mode):
+        """Switch the API-request graph time mode and refresh."""
+        self._req_graph_mode = mode
+        for m, btn in self._req_mode_btns.items():
+            btn.setChecked(m == mode)
+        self._refresh_req_graph()
+
+    def _refresh_req_graph(self):
+        """Reload API request/response counts from disk and repaint."""
+        try:
+            from systema.common.token_est import get_request_data, get_response_data
+            mode = getattr(self, '_req_graph_mode', 'Daily')
+
+            req_data = get_request_data(mode)
+            self._req_canvas.set_data(req_data, mode)
+            req_total = sum(v for _, v in req_data)
+            self._req_summary_lbl.setText(
+                f"Sent ({mode.lower()}): {req_total:,} request(s)  ·  "
+                f"{len(req_data)} bucket(s)")
+
+            resp_data = get_response_data(mode)
+            self._resp_canvas.set_data(resp_data, mode)
+            resp_total = sum(v for _, v in resp_data)
+            # The gap is the point of having two series: a request that never
+            # got a reply is a failure, a timeout, or a retry that gave up.
+            missing = req_total - resp_total
+            gap = (f"  ·  {missing:,} unanswered" if missing > 0 else "")
+            self._resp_summary_lbl.setText(
+                f"Received ({mode.lower()}): {resp_total:,} response(s)  ·  "
+                f"{len(resp_data)} bucket(s){gap}")
+        except Exception:
+            pass
+
     def show_status_message(self, message):
         """Show a temporary status message in the footer."""
         print(f"[Settings] {message}")
@@ -4335,6 +4460,7 @@ class SettingsWindow(BaseWindow):
         super().showEvent(event)
         try:
             self._refresh_tok_graph()
+            self._refresh_req_graph()
         except Exception:
             pass
         # Re-read shortcut / autostart state every time the window is shown, so
@@ -4402,6 +4528,7 @@ class SettingsWindow(BaseWindow):
             # Repopulate the token graph — the rebuild creates fresh empty canvases
             # and showEvent won't fire (the window is already visible on retint).
             self._refresh_tok_graph()
+            self._refresh_req_graph()
             self.apply_rounded_mask()
             self._sync_glass()
         except Exception as e:

@@ -20,7 +20,6 @@ TOP_P       = None   # float 0–1, or None for the API default
 TOP_K       = None   # int, or None for the API default
 # ──────────────────────────────────────────────────────────────────────────────
 
-CONTRACT_VERSION = 2
 
 # Gemini performs real function calling — opt into Systema's native mode
 # (Settings -> System -> Tool Calling Mode -> Native).

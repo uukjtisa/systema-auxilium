@@ -51,7 +51,6 @@ A provider opts into native by declaring the markers and handling the `tools`
 argument of its unified `chat()` (see [Providers](providers.md)):
 
 ```python
-CONTRACT_VERSION      = 2
 SUPPORTS_NATIVE_TOOLS = True
 NATIVE_DIALECT        = "openai"   # "openai" | "anthropic" | "gemini"
 
@@ -88,10 +87,6 @@ stream (yielded as `{"type": "tool_call", ...}` chunks) — assemble any
 fragment deltas inside the provider, or let
 `provider_contract.stream_openai_chunks()` do it. Tool cards still render in
 call order, exactly as in non-streaming mode.
-
-> Legacy scripts that define `chat_tools(system_prompt, messages, tools,
-> images=None) -> {"text", "tool_calls"}` still work unchanged — the loader
-> shims them into the shape above.
 
 ## `native_adapters` — do it in a few lines
 

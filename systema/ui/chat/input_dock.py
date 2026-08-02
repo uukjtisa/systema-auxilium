@@ -3,17 +3,11 @@ systema/ui/chat/input_dock.py
 InputDockMixin — floating input pill, attachments, token count.
 Extracted verbatim from chat_window.py (full-split pass, 2026-07-17).
 """
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
-                             QTextEdit, QLineEdit, QPushButton, QLabel,
-                             QFrame, QMenu, QScrollArea, QApplication,
-                             QGraphicsOpacityEffect, QSizePolicy)
-from PyQt6.QtCore import (Qt, QTimer, QPoint, pyqtSignal, QRect, QEvent,
-                          QPropertyAnimation, QEasingCurve, QParallelAnimationGroup)
-from PyQt6.QtGui import QAction, QCursor, QRegion, QPixmap
-from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QFont
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QSizePolicy
+from PyQt6.QtCore import Qt, QTimer, QRect, QEvent
+from PyQt6.QtGui import QColor
 from systema.common.logger import _make_logger, _NoOpLogger
-from systema.ui.chat.constants import *
-from systema import APP_ROOT as _APP_ROOT
+from systema.ui.chat.constants import ANIM_INERTIA_FRICTION, ANIM_INERTIA_MIN_VELOCITY
 from systema.ui.widgets.inputs import ResizableInput
 
 _verbose = True
@@ -235,7 +229,6 @@ class InputDockMixin:
             if measured is None:
                 return
             rect, reserve = measured
-            h = rect.height()
             ic.setGeometry(rect)
             # Bottom fade stays anchored to the chat display's bottom edge —
             # independent of the pill's height; the pill floats on top of it.

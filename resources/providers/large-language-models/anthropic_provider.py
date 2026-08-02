@@ -19,7 +19,6 @@ TEMPERATURE = 1.0
 THINKING_BUDGET = 0        # >0 enables extended thinking (tokens); 0 = off
 # ──────────────────────────────────────────────────────────────────────────────
 
-CONTRACT_VERSION = 2
 
 # Claude performs real function calling, so opt into Systema's native tool-calling
 # mode (Settings -> System -> Tool Calling Mode -> Native). Tools then travel

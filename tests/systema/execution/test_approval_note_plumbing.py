@@ -15,9 +15,7 @@ The dialog itself is covered in tests/systema/ui/test_approval_messages.py;
 here the dialog is bypassed and the ToolManager field set directly, which is
 what the main thread does before releasing the worker.
 """
-import pytest
 
-from systema.execution import capabilities as caps
 
 
 def _observation(tm, code="1 + 1"):

@@ -7,9 +7,6 @@ Each task runs in its own daemon thread with an isolated AI caller.
 import json
 import threading
 import re
-import io
-import sys
-import traceback
 import uuid
 from datetime import datetime, date, timedelta
 import math
@@ -1164,7 +1161,7 @@ class TaskThread(threading.Thread):
             if self._get_ping_interval_mode() == 'specific_times':
                 wait_sec = self._next_specific_ping_seconds()
                 if wait_sec is None:
-                    log.info(f"[TaskThread.run] No more specific pings today — waiting for next window")
+                    log.info("[TaskThread.run] No more specific pings today — waiting for next window")
                     session['ended_at'] = _now_stamp()
                     self._save_session(session, task_id, today)
                     sleep_secs = self._wait_seconds_until_start() or 86400
@@ -1187,7 +1184,7 @@ class TaskThread(threading.Thread):
             if not self._in_window():
                 session['ended_at'] = _now_stamp()
                 self._save_session(session, task_id, today)
-                log.info(f"[TaskThread.run] Window closed — ending session")
+                log.info("[TaskThread.run] Window closed — ending session")
                 wait = self._wait_seconds_until_start()
                 self._stop_event.wait(wait)
                 continue

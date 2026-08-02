@@ -30,8 +30,7 @@ bound to interrupt at the window level, so an unconsumed Escape would stop the
 assistant just because you dismissed a dropdown.
 """
 
-from PyQt6.QtCore import (QEasingCurve, QEvent, QPoint, QPropertyAnimation,
-                          Qt, QTimer)
+from PyQt6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, Qt, QTimer
 from PyQt6.QtWidgets import (QFrame, QLabel, QListWidget, QListWidgetItem,
                              QVBoxLayout)
 

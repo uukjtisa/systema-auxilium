@@ -132,10 +132,14 @@ def _cf_account_rows() -> dict:
     return rows
 
 
-CF_MODEL          = "@cf/moonshotai/kimi-k2.7-code"
+# Was @cf/moonshotai/kimi-k2.7-code until 2026-08-02, when Cloudflare moved the
+# Kimi models off the free allocation onto the Workers PAID plan — which broke
+# this script's entire premise, since the Cloudflare half exists precisely to
+# get FREE vision. Llama 4 Scout is the replacement: free allocation, natively
+# multimodal, and it keeps tool calling.
+CF_MODEL          = "@cf/meta/llama-4-scout-17b-16e-instruct"
 CF_MAX_TOKENS     = 16384
 
-CONTRACT_VERSION = 2
 
 # Model lists researched 2026-07-21 (both dropdowns are EDITABLE — type any id):
 # free OpenCode Zen lineup from https://opencode.ai/docs/zen/ (rotates);
@@ -146,32 +150,38 @@ Display = {
                          {"tooltip": "Get one at opencode.ai/zen",
                           "placeholder": "sk-..."}),
     "OPENCODE_MODEL": ("Text model (OpenCode)", "list_dropdown", [
-        "deepseek-v4-flash-free", "big-pickle", "mimo-v2.5-free",
-        "north-mini-code-free", "nemotron-3-ultra-free"],
-        {"tooltip": "Handles every text-only turn. Editable — paid ids from "
-                    "opencode.ai/docs/zen work too",
+        ("DeepSeek V4 Flash (free)",  "deepseek-v4-flash-free"),
+        ("Big Pickle (free)",         "big-pickle"),
+        ("Laguna S 2.1 (free)",       "laguna-s-2.1-free"),
+        ("Ling 3.0 Flash (free)",     "ling-3.0-flash-free"),
+        ("North Mini Code (free)",    "north-mini-code-free"),
+        ("Nemotron 3 Ultra (free)",   "nemotron-3-ultra-free")],
+        {"tooltip": "Handles every text-only turn; image turns go to the "
+                    "Cloudflare engine below. Editable: paid ids from "
+                    "opencode.ai/docs/zen work too. NOTE: mimo-v2.5-free is "
+                    "deliberately absent — it can see on its own, so if you want "
+                    "it, use provider_opencode_zen.py and skip this split script.",
          "item_tooltips": [
-             "DeepSeek V4 Flash — fast, good reasoning (free)",
-             "Big Pickle — stealth frontier model (free, limited time)",
-             "Mimo V2.5 — free",
-             "North Mini Code — code-focused (free)",
-             "Nemotron 3 Ultra — NVIDIA's best free model"]}),
+             "deepseek-v4-flash-free — fast, good reasoning. Default.",
+             "big-pickle — stealth frontier model, free for a limited time",
+             "laguna-s-2.1-free — Poolside agentic-coding MoE (new since 2026-07-21)",
+             "ling-3.0-flash-free — Ant Group MoE, 262K context (new since 2026-07-21)",
+             "north-mini-code-free — Cohere, code-focused",
+             "nemotron-3-ultra-free — NVIDIA 550B planning/reasoning"]}),
     "CF_MODEL": ("Vision model (Cloudflare)", "list_dropdown", [
-        "@cf/moonshotai/kimi-k2.7-code",
-        "@cf/moonshotai/kimi-k2.6",
-        "@cf/meta/llama-4-scout-17b-16e-instruct",
-        "@cf/google/gemma-4-26b-a4b-it",
-        "@cf/mistralai/mistral-small-3.1-24b-instruct",
-        "@cf/meta/llama-3.2-11b-vision-instruct"],
-        {"tooltip": "Handles any turn with attached images. Editable — any "
-                    "vision-capable @cf/... id",
+        ("Llama 4 Scout (Vision)",     "@cf/meta/llama-4-scout-17b-16e-instruct"),
+        ("Gemma 4 26B (Vision)",       "@cf/google/gemma-4-26b-a4b-it"),
+        ("Mistral Small 3.1 (Vision)", "@cf/mistralai/mistral-small-3.1-24b-instruct"),
+        ("Llama 3.2 11B (Vision)",     "@cf/meta/llama-3.2-11b-vision-instruct")],
+        {"tooltip": "Handles any turn with attached images — every entry here is "
+                    "vision-capable and on Cloudflare's FREE allocation. Kimi was "
+                    "removed 2026-08-02: it now needs the Workers PAID plan. "
+                    "Editable — type a Kimi id if you are on the paid plan.",
          "item_tooltips": [
-             "Kimi K2.7 Code — vision + tools, agentic tuned",
-             "Kimi K2.6 — 1T frontier; vision + tools",
-             "Llama-4 Scout — multimodal MoE; vision + tools",
-             "Gemma-4 26B — vision + tools",
-             "Mistral Small 3.1 — vision",
-             "Llama-3.2 11B Vision — vision"]}),
+             "@cf/meta/llama-4-scout-17b-16e-instruct — natively multimodal MoE; vision + tools. Default.",
+             "@cf/google/gemma-4-26b-a4b-it — vision + tools + reasoning",
+             "@cf/mistralai/mistral-small-3.1-24b-instruct — vision + tools, 128k context",
+             "@cf/meta/llama-3.2-11b-vision-instruct — vision only, no tool calling"]}),
     # One ID + token pair per slot, generated from CF_ACCOUNTS at the top.
     # Only the vision half of this provider uses them.
     **_cf_account_rows(),
@@ -504,9 +514,29 @@ NATIVE_DIALECT        = "openai"
 # Vision is real here even though the TEXT engine has none — any turn carrying
 # images is routed to the Cloudflare engine instead, which is the whole reason
 # this mixed script exists.
-SUPPORTS_VISION        = True
+# Vision depends on the CF_MODEL you picked, not on the text model: a text-only
+# Cloudflare id leaves this script with no vision path at all, and saying
+# otherwise fails inside the base64 encoder. (Catalog verified 2026-08-02.)
+_CF_VISION_MODELS = frozenset({
+    "@cf/meta/llama-4-scout-17b-16e-instruct",
+    "@cf/meta/llama-3.2-11b-vision-instruct",
+    "@cf/google/gemma-4-26b-a4b-it",
+    "@cf/mistralai/mistral-small-3.1-24b-instruct",
+    "@cf/moonshotai/kimi-k2.6",        # Workers PAID plan only
+    "@cf/moonshotai/kimi-k2.7-code",   # Workers PAID plan only
+})
+
+
+def SUPPORTS_VISION() -> bool:
+    """True when the selected Cloudflare vision engine can actually see."""
+    return CF_MODEL in _CF_VISION_MODELS
 SUPPORTS_INLINE_IMAGES = True
-IMAGE_FORMATS          = ("png", "jpg", "jpeg", "gif", "webp")
+# Everything Pillow can DECODE, not just what the endpoint accepts: the
+# encoder re-encodes to JPEG/PNG on the way out, so the input extension
+# only has to be readable. A narrow list refused a .jfif for no reason.
+IMAGE_FORMATS          = ("png", "jpg", "jpeg", "jfif", "jpe", "gif", "webp", "bmp",
+                 "dib", "tif", "tiff", "ico", "tga", "ppm", "pgm", "pbm",
+                 "avif", "heic", "heif")
 
 
 def _has_inline_images(messages: list) -> bool:

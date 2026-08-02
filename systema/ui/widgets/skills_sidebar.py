@@ -222,7 +222,6 @@ class SkillsSidebarSection(QWidget):
         self.refresh()
 
     def _build_ui(self):
-        p = self._p
         self.setStyleSheet("background: transparent;")
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)

@@ -4,7 +4,7 @@ Message input widgets — MultiLineInput + ResizableInput.
 Extracted verbatim from chat_window.py.
 """
 import os
-from PyQt6.QtWidgets import QTextEdit, QWidget, QVBoxLayout, QLabel, QSizePolicy
+from PyQt6.QtWidgets import QTextEdit, QWidget, QVBoxLayout, QLabel
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 
 

@@ -3,16 +3,21 @@ ui/debug_window.py
 Debug Window - Shows AI tool usage conversations
 """
 
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QScrollArea,
-                             QTextEdit, QPushButton, QLabel, QCheckBox, QFrame)
-from PyQt6.QtCore import Qt, QPoint, QTimer, QRect
-from PyQt6.QtGui import QFont, QRegion
+from PyQt6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QTextEdit,
+    QPushButton,
+    QLabel,
+    QCheckBox,
+    QFrame)
+from PyQt6.QtCore import Qt, QTimer
 from datetime import datetime
 from systema.common.hot_reload import reload_module
 from systema.ui.base_window import BaseWindow
 from systema.ui import theme as _theme
 import sys
-import ctypes
 
 
 # ── Theme palette (rebound per active theme by _refresh_palette) ──────────────
@@ -139,13 +144,6 @@ class DebugWindow(BaseWindow):
 
         header_layout.addStretch()
 
-        _icon_btn = f"""
-            QPushButton {{
-                background: transparent; border: none; border-radius: 6px;
-                font-size: 16px; color: {_MUTED};
-            }}
-            QPushButton:hover {{ background: {_SURFACE2}; color: {_TEXT}; }}
-        """
 
         # Painted chrome (icon overhaul 2026-07-21): ⌫ >_ − × → glyph buttons.
         # No MaximizeButton — this window dropped maximize 2026-07-28.
@@ -681,7 +679,7 @@ class DebugWindow(BaseWindow):
             if hook_name and hasattr(self, hook_name):
                 try:
                     getattr(self, hook_name)(self.controller)
-                except Exception as e:
+                except Exception:
                     import traceback as _tb
                     self.add_message("system", f"[hot_reload] post-hook error:\n{_tb.format_exc()}")
         else:
@@ -700,7 +698,6 @@ class DebugWindow(BaseWindow):
     def show_system_prompt(self):
         """Open a popup showing the full effective system prompt (base + loaded skills)."""
         from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QTextEdit, QPushButton, QLabel
-        from PyQt6.QtGui import QClipboard
         from PyQt6.QtWidgets import QApplication
 
         try:

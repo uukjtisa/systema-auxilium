@@ -173,8 +173,6 @@ class BaseWindow(QWidget):
         a wider right-edge strip swallowed most scrollbar clicks — users kept
         grabbing resize instead of the scrollbar. Corners stay 16px (easy to
         hit, nothing scrollable lives there)."""
-        handle_size = 5
-        corner_size = 16
 
         self.resize_handles = {}
 
@@ -208,7 +206,6 @@ class BaseWindow(QWidget):
         h = self.height()
         hs = 5   # handle_size (keep in sync with create_resize_handles)
         cs = 16  # corner_size
-        hh = self._header_height
 
         self.resize_handles['top'].setGeometry(cs, 0, w - 2 * cs, hs)
         self.resize_handles['bottom'].setGeometry(cs, h - hs, w - 2 * cs, hs)

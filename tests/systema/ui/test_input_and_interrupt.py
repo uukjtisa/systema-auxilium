@@ -19,8 +19,6 @@ import pytest
 
 pytest.importorskip("PyQt6.QtWidgets")
 
-from PyQt6.QtCore import Qt                                        # noqa: E402
-from PyQt6.QtGui import QKeyEvent                                  # noqa: E402
 from PyQt6.QtWidgets import QLabel, QPushButton                    # noqa: E402
 
 from systema.ui.chat.input_dock import InputDockMixin              # noqa: E402

@@ -96,10 +96,6 @@ def _read_unix_env() -> dict:
     """
     env = {}
 
-    sources = [
-        '/etc/environment',         # Debian/Ubuntu global env
-        '/etc/profile.d/*.sh',      # Handled specially below
-    ]
 
     # /etc/environment — simple KEY=VALUE format
     try:

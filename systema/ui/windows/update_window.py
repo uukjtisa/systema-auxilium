@@ -173,7 +173,6 @@ class ReviewPane(QWidget):
         lay.addWidget(self.stack, stretch=1)
 
     def _build_editor(self) -> QWidget:
-        p = self.p
         w = QWidget()
         w.setStyleSheet("background: transparent;")
         lay = QVBoxLayout(w)

@@ -3,16 +3,33 @@ systema/ui/chat/bubbles.py
 BubblesMixin — message bubbles, avatars, message menu.
 Extracted verbatim from chat_window.py (full-split pass, 2026-07-17).
 """
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
-                             QTextEdit, QLineEdit, QPushButton, QLabel,
-                             QFrame, QMenu, QScrollArea, QApplication,
-                             QGraphicsOpacityEffect, QSizePolicy)
-from PyQt6.QtCore import Qt, QTimer, QPoint, pyqtSignal, QRect, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup
-from PyQt6.QtGui import QAction, QCursor, QRegion, QPixmap
-from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QFont
+from PyQt6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QFrame,
+    QMenu,
+    QApplication,
+    QGraphicsOpacityEffect,
+    QSizePolicy)
+from PyQt6.QtCore import (
+    Qt,
+    QTimer,
+    QPoint,
+    QPropertyAnimation,
+    QEasingCurve,
+    QParallelAnimationGroup)
+from PyQt6.QtGui import QAction, QCursor, QPixmap
+from PyQt6.QtGui import QColor
 from systema.common.logger import _make_logger, _NoOpLogger
-from systema.ui.chat.constants import *
-from systema import APP_ROOT as _APP_ROOT
+from systema.ui.chat.constants import (
+    ANIM_MSG_IN_FADE_MS,
+    ANIM_MSG_IN_HEIGHT_MS,
+    ANIM_MSG_IN_OVERSHOOT_PX,
+    ANIM_MSG_OUT_FADE_MS,
+    ANIM_MSG_OUT_HEIGHT_MS,
+    ANIM_STATUS_CLEAR_MS)
 from systema.ui.widgets.code_blocks import CodeBlockWidget, TableBlockWidget
 
 _verbose = True
@@ -1179,7 +1196,7 @@ class BubblesMixin:
             return True
         return False
 
-    # ── Live streaming (provider contract v2) ────────────────────────────────
+    # ── Live streaming ────────────────────────────────────────────
     # A streamed turn paints text into a throwaway "live" segment as deltas
     # arrive, then hands off: the final full-fidelity render (markdown, code
     # blocks, LaTeX, tool cards) still goes through add_ai_message, which
@@ -1313,10 +1330,27 @@ class BubblesMixin:
 
     def on_stream_thinking(self, delta: str):
         """Append a reasoning delta to THIS TURN's thinking card (created on
-        first use, pinned to the top of the turn shell). Later responses in the
-        same merged bubble keep feeding the same card."""
+        first CONTENT-BEARING delta, pinned to the top of the turn shell).
+        Later responses in the same merged bubble keep feeding the same card.
+
+        Empty/whitespace deltas are BUFFERED, never card-creating. Providers do
+        emit them — an OpenAI-dialect `reasoning_content` field that is present
+        but blank is the common case — and `live=True` deliberately bypasses
+        add_thinking_card's "no thinking → no card" guard because the text is
+        expected to arrive later. Creating on the first EVENT therefore froze a
+        permanently empty card into the turn shell: it reserved header height as
+        a blank strip between the name and the reply, while
+        `_save_thinking_event` correctly skipped the empty text — so the live
+        window and the saved session disagreed, and reloading made it vanish.
+        """
         card = getattr(self, '_stream_think_card', None)
         if card is None:
+            pending = getattr(self, '_stream_think_pending', '') + (delta or '')
+            if not pending.strip():
+                self._stream_think_pending = pending
+                return
+            self._stream_think_pending = ''
+            delta = pending.lstrip()
             try:
                 card = self.add_thinking_card('', save_to_history=False, live=True)
             except Exception:
@@ -1352,11 +1386,19 @@ class BubblesMixin:
             try:
                 before = card['state'].get('saved_upto', 0)
                 full = card['finish']()
-                self._save_thinking_event(full[before:])
-                card['state']['saved_upto'] = len(full)
+                if not full.strip():
+                    # Belt-and-braces to the buffering in on_stream_thinking:
+                    # an empty card is REMOVED, never frozen into the shell.
+                    # _discard(0) also prunes the turn shell if this was its
+                    # only segment, so no avatar+name husk is left behind.
+                    card['discard'](0)
+                else:
+                    self._save_thinking_event(full[before:])
+                    card['state']['saved_upto'] = len(full)
             except RuntimeError:
                 pass
             self._stream_think_card = None
+        self._stream_think_pending = ''
         self._stream_active = False
         self._stream_suppressed = False
         # The final message normally lands in the same tick; if the turn
@@ -1396,6 +1438,7 @@ class BubblesMixin:
                             exc_info=True)
             self._stream_think_card = None
 
+        self._stream_think_pending = ''
         self._stream_active = False
         self._stream_suppressed = False
         self._clear_stream_segment()

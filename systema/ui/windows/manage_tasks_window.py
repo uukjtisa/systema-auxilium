@@ -4,15 +4,28 @@ Manage Tasks Window — Create, edit, and review scheduled task sessions.
 """
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QScrollArea, QFrame, QLineEdit, QTextEdit, QCheckBox,
-    QSpinBox, QStackedWidget, QSizePolicy, QApplication,
-    QTimeEdit, QRadioButton, QDateTimeEdit, QMessageBox, QComboBox,
-)
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QScrollArea,
+    QFrame,
+    QLineEdit,
+    QTextEdit,
+    QCheckBox,
+    QSpinBox,
+    QStackedWidget,
+    QApplication,
+    QTimeEdit,
+    QRadioButton,
+    QDateTimeEdit,
+    QMessageBox,
+    QComboBox)
 from systema.security import code_guard as _guard
 from systema.common.logger import _make_logger, _NoOpLogger
-from PyQt6.QtCore import Qt, QTime, QDateTime, QPoint, QThread, pyqtSignal, QTimer, QFileSystemWatcher
-from PyQt6.QtGui import QFont, QSyntaxHighlighter, QTextCharFormat, QColor
+from PyQt6.QtCore import Qt, QTime, QDateTime, QThread, pyqtSignal, QTimer, QFileSystemWatcher
+from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor
 import re
 from systema.ui.base_window import BaseWindow
 from systema.ui import theme as _theme
@@ -765,10 +778,10 @@ class ManageTasksWindow(BaseWindow):
         # Outer wrapper for the left status bar effect
         wrapper = QWidget()
         wrapper.setObjectName("taskRowWrapper")
-        wrapper.setStyleSheet(f"""
-            QWidget#taskRowWrapper {{
+        wrapper.setStyleSheet("""
+            QWidget#taskRowWrapper {
                 background: transparent;
-            }}
+            }
         """)
         _wl = QHBoxLayout(wrapper)
         _wl.setContentsMargins(0, 0, 0, 0)
@@ -2016,15 +2029,12 @@ class ManageTasksWindow(BaseWindow):
         bubble = QFrame()
         bubble.setObjectName("viewerBubble")
         if kind == 'agent':
-            border = _ACCENT
             bg = _SURFACE2
             bstyle = f"border: 1px solid rgba(79,158,248,0.25); border-left: 3px solid {_ACCENT};"
         elif kind == 'ping':
-            border = _YELLOW
             bg = _SURFACE
             bstyle = f"border: 1px solid {_BORDER}; border-left: 3px solid {_YELLOW};"
         else:
-            border = _PURPLE
             bg = _SURFACE
             bstyle = f"border: 1px solid {_BORDER}; border-left: 3px solid {_PURPLE};"
         bubble.setStyleSheet(f"QFrame#viewerBubble {{ background: {bg}; {bstyle} border-radius: 0 10px 10px 0; }}")
@@ -2267,7 +2277,6 @@ class ManageTasksWindow(BaseWindow):
         task_dict=None → read permissions from the currently open editor form.
         task_dict=<saved task> → use that task's saved permissions.
         """
-        perms = task_dict.get('permissions', {}) if task_dict else {}
         task_name = task_dict.get('name', '?') if task_dict else '?'
         from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QTextEdit, QPushButton, QLabel
         try:

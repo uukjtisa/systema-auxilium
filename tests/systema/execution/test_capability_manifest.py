@@ -149,7 +149,6 @@ def test_the_unknown_tool_message_only_lists_offered_tools(tm, monkeypatch):
     """The old message listed every registry key, so it advertised tools the
     model had never been given and invited it to retry them."""
     from systema.engine.ai_engine import AIEngine
-    import types
 
     eng = object.__new__(AIEngine)
     eng.tool_manager = tm

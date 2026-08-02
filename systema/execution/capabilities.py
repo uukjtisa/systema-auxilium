@@ -37,7 +37,7 @@ tool call (see `ToolManager.interp_web_search` -> `_interp_subresults` ->
 `emit_tool_card`). Anything that cannot meet that bar is single-surface, so the
 agent never has two ways to do one thing that behave differently.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # ── contexts ─────────────────────────────────────────────────────────────────
 CHAT = 'chat'          # the user's live session

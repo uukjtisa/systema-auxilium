@@ -398,7 +398,6 @@ class ManualResponseWindow(BaseWindow):
 
     def eventFilter(self, obj, event):
         from PyQt6.QtCore import QEvent
-        from PyQt6.QtGui import QKeyEvent
         if (obj is self._response_field and
                 event.type() == QEvent.Type.KeyPress):
             ke = event

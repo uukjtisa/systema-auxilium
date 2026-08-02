@@ -25,7 +25,6 @@ MAX_TOKENS  = 8192
 TEMPERATURE = 1.0
 # ──────────────────────────────────────────────────────────────────────────────
 
-CONTRACT_VERSION = 2
 
 # OpenAI performs real function calling — opt into Systema's native mode
 # (Settings -> System -> Tool Calling Mode -> Native).

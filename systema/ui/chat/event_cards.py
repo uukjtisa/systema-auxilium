@@ -3,17 +3,11 @@ systema/ui/chat/event_cards.py
 EventCardsMixin — tool/skill/file-op/memory event cards.
 Extracted verbatim from chat_window.py (full-split pass, 2026-07-17).
 """
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
-                             QTextEdit, QLineEdit, QPushButton, QLabel,
-                             QFrame, QMenu, QScrollArea, QApplication,
-                             QGraphicsOpacityEffect, QSizePolicy)
-from PyQt6.QtCore import Qt, QTimer, QPoint, pyqtSignal, QRect, QRectF, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup
-from PyQt6.QtGui import QAction, QCursor, QRegion, QPixmap, QPainter
-from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QFont, QTextCursor
+from PyQt6.QtWidgets import QWidget, QHBoxLayout, QPushButton, QLabel, QFrame, QSizePolicy
+from PyQt6.QtCore import Qt, QTimer, QRectF
+from PyQt6.QtGui import QPainter
+from PyQt6.QtGui import QColor, QTextCursor
 from systema.common.logger import _make_logger, _NoOpLogger
-from systema.ui.chat.constants import *
-from systema import APP_ROOT as _APP_ROOT
-from systema.ui.widgets.code_blocks import CodeBlockWidget, TableBlockWidget
 
 _verbose = True
 log = _make_logger("ChatWindow") if _verbose else _NoOpLogger()
@@ -27,21 +21,30 @@ def _fmt_tok(n: int) -> str:
 # ── Card icons ───────────────────────────────────────────────────────────────
 # One rule for the whole set: the glyph depicts the ACTION, never the tool —
 # every card already prints its tool name right beside the icon, so spending the
-# icon on it again said nothing. Two cards may share a glyph when they really do
-# the same thing (⌕ searching, ▤ a page you read, ⊘ refused); what they may NOT
-# do is share one across OPPOSITE actions, which is what load/unload used to.
+# icon on it again said nothing. Two cards may share an icon when they really do
+# the same thing (the painted magnifier = searching, on both grep and
+# web_search; ▤ a page you read; ⊘ refused); what they may NOT do is share one
+# across OPPOSITE actions, which is what load/unload used to.
 #
 # Pure functions of the card's own persisted data: a card rebuilt from a
 # reloaded session derives the identical glyph, so there is no icon state to
 # save and none that can drift.
 
 def file_op_glyph(tool: str, added=None, removed=None,
-                  created: bool = False, rejected: bool = False) -> str:
-    """read/grep → what you looked at; write-like → what happened to the file."""
+                  created: bool = False, rejected: bool = False) -> str | None:
+    """read/grep → what you looked at; write-like → what happened to the file.
+
+    Returns None for ops whose icon is PAINTED rather than typed — today that
+    is grep alone (painted_icons.SearchGlyph, the same magnifier the web_search
+    card uses). The caller builds the widget; keeping the decision here means
+    there is still ONE place that answers "which icon does this op get".
+    """
     if rejected:
         return '⊘'                                  # refused, nothing written
-    if tool in ('read_file', 'grep'):
-        return '⌕' if tool == 'grep' else '▤'
+    if tool == 'grep':
+        return None                                 # painted magnifier
+    if tool == 'read_file':
+        return '▤'
     if created:
         return '⊕'                                  # brought into existence
     net = (added or 0) - (removed or 0)
@@ -213,7 +216,7 @@ class EventCardsMixin:
 
         # Skill name
         name_lbl = QLabel(f"<b>{skill_name}</b>")
-        name_lbl.setStyleSheet(f"color: #C8CAFF; font-size: 12px; background: transparent;")
+        name_lbl.setStyleSheet("color: #C8CAFF; font-size: 12px; background: transparent;")
         card_layout.addWidget(name_lbl, stretch=1)
 
         # Badge
@@ -265,37 +268,37 @@ class EventCardsMixin:
                 new_loaded = not _loaded
                 if new_loaded:
                     badge_lbl.setText("● Loaded")
-                    badge_lbl.setStyleSheet(f"""
-                        QLabel {{
+                    badge_lbl.setStyleSheet("""
+                        QLabel {
                             background-color: #1A2B1A; color: #4CAF50;
                             border-radius: 4px; font-size: 10px; padding: 2px 8px;
-                        }}
+                        }
                     """)
                     action_btn.setText("Unload")
-                    action_btn.setStyleSheet(f"""
-                        QPushButton {{
+                    action_btn.setStyleSheet("""
+                        QPushButton {
                             background-color: #3C1A1A; color: #C0392B;
                             border: 1px solid #C0392B; border-radius: 4px;
                             font-size: 10px; padding: 0 10px;
-                        }}
-                        QPushButton:hover {{ background-color: #4A2020; }}
+                        }
+                        QPushButton:hover { background-color: #4A2020; }
                     """)
                 else:
                     badge_lbl.setText("○ Unloaded")
-                    badge_lbl.setStyleSheet(f"""
-                        QLabel {{
+                    badge_lbl.setStyleSheet("""
+                        QLabel {
                             background-color: #21262D; color: #9AA0A6;
                             border-radius: 4px; font-size: 10px; padding: 2px 8px;
-                        }}
+                        }
                     """)
                     action_btn.setText("Load")
-                    action_btn.setStyleSheet(f"""
-                        QPushButton {{
+                    action_btn.setStyleSheet("""
+                        QPushButton {
                             background-color: #1A2B1A; color: #4CAF50;
                             border: 1px solid #4CAF50; border-radius: 4px;
                             font-size: 10px; padding: 0 10px;
-                        }}
-                        QPushButton:hover {{ background-color: #223322; }}
+                        }
+                        QPushButton:hover { background-color: #223322; }
                     """)
                 # Rewire button with new state
                 action_btn.clicked.disconnect()
@@ -385,7 +388,7 @@ class EventCardsMixin:
 
     def add_work_execution_widget(self, code: str, output: str):
         """Add a collapsible code+output block to the chat for python interpreter execution."""
-        from PyQt6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QScrollArea, QWidget, QSizePolicy
+        from PyQt6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QWidget
         from PyQt6.QtGui import QFont
 
         _tc = self._t()
@@ -681,7 +684,7 @@ class EventCardsMixin:
         card is NOT persisted yet — update_live_output() streams into it and
         _finalize_live_card() freezes it. A non-live call while a live card is
         pending REUSES that card instead of stacking a duplicate."""
-        from PyQt6.QtWidgets import QFrame, QHBoxLayout, QVBoxLayout, QPushButton, QLabel, QTextEdit
+        from PyQt6.QtWidgets import QFrame, QHBoxLayout, QVBoxLayout, QPushButton, QLabel
         from PyQt6.QtGui import QFont
 
         # Reuse a pending streaming card instead of adding a second permanent one.
@@ -950,7 +953,7 @@ class EventCardsMixin:
         Green added / red removed counts, net colored by sign; reads show the
         line range instead. Expands to the unified diff (or the read window).
         Persisted as a ui_event (_type 'file_op') so it survives reloads."""
-        from PyQt6.QtWidgets import QFrame, QHBoxLayout, QVBoxLayout, QPushButton, QLabel, QTextEdit
+        from PyQt6.QtWidgets import QFrame, QHBoxLayout, QVBoxLayout, QLabel, QTextEdit
 
         _tc = self._t()
         tool = info.get('tool', 'edit_file')
@@ -986,7 +989,12 @@ class EventCardsMixin:
         header_lay.setContentsMargins(4, 2, 6, 2)
         header_lay.setSpacing(6)
 
-        icon_lbl = QLabel(op_glyph)                  # styled by _restyle (zoom-aware)
+        # None = this op's icon is painted, not typed (grep → the magnifier).
+        if op_glyph is None:
+            from systema.ui.widgets.painted_icons import SearchGlyph
+            icon_lbl = SearchGlyph(px=12, color='#6E7681')
+        else:
+            icon_lbl = QLabel(op_glyph)              # styled by _restyle (zoom-aware)
         header_lay.addWidget(icon_lbl)
 
         # ── Path — its OWN elided label so it can shrink with the card without
@@ -1109,10 +1117,14 @@ class EventCardsMixin:
         #    this card; re-invoked by _apply_zoom_all on Ctrl+scroll ──────────
         def _restyle():
             z = self._card_z
-            icon_lbl.setStyleSheet(
-                f"color: #6E7681; font-size: {z(12)}px; font-weight: 700;"
-                f" background: transparent; border: none;")
-            icon_lbl.setFixedWidth(max(14, round(14 * self._get_msg_font_size() / 13.0)))
+            if hasattr(icon_lbl, 'set_px'):          # painted glyph (grep)
+                icon_lbl.set_px(z(12))
+                icon_lbl.set_color("#6E7681")
+            else:
+                icon_lbl.setStyleSheet(
+                    f"color: #6E7681; font-size: {z(12)}px; font-weight: 700;"
+                    f" background: transparent; border: none;")
+                icon_lbl.setFixedWidth(max(14, round(14 * self._get_msg_font_size() / 13.0)))
             path_lbl.setStyleSheet(
                 f"color:#9AA0A6; font-size:{z(11)}px; background:transparent; border:none;")
             path_lbl._apply()      # re-elide with the new font metrics
@@ -1176,8 +1188,7 @@ class EventCardsMixin:
         if not context_id or not isinstance(context_id, str):
             return
 
-        from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QVBoxLayout,
-                                     QPushButton, QLabel)
+        from PyQt6.QtWidgets import QFrame, QHBoxLayout, QVBoxLayout, QLabel
         from datetime import datetime as _dt
 
         MUTED, DIM, CTX = "#8B949E", "#5F6368", "#C9D1D9"   # shared card grays
@@ -1490,10 +1501,13 @@ class EventCardsMixin:
         import html as _html
         from PyQt6.QtWidgets import QFrame, QLabel
 
+        from systema.ui.widgets.painted_icons import SearchGlyph
+
         query = str(info.get('query', '') or '')
         results = list(info.get('results', []) or [])
         (message_widget, outer_lay, header, summary_lbl,
-         icon_lbl, toggle_lbl, detail, detail_lay) = self._web_card_shell("⌕", "")
+         icon_lbl, toggle_lbl, detail, detail_lay) = self._web_card_shell(
+            SearchGlyph(px=12, color='#5F6368'), "")
 
         rows = []   # (title_lbl, url_lbl, snip_lbl, sep_or_None)
         for i, r in enumerate(results):
@@ -1532,7 +1546,8 @@ class EventCardsMixin:
             header.setStyleSheet(
                 "QFrame#webHeader { background: transparent; border: none; border-radius: 6px; }"
                 "QFrame#webHeader:hover { background: rgba(255,255,255,0.05); }")
-            icon_lbl.setStyleSheet(f"color: {dim}; font-size: {z(12)}px; background: transparent;")
+            icon_lbl.set_px(z(12))         # painted magnifier — scales with zoom
+            icon_lbl.set_color(dim)
             _q = _html.escape(query[:64] + ("…" if len(query) > 64 else ""))
             summary_lbl.setText(
                 f'<span style="color:{muted}; font-size:{z(11)}px;">Web search · </span>'
@@ -1971,7 +1986,7 @@ class EventCardsMixin:
         """Card B — an opened page's clean text, or a links list, in a compact
         expandable viewer (does not balloon: capped height + resize grip)."""
         import html as _html
-        from PyQt6.QtWidgets import QFrame, QLabel, QTextEdit
+        from PyQt6.QtWidgets import QLabel, QTextEdit
 
         mode = str(info.get('mode', 'open') or 'open')
         url = str(info.get('url', '') or '')
@@ -2014,7 +2029,7 @@ class EventCardsMixin:
         def _restyle():
             z, t = self._card_z, self._t()
             # _t() is the RAW theme dict — no 'text' key (see add_web_search_card).
-            accent, muted, dim = t['accent'], "#8B949E", "#5F6368"
+            accent, dim = t['accent'], "#5F6368"
             k = self._get_msg_font_size() / 13.0
             header.setStyleSheet(
                 "QFrame#webHeader { background: transparent; border: none; border-radius: 6px; }"

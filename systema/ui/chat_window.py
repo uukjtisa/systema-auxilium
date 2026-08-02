@@ -9,16 +9,17 @@ Features:
 - Automatic TTS for AI responses when voice is active
 """
 
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
-                             QTextEdit, QLineEdit, QPushButton, QLabel,
-                             QFrame, QMenu, QScrollArea, QApplication,
-                             QGraphicsOpacityEffect, QSizePolicy)
-from PyQt6.QtCore import Qt, QTimer, QPoint, pyqtSignal, QRect, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup
-from PyQt6.QtGui import QAction, QCursor, QRegion, QPixmap
-from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QFont
-from systema.agents.skill_manager import SkillManager as _SkillManagerType
+from PyQt6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLineEdit,
+    QPushButton,
+    QFrame,
+    QScrollArea,
+    QApplication)
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve
 from systema.ui.base_window import BaseWindow
-from systema.ui.theme import THEMES as _SHARED_THEMES
 from systema.common.logger import _make_logger, _NoOpLogger
 
 
@@ -27,27 +28,26 @@ _verbose = True
 log = _make_logger("ChatWindow") if _verbose else _NoOpLogger()
 # ─────────────────────────────────────────────────────────────────────────────
 
-from systema.ui.widgets.skills_sidebar import SkillsSidebarSection, SkillsPanel
-from systema.ui.widgets.inputs import ResizableInput
-from systema.ui.widgets.code_blocks import CodeBlockWidget, TableBlockWidget
 from systema.ui.chat.rendering import RenderingMixin
 from systema.ui.chat.theming import ThemingMixin
-from systema.ui.chat.constants import *
+from systema.ui.chat.constants import (
+    ANIM_INERTIA_FRICTION,
+    ANIM_INERTIA_INTERVAL_MS,
+    ANIM_INERTIA_MIN_VELOCITY,
+    ANIM_SCROLL_MAX_MS,
+    ANIM_SCROLL_MIN_MS,
+    ANIM_WINDOW_FADE_IN_MS,
+    SIDEBAR_DEFAULT_W)
 from systema.ui.chat.sidebar import SidebarMixin
-from systema.ui.chat.input_dock import InputDockMixin, InlineStatus, _ChatBottomFade
+from systema.ui.chat.input_dock import InputDockMixin, InlineStatus
 from systema.ui.chat.bubbles import BubblesMixin, make_circular_pixmap, _TypingDots
 from systema.ui.chat.event_cards import EventCardsMixin
 from systema.ui.chat.image_bubbles import ImageBubblesMixin
 from systema.ui.chat.commands import SlashCommandsMixin
-from systema.ui.chat.window_controls import WindowControlsMixin, PanelToggleButton
+from systema.ui.chat.window_controls import WindowControlsMixin
 
-import re
-import markdown2
 import os
 import sys
-import json
-import threading
-from pathlib import Path
 
 
 # (animation/sidebar constants moved to systema/ui/chat/constants.py)
@@ -158,10 +158,13 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         # Current assistant TURN GROUP (claude.ai-style merged work turn) —
         # None between turns; see BubblesMixin._ensure_ai_turn_group.
         self._ai_turn_group = None
-        # Live-streaming state (provider contract v2): the throwaway text
-        # segment deltas paint into, and the in-flight Thinking card.
+        # Live-streaming state: the throwaway text segment deltas paint into,
+        # and the in-flight Thinking card. `_stream_think_pending` holds
+        # reasoning deltas that have arrived but carry no content yet — the
+        # card is not built until one does (see on_stream_thinking).
         self._stream_seg = None
         self._stream_think_card = None
+        self._stream_think_pending = ''
         self._stream_active = False
         # ONE Thinking card per merged assistant bubble (reset per turn shell).
         self._turn_thinking_card = None
@@ -510,9 +513,18 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         """Open custom instructions window with personality presets and persona block tools."""
         import json as _json
         from pathlib import Path as _Path
-        from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
-                                     QTextEdit, QLabel, QScrollArea, QWidget, QFrame,
-                                     QInputDialog, QMessageBox, QSplitter)
+        from PyQt6.QtWidgets import (
+            QDialog,
+            QVBoxLayout,
+            QHBoxLayout,
+            QPushButton,
+            QTextEdit,
+            QLabel,
+            QScrollArea,
+            QWidget,
+            QFrame,
+            QInputDialog,
+            QSplitter)
 
         PRESETS_FILE = _Path(_APP_ROOT) / "data" / "instruction_presets.json"
         PRESETS_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -532,10 +544,10 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         def _chip(text, accent=False):
             btn = QPushButton(text)
             if accent:
-                btn.setStyleSheet(f"""
-                    QPushButton {{ background: rgba(88,166,255,0.14); border: 1px solid rgba(88,166,255,0.4);
-                        border-radius: 5px; padding: 4px 10px; font-size: 10px; color: #58A6FF; }}
-                    QPushButton:hover {{ background: rgba(88,166,255,0.24); border-color: #58A6FF; }}
+                btn.setStyleSheet("""
+                    QPushButton { background: rgba(88,166,255,0.14); border: 1px solid rgba(88,166,255,0.4);
+                        border-radius: 5px; padding: 4px 10px; font-size: 10px; color: #58A6FF; }
+                    QPushButton:hover { background: rgba(88,166,255,0.24); border-color: #58A6FF; }
                 """)
             else:
                 btn.setStyleSheet(f"""
@@ -784,10 +796,10 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         foot_l.addWidget(cancel_btn)
 
         save_btn = QPushButton("Save")
-        save_btn.setStyleSheet(f"""
-            QPushButton {{ background: rgba(88,166,255,0.14); border: 1px solid rgba(88,166,255,0.4);
-                border-radius: 6px; padding: 8px 24px; font-size: 12px; color: #58A6FF; font-weight: 600; }}
-            QPushButton:hover {{ background: rgba(88,166,255,0.24); border-color: #58A6FF; color: #79BBFF; }}
+        save_btn.setStyleSheet("""
+            QPushButton { background: rgba(88,166,255,0.14); border: 1px solid rgba(88,166,255,0.4);
+                border-radius: 6px; padding: 8px 24px; font-size: 12px; color: #58A6FF; font-weight: 600; }
+            QPushButton:hover { background: rgba(88,166,255,0.24); border-color: #58A6FF; color: #79BBFF; }
         """)
         save_btn.clicked.connect(lambda: (
             self.controller.set_custom_instructions(text_edit.toPlainText().strip()),
@@ -963,7 +975,7 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         lay.setSpacing(10)
 
         hdr = QLabel(title)
-        hdr.setStyleSheet(f"color: #E6EDF3; font-size: 13px; font-weight: 600; background: transparent;")
+        hdr.setStyleSheet("color: #E6EDF3; font-size: 13px; font-weight: 600; background: transparent;")
         lay.addWidget(hdr)
 
         grid_widget = QWidget()
@@ -1234,6 +1246,7 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         self._ai_turn_group = None   # widgets are gone — never append into them
         self._stream_seg = None      # ditto for any in-flight stream widgets
         self._stream_think_card = None
+        self._stream_think_pending = ''
         # Clearing removes the greeting banner too, so the empty-session state
         # just ended — re-anchor the floating input. Without this the pill kept
         # whatever position it last computed, which is why loading an existing
@@ -1694,11 +1707,11 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
         lay.addWidget(uniform_row)
 
         close_btn = QPushButton("Done")
-        close_btn.setStyleSheet(f"""
-            QPushButton {{ background: rgba(88,166,255,0.14); border: 1px solid rgba(88,166,255,0.4);
+        close_btn.setStyleSheet("""
+            QPushButton { background: rgba(88,166,255,0.14); border: 1px solid rgba(88,166,255,0.4);
                 margin: 12px 16px; border-radius: 7px; padding: 9px; font-size: 12px;
-                color: #58A6FF; font-weight: 600; }}
-            QPushButton:hover {{ background: rgba(88,166,255,0.24); }}
+                color: #58A6FF; font-weight: 600; }
+            QPushButton:hover { background: rgba(88,166,255,0.24); }
         """)
         close_btn.clicked.connect(dlg.accept)
         lay.addWidget(close_btn)

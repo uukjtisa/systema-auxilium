@@ -4,9 +4,16 @@ Code & table block widgets + syntax highlighter.
 Extracted verbatim from chat_window.py.
 """
 import re
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
-                             QPushButton, QScrollArea, QTextEdit, QApplication,
-                             QSizePolicy)
+from PyQt6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QFrame,
+    QLabel,
+    QPushButton,
+    QScrollArea,
+    QTextEdit,
+    QApplication)
 from PyQt6.QtCore import Qt, QTimer, QEvent
 from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QFont
 
@@ -255,7 +262,6 @@ class CodeBlockWidget(QWidget):
 
         theme = theme or {}
         base     = theme.get('base', '#0D1117')
-        elevated = theme.get('elevated', '#21262D')
         border   = theme.get('border', '#30363D')
         accent   = theme.get('accent', '#58A6FF')
         muted    = '#8B949E'
@@ -596,15 +602,15 @@ class CodeBlockWidget(QWidget):
         clipboard = QApplication.clipboard()
         clipboard.setText(self.code)
         self.copy_btn.setText("Copied ✓")
-        self.copy_btn.setStyleSheet(f"""
-            QPushButton {{
+        self.copy_btn.setStyleSheet("""
+            QPushButton {
                 background: rgba(52, 168, 83, 0.14);
                 color: #3FB950;
                 font-size: 10px; font-weight: 600;
                 padding: 2px 9px;
                 border: 1px solid rgba(52, 168, 83, 0.40);
                 border-radius: 4px;
-            }}
+            }
         """)
         QTimer.singleShot(ANIM_COPY_FEEDBACK_MS, self.reset_copy_button)
 

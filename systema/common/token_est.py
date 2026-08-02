@@ -6,7 +6,6 @@ Rule of thumb: ~4 characters per token for English text.
 
 import json
 from datetime import datetime, timezone
-from pathlib import Path
 
 from systema import APP_ROOT as _APP_ROOT
 _USAGE_FILE = _APP_ROOT / "data" / "token_usage.json"
@@ -162,67 +161,21 @@ def _load_output_raw() -> list:
     return []
 
 
-def get_output_usage_data(mode: str = "Daily") -> list:
-    """Same bucketing as get_usage_data() but for output tokens."""
-    entries = _load_output_raw()
-    if not entries:
-        return []
+MAX_POINTS = {"Minutes": 30, "Hourly": 24, "Daily": 30, "Weekly": 12,
+              "Monthly": 12, "Yearly": 20, "All": 24}
 
-    parsed = []
-    for e in entries:
-        try:
-            dt = datetime.fromisoformat(e['ts'])
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            parsed.append((dt, int(e.get('n', 0))))
-        except Exception:
-            continue
 
-    if not parsed:
-        return []
+def bucket_entries(entries: list, mode: str = "Daily") -> list:
+    """Aggregate `{"ts", "n"}` log entries into [(label, total), ...] for a graph.
 
-    now = datetime.now(timezone.utc)
-    buckets = {}
+    THE one bucketing implementation. Input tokens, output tokens, API requests
+    and API responses all log the same shape and all want the same time
+    windows, so they all come through here — this was copied verbatim per
+    series, which is how the four graphs would have drifted apart the first
+    time someone adjusted a window.
 
-    for dt, n in parsed:
-        if mode == "Minutes":
-            if int((now - dt).total_seconds() / 60) > 59:
-                continue
-            key = dt.strftime("%H:%M")
-        elif mode == "Hourly":
-            if int((now - dt).total_seconds() / 3600) > 23:
-                continue
-            key = dt.strftime("%H:00")
-        elif mode == "Daily":
-            if (now.date() - dt.date()).days > 29:
-                continue
-            key = dt.strftime("%m/%d")
-        elif mode == "Weekly":
-            if (now.date() - dt.date()).days > 83:
-                continue
-            key = f"W{dt.isocalendar().week}"
-        elif mode == "Monthly":
-            key = dt.strftime("%b %y")
-        elif mode == "Yearly":
-            key = dt.strftime("%Y")
-        else:
-            key = dt.strftime("%Y-%m")
-        buckets[key] = buckets.get(key, 0) + n
-
-    result = sorted(buckets.items(), key=lambda x: x[0])
-    if mode == "Monthly":
-        result = result[-12:]
-    max_pts = {"Minutes": 30, "Hourly": 24, "Daily": 30, "Weekly": 12,
-               "Monthly": 12, "Yearly": 20, "All": 24}.get(mode, 20)
-    return result[-max_pts:]
-
-def get_usage_data(mode: str = "Daily") -> list:
+    mode: Minutes | Hourly | Daily | Weekly | Monthly | Yearly | All
     """
-    Aggregate token usage by mode.
-    Returns list of (label: str, tokens: int) for the graph.
-    mode options: Minutes | Hourly | Daily | Weekly | Monthly | Yearly | All
-    """
-    entries = _load_raw()
     if not entries:
         return []
 
@@ -268,10 +221,72 @@ def get_usage_data(mode: str = "Daily") -> list:
         buckets[key] = buckets.get(key, 0) + n
 
     result = sorted(buckets.items(), key=lambda x: x[0])
-
     if mode == "Monthly":
         result = result[-12:]
+    return result[-MAX_POINTS.get(mode, 20):]
 
-    max_pts = {"Minutes": 30, "Hourly": 24, "Daily": 30, "Weekly": 12,
-               "Monthly": 12, "Yearly": 20, "All": 24}.get(mode, 20)
-    return result[-max_pts:]
+
+def get_output_usage_data(mode: str = "Daily") -> list:
+    """Output-token totals per time bucket."""
+    return bucket_entries(_load_output_raw(), mode)
+
+
+def get_usage_data(mode: str = "Daily") -> list:
+    """Input-token totals per time bucket."""
+    return bucket_entries(_load_raw(), mode)
+
+
+# ── API call counts ──────────────────────────────────────────────────────────
+# Counted separately from tokens because they answer a different question:
+# tokens say how much a turn COST, these say whether the provider is actually
+# answering. A request logged with no matching response is a failure, a timeout
+# or a retry — the gap between the two series is the interesting signal, which
+# is why they are two series and not one.
+
+_REQUEST_FILE = _APP_ROOT / "data" / "api_requests.json"
+_RESPONSE_FILE = _APP_ROOT / "data" / "api_responses.json"
+
+
+def _log_event(path, n: int = 1) -> None:
+    """Append one `{"ts", "n"}` entry. Never raises — telemetry must not be
+    able to break a chat turn."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        entries = _load_events(path)
+        entries.append({"ts": datetime.now(timezone.utc).isoformat(), "n": int(n)})
+        if len(entries) > 100_000:
+            entries = entries[-100_000:]
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(entries, f)
+    except Exception:
+        pass
+
+
+def _load_events(path) -> list:
+    try:
+        if path.exists():
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return []
+
+
+def log_request() -> None:
+    """One outbound call to a provider."""
+    _log_event(_REQUEST_FILE)
+
+
+def log_response() -> None:
+    """One reply actually received back from a provider."""
+    _log_event(_RESPONSE_FILE)
+
+
+def get_request_data(mode: str = "Daily") -> list:
+    """Requests sent per time bucket."""
+    return bucket_entries(_load_events(_REQUEST_FILE), mode)
+
+
+def get_response_data(mode: str = "Daily") -> list:
+    """Responses received per time bucket."""
+    return bucket_entries(_load_events(_RESPONSE_FILE), mode)

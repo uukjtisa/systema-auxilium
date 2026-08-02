@@ -124,50 +124,45 @@ def _account_rows() -> dict:
              "placeholder": "cfut_..."})
     return rows
 
-MODEL          = "@cf/moonshotai/kimi-k2.6"
+MODEL          = "@cf/meta/llama-4-scout-17b-16e-instruct"
 MAX_TOKENS     = 16384   # Raise up to 16384 if needed — watch your neuron budget
 
-CONTRACT_VERSION = 2
 
 # Current Cloudflare-hosted text-generation catalog (researched 2026-07-21,
 # https://developers.cloudflare.com/workers-ai/models/). Editable dropdown —
 # type any @cf/... id for models added after this list was compiled.
 Display = {
     "MODEL": ("Model", "list_dropdown", [
-        "@cf/moonshotai/kimi-k2.6",
-        "@cf/moonshotai/kimi-k2.7-code",
-        "@cf/zai-org/glm-5.2",
-        "@cf/zai-org/glm-4.7-flash",
-        "@cf/openai/gpt-oss-120b",
-        "@cf/openai/gpt-oss-20b",
-        "@cf/nvidia/nemotron-3-120b-a12b",
-        "@cf/meta/llama-4-scout-17b-16e-instruct",
-        "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-        "@cf/meta/llama-3.2-11b-vision-instruct",
-        "@cf/google/gemma-4-26b-a4b-it",
-        "@cf/mistralai/mistral-small-3.1-24b-instruct",
-        "@cf/qwen/qwen3-30b-a3b-fp8",
-        "@cf/qwen/qwen2.5-coder-32b-instruct",
-        "@cf/qwen/qwq-32b",
-        "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b"],
-        {"tooltip": "Editable — type any @cf/... id from the Workers AI catalog",
+        ("Llama 4 Scout (Vision)",     "@cf/meta/llama-4-scout-17b-16e-instruct"),
+        ("Gemma 4 26B (Vision)",       "@cf/google/gemma-4-26b-a4b-it"),
+        ("Mistral Small 3.1 (Vision)", "@cf/mistralai/mistral-small-3.1-24b-instruct"),
+        ("Llama 3.2 11B (Vision)",     "@cf/meta/llama-3.2-11b-vision-instruct"),
+        ("GLM 4.7 Flash",              "@cf/zai-org/glm-4.7-flash"),
+        ("gpt-oss 120B",               "@cf/openai/gpt-oss-120b"),
+        ("gpt-oss 20B",                "@cf/openai/gpt-oss-20b"),
+        ("Nemotron 3 120B",            "@cf/nvidia/nemotron-3-120b-a12b"),
+        ("Llama 3.3 70B Fast",         "@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
+        ("Qwen3 30B",                  "@cf/qwen/qwen3-30b-a3b-fp8"),
+        ("Qwen2.5 Coder 32B",          "@cf/qwen/qwen2.5-coder-32b-instruct"),
+        ("QwQ 32B",                    "@cf/qwen/qwq-32b"),
+        ("DeepSeek R1 Distill 32B",    "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b")],
+        {"tooltip": "Editable — type any @cf/... id from the Workers AI catalog. "
+                    "(Vision) models accept image attachments; the rest are text-only. "
+                    "Kimi and GLM-5.2 are omitted: they need the Workers PAID plan.",
          "item_tooltips": [
-             "Kimi K2.6 — 1T frontier model; vision + tools + reasoning",
-             "Kimi K2.7 Code — agentic/code tuned; vision + tools",
-             "GLM-5.2 — tools + reasoning",
-             "GLM-4.7 Flash — fast multilingual; tools + reasoning",
-             "gpt-oss-120b — OpenAI open-weight; tools + reasoning",
-             "gpt-oss-20b — lighter gpt-oss; tools + reasoning",
-             "Nemotron-3 120B — NVIDIA MoE; tools + reasoning",
-             "Llama-4 Scout — multimodal MoE; vision + tools",
-             "Llama-3.3 70B fast — tools",
-             "Llama-3.2 11B Vision — vision",
-             "Gemma-4 26B — vision + tools",
-             "Mistral Small 3.1 — vision",
-             "Qwen3 30B — tools + reasoning",
-             "Qwen2.5 Coder 32B — code-focused",
-             "QwQ 32B — reasoning-focused",
-             "DeepSeek R1 distill 32B — reasoning"]}),
+             "@cf/meta/llama-4-scout-17b-16e-instruct — natively multimodal MoE; VISION + tools. Free allocation. Default.",
+             "@cf/google/gemma-4-26b-a4b-it — VISION + tools + reasoning. Free allocation.",
+             "@cf/mistralai/mistral-small-3.1-24b-instruct — VISION + tools, 128k context. Free allocation.",
+             "@cf/meta/llama-3.2-11b-vision-instruct — VISION only, no tool calling. Free allocation.",
+             "@cf/zai-org/glm-4.7-flash — fast multilingual; tools + reasoning. Text only.",
+             "@cf/openai/gpt-oss-120b — OpenAI open-weight; tools + reasoning. Text only.",
+             "@cf/openai/gpt-oss-20b — lighter gpt-oss; tools + reasoning. Text only.",
+             "@cf/nvidia/nemotron-3-120b-a12b — NVIDIA MoE; tools + reasoning. Text only.",
+             "@cf/meta/llama-3.3-70b-instruct-fp8-fast — tools. Text only.",
+             "@cf/qwen/qwen3-30b-a3b-fp8 — tools + reasoning. Text only.",
+             "@cf/qwen/qwen2.5-coder-32b-instruct — code-focused. Text only.",
+             "@cf/qwen/qwq-32b — reasoning-focused. Text only.",
+             "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b — reasoning. Text only."]}),
     "MAX_TOKENS": ("Max tokens", "number",
                    {"tooltip": "Response cap — higher burns the daily free "
                                "neuron budget faster"}),
@@ -201,9 +196,32 @@ NATIVE_DIALECT        = "openai"   # Cloudflare Workers AI speaks the OpenAI dia
 # Vision (contract v2.1). SUPPORTS_INLINE_IMAGES means a message may carry its
 # own `images`, so an attachment stays anchored to the turn it arrived in
 # instead of being re-stapled onto the newest user turn every request.
-SUPPORTS_VISION       = True
+# Vision is PER MODEL, not per provider — Workers AI hosts both kinds, so one
+# flag for the whole backend either hid the models that can see or failed
+# inside the base64 encoder on the ones that can't. `SUPPORTS_VISION` is a
+# FUNCTION: the app calls it after applying your Settings choices, so it always
+# describes the model actually selected. (Catalog verified 2026-08-02.)
+_VISION_MODELS = frozenset({
+    "@cf/meta/llama-4-scout-17b-16e-instruct",
+    "@cf/meta/llama-3.2-11b-vision-instruct",
+    "@cf/google/gemma-4-26b-a4b-it",
+    "@cf/mistralai/mistral-small-3.1-24b-instruct",
+    # Workers PAID plan only, but genuinely vision-capable.
+    "@cf/moonshotai/kimi-k2.6",
+    "@cf/moonshotai/kimi-k2.7-code",
+})
+
+
+def SUPPORTS_VISION() -> bool:
+    """True when the CURRENTLY SELECTED model accepts images."""
+    return MODEL in _VISION_MODELS
 SUPPORTS_INLINE_IMAGES = True
-IMAGE_FORMATS         = ("png", "jpg", "jpeg", "gif", "webp")
+# Everything Pillow can DECODE, not just what the endpoint accepts: the
+# encoder re-encodes to JPEG/PNG on the way out, so the input extension
+# only has to be readable. A narrow list refused a .jfif for no reason.
+IMAGE_FORMATS         = ("png", "jpg", "jpeg", "jfif", "jpe", "gif", "webp", "bmp",
+                 "dib", "tif", "tiff", "ico", "tga", "ppm", "pgm", "pbm",
+                 "avif", "heic", "heif")
 
 # ─────────────────────────────────────────────────────────────────────────────
 

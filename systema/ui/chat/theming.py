@@ -319,7 +319,6 @@ class ThemingMixin:
             # Scrollbar: hidden in both modes — the MessageNavigator overlay
             # replaces it (2026-07 redesign).
             _scrollbar_glass = "QScrollBar:vertical { width: 0px; }"
-            _scrollbar_solid = "QScrollBar:vertical { width: 0px; }"
 
             if enabled:
                 t = self._t()

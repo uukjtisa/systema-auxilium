@@ -743,6 +743,57 @@ class TerminalGlyph(QWidget):
         p.end()
 
 
+class SearchGlyph(QWidget):
+    """Non-interactive painted magnifying glass for card headers — the icon of
+    the two cards that SEARCH: web_search, and the grep file-op card.
+
+    Replaces QLabel("⌕") (U+2315). That character is a text glyph, so it
+    depended on whatever the system font happened to have, sat on the text
+    baseline rather than the header's optical centre, and could not follow the
+    zoom cleanly the way set_px() does. Same approach as TerminalGlyph above:
+    zoom-aware via set_px(), colour via set_color().
+
+    read_file / web_page keep their text ▤ deliberately — the user asked for
+    the magnifier only, and ▤ is already a monochrome geometric glyph per the
+    no-emoji rule.
+    """
+
+    def __init__(self, px: int = 12, color: str = '#5F6368', parent=None):
+        super().__init__(parent)
+        self._color = QColor(color)
+        self.set_px(px)
+
+    def set_px(self, px: int):
+        px = max(8, int(px))
+        # Square and slightly roomier than the em box the text glyph used, so
+        # the handle has somewhere to go without clipping.
+        self.setFixedSize(int(px * 1.4), int(px * 1.4))
+        self.update()
+
+    def set_color(self, color: str):
+        self._color = QColor(color)
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = float(self.width()), float(self.height())
+        pen = QPen(self._color, max(1.3, h * 0.11))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        u = h / 15.0
+        # Lens sits up-left of centre so the handle balances the widget's box.
+        r = 4.3 * u
+        cx, cy = w / 2.0 - 1.1 * u, h / 2.0 - 1.1 * u
+        p.drawEllipse(QPointF(cx, cy), r, r)
+        # Handle leaves the rim at 45°, never from inside the circle.
+        k = 0.7071067811865476            # cos/sin 45°
+        p.drawLine(QPointF(cx + r * k, cy + r * k),
+                   QPointF(cx + (r + 3.4 * u) * k, cy + (r + 3.4 * u) * k))
+        p.end()
+
+
 class SparkleGlyph(QWidget):
     """The Thinking card's icon: a painted four-point sparkle that ANIMATES
     while the assistant is actually thinking, and freezes solid when it stops.

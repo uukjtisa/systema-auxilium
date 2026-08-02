@@ -10,7 +10,6 @@ writes four names and the tool reads four names; a typo in either makes a key
 look saved while doing absolutely nothing, which is indistinguishable from a
 backend that simply did not help.
 """
-import pytest
 
 from systema.ui.windows.settings_window import _WebBackendTestWorker
 

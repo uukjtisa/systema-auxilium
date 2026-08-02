@@ -27,7 +27,6 @@ from systema.common.logger import _make_logger, _NoOpLogger
 
 # Vosk import (offline, free alternative)
 try:
-    from vosk import Model, KaldiRecognizer
     VOSK_AVAILABLE = True
 except ImportError:
     VOSK_AVAILABLE = False
@@ -41,7 +40,6 @@ try:
     except (ImportError, OSError):
         torch = None
         TORCH_AVAILABLE = False
-    import torchaudio
     SILERO_AVAILABLE = True
 except ImportError:
     SILERO_AVAILABLE = False
@@ -302,7 +300,7 @@ class VoiceHandler:
 
     def set_vad_configuration(self, webrtc_enabled, silero_enabled, webrtc_aggressiveness, silero_threshold):
         """Configure VAD settings - THREAD SAFE"""
-        log.info(f"[VoiceHandler.set_vad_configuration] ── Updating VAD config ──────────────")
+        log.info("[VoiceHandler.set_vad_configuration] ── Updating VAD config ──────────────")
         log.debug(f"[VoiceHandler.set_vad_configuration] webrtc_enabled={webrtc_enabled} | "
                   f"silero_enabled={silero_enabled} | webrtc_aggressiveness={webrtc_aggressiveness} | "
                   f"silero_threshold={silero_threshold}")
@@ -1083,7 +1081,6 @@ class VoiceHandler:
 
         try:
             audio_data = b''.join(audio_buffer)
-            audio_array = np.frombuffer(audio_data, dtype=np.int16)
             total_bytes = len(audio_data)
             duration_s = total_bytes / (self.sample_rate * 2)
             log.debug(f"[VoiceHandler._process_audio_segment] Audio assembled: "
@@ -1233,7 +1230,7 @@ class VoiceHandler:
             elif self.tts_provider == 'custom_script':
                 log.debug(f"[VoiceHandler.speak_text] → _speak_custom_script_tts() | "
                           f"script='{self.tts_script_path}'")
-                self._emit_log_callback(f"[TTS] Using custom script provider")
+                self._emit_log_callback("[TTS] Using custom script provider")
                 await self._speak_custom_script_tts(filtered_text)
 
             else:

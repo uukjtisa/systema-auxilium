@@ -9,7 +9,6 @@ sections on save.
 """
 import json
 
-import pytest
 
 from systema.common import app_config
 

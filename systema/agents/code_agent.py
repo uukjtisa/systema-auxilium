@@ -24,6 +24,7 @@ import re
 import json
 from typing import Callable
 
+from systema.engine import provider_contract as pc
 from systema.security.code_guard import (scan_code, summarize_findings,
                                          redact_secrets)
 
@@ -176,13 +177,19 @@ class CodeAgent:
     def _run_native(self, mod, user0: str) -> str:
         convo = list(self.history) + [{"role": "user", "content": user0}]
         try:
-            res = mod.chat_tools(SUB_SYSTEM_PROMPT_NATIVE, convo, self._tool_schemas())
+            # THE call path — the same pc.invoke() the main engine uses. This
+            # used to call mod.chat_tools() directly: an entry point from the
+            # retired first contract that no shipped provider has ever defined,
+            # so every native run raised AttributeError, was swallowed below,
+            # and the sub-agent's native mode was a silent no-op.
+            res = pc.invoke(mod, SUB_SYSTEM_PROMPT_NATIVE, convo,
+                            tools=self._tool_schemas())
         except Exception as e:
             self.on_message("system", f"native tool-call error: {e}")
             return ""
         if not isinstance(res, dict):
             return ""
-        text = (res.get("text") or "").strip()
+        text = (res.get("content") or "").strip()
         calls = res.get("tool_calls") or []
         if self.meter is not None:
             try:

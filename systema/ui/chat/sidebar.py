@@ -3,17 +3,28 @@ systema/ui/chat/sidebar.py
 SidebarMixin — sidebar build, toggle/animation, session list.
 Extracted verbatim from chat_window.py (full-split pass, 2026-07-17).
 """
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
-                             QTextEdit, QLineEdit, QPushButton, QLabel,
-                             QFrame, QMenu, QScrollArea, QApplication,
-                             QGraphicsOpacityEffect, QSizePolicy)
-from PyQt6.QtCore import Qt, QTimer, QPoint, pyqtSignal, QRect, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup
-from PyQt6.QtGui import QAction, QCursor, QRegion, QPixmap
-from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QFont
+from PyQt6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLineEdit,
+    QPushButton,
+    QLabel,
+    QFrame,
+    QScrollArea,
+    QGraphicsOpacityEffect)
+from PyQt6.QtCore import Qt, QTimer, QRect, QPropertyAnimation, QEasingCurve
 from systema.common.logger import _make_logger, _NoOpLogger
-from systema.ui.chat.constants import *
-from systema import APP_ROOT as _APP_ROOT
-from systema.ui.widgets.skills_sidebar import SkillsSidebarSection, SkillsPanel
+from systema.ui.chat.constants import (
+    ANIM_INERTIA_FRICTION,
+    ANIM_INERTIA_MIN_VELOCITY,
+    ANIM_SCROLL_MAX_MS,
+    ANIM_SCROLL_MIN_MS,
+    ANIM_SIDEBAR_SLIDE_MS,
+    SIDEBAR_CLOSE_TRIGGER_W,
+    SIDEBAR_MAX_W,
+    SIDEBAR_MIN_W)
+from systema.ui.widgets.skills_sidebar import SkillsSidebarSection
 from systema.ui.chat.window_controls import PanelToggleButton
 
 _verbose = True
@@ -674,13 +685,13 @@ class SidebarMixin:
         # ─────────────────────────────────────────────────────────────────────
         def _sec_header(icon, text):
             lbl = QLabel(f"{icon}  {text}")
-            lbl.setStyleSheet(f"""
-                QLabel {{
+            lbl.setStyleSheet("""
+                QLabel {
                     font-size: 11px; font-weight: 700;
                     color: #9AA0A6;
                     background: transparent;
                     padding: 14px 16px 4px;
-                }}
+                }
             """)
             return lbl
 
