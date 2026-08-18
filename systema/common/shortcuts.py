@@ -26,6 +26,7 @@ import os
 import sys
 import platform
 import subprocess
+from functools import lru_cache
 from pathlib import Path
 
 SYSTEM = platform.system()          # 'Windows' | 'Linux' | 'Darwin'
@@ -43,13 +44,46 @@ _NO_WINDOW = 0x08000000 if IS_WIN else 0   # CREATE_NO_WINDOW for quiet subproce
 
 # ── Paths & launch target ─────────────────────────────────────────────────────
 
+def _win_desktop_from_registry():
+    """The Desktop path straight out of the user's shell-folder registry key.
+
+    This is where Explorer itself stores the (possibly OneDrive-redirected)
+    location, so it answers the same question the PowerShell call below does —
+    in microseconds instead of spawning a process. Returns None if anything is
+    off, so the caller can fall back.
+    """
+    try:
+        import winreg
+        key = (r"Software\Microsoft\Windows\CurrentVersion"
+               r"\Explorer\User Shell Folders")
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as handle:
+            raw, _ = winreg.QueryValueEx(handle, "Desktop")
+        path = Path(os.path.expandvars(raw))
+        return path if path.is_dir() else None
+    except Exception:
+        return None
+
+
+@lru_cache(maxsize=1)
 def desktop_dir() -> Path:
     """The real Desktop folder to place the shortcut in. When the app runs elevated
     (sudo/pkexec), this is the INVOKING login user's Desktop, NOT root's — otherwise
     the shortcut lands on /root/Desktop and the user's session never shows it (and
-    removal can't find it). Honours OneDrive / XDG redirects for the normal case."""
+    removal can't find it). Honours OneDrive / XDG redirects for the normal case.
+
+    CACHED, and on Windows the registry is tried before PowerShell. This used to
+    spawn `powershell -NoProfile -Command [Environment]::GetFolderPath('Desktop')`
+    on every call, from the GUI thread — PowerShell start-up is a few hundred ms
+    cold, and `settings_window.__init__` reaches this during a click. It was the
+    single worst stall on record: a 3226 ms freeze opening Settings
+    (perf report 2026-08-18_20-15-36). The answer cannot change while the app
+    runs, so computing it more than once was never useful either.
+    """
     try:
         if IS_WIN:
+            from_registry = _win_desktop_from_registry()
+            if from_registry is not None:
+                return from_registry
             out = subprocess.run(
                 ["powershell", "-NoProfile", "-Command",
                  "[Environment]::GetFolderPath('Desktop')"],

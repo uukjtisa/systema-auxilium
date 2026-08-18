@@ -505,8 +505,19 @@ class ManageTasksWindow(BaseWindow):
         self._stack = QStackedWidget()
         root.addWidget(self._stack, stretch=1)
 
+        # Index 1 starts as a PLACEHOLDER. _build_editor_page is 809 lines and
+        # 463 widgets — measured at 100 ms of a 176 ms window build offscreen,
+        # and 1151 ms in a real hitch report — while the list and viewer pages
+        # are 16 widgets and under 7 ms each. Building it up front charged that
+        # to every user who only ever looks at the task list.
+        #
+        # A placeholder rather than a shorter stack ON PURPOSE: the page
+        # indices are addressed positionally in several places (and
+        # apply_theme saves/restores currentIndex), so slot 1 has to keep
+        # existing. _ensure_editor_page swaps the real page in on first use.
+        self._editor_page = None
         self._stack.addWidget(self._build_list_page())    # index 0
-        self._stack.addWidget(self._build_editor_page())  # index 1
+        self._stack.addWidget(self._editor_placeholder())  # index 1 (lazy)
         self._stack.addWidget(self._build_viewer_page())  # index 2
 
         self._stack.setCurrentIndex(0)
@@ -631,13 +642,21 @@ class ManageTasksWindow(BaseWindow):
             self._title_bar = new_bar
             # Rebuild the stacked pages, keeping the current page selected
             idx = self._stack.currentIndex()
+            had_editor = self._editor_page is not None
             while self._stack.count():
                 w = self._stack.widget(0)
                 self._stack.removeWidget(w)
                 w.deleteLater()
-            self._stack.addWidget(self._build_list_page())    # 0
-            self._stack.addWidget(self._build_editor_page())  # 1
-            self._stack.addWidget(self._build_viewer_page())  # 2
+            self._editor_page = None
+            self._stack.addWidget(self._build_list_page())     # 0
+            self._stack.addWidget(self._editor_placeholder())  # 1
+            self._stack.addWidget(self._build_viewer_page())   # 2
+            # Only re-pay the 809-line editor build for someone who had
+            # already opened it. A theme change used to construct all three
+            # pages, so the most expensive one was rebuilt for every user on
+            # every theme save — including those who never opened the editor.
+            if had_editor:
+                self._ensure_editor_page()
             self._stack.setCurrentIndex(idx if 0 <= idx <= 2 else 0)
             self._refresh_list()
             self._sync_glass()
@@ -1106,6 +1125,34 @@ class ManageTasksWindow(BaseWindow):
     # ═══════════════════════════════════════════════════════════════════════════
     # PAGE 1 — Task Editor
     # ═══════════════════════════════════════════════════════════════════════════
+
+    def _editor_placeholder(self) -> QWidget:
+        """Empty stand-in holding stack slot 1 until the editor is first used.
+
+        Painted the page background so the swap cannot flash a bare surface.
+        """
+        stand_in = QWidget()
+        stand_in.setStyleSheet(f"background: {_BG};")
+        return stand_in
+
+    def _ensure_editor_page(self):
+        """Build the editor page on first use and swap it into slot 1.
+
+        Called from the ONLY two doors into the editor, `_new_task` and
+        `_edit_task`, before either touches a form widget. Everything else that
+        reads the editor's ~55 widget attributes (saving, verifying, the ping
+        and one-time-date lists, the function editor, the skill checklist) is
+        reachable only from inside the editor, so those need no guard.
+        """
+        if self._editor_page is not None:
+            return
+        page = self._build_editor_page()
+        stale = self._stack.widget(1)
+        self._stack.insertWidget(1, page)
+        if stale is not None and stale is not page:
+            self._stack.removeWidget(stale)
+            stale.deleteLater()
+        self._editor_page = page
 
     def _build_editor_page(self) -> QWidget:
         page = QWidget()
@@ -2641,6 +2688,7 @@ class ManageTasksWindow(BaseWindow):
                 item.widget().deleteLater()
 
     def _new_task(self):
+        self._ensure_editor_page()      # lazy: slot 1 may still be the placeholder
         self._editing_task_id = None
         self._editor_title.setText("New Task")
         self._f_name.clear()
@@ -2742,6 +2790,7 @@ class ManageTasksWindow(BaseWindow):
                 for cat, combo in getattr(self, '_f_policy_combos', {}).items()}
 
     def _edit_task(self, task: dict):
+        self._ensure_editor_page()      # lazy: slot 1 may still be the placeholder
         self._editing_task_id = task['id']
         self._editor_title.setText(f"Edit — {task.get('name', '')}")
         self._f_name.setText(task.get('name', ''))
