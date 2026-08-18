@@ -815,14 +815,69 @@ def test_detach_uses_an_eye_not_a_repeat_arrow(widget_host, tmp_path):
     image_cache.discard(img, still_referenced=[])
 
 
-def test_the_greeting_does_not_wrap_mid_phrase(widget_host):
-    """A wrapping QLabel reports a near-zero sizeHint width, so between two
-    stretches it collapsed and broke the line into "Good evening," / "Thirdy"."""
+def test_the_greeting_wraps_rather_than_clipping(widget_host):
+    """The greeting used to be setWordWrap(False), which traded one bug for
+    another: it could not collapse mid-phrase any more, but a long phrasing was
+    CLIPPED at the window edge instead ("...Let's prove tha").
+
+    Wrapping is safe here because the label is added to the column WITHOUT an
+    alignment flag. That was the real cause of the old collapse — an alignment
+    flag hands a widget its own sizeHint width, and a wrapping QLabel's
+    sizeHint width is deliberately tiny. Full column width plus AlignCenter on
+    the TEXT centres it without shrinking it.
+    """
+    from PyQt6.QtCore import Qt
     from systema.ui.chat.bubbles import BubblesMixin
 
     BubblesMixin.add_greeting_banner(widget_host)
-    label = widget_host.message_widgets[-1]["content_wrapper"]
-    assert label.wordWrap() is False
+    entry = widget_host.message_widgets[-1]
+    label = entry["content_wrapper"]
+    assert label.wordWrap() is True
+    assert label.alignment() & Qt.AlignmentFlag.AlignHCenter
+
+    layout = label.parentWidget().layout()
+    item = next(layout.itemAt(i) for i in range(layout.count())
+                if layout.itemAt(i).widget() is label)
+    assert int(item.alignment()) == 0, (
+        "an alignment flag hands the label its own tiny wrapped sizeHint — "
+        "this is what collapsed the greeting into a narrow ribbon")
+
+
+def test_the_greeting_font_shrinks_to_fit_a_long_phrasing(widget_host):
+    """Sizing off window width alone assumed an average-length greeting. The
+    pool spans roughly 4x, so the long ones overflowed and were cut off."""
+    from PyQt6.QtGui import QFont, QFontMetrics
+    from systema.ui.chat.bubbles import BubblesMixin
+
+    BubblesMixin.add_greeting_banner(widget_host)
+    entry = widget_host.message_widgets[-1]
+    label = entry["content_wrapper"]
+    row = label.parentWidget()
+    row.resize(700, row.height() or 200)
+
+    def size_for(text):
+        label.setText(text)
+        entry["zoom_restyle"]()
+        for part in label.styleSheet().split(";"):
+            if "font-size" in part:
+                return int(part.split(":")[1].strip().removesuffix("px"))
+        raise AssertionError("no font-size in the stylesheet")
+
+    short = size_for("Evening.")
+    long = size_for("Nothing good happens at this hour, Thirdy. "
+                    "Let's prove that wrong, and then some, at length.")
+    assert long < short, "a long greeting must be sized down, not clipped"
+    assert long >= 20, "but never below title size — it wraps instead"
+
+    # When the fit SUCCEEDS (it stopped above the floor) the text must actually
+    # be inside the two-line budget. When it bottoms out at the floor it is
+    # allowed to need a third line: wrapping at title size is the intended
+    # failure, shrinking into body copy is not.
+    probe = QFont(label.font())
+    probe.setPixelSize(long)
+    if long > 20:
+        budget = int((row.width() - 48) * 1.9)
+        assert QFontMetrics(probe).horizontalAdvance(label.text()) <= budget
 
 
 def test_the_greeting_banner_builds_and_scales(widget_host):
@@ -1015,20 +1070,52 @@ def test_the_banner_fills_the_session_without_being_shrinkable(widget_host):
     assert row.sizePolicy().verticalPolicy() == QSizePolicy.Policy.MinimumExpanding
 
 
-def test_the_banner_re_measures_itself_on_every_resize(widget_host):
+def test_the_banner_reports_enough_height_at_every_width(widget_host):
     """A height that is correct at 900px is wrong at 500px, and a static
-    minimum cannot know that — so the row recomputes its floor at the NEW
-    width whenever it is resized. This is what makes clipping unable to
-    survive a window drag."""
+    minimum cannot know that.
+
+    This used to assert `minimumHeight() >= layout().heightForWidth(w)` after
+    resizing the row, on the theory that the resize hook recomputed the floor.
+    It did not: **resizeEvent never fires on a widget that has never been
+    shown**, so the loop measured the ONE value set at construction and the
+    assertion passed or failed on whether the randomly-chosen greeting happened
+    to be short. It was testing nothing.
+
+    The row now answers heightForWidth itself, which the parent layout asks for
+    whether or not an event ever arrives — so THAT is what gets checked.
+    """
     from systema.ui.chat.bubbles import BubblesMixin
 
     row = BubblesMixin.add_greeting_banner(widget_host)
-    assert callable(row.on_resize)
+    assert callable(row.on_resize)          # still there: it refits the font
+    assert row.hasHeightForWidth()
+    assert row.sizePolicy().hasHeightForWidth(), (
+        "the layout only asks widgets whose size policy opts in")
 
     for width in (1200, 900, 620, 460, 360):
-        row.resize(width, row.height())
-        needed = row.layout().heightForWidth(row.width()) or row.sizeHint().height()
-        assert row.minimumHeight() >= needed, f"would clip at {width}px"
+        needed = row.layout().heightForWidth(width)
+        assert row.heightForWidth(width) >= needed, f"would clip at {width}px"
+
+
+def test_a_long_greeting_needs_more_height_than_a_short_one(widget_host):
+    """The point of the whole mechanism: a wrapped line is taller, and the row
+    has to say so or the last line is cut off."""
+    from systema.ui.chat.bubbles import BubblesMixin
+
+    row = BubblesMixin.add_greeting_banner(widget_host)
+    label = widget_host.message_widgets[-1]["content_wrapper"]
+
+    label.setText("Evening.")
+    widget_host.message_widgets[-1]["zoom_restyle"]()
+    short = row.layout().heightForWidth(420)
+
+    label.setText("Nothing good happens at this hour, Thirdy. Let's prove "
+                  "that wrong, and then some, at considerable length.")
+    widget_host.message_widgets[-1]["zoom_restyle"]()
+    long = row.layout().heightForWidth(420)
+
+    assert long > short
+    assert row.heightForWidth(420) >= long
 
 
 # ── pasting file paths ───────────────────────────────────────────────────────

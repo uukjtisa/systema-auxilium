@@ -1882,6 +1882,21 @@ class BubblesMixin:
                     except RuntimeError:
                         pass
 
+            # The resize hook alone is NOT enough, and quietly was not:
+            # resizeEvent does not fire on a widget that has never been shown,
+            # so the height floor came from whatever the ONE constructor-time
+            # measurement produced. Reporting heightForWidth properly lets the
+            # parent layout size the row through Qt's own mechanism, whether or
+            # not an event ever arrives. The hook stays because it also refits
+            # the FONT, which heightForWidth cannot do.
+            def hasHeightForWidth(self):
+                return True
+
+            def heightForWidth(self, width):
+                lay = self.layout()
+                own = lay.heightForWidth(width) if lay is not None else 0
+                return max(120, own, self.minimumHeight())
+
         message_widget = _GreetingRow()
         message_widget.setObjectName("greetRow")
         message_widget.setStyleSheet(
@@ -1893,8 +1908,12 @@ class BubblesMixin:
         # subtitle lost its last line. MinimumExpanding means "sizeHint is a
         # FLOOR, grow if there is room": the layout is no longer permitted to
         # cut the content, and the banner still fills an empty session.
-        message_widget.setSizePolicy(QSizePolicy.Policy.Expanding,
-                                     QSizePolicy.Policy.MinimumExpanding)
+        _greet_policy = QSizePolicy(QSizePolicy.Policy.Expanding,
+                                    QSizePolicy.Policy.MinimumExpanding)
+        # Without this the overridden heightForWidth above is simply ignored by
+        # the parent layout — the policy is what opts a widget into being asked.
+        _greet_policy.setHeightForWidth(True)
+        message_widget.setSizePolicy(_greet_policy)
 
         # Stacked and centred, NOT glyph-beside-text: with the sparkle on the
         # left, the title sits to the right of centre and the whole banner
@@ -1915,11 +1934,20 @@ class BubblesMixin:
 
         label = QLabel(text)
         label.setTextFormat(Qt.TextFormat.PlainText)   # a name is not markup
-        # NOT word-wrapped. A wrapping QLabel reports a near-zero sizeHint
-        # width, so in a centring layout it collapses and breaks the greeting
-        # mid-phrase ("Good evening," / "Thirdy"). The line is short by design
-        # and the font size below already scales with the window.
-        label.setWordWrap(False)
+        # WORD-WRAPPED, as a last resort only. `_greet_restyle` shrinks the
+        # font until the line fits the real width, so wrapping normally never
+        # engages — but the greeting pool contains phrasings far longer than
+        # the shortest ("Nothing good happens at this hour, {name}. Let's prove
+        # that wrong."), and with a name appended even the minimum size can
+        # overrun a narrow window. Unwrapped, that was simply CLIPPED at the
+        # window edge mid-word.
+        #
+        # The old comment here said wrapping collapses the label to a near-zero
+        # sizeHint width. That is only true when the widget is added WITH an
+        # alignment flag, which hands it its own sizeHint instead of the
+        # column's. It is added full-width below, exactly like the subtitle
+        # that has always wrapped correctly.
+        label.setWordWrap(True)
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         # NO AlignHCenter flag: that hands the label its sizeHint width instead
         # of the column's, and a word-wrapped QLabel's sizeHint width is
@@ -1952,6 +1980,41 @@ class BubblesMixin:
             except Exception:
                 avail = 640
             px = self._card_z(int(max(20, min(34, avail * 0.038))))
+            # FIT THE LINE, don't just pick a size from the window width.
+            # avail*0.038 assumes an average-length greeting; the pool ranges
+            # from "Evening, {name}." to "Nothing good happens at this hour,
+            # {name}. Let's prove that wrong." — roughly a 4x spread — so a
+            # width-only rule overflows on the long ones and the tail was cut
+            # off at the window edge. Measure the actual string and step down
+            # until it fits, keeping the banner on ONE line wherever it can.
+            #
+            # The floor stays at TITLE size on purpose. Shrinking far enough to
+            # fit the longest phrasings on one line reaches ~15px, which stops
+            # reading as a greeting and starts reading as body copy — two lines
+            # at 20px is the better-looking failure. Below the floor the label
+            # wraps instead, which is what setWordWrap(True) above is for.
+            try:
+                from PyQt6.QtGui import QFont, QFontMetrics
+                # 48 = the column's left+right content margins.
+                room = max(120, int((message_widget.width() or avail) - 48))
+                # TWO lines of budget, not one. Demanding a single line shrinks
+                # the longest phrasings to the floor even in a wide window,
+                # which looks broken in the common case to protect the rare
+                # one. 1.9 rather than 2.0 leaves slack for a ragged wrap.
+                budget = int(room * 1.9)
+                probe = QFont(lbl.font())
+                floor = self._card_z(20)
+                # Read the LABEL, not the captured string: the greeting is set
+                # once today, but measuring the widget's own text is what makes
+                # this correct if it is ever re-set (a name change, a reload).
+                line = lbl.text() or text
+                while px > floor:
+                    probe.setPixelSize(px)
+                    if QFontMetrics(probe).horizontalAdvance(line) <= budget:
+                        break
+                    px -= 1
+            except Exception:
+                pass
             # House primary text colour — the theme dict carries surfaces and
             # the accent, not type colours.
             lbl.setStyleSheet(
@@ -1977,6 +2040,29 @@ class BubblesMixin:
             # floor to what the content actually measures at the CURRENT width,
             # so a wrapped subtitle can never be cut no matter how the parent
             # layout distributes space.
+            try:
+                # Force the layout to take the new fonts into account BEFORE
+                # measuring. Qt invalidates size hints lazily, so a stylesheet
+                # applied a few lines above is not yet reflected in
+                # heightForWidth — and now that the title WRAPS, its height is
+                # a function of that font. Without this the floor lagged one
+                # resize behind and the last line was cut at narrow widths.
+                #
+                # unpolish/polish is the part that actually matters: a
+                # font-size set through a STYLESHEET is not applied until the
+                # widget is next polished, so measuring immediately after
+                # setStyleSheet uses the OLD font. updateGeometry alone does
+                # not force that.
+                for _w in (lbl, sub):
+                    if _w is None:
+                        continue
+                    _w.style().unpolish(_w)
+                    _w.style().polish(_w)
+                    _w.updateGeometry()
+                message_widget.layout().invalidate()
+                message_widget.layout().activate()
+            except (RuntimeError, AttributeError):
+                pass
             try:
                 w = max(200, message_widget.width() or int(avail))
                 # BOTH measurements, whichever is larger. heightForWidth knows
@@ -2118,6 +2204,32 @@ class BubblesMixin:
                 pass
         finally:
             self._dismissing_intro = False
+
+    def restore_session_intro_if_empty(self):
+        """Bring the greeting back once the transcript is visually empty again.
+
+        The banner is an EMPTY-SESSION state, and it used to be a one-way door:
+        `dismiss_session_intro` removed it on the first message and only a NEW
+        session ever built another. Deleting or rewinding away every message
+        therefore left a blank slate — the same state that gets a greeting on
+        startup, rendered as nothing at all.
+
+        Empty means no user/assistant rows. Cards and system notes do not
+        count: a session holding only a stray tool card is still, to the
+        reader, an empty conversation.
+        """
+        try:
+            if any(entry.get('role') in ('user', 'assistant')
+                   for entry in getattr(self, 'message_widgets', [])):
+                return
+            if any(entry.get('_intro') for entry in self.message_widgets):
+                return                       # already showing
+            self._end_ai_turn_group()        # never nest the banner in a shell
+            self.add_greeting_banner()
+        except Exception:
+            # Decoration must never break a delete.
+            log.warning("[ChatWindow.restore_session_intro_if_empty] failed",
+                        exc_info=True)
 
     def copy_to_clipboard(self, text):
         """Copy text to clipboard"""
@@ -2333,6 +2445,7 @@ class BubblesMixin:
             self._detach_chat_widget(widget)
         self._animate_message_out(widget, _destroy)
         self._refresh_msg_navigator()
+        self.restore_session_intro_if_empty()
 
     def _rewind_to_message(self, message_data, keep_message=False):
         """Rewind conversation — data truncated sync, widgets animated out async."""
@@ -2358,6 +2471,7 @@ class BubblesMixin:
             self._animate_message_out(widget, _destroy)
         self._refresh_msg_navigator()
         self._end_ai_turn_group()   # never append into a truncated turn
+        self.restore_session_intro_if_empty()
 
     def _rewind_to_here(self, message_data):
         """'Rewind to Here' from the context menu.
@@ -2392,6 +2506,7 @@ class BubblesMixin:
             self._animate_message_out(widget, _destroy)
         self._refresh_msg_navigator()
         self._end_ai_turn_group()   # never append into a truncated turn
+        self.restore_session_intro_if_empty()
 
         # For user messages: fire a new AI response (bubble stays visible)
         if role == 'user':
