@@ -1486,7 +1486,12 @@ class BubblesMixin:
         # full-fidelity render, and the typewriter reveal is skipped (the
         # stream already served as the reveal).
         _was_streamed = getattr(self, '_stream_seg', None) is not None
+        _scroll_pin = None
         if _was_streamed:
+            # Pin the viewport BEFORE the live stub is torn out — the swap
+            # changes total content height twice, and a long chat that is not
+            # pinned to the bottom would otherwise lurch.
+            _scroll_pin = self._capture_scroll_pin()
             self._clear_stream_segment()
         if self.voice_enabled:
             display_message = self._clean_emotion_brackets(message)
@@ -1561,6 +1566,10 @@ class BubblesMixin:
                     content_wrapper_layout.addWidget(code_widget)
                 elif part[0] == 'table':
                     table_widget = TableBlockWidget(part[1], self._t(), self.render_markdown)
+                    # Born at the CURRENT zoom, not the app default — a table
+                    # arriving while zoomed in used to render at 13px and only
+                    # catch up on the next Ctrl+scroll.
+                    table_widget.apply_zoom(self._get_msg_font_size())
                     content_wrapper_layout.addWidget(table_widget)
         else:
             text_label = QLabel()
@@ -1672,9 +1681,43 @@ class BubblesMixin:
             self._reveal_text_label(
                 first_text_label, display_message,
                 on_done=lambda: self.scroll_to_widget(message_widget))
+        elif _was_streamed:
+            # NO entrance animation on a stream hand-off. This exact content was
+            # already on screen at full height while it streamed; _animate_message_in
+            # collapses a widget to zero and springs it back open, so replacing the
+            # live stub with the markdown render made the whole list jump — every
+            # bubble below shifted twice, which reads as the chat scrolling wildly
+            # at the precise moment the reply finishes. Only visible on a chat long
+            # enough to scroll, which is exactly when it is most disorienting.
+            self._restore_scroll_pin(_scroll_pin)
+            QTimer.singleShot(0, lambda: self._restore_scroll_pin(_scroll_pin))
         else:
             self._animate_message_in(message_widget,
                                      on_settled=lambda: self.scroll_to_widget(message_widget))
+
+    def _capture_scroll_pin(self):
+        """(scroll value, was_at_bottom) for the chat view, or None.
+
+        `was_at_bottom` is what decides the restore: someone reading the newest
+        reply should FOLLOW the content as it settles, while someone scrolled up
+        re-reading must not be dragged anywhere.
+        """
+        try:
+            sb = self.chat_scroll_area.verticalScrollBar()
+            return (sb.value(), sb.value() >= sb.maximum() - 4)
+        except (AttributeError, RuntimeError):
+            return None
+
+    def _restore_scroll_pin(self, pin):
+        """Put the viewport back where _capture_scroll_pin found it."""
+        if pin is None:
+            return
+        value, at_bottom = pin
+        try:
+            sb = self.chat_scroll_area.verticalScrollBar()
+            sb.setValue(sb.maximum() if at_bottom else value)
+        except (AttributeError, RuntimeError):
+            pass
 
     def _clean_emotion_brackets(self, text):
         """Remove ElevenLabs emotion brackets from text for display.

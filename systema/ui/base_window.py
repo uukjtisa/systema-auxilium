@@ -49,15 +49,28 @@ class BaseWindow(QWidget):
         exactly how the app ended up with views you could not aim in.
         Idempotent (install_smooth_scroll no-ops on an area it already owns), so
         re-showing a window costs nothing.
+
+        DEFERRED by one event-loop turn. findChildren() walks the entire widget
+        tree, and running that synchronously inside showEvent put the walk in
+        front of the window actually appearing — 1134 ms on a big window
+        (perf report 2026-08-18). Nothing here affects the first paint, and a
+        human cannot scroll a window during the tick before it is drawn.
         """
+        super().showEvent(event)
+        QTimer.singleShot(0, self._install_smooth_scrolling)
+
+    def _install_smooth_scrolling(self):
+        """The deferred half of showEvent. Never raises — a window that fails to
+        get the house wheel behaviour still works, it just scrolls plainly."""
         try:
             from PyQt6.QtWidgets import QAbstractScrollArea
             from systema.ui.widgets.smooth_scroll import install_smooth_scroll
-            for area in self.findChildren(QAbstractScrollArea):
-                install_smooth_scroll(area)
+            from systema.common.perf_monitor import span
+            with span(f"smooth_scroll:{type(self).__name__}"):
+                for area in self.findChildren(QAbstractScrollArea):
+                    install_smooth_scroll(area)
         except Exception:
             pass
-        super().showEvent(event)
 
     # ── Chrome state bootstrap ─────────────────────────────────────────────────
 

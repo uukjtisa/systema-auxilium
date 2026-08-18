@@ -468,7 +468,6 @@ def _dump_verbose_error(
       4. Image list summary (paths + sizes), if applicable.
     """
     SEP  = "=" * 72
-    SEP2 = "-" * 72
 
     print()
     print(SEP)

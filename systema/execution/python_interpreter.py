@@ -108,6 +108,46 @@ class CustomInterpreter(code.InteractiveInterpreter):
             sys.displayhook = old_displayhook
             log.debug("[CustomInterpreter.runcode] displayhook restored to original")
 
+    def showtraceback(self):
+        """Write the traceback to the captured stream. NEVER to sys.excepthook.
+
+        The stdlib version does this:
+
+            if sys.excepthook is sys.__excepthook__:
+                self.write(''.join(lines))
+            else:
+                sys.excepthook(ei[0], ei[1], last_tb)   # "let that take precedence"
+
+        This app installs a sys.excepthook so real backend faults become crash
+        dumps (crash_watcher.write_crash_dump), which meant EVERY error in
+        agent-generated code took the second branch. Two consequences, both bad:
+
+          * a NameError in a task's own code was filed as "Unhandled exception
+            on main thread" and written to data/logs/crash_dumps/backend/ —
+            8 of the 10 dumps sitting there on 2026-08-13/14 were ONE scheduled
+            task calling a name it did not have;
+          * the traceback went to the hook INSTEAD of the captured stdout, so
+            the agent never saw its own error and could not self-correct. That
+            task failed identically every hour, all night.
+
+        Generated code failing is normal operation, and its traceback is the
+        feedback that fixes it — it is not a crash of this application.
+        """
+        typ, value, tb = sys.exc_info()
+        sys.last_type, sys.last_value, sys.last_traceback = typ, value, tb
+        try:
+            # tb.tb_next drops this interpreter's own exec() frame so the model
+            # sees only the frames of the code it actually wrote.
+            lines = traceback.format_exception(typ, value, tb.tb_next if tb else tb)
+            self.write("".join(lines))
+        except Exception:
+            try:
+                self.write(f"{type(value).__name__}: {value}" + chr(10))
+            except Exception:
+                pass
+        finally:
+            del tb
+
 
 class PythonInterpreter:
     """Full interactive Python interpreter with persistent state"""

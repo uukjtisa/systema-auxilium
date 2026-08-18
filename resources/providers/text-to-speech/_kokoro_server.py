@@ -11,7 +11,7 @@ Endpoints:
 Default port: 11235
 """
 
-import sys, os, json, subprocess, numpy as np
+import os, subprocess, numpy as np
 from flask import Flask, request, Response, jsonify
 
 PORT = 11235
@@ -86,5 +86,5 @@ def synthesize():
 if __name__ == '__main__':
     print(f"\n🎤 Kokoro TTS Server — http://127.0.0.1:{PORT}")
     print(f"   Voice: {DEFAULT_VOICE}")
-    print(f"   Press Ctrl+C or close this window to stop.\n")
+    print("   Press Ctrl+C or close this window to stop.\n")
     app.run(host='127.0.0.1', port=PORT, debug=False, use_reloader=False)

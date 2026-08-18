@@ -5,6 +5,7 @@ frontmatter, emits Qt signals on changes, and persists loaded-state to
 skills/skills_state.json.
 """
 import json
+import os
 import re
 import shutil
 import threading
@@ -18,6 +19,56 @@ _verbose = True
 log = _make_logger("SkillManager") if _verbose else _NoOpLogger()
 
 _STATE_FILE = "skills_state.json"  # relative to skills_dir
+
+# Directory names that are never part of a skill's DEFINITION — vendored
+# environments, build output, caches, VCS metadata. A skill may legitimately
+# bundle any of them: skills/mc_server/ carries 887 files inside a vendored
+# venv, three quarters of the entire skills tree.
+_PRUNED_DIR_NAMES = {
+    "venv", ".venv", "env", "node_modules", "site-packages", "__pycache__",
+    ".git", ".hg", ".svn", ".idea", ".vscode", ".mypy_cache", ".pytest_cache",
+    ".ruff_cache", "dist", "build", "target",
+}
+
+# A skill definition needs nowhere near this many files. The cap is what makes
+# the walk bounded by CONSTRUCTION: no future bundled payload can make the
+# 2-second poll expensive again, whatever it is called.
+_MAX_FILES_PER_SKILL = 250
+
+
+def _walk_skill_entries(folder: Path, limit: int = _MAX_FILES_PER_SKILL):
+    """Yield os.DirEntry for the files under a skill folder, pruning vendored
+    trees and stopping at `limit`.
+
+    Deliberately scandir and not rglob(). Both walks in this module used to
+    rglob('*') the whole subtree and stat() every hit — ~1300 stat calls, every
+    2 seconds, forever. That put `_poll` at the TOP of the hitch reports (18 of
+    50 on 2026-08-18): the GUI thread blocked inside Thread.start() waiting for
+    a worker that was holding the GIL grinding through them. A DirEntry carries
+    its stat data from the directory read on Windows, so the mtimes below are
+    free, and the pruning removes three quarters of the entries outright."""
+    stack = [str(folder)]
+    count = 0
+    while stack:
+        try:
+            with os.scandir(stack.pop()) as it:
+                for entry in it:
+                    try:
+                        is_dir = entry.is_dir(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if is_dir:
+                        if (entry.name in _PRUNED_DIR_NAMES
+                                or entry.name.startswith('.')):
+                            continue
+                        stack.append(entry.path)
+                        continue
+                    yield entry
+                    count += 1
+                    if count >= limit:
+                        return
+        except OSError:
+            continue
 
 
 class SkillManager(QObject):
@@ -152,12 +203,14 @@ class SkillManager(QObject):
                 )
             seen_names[name] = folder.name
 
-            # Collect non-hidden files relative to the skill folder
-            files = [
-                str(f.relative_to(folder))
-                for f in sorted(folder.rglob("*"))
-                if f.is_file() and not f.name.startswith('.')
-            ]
+            # Non-hidden files relative to the skill folder. Only consumer
+            # is the skills sidebar, which shows the first 8 — this never
+            # needed to be an unbounded enumeration.
+            files = sorted(
+                os.path.relpath(entry.path, folder)
+                for entry in _walk_skill_entries(folder)
+                if not entry.name.startswith('.')
+            )
             skills.append({
                 'name': name,
                 'description': meta['description'],
@@ -334,11 +387,11 @@ class SkillManager(QObject):
         for folder in self.skills_dir.iterdir():
             if not folder.is_dir() or folder.name.startswith('.'):
                 continue
-            # Use the max mtime of the folder itself + all files inside
+            # Max mtime of the folder itself + the files that define it.
             mtimes = [folder.stat().st_mtime]
-            for f in folder.rglob("*"):
+            for entry in _walk_skill_entries(folder):
                 try:
-                    mtimes.append(f.stat().st_mtime)
+                    mtimes.append(entry.stat().st_mtime)
                 except OSError:
                     pass
             snapshot[folder.name] = max(mtimes)

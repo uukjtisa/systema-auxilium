@@ -156,10 +156,15 @@ class AndroidBridge:
         elif cmd == "closed":
             self._conn = None
         elif cmd == "code_approval_result":
-            approved = msg.get("approved", False)
+            approved = bool(msg.get("approved", False))
+            # The phone may send the same two free-text fields the PC dialog
+            # offers: a reason when rejecting, a note when approving. Only the
+            # pressed button's field is meaningful, so one slot carries it.
+            message = (msg.get("accept_note", "") if approved
+                       else msg.get("reject_reason", "")) or ""
             try:
                 self.controller.ai.tool_manager.approval_signal.close_approval_dialog.emit(
-                    bool(approved), msg.get("modified_code", "")
+                    approved, msg.get("modified_code", ""), message
                 )
             except Exception as e:
                 log.error(f"[AndroidBridge] code_approval_result error: {e}")

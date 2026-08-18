@@ -392,6 +392,18 @@ class AssistantController(QObject):
             self._hitch_monitor.start()
         except Exception as e:
             log.warning(f"[AssistantController.__init__] HitchMonitor failed (non-fatal): {e}")
+        # Window flicker detector — logs any widget that momentarily becomes a
+        # top-level WINDOW, with the app frames that created it. Chasing a
+        # reported empty window that flashes during agent work; a parentless
+        # QWidget that gets shown is a real HWND on Windows, animation and all.
+        try:
+            from PyQt6.QtWidgets import QApplication
+            from systema.common.perf_monitor import install_window_watch
+            _app = QApplication.instance()
+            if _app is not None:
+                install_window_watch(_app)
+        except Exception as e:
+            log.warning(f"[AssistantController.__init__] WindowWatch failed (non-fatal): {e}")
         self.log("System AI Assistant initialized", "SUCCESS")
         log.info(f"[AssistantController.__init__] ✓ AssistantController ready | "
                  f"session='{self.current_session_id}' ──")
@@ -444,7 +456,75 @@ class AssistantController(QObject):
             log.warning(f"[AssistantController._deferred_bg_init] UpdaterService failed (non-fatal): {e}")
             self.updater_service = None
 
+        # SESSION INDEX REVALIDATION — trust the index on screen, check disk here
+        self._revalidate_sessions_async()
+
+        # HEAVY OPTIONAL IMPORTS — pay for them now, not mid-click
+        self._warm_optional_imports()
+
         log.info("[AssistantController._deferred_bg_init] ✓ Deferred init complete")
+
+    def _warm_optional_imports(self):
+        """Import the heavy optional modules on a worker thread, staggered.
+
+        First-use imports were landing inside user interactions: the 2026-08-02
+        reports caught `importlib ... get_data()` at 2030 ms and 1536 ms, which
+        is a click that freezes because a module happened to be cold. Paying it
+        here spends the cost while the user is still reading the greeting.
+
+        DELIBERATELY NOT torch or playwright, though both were on the original
+        list. torch is voice-gated and enormous, playwright is optional and only
+        ever used from an already-threaded path — importing either eagerly
+        contends the GIL for seconds and trades a click hitch for a startup
+        hitch, which is the same bug wearing a different hat.
+        """
+        import sys
+        import threading
+        import time as _time
+
+        def _warm():
+            for mod in ("PIL.Image", "PIL.ImageGrab", "trafilatura", "fastembed"):
+                if mod in sys.modules:
+                    continue
+                try:
+                    t0 = _time.perf_counter()
+                    __import__(mod)
+                    ms = (_time.perf_counter() - t0) * 1000
+                    if ms > 50:
+                        log.info(f"[AssistantController._warm_optional_imports] "
+                                 f"{mod} warmed in {ms:.0f} ms")
+                except Exception as e:
+                    log.debug(f"[AssistantController._warm_optional_imports] "
+                              f"{mod} unavailable: {type(e).__name__}")
+                # Breathe between imports so a C-extension init cannot hold the
+                # GIL back-to-back through the whole warm-up.
+                _time.sleep(0.25)
+
+        threading.Thread(target=_warm, daemon=True, name="import-warmer").start()
+
+    def _revalidate_sessions_async(self):
+        """Re-scan the sessions directory on a WORKER thread and refresh the
+        sidebar only if the truth differs from the index we started from.
+
+        The startup list comes from data/sessions/.index.json, which is one
+        small read instead of parsing 411 files / 54 MB — that parse was the
+        worst freeze on record (14867 ms on the GUI thread, 2026-08-18). The
+        cost of trusting a cached index is that something editing the folder
+        behind our back is invisible until we look; this is the look, and it
+        happens where a slow disk cannot freeze anything.
+        """
+        import threading
+
+        def _scan():
+            try:
+                if self.session_manager.revalidate():
+                    log.info("[AssistantController._revalidate_sessions_async] "
+                             "Index was stale — refreshing the sidebar")
+                    self._refresh_session_list_safe()   # marshals to the GUI thread
+            except Exception as e:
+                log.warning(f"[AssistantController._revalidate_sessions_async] {type(e).__name__}: {e}")
+
+        threading.Thread(target=_scan, daemon=True, name="session-revalidate").start()
 
     # ── Software updates ───────────────────────────────────────────────────────
 
@@ -2536,13 +2616,39 @@ class AssistantController(QObject):
         )
 
         if success:
-            if self._chat:
-                self._chat.refresh_session_list()
+            self._refresh_session_list_safe()
             log.info(f"[AssistantController._auto_save_session] ✓ Session saved: '{self.current_session_id}'")
             self.log(f"Session auto-saved: {self.current_session_id}")
         else:
             log.error(f"[AssistantController._auto_save_session] ✗ Save failed: '{self.current_session_id}'")
             self.log(f"Failed to save session: {self.current_session_id}", "ERROR")
+
+    def _refresh_session_list_safe(self):
+        """Refresh the sidebar session list from ANY thread.
+
+        `_auto_save_session` is not GUI-thread-only: TaskManager._send_to_main
+        calls it from a background TaskThread before posting a task
+        notification. Touching Qt widgets from there tore down the sidebar's
+        session items off-thread and the list rendered EMPTY until the user
+        forced a GUI-thread rebuild with "Show All" / "Show 10 More". Marshal
+        through bridge_run_on_main when we are not on the GUI thread."""
+        chat = self._chat
+        if not chat:
+            return
+        try:
+            from PyQt6.QtCore import QThread
+            on_gui_thread = QThread.currentThread() is self.thread()
+        except (RuntimeError, ImportError):
+            # self.thread() needs a live QObject, and not every caller has one:
+            # test doubles build the controller with __new__ and never run
+            # QObject.__init__. With no affinity to check there is nothing to
+            # marshal through either, so behave exactly as this call site did
+            # before the marshalling was added.
+            on_gui_thread = True
+        if on_gui_thread:
+            chat.refresh_session_list()
+        else:
+            self.bridge_run_on_main.emit(chat.refresh_session_list)
 
     def _present_new_session(self):
         """Put a freshly-created session on screen.
@@ -2690,8 +2796,7 @@ class AssistantController(QObject):
             self.session_manager.delete_session(session_id)
 
             # Refresh UI
-            if self._chat:
-                self._chat.refresh_session_list()
+            self._refresh_session_list_safe()
             log.info("[AssistantController.delete_session] ✓ Session deleted")
 
     def set_session_name(self, name, manual: bool = False):
@@ -2713,9 +2818,10 @@ class AssistantController(QObject):
             log.info(f"[AssistantController.set_session_name] ✓ Renamed to '{name}'")
             self.log(f"Session renamed to: {name}")
 
-            # Refresh UI session list
-            if self._chat:
-                self._chat.refresh_session_list()
+            # Refresh UI session list. NOT necessarily the GUI thread: the
+            # SessionNamerAgent's done-slot is a plain callable, so PyQt runs it
+            # on the namer QThread and the rename lands from there.
+            self._refresh_session_list_safe()
         else:
             log.error(f"[AssistantController.set_session_name] ✗ Failed to rename to '{name}'")
             self.log("Failed to rename session", "ERROR")

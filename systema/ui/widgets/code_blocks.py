@@ -681,6 +681,7 @@ class TableBlockWidget(QWidget):
         """)
 
         # Size height to content (capped); overflow scrolls instead of clipping.
+        # _fit_height() re-does this properly once a real width exists.
         doc = self.view.document()
         doc.setDocumentMargin(8)
         content_h = int(doc.size().height()) + 6
@@ -716,6 +717,30 @@ class TableBlockWidget(QWidget):
         # Re-fit once the widget has a real laid-out width — the height computed
         # during construction (before layout) under-sizes wrapped tables.
         QTimer.singleShot(0, self._fit_height)
+
+    def apply_zoom(self, font_px: int):
+        """Scale the table's text with the chat's zoom level.
+
+        The table renders into a QTextEdit whose HTML sets no font-size, so it
+        inherited the application default and Ctrl+scroll moved every other
+        thing in the bubble EXCEPT the tables — spec and comparison tables
+        stayed at their original size while the prose around them grew or
+        shrank. The document's default font is what the HTML inherits, so
+        setting it here scales cells, headers and all.
+
+        Height is re-fitted afterwards, unless the user has dragged the resize
+        grip: a manual height is a deliberate choice and zoom must not undo it.
+        """
+        try:
+            f = self.view.font()
+            if f.pixelSize() == int(font_px):
+                return
+            f.setPixelSize(max(7, int(font_px)))
+            self.view.setFont(f)
+            self.view.document().setDefaultFont(f)
+            self._fit_height()          # no-ops if the user set a manual height
+        except RuntimeError:
+            pass        # widget already destroyed
 
     def _fit_height(self):
         """Size the table view to its content at the CURRENT width. Skipped once

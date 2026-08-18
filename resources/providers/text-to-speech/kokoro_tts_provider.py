@@ -26,7 +26,7 @@ Voices:
   ef_dora   - Spanish female       em_alex  - Spanish male
 """
 
-import subprocess, sys, os, time, requests, socket
+import subprocess, sys, os, time, requests
 
 PORT = 11235
 SERVER_URL = f"http://127.0.0.1:{PORT}"

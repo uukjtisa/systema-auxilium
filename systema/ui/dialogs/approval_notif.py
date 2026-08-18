@@ -235,6 +235,16 @@ class ApprovalNotifCard(QDialog):
         if self._chat_visible():
             self._finish("expand")
 
+    def resolve(self, outcome):
+        """Decide this card from OUTSIDE — the phone answering the approval.
+
+        The card owns a local QEventLoop while it is up, so a remote decision
+        has to land here to release the waiting tool call; poking the full
+        dialog does nothing, because in card mode that dialog was built but
+        never shown.
+        """
+        self._finish(outcome)
+
     def _finish(self, outcome):
         if self.outcome is not None:
             return

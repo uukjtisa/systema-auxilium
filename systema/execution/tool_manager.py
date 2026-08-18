@@ -153,7 +153,11 @@ class ApprovalSignal(QObject):
     system_message   = pyqtSignal(str)               # text → chat window, main thread only
     file_op          = pyqtSignal(dict)              # structured file-op card → chat window
     tool_card        = pyqtSignal(dict)              # CENTRAL tool-result card → chat ({'card_type', ...})
-    close_approval_dialog = pyqtSignal(bool, str)  # approved, modified_code — closes active dialog
+    # approved, modified_code, message — resolves the active approval from
+    # a remote surface. `message` is the accept NOTE when approved and the
+    # reject REASON when not: the dialog only ever sends the pressed
+    # button's field, so one slot carries whichever applies.
+    close_approval_dialog = pyqtSignal(bool, str, str)
     timeout_signal   = pyqtSignal(int, object, object, object)  # elapsed, done_event, result_holder, user_event — timeout prompt
     work_code_active = pyqtSignal(bool)                          # True when code execution starts, False when it finishes
     work_narration   = pyqtSignal(str)               # a work step's narration → chat BEFORE its tool runs (ordering)
@@ -2057,10 +2061,54 @@ class ToolManager:
         except Exception:
             pass
 
-    def _close_active_approval_dialog(self, approved: bool, modified_code: str):
-        """Slot — always runs on main thread. Closes PC dialog when Android decides first."""
+    def _close_active_approval_dialog(self, approved: bool, modified_code: str,
+                                      message: str = ""):
+        """Slot — always runs on main thread. Resolves the PC side when the
+        phone decides first.
+
+        The compact notification card was the case this missed. When the chat
+        window is closed or minimised, the FULL dialog is constructed but never
+        shown — only the card is — and the card holds its own QEventLoop. So
+        `dialog.isVisible()` was False and every remote approve/deny fell into
+        a dead branch: the PC stayed blocked on the card's loop and the phone's
+        notification stayed pending forever. That is the COMMON case, not the
+        rare one, because the phone is exactly what the user reaches for when
+        they are away from the keyboard.
+        """
         dialog = self._active_approval_dialog
-        if dialog and dialog.isVisible():
+        if not dialog:
+            return
+
+        # The phone may have edited the code before approving. Put it in the
+        # editor rather than on the dialog: on_accept() reads it from there,
+        # so one path applies it however the decision arrived.
+        if approved and modified_code:
+            try:
+                dialog.code_edit.setPlainText(modified_code)
+            except (RuntimeError, AttributeError):
+                pass
+
+        # Same trick for the phone's rejection reason / approval note: write it
+        # into the field the dialog reads, so on_accept()/on_reject() pick it up
+        # and the agent receives it identically however it was typed.
+        if message:
+            field = 'note_edit' if approved else 'reason_edit'
+            try:
+                getattr(dialog, field).setText(message)
+            except (RuntimeError, AttributeError):
+                pass
+
+        card = getattr(dialog, '_mini_card', None)
+        if card is not None:
+            # Finishing the card quits its loop; the code after that loop then
+            # applies the outcome through the dialog's own on_accept/on_reject.
+            try:
+                card.resolve('accept' if approved else 'reject')
+                return
+            except RuntimeError:
+                pass        # card already destroyed — fall through
+
+        if dialog.isVisible():
             if approved:
                 dialog.result = 'accept'
                 dialog.modified_code = modified_code if modified_code else dialog.code_edit.toPlainText().strip()
@@ -2100,7 +2148,14 @@ class ToolManager:
                 android_bridge._dispatch({
                     "cmd": "show_code_approval",
                     "code": code,
-                    "execution_type": execution_type
+                    "execution_type": execution_type,
+                    # Context the phone needs to render the FULL review rather
+                    # than a bare approve/deny chip. Sending it costs nothing
+                    # when the phone ignores it, and the phone cannot ask for
+                    # it later — the PC is blocked waiting on the answer.
+                    "annotation": (self.work.interpreter.last_annotation or ""),
+                    "file_edit": self._pending_file_edit is not None,
+                    "accepts_message": True,
                 })
 
             # Show dialog manually so we keep a ref for Android to close it.

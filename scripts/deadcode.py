@@ -26,6 +26,35 @@ TWO LAYERS, and they are NOT equally trustworthy:
 
 Baseline (2026-08-02): pyflakes reports exactly the two entries in
 PYFLAKES_ALLOWED below, both deliberate. It was 326 before that pass.
+
+ENFORCED since 2026-08-18 by `tests/test_deadcode_baseline.py`, which runs
+`--strict` as part of the suite. The working copy is not a git repo, so there
+is no pre-commit hook to hang this on; the suite is the thing that always runs.
+
+REMAINING CLEANUP — opportunistic, do it while you are already in the module,
+NOT as its own sweep (this is the demoted remainder of the "codebase cleanup"
+backlog item, retired 2026-08-18):
+
+  1. Vulture triage. 76 candidates survive the filters below; all are 60%
+     confidence and spot-checking has already turned up LIVE code among them.
+     Verify the call site by hand before deleting anything. The five most
+     plausible, because they are self-contained and their callers may have
+     moved:
+       engine/native_adapters.py  — to_dialect_tools, parse_response,
+                                    result_messages
+       updater/hunks.py           — build_hunks, apply_decisions (the Manage
+                                    dialog was retired 2026-07-20 and conflict
+                                    resolution moved inline into update_window)
+       common/image_refs.py       — detached_refs, attached_marker
+       common/relauncher.py       — process_alive, kill_and_relaunch
+       ui/theme.py                — scrollbar_qss
+  2. Commented-out code: ~23 lines tree-wide (`# self.foo(...)`, `# def ...`).
+     None should survive unless labelled with why it is kept as reference.
+  3. Orphaned modules: no import-graph pass has ever run, so "modules nobody
+     imports" is unmeasured. pydeps or a small ast importer scan settles it.
+     Re-derive the module list from the real tree — the original issue's list
+     (app/core/, app/tools/, app/hooks/) describes a layout this project has
+     never had.
 """
 from __future__ import annotations
 

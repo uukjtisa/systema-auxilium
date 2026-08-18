@@ -40,7 +40,37 @@ def _make_log_path():
     )
     logs_dir = Path("data/logs")
     logs_dir.mkdir(parents=True, exist_ok=True)
+    _prune_old_run_logs(logs_dir)
     return logs_dir / name
+
+
+# Runs kept on disk. RETENTION, not rotation — a single run still writes ONE
+# unsplit file (see _LogSink), which is the part that was deliberately decided.
+# Nothing pruned these, so data/logs/ reached 230 files / 168 MB by 2026-08-18
+# while its neighbours crash_dumps/ (10 per bucket) and perf_reports/ (50)
+# have always self-managed.
+_KEEP_RUN_LOGS = 40
+
+
+def _prune_old_run_logs(logs_dir, keep=_KEEP_RUN_LOGS):
+    """Delete all but the newest `keep` run logs. Never raises.
+
+    Sorted by MTIME, never by filename: the names read
+    `log_2026_jul_28_tuesday_h03_m38_s16_ms53_am.txt`, where the month is a
+    NAME ("aug" sorts before "jul") and the am/pm marker trails the digits, so
+    lexicographic order is not chronological order. Sorting by name here would
+    delete the newest logs and keep the oldest.
+    """
+    try:
+        files = [p for p in logs_dir.glob("log_*.txt") if p.is_file()]
+        for old in sorted(files, key=lambda p: p.stat().st_mtime,
+                          reverse=True)[keep:]:
+            try:
+                old.unlink()
+            except OSError:
+                pass        # in use by another instance, or gone already
+    except Exception:
+        pass                # retention must never stop the app from starting
 
 
 class _LogSink:

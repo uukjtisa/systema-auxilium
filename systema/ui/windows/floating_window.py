@@ -118,10 +118,11 @@ class FloatingWindow(QWidget):
         self.raise_timer.start(50)  # Check every 50ms
 
         # Crash-watchdog heartbeat (idea #12) — a DEDICATED tiny timer, NOT
-        # piggybacked on raise_timer's 50ms z-order churn. Stamps
-        # data/logs/crash_dumps/heartbeat.txt from the UI thread; the CrashWatcher
-        # daemon thread autopsies + force-restarts if the stamp goes stale
-        # (event loop hung or windows silently gone).
+        # piggybacked on raise_timer's 50ms z-order churn. Stamps an IN-MEMORY
+        # float only; the CrashWatcher daemon thread does the heartbeat.txt
+        # write, autopsies, and force-restarts if the stamp goes stale (event
+        # loop hung or windows silently gone). Keep this callback I/O-free —
+        # the disk write it used to do was itself a top hitch culprit.
         from systema.ui import crash_watcher
         self.heartbeat_timer = QTimer(self)
         self.heartbeat_timer.timeout.connect(crash_watcher.beat)

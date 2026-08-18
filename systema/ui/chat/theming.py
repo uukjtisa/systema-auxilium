@@ -60,8 +60,35 @@ class ThemingMixin:
                     rs()
                 except RuntimeError:
                     pass
+            self._zoom_rich_children(md.get('widget'), fsize)
         # Re-apply responsive bubble widths (the cap scales with zoom)
         self._reflow_bubbles()
+
+    @staticmethod
+    def _zoom_rich_children(root, fsize: int):
+        """Scale rich sub-widgets that are neither QLabels nor restyle-closure
+        owners — markdown tables today.
+
+        Found by CAPABILITY (anything exposing `apply_zoom`) rather than by
+        bookkeeping, because the alternative is registering every such widget
+        at every construction site and that is exactly how tables got missed:
+        Ctrl+scroll moved the prose around a spec table while the table itself
+        stayed put. A widget that grows an `apply_zoom` is covered the day it
+        is added, with no change here.
+        """
+        if root is None:
+            return
+        try:
+            from PyQt6.QtWidgets import QWidget
+            for w in root.findChildren(QWidget):
+                fn = getattr(w, 'apply_zoom', None)
+                if callable(fn):
+                    try:
+                        fn(fsize)
+                    except RuntimeError:
+                        pass
+        except RuntimeError:
+            pass        # the message widget was destroyed mid-zoom
 
     # ═══════════════════════════════════════════════════════════════════════════
     # GLASS BUBBLE HELPER

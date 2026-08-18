@@ -20,6 +20,13 @@ from systema import APP_ROOT as _APP_ROOT
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+# One small file holding the metadata of every session, so a cold start reads
+# THIS instead of parsing every session on disk. Named with a leading dot so
+# the *.json glob that finds sessions never picks it up as one.
+_INDEX_NAME = ".index.json"
+_INDEX_VERSION = 1
+
+
 class SessionManager:
     """Manages chat sessions - save, load, list, delete, rename"""
 
@@ -33,8 +40,95 @@ class SessionManager:
         # list_sessions() metadata cache: filename -> ((mtime_ns, size), meta).
         # Lets a sidebar refresh skip re-parsing unchanged session files.
         self._list_cache = {}
+        # True once _list_cache is trustworthy enough to answer list_sessions()
+        # with no disk access at all — set by loading the index, or by a full
+        # scan. Until then every call pays the scan.
+        self._index_ready = False
+        self._load_index()
         log.info(f"[SessionManager.__init__] Sessions directory: '{self.sessions_dir}' | "
                  f"active_session_id=None | metadata cache empty")
+
+    # ── Persisted index ──────────────────────────────────────────────────────
+
+    @property
+    def _index_path(self):
+        return self.sessions_dir / _INDEX_NAME
+
+    def _load_index(self):
+        """Populate the metadata cache from the on-disk index.
+
+        This is the whole point of the index: 411 session files totalling 54 MB
+        took **14867 ms** to parse on the GUI thread on 2026-08-18, and that is
+        a freeze the user reads as a crash. Reading one small JSON instead is
+        the difference between a cold start and a hang. Best-effort — a missing
+        or corrupt index just means the next list_sessions() does a full scan
+        and writes a fresh one.
+        """
+        try:
+            raw = json.loads(self._index_path.read_text(encoding="utf-8"))
+            if raw.get("version") != _INDEX_VERSION:
+                return False
+            cache = {}
+            for e in raw.get("entries", []):
+                fname = e.get("file")
+                if not fname:
+                    continue
+                cache[fname] = ((int(e.get("mtime_ns", 0)), int(e.get("size", 0))),
+                                {"id": e.get("id", ""), "name": e.get("name", "Unnamed"),
+                                 "date": e.get("date", ""), "file": fname})
+            if not cache:
+                return False
+            self._list_cache = cache
+            self._index_ready = True
+            log.info(f"[SessionManager._load_index] {len(cache)} entries from index")
+            return True
+        except Exception as e:
+            log.debug(f"[SessionManager._load_index] No usable index ({type(e).__name__})")
+            return False
+
+    def _save_index(self):
+        """Write the metadata cache out. Never raises — the index is an
+        optimisation, and failing to persist it must not fail a save."""
+        try:
+            entries = [{"file": fname, "mtime_ns": key[0], "size": key[1],
+                        "id": meta.get("id", ""), "name": meta.get("name", ""),
+                        "date": meta.get("date", "")}
+                       for fname, (key, meta) in self._list_cache.items()]
+            tmp = self._index_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"version": _INDEX_VERSION, "entries": entries}),
+                           encoding="utf-8")
+            tmp.replace(self._index_path)   # atomic: never a half-written index
+        except Exception as e:
+            log.debug(f"[SessionManager._save_index] {type(e).__name__}: {e}")
+
+    def _cached_list(self):
+        """The session list straight from memory, newest first. No disk."""
+        out = [dict(meta) for _, meta in self._list_cache.values()]
+        out.sort(key=lambda x: x["id"], reverse=True)
+        return out
+
+    def _touch_index_entry(self, session_file, meta):
+        """Record a just-written session in the cache + index, without re-parsing
+        it — we already know its metadata, and its stat is one syscall."""
+        try:
+            st = session_file.stat()
+            self._list_cache[session_file.name] = (
+                (st.st_mtime_ns, st.st_size), dict(meta, file=session_file.name))
+            self._save_index()
+        except OSError:
+            pass
+
+    def revalidate(self):
+        """Full disk scan, off the GUI thread. Returns True if the list changed.
+
+        The index is trusted on startup and repaired here: a session added,
+        removed or edited by something other than this app shows up on the next
+        revalidation instead of costing every caller a 14-second stat-and-parse
+        storm up front.
+        """
+        before = [m["id"] for m in self._cached_list()]
+        fresh = self.list_sessions(force_scan=True)
+        return [m["id"] for m in fresh] != before
 
     def create_session(self):
         """Create a new session with timestamp-based ID"""
@@ -105,6 +199,12 @@ class SessionManager:
         try:
             with open(session_file, 'w', encoding='utf-8') as f:
                 json.dump(session_data, f, indent=2, ensure_ascii=False)
+            # Keep the index exact without re-reading what we just wrote.
+            self._touch_index_entry(session_file, {
+                "id": session_id,
+                "name": session_data["session_name"],
+                "date": session_data["creation_time_and_date"],
+            })
             log.info(f"[SessionManager.save_session] ✓ Saved successfully → '{session_file.name}' "
                      f"| name='{session_data['session_name']}'")
             return True
@@ -148,19 +248,30 @@ class SessionManager:
                       f"{type(e).__name__}: {e}")
             return None
 
-    def list_sessions(self):
+    def list_sessions(self, force_scan: bool = False):
         """List all sessions, sorted by date (newest first).
 
-        Metadata is cached per file keyed by (mtime_ns, size): only new or
-        changed files are re-parsed. Session files hold whole chat histories
-        (MBs), and this runs on the GUI thread on every sidebar refresh /
-        auto-save — the full-directory parse was the top-ranked UI hitch."""
+        Serves from the persisted index with NO disk access when it is ready —
+        this is called on every sidebar refresh and every auto-save, from the
+        GUI thread, and the full-directory scan is what produced the worst
+        freeze on record (14867 ms across 411 files / 54 MB, 2026-08-18). Truth
+        is restored by `revalidate()` on a worker thread.
+
+        `force_scan=True` does the authoritative walk: stat every file, re-parse
+        only those whose (mtime_ns, size) changed, then rewrite the index."""
+        if self._index_ready and not force_scan:
+            return self._cached_list()
         log.info("[SessionManager.list_sessions] Scanning sessions directory")
         sessions = []
         seen = set()
 
         for file_path in self.sessions_dir.glob("*.json"):
             fname = file_path.name
+            # pathlib's glob is NOT shell glob — `*` matches a leading dot, so
+            # the index would otherwise be scanned as if it were a session and
+            # appear in the sidebar as an "Unnamed" entry.
+            if fname == _INDEX_NAME:
+                continue
             try:
                 st = file_path.stat()
                 key = (st.st_mtime_ns, st.st_size)
@@ -193,6 +304,8 @@ class SessionManager:
 
         # Sort by ID (which is timestamp-based) - newest first
         sessions.sort(key=lambda x: x['id'], reverse=True)
+        self._index_ready = True
+        self._save_index()
         log.info(f"[SessionManager.list_sessions] Found {len(sessions)} session(s) — sorted newest first")
         return sessions
 
@@ -209,6 +322,10 @@ class SessionManager:
                 if session_id in self.session_metadata:
                     del self.session_metadata[session_id]
                     log.debug("[SessionManager.delete_session] Metadata cache entry removed")
+                # Drop it from the index too, or a deleted session keeps
+                # appearing in the sidebar until the next full revalidation.
+                self._list_cache.pop(session_file.name, None)
+                self._save_index()
                 log.info(f"[SessionManager.delete_session] ✓ Deleted '{session_file.name}'")
                 return True
             except Exception as e:
@@ -265,6 +382,13 @@ class SessionManager:
                 "id": session_id
             }
             log.debug("[SessionManager.rename_session] Metadata cache updated with new name")
+            # The FILE moved, so the index keys move with it.
+            self._list_cache.pop(old_file.name, None)
+            self._touch_index_entry(new_file, {
+                "id": session_id,
+                "name": new_name,
+                "date": session_data.get('creation_time_and_date', ''),
+            })
             log.info(f"[SessionManager.rename_session] ✓ Renamed → '{new_file.name}'")
             return True
         except Exception as e:

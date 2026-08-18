@@ -10,7 +10,8 @@ launch was blocked until a Task Manager kill.
 
 Three pieces:
   * beat()             — called by a tiny QTimer on the UI thread (floating
-                         window); stamps data/logs/crash_dumps/heartbeat.txt.
+                         window); stamps an IN-MEMORY timestamp. No I/O: the
+                         watcher thread persists it to heartbeat.txt.
   * CrashWatcher       — daemon THREAD (the process survived the observed
                          crash, so an in-process watchdog suffices). On a stale
                          heartbeat it writes a forensic dump bundle, spawns the
@@ -59,15 +60,38 @@ KEEP_PER_BUCKET = 10           # newest N dump bundles kept per bucket
 
 # ── Heartbeat (UI thread) ────────────────────────────────────────────────────
 
+_last_beat = 0.0     # wall-clock of the newest UI beat; 0.0 = none yet
+
+
 def beat():
-    """Stamp the heartbeat file. Runs on the UI thread via QTimer — if the Qt
-    event loop hangs or the windows die, the stamps stop and the watcher acts."""
+    """Record a UI-thread heartbeat. Runs on the UI thread via QTimer — if the
+    Qt event loop hangs or the windows die, the stamps stop and the watcher acts.
+
+    Does NO I/O, deliberately. This used to write heartbeat.txt from the GUI
+    thread every 5 s and was the most FREQUENT culprit in the hitch reports
+    (10 of 50 on 2026-08-02): a blocking write can stall for seconds on a
+    contended disk no matter how few bytes it carries, and the watchdog is
+    supposed to detect freezes, not cause them. An in-memory float proves the
+    event loop is turning exactly as well as a file does — the WATCHER thread
+    persists it (_persist_beat), so the forensic artifact still exists."""
+    global _last_beat
+    _last_beat = time.time()
+
+
+def _beat_text() -> str:
+    """The heartbeat stamp in its on-disk / in-report form."""
+    return (f"{_last_beat:.3f} pid={os.getpid()} "
+            f"{datetime.fromtimestamp(_last_beat).isoformat(timespec='seconds')}")
+
+
+def _persist_beat():
+    """Write the newest beat to disk. Called ONLY from the watcher thread —
+    never from the GUI thread, which is the whole point of the split."""
+    if not _last_beat:
+        return
     try:
         HEARTBEAT_FILE.parent.mkdir(parents=True, exist_ok=True)
-        HEARTBEAT_FILE.write_text(
-            f"{time.time():.3f} pid={os.getpid()} "
-            f"{datetime.now().isoformat(timespec='seconds')}",
-            encoding="utf-8")
+        HEARTBEAT_FILE.write_text(_beat_text(), encoding="utf-8")
     except Exception:
         pass
 
@@ -96,10 +120,7 @@ def write_crash_dump(bucket: str, reason: str, exc_text=None,
             "python": sys.version,
             "exception": exc_text,
         }
-        try:
-            report["last_heartbeat"] = HEARTBEAT_FILE.read_text(encoding="utf-8")
-        except Exception:
-            report["last_heartbeat"] = None
+        report["last_heartbeat"] = _beat_text() if _last_beat else None
         (d / "crash_report.json").write_text(
             json.dumps(report, indent=2), encoding="utf-8")
 
@@ -269,11 +290,10 @@ class CrashWatcher(threading.Thread):
                 continue
             if not threading.main_thread().is_alive():
                 return                      # normal interpreter shutdown
-            try:
-                stale = time.time() - float(
-                    HEARTBEAT_FILE.read_text(encoding="utf-8").split()[0])
-            except Exception:
-                continue                    # no/garbled stamp yet
+            if not _last_beat:
+                continue                    # UI has not beaten once yet
+            _persist_beat()                 # forensic copy, off the GUI thread
+            stale = time.time() - _last_beat
             if stale < STALE_AFTER_S:
                 continue
             self._handle_freeze(stale)
