@@ -57,11 +57,22 @@ class BaseWindow(QWidget):
         human cannot scroll a window during the tick before it is drawn.
         """
         super().showEvent(event)
-        QTimer.singleShot(0, self._install_smooth_scrolling)
+        QTimer.singleShot(0, self._install_house_scrolling)
 
-    def _install_smooth_scrolling(self):
+    def _install_house_scrolling(self):
         """The deferred half of showEvent. Never raises — a window that fails to
-        get the house wheel behaviour still works, it just scrolls plainly."""
+        get the house wheel behaviour still works, it just scrolls plainly.
+
+        NAMED `_install_house_scrolling`, not `_install_smooth_scrolling`, and
+        that matters: `ChatWindow` has its own long-standing
+        `_install_smooth_scrolling(scroll_area)` that installs on ONE area with
+        the sticky-bottom intent callback. A deferred `QTimer.singleShot(0,
+        self._install_smooth_scrolling)` resolves the attribute on the INSTANCE,
+        so the subclass method won and the zero-argument call raised TypeError
+        on the GUI thread — an unhandled main-thread exception, which takes the
+        whole app down. It crashed five times on 2026-08-18 before the name was
+        separated. `test_base_window_deferred_hook.py` locks the signature.
+        """
         try:
             from PyQt6.QtWidgets import QAbstractScrollArea
             from systema.ui.widgets.smooth_scroll import install_smooth_scroll

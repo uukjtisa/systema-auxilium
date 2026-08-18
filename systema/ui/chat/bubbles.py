@@ -1292,23 +1292,56 @@ class BubblesMixin:
         if not t.isActive():
             t.start(self.STREAM_FLUSH_MS)
 
+    @staticmethod
+    def _append_stream_html(seg, chunk) -> bool:
+        """Append one delta to the live segment's html. Returns True if
+        anything paintable was added.
+
+        Escapes only the NEW chunk (the whole-reply re-escape was the old
+        O(n^2)), but normalises blank runs the same way the final markdown
+        render will — otherwise the reply visibly reflows the instant streaming
+        ends, which reads as a bug even though the end state is right:
+
+          * LEADING newlines are dropped. Plenty of models open with "\\n" or
+            "\\n\\n" (step-3.7-flash answers "\\nhello"), and a raw
+            `<br><br>` at the top of the label reserves two empty lines
+            between the name/thinking row and the first word.
+          * Runs of 3+ newlines collapse to one blank line, as markdown does.
+          * TRAILING newlines are HELD, not emitted, and re-prepended to the
+            next chunk. Without the hold the label grows a blank line at the
+            bottom after every delta that happens to end on a newline, and the
+            view jitters as it is added and pushed down again. It also makes
+            the collapse correct across a delta boundary — "a\\n" + "\\n\\nb"
+            is one run of three, not two separate runs.
+        """
+        import html as _html
+        import re as _re
+        buf = seg.get('nlbuf', '') + chunk
+        body = buf.rstrip('\n')
+        seg['nlbuf'] = buf[len(body):]
+        if not seg['html']:
+            body = body.lstrip()
+        if not body:
+            return False
+        seg['html'] += _html.escape(_re.sub(r'\n{3,}', '\n\n', body)
+                                    ).replace('\n', '<br>')
+        return True
+
     def _flush_stream(self):
         """Apply everything buffered since the last flush — ONE escape of the
         new chunk, ONE setText, ONE scroll, for both the reply and the card."""
-        import html as _html
         seg = getattr(self, '_stream_seg', None)
         painted = False
         if seg is not None and seg['pending']:
             chunk = ''.join(seg['pending'])
             seg['pending'].clear()
             seg['text'] += chunk
-            # Escape ONLY the new chunk and append to the rendered html.
-            seg['html'] += _html.escape(chunk).replace('\n', '<br>')
-            try:
-                seg['label'].setText(seg['html'])
-                painted = True
-            except RuntimeError:
-                self._stream_seg = None
+            if self._append_stream_html(seg, chunk):
+                try:
+                    seg['label'].setText(seg['html'])
+                    painted = True
+                except RuntimeError:
+                    self._stream_seg = None
 
         card = getattr(self, '_stream_think_card', None)
         if card is not None and card.get('flush'):

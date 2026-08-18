@@ -179,9 +179,24 @@ def normalize_result(raw) -> dict | None:
 
 def split_think_tags(text: str) -> tuple:
     """(thinking, content) for models that inline <think>...</think> in the
-    reply. thinking is None when no tag is present."""
-    if not text or "<think" not in text.lower():
+    reply. thinking is None when no tag is present.
+
+    Also handles a CLOSER WITH NO OPENER. Several reasoning chat templates
+    pre-fill the leading `<think>` themselves, so the model's own output
+    starts mid-thought and the only tag it ever emits is `</think>`. Requiring
+    both tags meant that whole chain-of-thought was returned as the reply and
+    shown to the user as the model's answer — measured 2026-08-18 on
+    `@cf/qwen/qwq-32b`, which streamed 257 text chunks of internal monologue
+    and zero thinking chunks.
+    """
+    if not text:
         return None, text
+    low = text.lower()
+    if "<think" not in low:
+        if "</think>" not in low:
+            return None, text
+        head, _, tail = text.partition("</think>")
+        return (head.strip() or None), tail.strip()
     thinks = _THINK_RE.findall(text)
     if not thinks:
         return None, text
@@ -196,12 +211,19 @@ class ThinkTagStreamSplitter:
 
         feed(delta) -> [("thinking"|"text", chunk), ...]
         flush()     -> same, at end of stream (unclosed think drains as thinking)
+
+    `assume_open=True` starts in think mode, for models whose chat template
+    PRE-FILLS the opening tag: their output begins mid-thought and `</think>`
+    is the only tag they ever emit. Detection cannot recover that case — by
+    the time the closer arrives the reasoning has already been streamed as
+    reply text and cannot be un-emitted — so it is a per-model declaration the
+    provider makes, not a guess made here.
     """
 
     OPEN, CLOSE = "<think>", "</think>"
 
-    def __init__(self):
-        self._mode = "detect"   # detect | think | text
+    def __init__(self, assume_open: bool = False):
+        self._mode = "think" if assume_open else "detect"
         self._buf = ""
 
     def feed(self, delta: str) -> list:
@@ -252,7 +274,8 @@ class ThinkTagStreamSplitter:
         return out
 
 
-def stream_openai_chunks(events, split_think: bool = True):
+def stream_openai_chunks(events, split_think: bool = True,
+                         assume_think_open: bool = False):
     """OpenAI-style streaming events → contract chunks.
 
     `events` yields either OpenAI-SDK chunk objects or plain dicts of the same
@@ -267,7 +290,7 @@ def stream_openai_chunks(events, split_think: bool = True):
 
     finish = None
     pending = {}   # stream index → {"id", "name", "args"}
-    splitter = ThinkTagStreamSplitter() if split_think else None
+    splitter = ThinkTagStreamSplitter(assume_think_open) if split_think else None
     for event in events:
         choices = g(event, "choices")
         if not choices:

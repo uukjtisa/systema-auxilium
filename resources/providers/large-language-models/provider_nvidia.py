@@ -2,25 +2,36 @@
 provider_nvidia.py
 ===================
 Custom Script Provider for Systema Auxilium.
-ONE provider for the NVIDIA Inference API — pick the model in Settings
-(merged from the old per-model scripts: glm51 / deepseek_v4_pro /
-deepseek_v4_flash).
+ONE provider for the NVIDIA Inference API — pick the model in Settings.
 
-Models: z-ai/glm-5.1, deepseek-ai/deepseek-v4-pro, deepseek-ai/deepseek-v4-flash
 Endpoint: https://integrate.api.nvidia.com/v1
-
-All three support extended reasoning. Reasoning is returned separately as
-"thinking" — the app renders it in a collapsible card above the reply and
-never sends it back to the model. REASONING_EFFORT applies to the DeepSeek
-models only (GLM ignores it).
 
 Unified chat() with streaming, native tool calling and inline (positional)
 images; editable settings via Display.
 
-The endpoint is OpenAI-compatible, so tools and vision both work at the
-TRANSPORT level — whether a given request succeeds depends on the model you
-picked in Settings. The curated GLM/DeepSeek defaults are reasoning models;
-select a vision-capable model via Custom… if you want to send images.
+Reasoning is returned separately as "thinking" — the app renders it in a
+collapsible card above the reply and never sends it back to the model. It is
+switchable per request via the THINKING checkbox, and how deeply via
+REASONING_EFFORT.
+
+CAPABILITIES ARE A TABLE, NOT A GUESS (_MODEL_INFO, researched 2026-08-18).
+Both halves of this file used to infer capability from the model STRING, and
+both were wrong in ways nothing reported:
+
+  * Vision was a substring match on the id ("vl", "vision", "omni", ...), so
+    `minimaxai/minimax-m3` — which NVIDIA's own reference page documents as
+    accepting text, image AND video — was declared blind, and the Model
+    dropdown's own tooltip said so out loud while the item tooltip beside it
+    said "vision capable". Both were shipped, contradicting each other.
+  * Thinking was `if "deepseek" in MODEL`, so every non-DeepSeek model got
+    GLM's `{enable_thinking, clear_thinking}` spelling whether or not it
+    understood it — including MiniMax, whose knob is `thinking_mode`, and
+    Inkling, whose knob is `reasoning_effort`.
+
+Chat-template kwargs are per FAMILY and not interchangeable; DeepSeek V4 in
+particular HANGS rather than erroring when its keys are missing. Unknown ids
+(anything typed into Custom…) still fall back to the string heuristics, which
+is a guess and is documented as one at the call site.
 
 Point this file at:
     Settings → AI → Custom Script Provider
@@ -36,11 +47,12 @@ from openai import OpenAI
 # ── Configure here ────────────────────────────────────────────────────────────
 
 API_KEY       = "YOUR_NVIDIA_API_KEY"   # Replace with your NVIDIA API key
-MODEL            = "z-ai/glm-5.1"
+MODEL            = "deepseek-ai/deepseek-v4-flash-0731"
 TEMPERATURE      = 1
 TOP_P            = 1
 MAX_TOKENS       = 16384
-REASONING_EFFORT = "high"   # DeepSeek models only — "low" for speed
+THINKING         = True     # Extended reasoning on/off — see _thinking_kwargs()
+REASONING_EFFORT = "high"   # How deep, when THINKING is on
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -55,20 +67,89 @@ BASE_URL = "https://integrate.api.nvidia.com/v1"
 SUPPORTS_NATIVE_TOOLS  = True
 NATIVE_DIALECT         = "openai"
 
-# Vision is PER MODEL. The gateway speaks the image_url format at the TRANSPORT
-# level, which is what the old blanket `SUPPORTS_VISION = True` was really
-# describing — but the three curated defaults are REASONING models that cannot
-# see, so the app cheerfully accepted attachments and the request failed
-# upstream. Prefix-matched: NVIDIA's catalog versions fast and an exact-id set
-# would silently rot. Pick a VLM via Custom… to send images.
-# (Catalog checked 2026-08-02 — https://build.nvidia.com/models.)
-_VISION_MODEL_MARKERS = ("vl", "vision", "omni", "multimodal", "nano-omni")
+# ── Per-model capability table ────────────────────────────────────────────────
+# Catalog researched 2026-08-18 against build.nvidia.com, docs.api.nvidia.com
+# and the NVIDIA developer forums. Two facts per model, because both were
+# previously inferred from the id string and both were wrong for someone:
+#
+#   vision  — does the HOSTED endpoint accept image_url content blocks. The
+#             gateway speaks the format at the transport level regardless;
+#             this is about the MODEL, and the app reads it BEFORE an
+#             attachment so the user is warned instead of failing inside the
+#             base64 encoder.
+#   think   — which chat-template family the model belongs to. NOT cosmetic:
+#             the keys are per family and a model given the wrong ones either
+#             silently ignores them (no reasoning, no error) or, for DeepSeek
+#             V4, HANGS until the request times out.
+#
+# RETIRED — deliberately absent, do not re-add: z-ai/glm5 (deprecated
+# 2026-04-20), z-ai/glm-5.1 (superseded by 5.2; it was this file's default
+# and was not even in its own dropdown), moonshotai/kimi-k2.5,
+# minimaxai/minimax-m2.5 and -m2.7, qwen/qwen3.5-397b-a17b (endpoint retired),
+# nvidia/cosmos-reason1-7b (deprecated 2026-03-24).
+_MODEL_INFO = {
+    # ── vision, MEASURED: each read "47" off a green test card ────────────
+    "minimaxai/minimax-m3":                          (True,  "minimax"),
+    "thinkingmachines/inkling":                      (True,  "inkling"),
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning": (True,  "nemotron"),
+    "nvidia/nemotron-nano-12b-v2-vl":                (True,  "nemotron"),
+    # ── text only, MEASURED ───────────────────────────────────────────────
+    # glm-5.2 is the reason this table exists in place of a substring guess:
+    # it ACCEPTS image blocks without error and answers "Unknown unknown".
+    # No exception is raised anywhere, so only asking it settles the question.
+    "z-ai/glm-5.2":                                  (False, "glm"),
+    "deepseek-ai/deepseek-v4-flash-0731":            (False, "deepseek_v4"),
+    "nvidia/nemotron-3-ultra-550b-a55b":             (False, "nemotron"),
+    "nvidia/nemotron-3-super-120b-a12b":             (False, "nemotron"),
+    "nvidia/nemotron-3.5-lightning-30b-a3b":         (False, "nemotron"),
+    "openai/gpt-oss-120b":                           (False, "qwen"),
+    "stepfun-ai/step-3.7-flash":                     (False, None),
+    "google/gemma-4-31b-it":                         (False, None),
+    # Still served, kept for anyone who types them into Custom…
+    "deepseek-ai/deepseek-v3.2":                     (False, "deepseek_v3"),
+    "moonshotai/kimi-k2.6":                          (True,  "kimi"),
+}
+
+# NOT OFFERED, and each for a measured reason (2026-08-19, this account):
+#   moonshotai/kimi-k2.6                 404 "not found for account". It IS
+#                                        vision-capable (MoonViT) — hence the
+#                                        True above for paid accounts — but it
+#                                        cannot be called here.
+#   meta/llama-3.2-90b-vision-instruct   timed out on all four probes.
+#   poolside/laguna-xs-2.1               503 ResourceExhausted.
+#   mistralai/mistral-nemotron           read timeout.
+#
+# GONE from GET /v1/models entirely — never re-add without re-checking:
+#   deepseek-ai/deepseek-v4-pro, deepseek-ai/deepseek-v4-flash (superseded by
+#   the dated -0731 snapshot), qwen/* (the whole Qwen endpoint was retired),
+#   z-ai/glm-5.1 (this file's own former default, not even in its own
+#   dropdown), z-ai/glm5.
+# `GET /v1/models` is the authority — third-party catalog lists were wrong
+# about four of these on the day they were copied.
+
+# Fallback for ids typed into Custom… — a GUESS, and the only place one is
+# made. The table above is authoritative for everything shipped in the
+# dropdown; this exists so a VLM released after today still works without an
+# edit. Being wrong here costs a refused attachment or an ignored kwarg, never
+# a hallucinated answer: the app still routes real pixels when it sends any.
+_VISION_MODEL_MARKERS = ("vl", "vision", "omni", "multimodal")
+_THINK_FAMILY_MARKERS = (
+    ("deepseek-v4", "deepseek_v4"), ("deepseek", "deepseek_v3"),
+    ("glm", "glm"), ("kimi", "kimi"), ("minimax", "minimax"),
+    ("inkling", "inkling"), ("nemotron", "nemotron"), ("qwen", "qwen"),
+)
+
+
+def _model_id() -> str:
+    return (MODEL or "").strip().lower()
 
 
 def SUPPORTS_VISION() -> bool:
-    """True when the selected model id looks like a vision/multimodal one."""
-    m = (MODEL or "").lower()
-    tail = m.split("/")[-1]
+    """True when the SELECTED model accepts images."""
+    known = _MODEL_INFO.get(_model_id())
+    if known is not None:
+        return known[0]
+    tail = _model_id().split("/")[-1]
     return any(mark in tail for mark in _VISION_MODEL_MARKERS)
 
 
@@ -90,26 +171,110 @@ Display = {
                 {"tooltip": "Free key at build.nvidia.com",
                  "placeholder": "nvapi-..."}),
     "MODEL": ("Model", "list_dropdown", [
-        ("GLM 5.1",             "z-ai/glm-5.1"),
-        ("DeepSeek V4 Pro",     "deepseek-ai/deepseek-v4-pro"),
-        ("DeepSeek V4 Flash",   "deepseek-ai/deepseek-v4-flash")],
-        {"tooltip": "Editable — type any model id from the NVIDIA catalog. None "
-                    "of the three curated defaults accept images; pick a "
-                    "vision/VL/omni model via Custom… if you need that.",
+        ("DeepSeek V4 Flash",              "deepseek-ai/deepseek-v4-flash-0731"),
+        ("MiniMax M3 (Vision)",            "minimaxai/minimax-m3"),
+        ("Inkling (Vision)",               "thinkingmachines/inkling"),
+        ("Nemotron 3 Nano Omni (Vision)",  "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"),
+        ("Nemotron Nano 12B VL (Vision)",  "nvidia/nemotron-nano-12b-v2-vl"),
+        ("GLM 5.2",                        "z-ai/glm-5.2"),
+        ("Nemotron 3 Ultra 550B",          "nvidia/nemotron-3-ultra-550b-a55b"),
+        ("Nemotron 3 Super 120B",          "nvidia/nemotron-3-super-120b-a12b"),
+        ("Nemotron 3.5 Lightning 30B",     "nvidia/nemotron-3.5-lightning-30b-a3b"),
+        ("GPT-OSS 120B",                   "openai/gpt-oss-120b"),
+        ("Step 3.7 Flash",                 "stepfun-ai/step-3.7-flash"),
+        ("Gemma 4 31B",                    "google/gemma-4-31b-it")],
+        {"tooltip": "Editable — type any model id from the NVIDIA catalog. Every "
+                    "entry here was called live on 2026-08-19 and answered; "
+                    "(Vision) entries actually read a number off a test picture. "
+                    "The rest are text-only and the app says so before you attach.",
          "item_tooltips": [
-             "z-ai/glm-5.1 — strong all-round reasoning flagship. Text only.",
-             "deepseek-ai/deepseek-v4-pro — deepest reasoning, slower. Text only.",
-             "deepseek-ai/deepseek-v4-flash — fast, lighter reasoning. Text only."]}),
-    "REASONING_EFFORT": ("Reasoning effort", "list_dropdown", ["low", "high"],
-        {"tooltip": "DeepSeek models only — GLM ignores this"}),
+             "deepseek-ai/deepseek-v4-flash-0731 — fast, strong reasoning, native tools. Text only. Default. (The undated id was retired; NVIDIA now serves this dated snapshot.)",
+             "minimaxai/minimax-m3 — VISION (image + video). 1M context, switchable thinking. Popular, so it rate-limits (429) more than the rest.",
+             "thinkingmachines/inkling — VISION (image + audio). Mamba-hybrid MoE; thinking effort is a full ladder, none..max.",
+             "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning — VISION (image, video, audio). 30B MoE, 256K context.",
+             "nvidia/nemotron-nano-12b-v2-vl — VISION. Small, quick vision-language model; good when the big ones are busy.",
+             "z-ai/glm-5.2 — reasoning + native tools. Replaces GLM 5 and 5.1, both retired. Text only: it ACCEPTS images and answers without seeing them, so the app blocks attachments.",
+             "nvidia/nemotron-3-ultra-550b-a55b — NVIDIA's 550B/55B-active reasoning flagship. Text only.",
+             "nvidia/nemotron-3-super-120b-a12b — mid-size Nemotron 3, lighter than Ultra. Text only.",
+             "nvidia/nemotron-3.5-lightning-30b-a3b — fastest Nemotron here. Text only.",
+             "openai/gpt-oss-120b — open-weight GPT-OSS, reasoning. Text only.",
+             "stepfun-ai/step-3.7-flash — fast; always reasons and ignores the Extended reasoning switch. Text only.",
+             "google/gemma-4-31b-it — no extended reasoning at all. Text only."]}),
+    "THINKING": ("Extended reasoning", "checkbox",
+        {"tooltip": "Ask the model to think before answering. Off is faster and "
+                    "cheaper; the thinking card disappears. Models with no "
+                    "reasoning mode (the Llama vision ones) ignore this."}),
+    "REASONING_EFFORT": ("Reasoning effort", "list_dropdown",
+        ["low", "medium", "high", "max"],
+        {"tooltip": "How deep to think, when Extended reasoning is on. Read by "
+                    "DeepSeek V4 (high/max only — lower is clamped up), Inkling "
+                    "(full ladder) and MiniMax M3 (low/medium pick its adaptive "
+                    "mode). Other families are simply on or off and ignore this."}),
+    "NOTE_1": ("NOTE: the NVIDIA catalog rotates and retires ids — GLM 5, GLM "
+               "5.1, Kimi K2.5, MiniMax M2.x and the Qwen 3.5 endpoint are all "
+               "gone. If a model starts erroring, pick another here or type a "
+               "current id from build.nvidia.com into Custom….", "info_box"),
 }
 
 
+# ── Reasoning: per-family chat_template_kwargs ────────────────────────────────
+# Every family spells this differently and the keys do NOT carry across. Two
+# things depend on getting it right:
+#   * DeepSeek V4 HANGS — not errors, hangs — when its keys are absent, which
+#     is why the "off" variant still sends the block with thinking False
+#     rather than sending nothing at all.
+#   * A model handed another family's keys ignores them silently. That is how
+#     `if "deepseek" in MODEL` shipped GLM's spelling to MiniMax and Inkling:
+#     no reasoning, no card, no error, nothing to notice.
+# `None` means the model has no reasoning mode; it gets an empty block.
+
+def _effort() -> str:
+    e = (REASONING_EFFORT or "high").strip().lower()
+    return e if e in ("none", "minimal", "low", "medium", "high", "max") else "high"
+
+
+def _think_family():
+    """Which chat-template family the SELECTED model belongs to."""
+    known = _MODEL_INFO.get(_model_id())
+    if known is not None:
+        return known[1]
+    tail = _model_id().split("/")[-1]
+    for marker, family in _THINK_FAMILY_MARKERS:
+        if marker in tail:
+            return family
+    return None
+
+
 def _thinking_kwargs() -> dict:
-    """Per-family chat_template_kwargs — GLM and DeepSeek spell it differently."""
-    if "deepseek" in MODEL.lower():
-        return {"thinking": True, "reasoning_effort": REASONING_EFFORT}
-    return {"enable_thinking": True, "clear_thinking": False}
+    family = _think_family()
+    on = bool(THINKING)
+    if family is None:
+        return {}
+    if family == "deepseek_v4":
+        # Both keys on purpose: the reference lists `thinking`, the hang report
+        # names `enable_thinking` too, and an unused chat-template kwarg is
+        # harmless while a missing one costs the whole request.
+        if not on:
+            return {"thinking": False, "enable_thinking": False}
+        effort = _effort()
+        return {"thinking": True, "enable_thinking": True,
+                "reasoning_effort": effort if effort in ("high", "max") else "high"}
+    if family == "deepseek_v3":
+        return {"thinking": on}
+    if family == "glm":
+        return {"enable_thinking": True, "clear_thinking": False} if on \
+            else {"enable_thinking": False}
+    if family == "kimi":
+        return {"thinking": on}
+    if family == "minimax":
+        if not on:
+            return {"thinking_mode": "disabled"}
+        return {"thinking_mode": "adaptive" if _effort() in ("none", "minimal", "low", "medium")
+                else "enabled"}
+    if family == "inkling":
+        return {"reasoning_effort": _effort() if on else "none"}
+    # nemotron / qwen / gpt-oss
+    return {"enable_thinking": on}
 
 
 def _client() -> OpenAI:
@@ -202,9 +367,13 @@ def chat(system_prompt: str, messages: list, *, images=None, tools=None, stream=
         temperature=TEMPERATURE,
         top_p=TOP_P,
         max_tokens=MAX_TOKENS,
-        extra_body={"chat_template_kwargs": _thinking_kwargs()},
         stream=True,
     )
+    # Only sent when the model HAS a reasoning mode — a model with none (the
+    # Llama vision pair) should not receive an empty chat_template_kwargs block.
+    think = _thinking_kwargs()
+    if think:
+        kwargs["extra_body"] = {"chat_template_kwargs": think}
     if tools:
         kwargs["tools"] = na.to_openai_tools(tools)
         kwargs["tool_choice"] = "auto"

@@ -171,20 +171,16 @@ Display = {
     "CF_MODEL": ("Vision model (Cloudflare)", "list_dropdown", [
         ("Llama 4 Scout (Vision)",     "@cf/meta/llama-4-scout-17b-16e-instruct"),
         ("Gemma 4 26B (Vision)",       "@cf/google/gemma-4-26b-a4b-it"),
-        ("Mistral Small 3.1 (Vision)", "@cf/mistralai/mistral-small-3.1-24b-instruct"),
-        ("Llama 3.2 11B (Vision)",     "@cf/meta/llama-3.2-11b-vision-instruct")],
-        {"tooltip": "Handles any turn with attached images — every entry here is "
-                    "vision-capable and on Cloudflare's FREE allocation. Kimi was "
-                    "removed 2026-08-02: it now needs the Workers PAID plan. "
-                    "Editable — type a Kimi id if you are on the paid plan.",
+        ("Mistral Small 3.1 (Vision)", "@cf/mistralai/mistral-small-3.1-24b-instruct")],
+        {"tooltip": "Handles any turn with attached images. All three were called "
+                    "live on 2026-08-18 and read a number off a test picture; all "
+                    "three are on Cloudflare's FREE allocation. Kimi needs the "
+                    "Workers PAID plan and Llama 3.2 11B Vision returns 403 on "
+                    "free — editable, so type either if your plan covers it.",
          "item_tooltips": [
              "@cf/meta/llama-4-scout-17b-16e-instruct — natively multimodal MoE; vision + tools. Default.",
              "@cf/google/gemma-4-26b-a4b-it — vision + tools + reasoning",
-             "@cf/mistralai/mistral-small-3.1-24b-instruct — vision + tools, 128k context",
-             "@cf/meta/llama-3.2-11b-vision-instruct — vision only, no tool calling"]}),
-    # One ID + token pair per slot, generated from CF_ACCOUNTS at the top.
-    # Only the vision half of this provider uses them.
-    **_cf_account_rows(),
+             "@cf/mistralai/mistral-small-3.1-24b-instruct — vision + tools, 128k context"]}),
     "NOTE_1": ("NOTE: text goes to OpenCode Zen, images to Cloudflare.",
                "info_box"),
     "NOTE_2": ("NOTE: both Cloudflare values come from dash.cloudflare.com ▸ "
@@ -517,9 +513,14 @@ NATIVE_DIALECT        = "openai"
 # Vision depends on the CF_MODEL you picked, not on the text model: a text-only
 # Cloudflare id leaves this script with no vision path at all, and saying
 # otherwise fails inside the base64 encoder. (Catalog verified 2026-08-02.)
+# MEASURED 2026-08-18 by sending each id a picture of the number 47 on a green
+# field through this script's own chat(); the three free ones answered "47
+# green". @cf/meta/llama-3.2-11b-vision-instruct is deliberately ABSENT: it is
+# a real vision model that returns 403 PermissionDenied on the free plan, and
+# promising vision for an id nobody can call just moves the failure one step
+# later, into the encoder.
 _CF_VISION_MODELS = frozenset({
     "@cf/meta/llama-4-scout-17b-16e-instruct",
-    "@cf/meta/llama-3.2-11b-vision-instruct",
     "@cf/google/gemma-4-26b-a4b-it",
     "@cf/mistralai/mistral-small-3.1-24b-instruct",
     "@cf/moonshotai/kimi-k2.6",        # Workers PAID plan only

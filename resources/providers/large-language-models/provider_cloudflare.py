@@ -126,6 +126,8 @@ def _account_rows() -> dict:
 
 MODEL          = "@cf/meta/llama-4-scout-17b-16e-instruct"
 MAX_TOKENS     = 16384   # Raise up to 16384 if needed — watch your neuron budget
+THINKING         = True     # Extended reasoning on/off — see _reasoning_params()
+REASONING_EFFORT = "high"   # gpt-oss only: low / medium / high
 
 
 # Current Cloudflare-hosted text-generation catalog (researched 2026-07-21,
@@ -136,7 +138,6 @@ Display = {
         ("Llama 4 Scout (Vision)",     "@cf/meta/llama-4-scout-17b-16e-instruct"),
         ("Gemma 4 26B (Vision)",       "@cf/google/gemma-4-26b-a4b-it"),
         ("Mistral Small 3.1 (Vision)", "@cf/mistralai/mistral-small-3.1-24b-instruct"),
-        ("Llama 3.2 11B (Vision)",     "@cf/meta/llama-3.2-11b-vision-instruct"),
         ("GLM 4.7 Flash",              "@cf/zai-org/glm-4.7-flash"),
         ("gpt-oss 120B",               "@cf/openai/gpt-oss-120b"),
         ("gpt-oss 20B",                "@cf/openai/gpt-oss-20b"),
@@ -153,7 +154,6 @@ Display = {
              "@cf/meta/llama-4-scout-17b-16e-instruct — natively multimodal MoE; VISION + tools. Free allocation. Default.",
              "@cf/google/gemma-4-26b-a4b-it — VISION + tools + reasoning. Free allocation.",
              "@cf/mistralai/mistral-small-3.1-24b-instruct — VISION + tools, 128k context. Free allocation.",
-             "@cf/meta/llama-3.2-11b-vision-instruct — VISION only, no tool calling. Free allocation.",
              "@cf/zai-org/glm-4.7-flash — fast multilingual; tools + reasoning. Text only.",
              "@cf/openai/gpt-oss-120b — OpenAI open-weight; tools + reasoning. Text only.",
              "@cf/openai/gpt-oss-20b — lighter gpt-oss; tools + reasoning. Text only.",
@@ -161,8 +161,19 @@ Display = {
              "@cf/meta/llama-3.3-70b-instruct-fp8-fast — tools. Text only.",
              "@cf/qwen/qwen3-30b-a3b-fp8 — tools + reasoning. Text only.",
              "@cf/qwen/qwen2.5-coder-32b-instruct — code-focused. Text only.",
-             "@cf/qwen/qwq-32b — reasoning-focused. Text only.",
+             "@cf/qwen/qwq-32b — reasoning-focused. Text only. Always thinks: it ignores Extended reasoning being switched off.",
              "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b — reasoning. Text only."]}),
+    "THINKING": ("Extended reasoning", "checkbox",
+                 {"tooltip": "Ask the model to think before answering. Off is "
+                             "faster and cheaper on neurons; the thinking card "
+                             "disappears. Models with no reasoning mode (Llama "
+                             "4 Scout, Mistral Small, Llama 3.3, Qwen2.5 Coder) "
+                             "ignore this."}),
+    "REASONING_EFFORT": ("Reasoning effort", "list_dropdown",
+                         ["low", "medium", "high"],
+                         {"tooltip": "How deep to think, when Extended reasoning "
+                                     "is on. Read by the gpt-oss models only — "
+                                     "the other families are simply on or off."}),
     "MAX_TOKENS": ("Max tokens", "number",
                    {"tooltip": "Response cap — higher burns the daily free "
                                "neuron budget faster"}),
@@ -201,21 +212,92 @@ NATIVE_DIALECT        = "openai"   # Cloudflare Workers AI speaks the OpenAI dia
 # inside the base64 encoder on the ones that can't. `SUPPORTS_VISION` is a
 # FUNCTION: the app calls it after applying your Settings choices, so it always
 # describes the model actually selected. (Catalog verified 2026-08-02.)
+# MEASURED 2026-08-18, not read off a catalog page: each model was sent a
+# picture of the number 47 on a green field through this script's own chat()
+# and asked to name both. The three below answered "47 green"; every model
+# absent from this set returned a 400 rejecting the image blocks.
 _VISION_MODELS = frozenset({
     "@cf/meta/llama-4-scout-17b-16e-instruct",
-    "@cf/meta/llama-3.2-11b-vision-instruct",
     "@cf/google/gemma-4-26b-a4b-it",
     "@cf/mistralai/mistral-small-3.1-24b-instruct",
-    # Workers PAID plan only, but genuinely vision-capable.
+    # Paid-plan only (see the MODEL dropdown note) but genuinely vision-capable,
+    # so a user on the Workers Paid plan who types one in gets the right answer.
     "@cf/moonshotai/kimi-k2.6",
     "@cf/moonshotai/kimi-k2.7-code",
 })
+# NOT here on purpose: @cf/meta/llama-3.2-11b-vision-instruct. It really is a
+# vision model, and it returns 403 PermissionDenied on the free plan — it is
+# out of the dropdown for that reason, and claiming vision for an id nobody
+# can call only produces a confusing failure one step later.
 
 
 def SUPPORTS_VISION() -> bool:
     """True when the CURRENTLY SELECTED model accepts images."""
     return MODEL in _VISION_MODELS
-SUPPORTS_INLINE_IMAGES = True
+
+
+# ── Reasoning ─────────────────────────────────────────────────────────────────
+# Workers AI takes `reasoning_effort` and `chat_template_kwargs` on its
+# OpenAI-compatible endpoint. This script previously sent NEITHER — it only
+# parsed reasoning back out of the reply — so thinking was whatever the model
+# defaulted to and the user had no way to turn it off.
+#
+# Spellings are per family and are not interchangeable (verified against the
+# Workers AI model pages 2026-08-18): gpt-oss takes the OpenAI-style
+# `reasoning_effort`; Qwen3/QwQ take `enable_thinking`; GLM takes
+# `enable_thinking` + `clear_thinking`; Kimi K2.6 takes `thinking` (NOT
+# `enable_thinking` — a known Workers AI quirk).
+_REASONING_FAMILIES = (
+    ("gpt-oss",        "effort"),
+    ("qwq",            "enable"),
+    ("qwen3",          "enable"),
+    ("glm",            "glm"),
+    ("kimi",           "thinking"),
+    ("deepseek-r1",    "enable"),
+    ("nemotron",       "enable"),
+    ("gemma-4",        "enable"),
+)
+
+# Models whose chat template PRE-FILLS the opening <think>, so the only tag
+# they emit is the closer. Measured: streaming @cf/qwen/qwq-32b produced 257
+# text chunks and zero thinking chunks — the user watched the model's internal
+# monologue arrive as its answer. The stream splitter cannot detect this
+# (nothing marks the start), so it is declared here.
+_PREFILLED_THINK = frozenset({"@cf/qwen/qwq-32b"})
+
+# Measured, so the tooltip can say it: qwq-32b IGNORES enable_thinking:false —
+# it returned ~1000 characters of reasoning either way. The toggle is still
+# sent (harmless, and it may start being honoured), but the model is labelled
+# as always-thinking rather than left looking broken.
+
+
+def _reasoning_family() -> str:
+    m = (MODEL or "").lower()
+    for marker, family in _REASONING_FAMILIES:
+        if marker in m:
+            return family
+    return ""
+
+
+def _reasoning_params() -> dict:
+    """Extra request params carrying the THINKING choice, per family. Empty
+    for models with no reasoning mode — never send an empty kwargs block."""
+    family = _reasoning_family()
+    if not family:
+        return {}
+    on = bool(THINKING)
+    if family == "effort":
+        return {"reasoning_effort": REASONING_EFFORT if on else "low"}
+    if family == "glm":
+        return {"chat_template_kwargs":
+                {"enable_thinking": True, "clear_thinking": False} if on
+                else {"enable_thinking": False}}
+    if family == "thinking":
+        return {"chat_template_kwargs": {"thinking": on}}
+    return {"chat_template_kwargs": {"enable_thinking": on}}
+
+
+# SUPPORTS_INLINE_IMAGES = True
 # Everything Pillow can DECODE, not just what the endpoint accepts: the
 # encoder re-encodes to JPEG/PNG on the way out, so the input extension
 # only has to be readable. A narrow list refused a .jfif for no reason.
@@ -307,11 +389,17 @@ def _make_client(account: dict) -> OpenAI:
 
 
 def _split_reasoning(message) -> tuple:
-    """(content, thinking) from a Kimi response message.
+    """(content, thinking) from a response message.
 
     K2.6+ puts reasoning in message.reasoning (was reasoning_content /
     inline <think>...</think> in the body). Legacy inline blocks are split
     out as a fallback in case a middleware proxy still emits them.
+
+    A CLOSER WITH NO OPENER is handled too. Some chat templates pre-fill the
+    leading `<think>` themselves, so the model emits `</think>` and nothing
+    else — measured on `@cf/qwen/qwq-32b` 2026-08-18, which returned nine
+    hundred characters of "Okay, the user wants me to..." as its ANSWER
+    because a both-tags-required regex matched nothing.
     """
     content = (getattr(message, "content", None) or "").strip()
     reasoning = (getattr(message, "reasoning", None)
@@ -321,6 +409,34 @@ def _split_reasoning(message) -> tuple:
         if not reasoning:
             reasoning = m.group(1)
         content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+    elif "</think>" in content:
+        head, _, tail = content.partition("</think>")
+        if not reasoning:
+            reasoning = head
+        content = tail.strip()
+
+    # gpt-oss speaks OpenAI's "harmony" channel format, and Workers AI does not
+    # always parse it before handing the reply back — the same prompt returned a
+    # clean {content, reasoning} pair once and the raw transcript
+    #   analysis: just multiply 391? 17*23 = 391.<|end|><|start|>assistantfinal391
+    # the next time (measured 2026-08-18). Unwrap it rather than paint the
+    # channel markers into the bubble.
+    if "<|start|>assistantfinal" in content:
+        head, _, tail = content.partition("<|start|>assistantfinal")
+        if not reasoning:
+            reasoning = re.sub(r"^analysis:?\s*", "", head.split("<|end|>")[0]).strip()
+        content = tail.strip()
+    content = re.sub(r"<\|(?:end|start|return|channel|message)\|>", "", content).strip()
+
+    # Workers AI can return the ANSWER in the reasoning field with a null
+    # content — reproduced on @cf/qwen/qwen3-30b-a3b-fp8 with
+    # enable_thinking:false, which answered "17 * 23 = **391**" as *reasoning*.
+    # Left alone that is an empty reply with the real answer hidden inside a
+    # collapsed thinking card. A tool-call turn is legitimately contentless, so
+    # it is excluded.
+    if not content and reasoning and not getattr(message, "tool_calls", None):
+        content, reasoning = reasoning.strip(), ""
+
     return content, (reasoning.strip() or None)
 
 
@@ -659,6 +775,9 @@ def _call_accounts(
                 max_tokens=MAX_TOKENS,
                 stream=stream,
             )
+            extra = _reasoning_params()
+            if extra:
+                kwargs["extra_body"] = extra
             if tools:
                 kwargs["tools"] = tools
                 kwargs["tool_choice"] = "auto"   # nudge the model to actually call
@@ -776,9 +895,14 @@ def chat(system_prompt: str, messages: list, *, images=None, tools=None, stream=
 def _chunks(completion):
     """SDK stream → contract chunks via the shared engine helper. Reasoning
     arrives via delta.reasoning (K2.6+) or legacy inline <think> tags (split
-    incrementally); complete tool calls are emitted at end of stream."""
+    incrementally); complete tool calls are emitted at end of stream.
+
+    `assume_think_open` for the models in _PREFILLED_THINK: they never emit an
+    opening tag, so without it the splitter stays in text mode and the whole
+    chain-of-thought streams into the reply bubble."""
     from systema.engine.provider_contract import stream_openai_chunks
-    return stream_openai_chunks(completion)
+    return stream_openai_chunks(completion,
+                                assume_think_open=MODEL in _PREFILLED_THINK)
 
 
 # ── Quick test ────────────────────────────────────────────────────────────────

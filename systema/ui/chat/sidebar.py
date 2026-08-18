@@ -585,8 +585,17 @@ class SidebarMixin:
         av_name_row = QHBoxLayout()
         av_name_row.setSpacing(12)
 
-        # Stacked avatars widget (bot big, user badge)
-        av_stack = QWidget()
+        # Stacked avatars widget (bot big, user badge).
+        # PARENTED TO `hero` AT CONSTRUCTION, and that is load-bearing: a
+        # parentless QWidget that gets .show() called becomes a real top-level
+        # WINDOW. This one is 56x56 and frameless, so it flashed on screen as a
+        # tiny bodyless box and vanished again the moment the layout adopted it
+        # — and because av_name_row is not attached to hero_lay until further
+        # down, it stayed up long enough to paint. That is the "small window
+        # with no body appears for a split second" the user reported seeing
+        # whenever the agent worked; the sidebar rebuilds often. Identified by
+        # perf_monitor.WindowWatch (TOP-LEVEL SHOWN: QWidget 56x56).
+        av_stack = QWidget(hero)
         av_stack.setFixedSize(56, 56)
         av_stack.setStyleSheet("background: transparent;")
 
