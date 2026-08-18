@@ -365,12 +365,11 @@ class ToolManager:
         else:
             chat = None
 
-        if chat is None:
-            log.debug("[ToolManager._chat] | [chat_window.py] NONE")
-        else:
-            is_active = getattr(chat, "isVisible", lambda: True)()
-            log.debug(f"[ToolManager._chat] | [chat_window.py] ACTIVE={is_active} | {chat}")
-
+        # Deliberately SILENT. This accessor runs on every card delivery and
+        # every stream flush, so logging here emitted the same line dozens of
+        # times a second and buried everything else in the terminal. It also
+        # called isVisible() on the GUI thread purely to build that line.
+        # Callers log what they actually did with the window.
         return chat
 
     def _deliver_file_op(self, info: dict):
@@ -2659,14 +2658,16 @@ class ToolManager:
         log.info("[ToolManager.reset_python] ✓ Python interpreter reset complete")
 
     def strip_tool_calls(self, text):
+        # NO logging in here. This runs per streamed delta: it produced
+        # 22 thousand lines in a single session log (2026-08-07), which
+        # drowned every message that mattered and made the terminal
+        # unreadable while the agent worked.
         """
         Remove all tool call fences from text for display purposes.
         Does NOT execute any code — purely for cleaning stored messages before rendering.
         """
         if not text:
-            log.debug("[ToolManager.strip_tool_calls] Empty text — returning as-is")
             return text
-        log.debug(f"[ToolManager.strip_tool_calls] Stripping tool fences from {len(text)} char text")
         # Legacy keys included: OLD sessions containing retired-tool fences
         # (e.g. execute_code) must still render clean.
         for key in self._tool_keys + list(tool_registry.LEGACY_STRIP_KEYS):
@@ -2679,7 +2680,6 @@ class ToolManager:
                 else:
                     _, text = result
                 result = self._parse_fence(text, key)
-        log.debug(f"[ToolManager.strip_tool_calls] ✓ Stripped | resulting_len={len(text)}")
         return text
 
     # ─────────────────────────────────────────────────────────────────────────
