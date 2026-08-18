@@ -188,7 +188,7 @@ On yes:
 # Fresh email
 python e_mailman.py --account "disroot" send \
   --to "addr" --subject "..." --body "..." \
-  [--attachments f1 f2]
+  [--attachments f1 f2] [--html]
 
 # Reply to an existing email (threads correctly in all email clients)
 python e_mailman.py --account "disroot" send \
@@ -199,6 +199,21 @@ python e_mailman.py --account "disroot" send \
 ```
 
 `--reply-to-uid` takes the UID shown in the `Email #N (UID: …)` header when reading. It automatically sets the `In-Reply-To` and `References` headers so the message threads correctly in the recipient's email client.
+
+### `--html` — send a rich HTML body
+
+Without it, `--body` is sent as plain text and any markup arrives as literal
+angle brackets. With it, the body is attached as `text/html` and renders.
+
+```bash
+python e_mailman.py --account "disroot" send \
+  --to "addr" --subject "Report" --body "$(cat report.html)" --html
+```
+
+Use it when the body is a filled-in HTML template — the System Monitor task's
+`data/templates/system_state_email.html` is the standing example. Do NOT pass
+`--html` with a plain-text body: some clients collapse the whitespace and the
+mail arrives as one run-on paragraph.
 
 ---
 

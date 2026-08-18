@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  body {
+    margin: 0;
+    padding: 0;
+    background: #06060b;
+    font-family: -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+    color: #c8c8d4;
+  }
+
+  .wrapper {
+    width: 100%;
+    padding: 40px 20px;
+    background-color: #06060b;
+  }
+
+  .container {
+    max-width: 720px;
+    margin: 0 auto;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid rgba(255,255,255,0.06);
+    background-color: #0e0e1a;
+  }
+
+  /* HEADER */
+  .header {
+    padding: 36px 44px 28px;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+    background-color: #10101e;
+  }
+  .brand-table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  .brand-icon-cell {
+    width: 40px;
+    vertical-align: middle;
+  }
+  .brand-icon {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    background-color: rgba(99,91,255,0.2);
+    border: 1px solid rgba(139,92,246,0.25);
+    text-align: center;
+    line-height: 32px;
+    font-size: 14px;
+    color: #8b8bf6;
+  }
+  .brand-text {
+    font-size: 17px;
+    font-weight: 600;
+    color: #eeeef2;
+    letter-spacing: 0.2px;
+  }
+  .header-meta {
+    font-size: 11px;
+    color: #4a4a5a;
+    letter-spacing: 0.4px;
+    padding-top: 10px;
+  }
+
+  /* BODY */
+  .body {
+    padding: 28px 44px 32px;
+  }
+  .greeting {
+    font-size: 14px;
+    color: #8888a0;
+    font-weight: 400;
+    margin-bottom: 4px;
+  }
+  .intro {
+    font-size: 12.5px;
+    color: #4a4a5a;
+    line-height: 1.6;
+    margin-bottom: 28px;
+  }
+
+  /* SECTION */
+  .section {
+    margin-bottom: 16px;
+    border: 1px solid rgba(255,255,255,0.04);
+    border-radius: 8px;
+    overflow: hidden;
+    background-color: rgba(255,255,255,0.015);
+  }
+  .section-head {
+    padding: 10px 18px;
+    background-color: rgba(255,255,255,0.025);
+    border-bottom: 1px solid rgba(255,255,255,0.03);
+  }
+  .section-title {
+    font-size: 9.5px;
+    text-transform: uppercase;
+    letter-spacing: 1.8px;
+    color: #55556a;
+    font-weight: 600;
+    margin: 0;
+  }
+  .section-body {
+    padding: 4px 18px 8px;
+  }
+
+  /* STAT TABLE */
+  .stat-table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  .stat-table tr {
+    border-bottom: 1px solid rgba(255,255,255,0.025);
+  }
+  .stat-table tr:last-child {
+    border-bottom: none;
+  }
+  .stat-table td {
+    padding: 8px 0;
+    font-size: 12px;
+    vertical-align: middle;
+  }
+  .stat-label {
+    color: #55556a;
+    font-weight: 400;
+  }
+  .stat-value {
+    text-align: right;
+    color: #b0b0c0;
+    font-weight: 500;
+    font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-size: 12px;
+    letter-spacing: 0.2px;
+  }
+  .stat-value.ok { color: #34d399; }
+  .stat-value.warn { color: #fbbf24; }
+  .stat-value.danger { color: #f87171; }
+
+  /* PROCESS TABLE */
+  .proc-table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  .proc-table tr {
+    border-bottom: 1px solid rgba(255,255,255,0.025);
+  }
+  .proc-table tr:last-child {
+    border-bottom: none;
+  }
+  .proc-table td {
+    padding: 8px 0;
+    font-size: 12px;
+    vertical-align: middle;
+  }
+  .proc-name {
+    color: #9999b0;
+    font-weight: 400;
+  }
+  .proc-meta {
+    text-align: right;
+    color: #44445a;
+    font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+    font-size: 11px;
+  }
+
+  /* SUMMARY */
+  .summary {
+    margin-top: 24px;
+    padding: 18px 22px;
+    border: 1px solid rgba(52,211,153,0.12);
+    border-radius: 8px;
+    background-color: rgba(52,211,153,0.03);
+  }
+  .summary-label {
+    font-size: 9.5px;
+    text-transform: uppercase;
+    letter-spacing: 1.8px;
+    color: #34d399;
+    font-weight: 600;
+    margin-bottom: 8px;
+  }
+  .summary-text {
+    font-size: 13px;
+    line-height: 1.7;
+    color: #777790;
+    margin: 0;
+  }
+
+  /* SIGN OFF */
+  .sign-off {
+    padding: 20px 44px 8px;
+    font-size: 12px;
+    color: #3a3a4a;
+    line-height: 1.7;
+  }
+  .sign-off .name {
+    color: #6a6a80;
+    font-weight: 500;
+  }
+
+  /* FOOTER */
+  .footer {
+    padding: 16px 44px 24px;
+    border-top: 1px solid rgba(255,255,255,0.025);
+    font-size: 10px;
+    color: #2a2a38;
+    letter-spacing: 0.3px;
+  }
+  .footer a {
+    color: #44445a;
+    text-decoration: none;
+  }
+</style>
+</head>
+<body>
+<div class="wrapper">
+<div class="container">
+
+  <!-- HEADER -->
+  <div class="header">
+    <table class="brand-table" cellpadding="0" cellspacing="0" border="0">
+      <tr>
+        <td class="brand-icon-cell">
+          <div class="brand-icon">&#x25C8;</div>
+        </td>
+        <td style="padding-left:12px;">
+          <span class="brand-text">Systema Auxilium</span>
+        </td>
+      </tr>
+    </table>
+    <div class="header-meta">System Report &mdash; {{report_date}}</div>
+  </div>
+
+  <!-- BODY -->
+  <div class="body">
+    <div class="greeting">Hello,</div>
+    <div class="intro">Here is your scheduled system briefing. All metrics reflect current conditions.</div>
+
+    <!-- CPU -->
+    <div class="section">
+      <div class="section-head">
+        <p class="section-title">Processor</p>
+      </div>
+      <div class="section-body">
+        <table class="stat-table" cellpadding="0" cellspacing="0" border="0">
+          {{cpu_rows}}
+        </table>
+      </div>
+    </div>
+
+    <!-- MEMORY -->
+    <div class="section">
+      <div class="section-head">
+        <p class="section-title">Memory</p>
+      </div>
+      <div class="section-body">
+        <table class="stat-table" cellpadding="0" cellspacing="0" border="0">
+          {{memory_rows}}
+        </table>
+      </div>
+    </div>
+
+    <!-- DISK -->
+    <div class="section">
+      <div class="section-head">
+        <p class="section-title">Storage</p>
+      </div>
+      <div class="section-body">
+        <table class="stat-table" cellpadding="0" cellspacing="0" border="0">
+          {{disk_rows}}
+        </table>
+      </div>
+    </div>
+
+    <!-- PROCESSES -->
+    <div class="section">
+      <div class="section-head">
+        <p class="section-title">Active Applications</p>
+      </div>
+      <div class="section-body">
+        <table class="proc-table" cellpadding="0" cellspacing="0" border="0">
+          {{process_rows}}
+        </table>
+      </div>
+    </div>
+
+    <!-- SUMMARY -->
+    <div class="summary">
+      <div class="summary-label">Overall Status</div>
+      <p class="summary-text">{{summary}}</p>
+    </div>
+  </div>
+
+  <!-- SIGN OFF -->
+  <div class="sign-off">
+    I will reach out again when there is something worth noting.<br>
+    <span class="name">Your Assistant</span>
+  </div>
+
+  <!-- FOOTER -->
+  <div class="footer">
+    Automated report generated by <a href="https://github.com/uukjtisa/systema-auxilium">Systema Auxilium</a>
+  </div>
+
+</div>
+</div>
+</body>
+</html>

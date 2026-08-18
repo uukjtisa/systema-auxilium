@@ -401,18 +401,26 @@ def attach_file(msg: EmailMessage, path: str) -> None:
     print(f"[info] Attached: {p.name}")
 
 
+def _sanitize_header(value: str) -> str:
+    """Collapse whitespace and strip CR/LF so a header value can be safely set."""
+    return " ".join(value.replace("\r", " ").replace("\n", " ").split())
+
+
 def cmd_send(cfg: dict, to: str, subject: str, body: str, attachments: list,
-             in_reply_to: str = "", references: str = "") -> None:
+             in_reply_to: str = "", references: str = "", html: bool = False) -> None:
     msg = EmailMessage()
     msg["From"]    = cfg["account"]
     msg["To"]      = to
     msg["Subject"] = subject
     if in_reply_to:
-        msg["In-Reply-To"] = in_reply_to
+        msg["In-Reply-To"] = _sanitize_header(in_reply_to)
         # References = previous chain + the message we're replying to
         ref_chain = (references.strip() + " " + in_reply_to).strip()
-        msg["References"] = ref_chain
-    msg.set_content(body)
+        msg["References"] = _sanitize_header(ref_chain)
+    if html:
+        msg.add_alternative(body, subtype="html")
+    else:
+        msg.set_content(body)
     for path in attachments:
         attach_file(msg, path)
     port = cfg["smtp_port"]
@@ -743,6 +751,8 @@ def build_parser() -> argparse.ArgumentParser:
     send_p.add_argument("--attachments",  nargs="*", default=[], metavar="FILE")
     send_p.add_argument("--reply-to-uid", dest="reply_uid", default=None,
                         help="UID of the email to reply to (sets In-Reply-To / References headers)")
+    send_p.add_argument("--html", action="store_true", default=False,
+                        help="Treat --body as HTML (renders as rich HTML in the email)")
 
     # --- NOTES ---
     notes_p = sub.add_parser("notes")
@@ -892,7 +902,8 @@ def main() -> None:
 
         print(f"[info] From: {cfg['account']}  →  To: {recipient}  |  Subject: {subject}")
         cmd_send(cfg, recipient, subject, body, args.attachments,
-                 in_reply_to=in_reply_to, references=references)
+                 in_reply_to=in_reply_to, references=references,
+                 html=args.html)
 
 
 if __name__ == "__main__":
