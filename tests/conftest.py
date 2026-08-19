@@ -93,3 +93,23 @@ def qapp():
     QtWidgets = pytest.importorskip("PyQt6.QtWidgets")
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     yield app
+
+
+# The update safety net writes an .apply-in-progress marker into APP_ROOT before
+# an apply and clears it after. tests/systema/updater/test_apply_resolved.py
+# drives the real UpdaterService, and on any checkout WITHOUT a .dev-copy marker
+# (CI, a fresh clone) the gate does not fire -- so the suite left the marker
+# behind and the next launch would have shown a "broken install" recovery
+# dialog. Enforced here rather than asserted in a test, because it has to hold
+# in every environment, not just the one that happens to be a dev copy.
+@pytest.fixture(autouse=True, scope="session")
+def _clear_apply_marker():
+    def _clean():
+        try:
+            from systema.startup.integrity import APPLY_MARKER
+            APPLY_MARKER.unlink(missing_ok=True)
+        except Exception:
+            pass
+    _clean()
+    yield
+    _clean()

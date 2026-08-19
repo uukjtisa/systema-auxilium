@@ -20,14 +20,18 @@ from __future__ import annotations
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QHBoxLayout, QLabel,
-                             QListWidget, QListWidgetItem, QMessageBox, QPushButton,
-                             QRadioButton, QSplitter, QStackedWidget, QTextEdit,
-                             QVBoxLayout, QWidget)
+from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFrame,
+                             QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
+                             QMessageBox, QPushButton, QRadioButton, QSplitter,
+                             QStackedWidget, QTextEdit, QVBoxLayout, QWidget)
 
+from systema.common.logger import _make_logger
 from systema.ui import theme as _theme
 from systema.ui.base_window import BaseWindow
+from systema.updater import messages as upd_messages
 from systema.updater.hunks import ReviewSession, FileReview
+
+log = _make_logger("UpdateWindow")
 
 # Per-change-type accent colours + a short tag shown in the list.
 _CHANGE_STYLE = {
@@ -625,6 +629,17 @@ class UpdateWindow(BaseWindow):
         rc.addWidget(split, stretch=1)
         review_container.setMinimumHeight(240)
 
+        # Developer notes carried in commit messages (<update_message>), stacked
+        # above everything: they say what the user must DO about this update,
+        # which the file list and the commit subjects cannot.
+        self.notes_box = QWidget()
+        self.notes_box.setStyleSheet("background: transparent;")
+        self.notes_layout = QVBoxLayout(self.notes_box)
+        self.notes_layout.setContentsMargins(0, 0, 0, 4)
+        self.notes_layout.setSpacing(5)
+        self.notes_box.setVisible(False)
+        body.addWidget(self.notes_box)
+
         outer_split = QSplitter(Qt.Orientation.Vertical)
         outer_split.setStyleSheet(f"QSplitter::handle {{ background: {p['border']}; height: 2px; }}")
         outer_split.addWidget(self.commits_view)
@@ -832,7 +847,89 @@ class UpdateWindow(BaseWindow):
         self.service.check(self.branch_combo.currentText())
         self.service.fetch_pending_commits(self.branch_combo.currentText())
 
+    def _build_note_card(self, note):
+        """One dismissible developer notice from a commit's <update_message>."""
+        p = self._p
+        card = QFrame()
+        card.setObjectName("updNote")
+        card.setStyleSheet(
+            f"QFrame#updNote {{ background: {p['surface']}; "
+            f"border: 1px solid {p['accent']}; border-left: 3px solid {p['accent']}; "
+            f"border-radius: 6px; }}")
+        row = QHBoxLayout(card)
+        row.setContentsMargins(10, 7, 6, 7)
+        row.setSpacing(8)
+
+        col = QVBoxLayout()
+        col.setSpacing(2)
+        head = QLabel(f"Note from {note.sha[:7]}"
+                      + (f" - {note.subject[:60]}" if note.subject else ""))
+        head.setStyleSheet(
+            f"color: {p['muted']}; font-size: 9px; font-weight: 600; "
+            f"background: transparent; border: none;")
+        body = QLabel(note.text)
+        body.setWordWrap(True)
+        body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        body.setStyleSheet(
+            f"color: {p['text']}; font-size: 11px; background: transparent; "
+            f"border: none;")
+        col.addWidget(head)
+        col.addWidget(body)
+        row.addLayout(col, 1)
+
+        close = QPushButton("x")
+        close.setFixedSize(20, 20)
+        close.setCursor(Qt.CursorShape.PointingHandCursor)
+        close.setToolTip("Dismiss this note")
+        close.setStyleSheet(
+            f"QPushButton {{ background: transparent; border: none; "
+            f"color: {p['muted']}; font-size: 12px; }}"
+            f"QPushButton:hover {{ color: {p['text']}; }}")
+
+        def _dismiss():
+            # Persist BEFORE removing the widget: if the write fails the note
+            # should still be on screen rather than silently gone for this run
+            # and back on the next one.
+            try:
+                upd_messages.dismiss(note)
+            except Exception as e:
+                log.warning(f"[UpdateWindow] could not persist dismissal: {e}")
+            card.setParent(None)
+            card.deleteLater()
+            self._sync_notes_visibility()
+
+        close.clicked.connect(_dismiss)
+        row.addWidget(close, 0, Qt.AlignmentFlag.AlignTop)
+        return card
+
+    def _sync_notes_visibility(self):
+        """Hide the container once its last note is dismissed."""
+        try:
+            self.notes_box.setVisible(self.notes_layout.count() > 0)
+        except RuntimeError:
+            pass
+
+    def _render_notes(self, commits):
+        """Stack every undismissed <update_message> in the pending range.
+
+        Newest first, and ALL of them: a user three versions behind needs all
+        three notes, not just the latest.
+        """
+        try:
+            while self.notes_layout.count():
+                item = self.notes_layout.takeAt(0)
+                w = item.widget()
+                if w is not None:
+                    w.setParent(None)
+                    w.deleteLater()
+            for note in upd_messages.pending(commits):
+                self.notes_layout.addWidget(self._build_note_card(note))
+            self._sync_notes_visibility()
+        except Exception as e:
+            log.warning(f"[UpdateWindow._render_notes] {type(e).__name__}: {e}")
+
     def _on_commits(self, commits):
+        self._render_notes(commits)
         if not commits:
             self.commits_view.setVisible(False)
             return
@@ -842,7 +939,9 @@ class UpdateWindow(BaseWindow):
                 f'{n} pending commit(s), newest first</div>')
         rows = []
         for c in commits[:40]:
-            msg = (c.get("message", "") or "").splitlines()
+            # strip: the note is rendered as its own card above, so leaving it
+            # in the commit body would print it twice.
+            msg = upd_messages.strip(c.get("message", "") or "").splitlines()
             subj = _esc(msg[0]) if msg else "(no message)"
             sha = _esc((c.get("sha", "") or "")[:7])
             author = _esc(c.get("author", "") or "")

@@ -109,7 +109,9 @@ def get_system_prompt(
         include_interpreter_mode_rules: bool = True,
         include_must_remember: bool = True,
         # Optionals, off by default (token cost).
-        include_image_tools: bool = False,
+        include_image_tools: bool = True,
+        include_ask_user: bool = True,
+        interview_first: bool = False,   # one-shot: ask before acting
         include_controller_ref: bool = False,
         include_notify_tool: bool = False,
         # Native function calling: fence-free renderings + native header.
@@ -132,7 +134,8 @@ def get_system_prompt(
         body.append(compat.tool_format_section(
             include_workmode=include_interpreter_mode_rules and include_fence_syntax,
             include_skills=skills_present,
-            include_images=include_image_tools))
+            include_images=include_image_tools,
+            include_ask_user=include_ask_user))
 
     if include_memory:
         body.append(shared.memory_section(hint, inject_all=memory_inject_all))
@@ -146,6 +149,10 @@ def get_system_prompt(
         body.append(shared.controller_ref_section(hint))
     if include_notify_tool:
         body.append(shared.NOTIFY_SECTION)
+    # Late in the body on purpose: a one-turn instruction should be the last
+    # thing read, not buried above the tool docs it depends on.
+    if interview_first and include_ask_user:
+        body.append(shared.INTERVIEW_FIRST_SECTION)
     if include_must_remember:
         body.append(native.MUST_REMEMBER if native_tools else compat.MUST_REMEMBER)
 

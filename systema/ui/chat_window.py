@@ -42,6 +42,7 @@ from systema.ui.chat.sidebar import SidebarMixin
 from systema.ui.chat.input_dock import InputDockMixin, InlineStatus
 from systema.ui.chat.bubbles import BubblesMixin, make_circular_pixmap, _TypingDots
 from systema.ui.chat.event_cards import EventCardsMixin
+from systema.ui.chat.qa_cards import QaCardsMixin
 from systema.ui.chat.image_bubbles import ImageBubblesMixin
 from systema.ui.chat.commands import SlashCommandsMixin
 from systema.ui.chat.window_controls import WindowControlsMixin
@@ -63,7 +64,8 @@ from systema.common import app_config as _app_config
 
 class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
                  SidebarMixin, InputDockMixin, BubblesMixin, EventCardsMixin,
-                 ImageBubblesMixin, SlashCommandsMixin, WindowControlsMixin):
+                 QaCardsMixin, ImageBubblesMixin, SlashCommandsMixin,
+                 WindowControlsMixin):
     """Modern chat window with AI conversation"""
 
     # Smooth antialiased corners (no 1-bit mask): every corner-touching child
@@ -1390,6 +1392,19 @@ class ChatWindow(BaseWindow, RenderingMixin, ThemingMixin,
                                 {'paths': msg.get("_image_paths", []),
                                  'annotation': msg.get("_annotation", "")},
                                 save_to_history=False)
+                    elif msg.get("_type") == "ask_user":
+                        # Rebuilt LOCKED: the interview already happened and the
+                        # agent already acted on it. The Revise button is the
+                        # only way back in, and it routes a correction through
+                        # the input box rather than rewriting history.
+                        from systema.execution import qa_spec as _qa
+                        _qset = _qa.from_payload(msg.get("_qa_questions") or [])
+                        if _qset:
+                            _card = self.add_qa_card(
+                                _qset, answers=msg.get("_qa_answers") or [],
+                                locked=True, save_to_history=False)
+                            _card.dismissed = bool(msg.get("_qa_dismissed"))
+                            _card._lock()
                     elif msg.get("_type") == "web_page":
                         self.add_web_page_card(
                             {'mode': msg.get("_web_mode", "open"),

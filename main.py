@@ -10,6 +10,7 @@ Original Architecture & Implementation:
 import faulthandler
 import threading
 import sys
+import traceback
 import os
 import re
 import signal
@@ -354,6 +355,57 @@ _subprocess.Popen(
 # ── Core imports come AFTER the Tee is in place ──────────────────────────────
 from PyQt6.QtWidgets import QApplication, QWidget
 from PyQt6.QtCore import QObject, QEvent
+# ── STARTUP INTEGRITY GATE ───────────────────────────────────────────────────
+# THIS MUST RUN BEFORE the controller import on the next line, and that is the
+# whole point of it. That import pulls in the entire app, so a half-applied
+# update makes it raise at MODULE level and the process dies before main() is
+# ever called -- a check inside main() can never fire.
+#
+# Observed on Kali, 2026-08-19: an update left 3-way merge conflict markers in
+# systema/ui/windows/floating_window.py, the import died with
+# "SyntaxError: invalid syntax", and the user got a bare traceback and a dead
+# app instead of the recovery dialog that exists for exactly this.
+#
+# systema.startup.integrity imports nothing from the app and needs no PyQt --
+# it was written that way so it can run here, on a copy whose UI layer may BE
+# the broken part.
+def _startup_integrity_gate():
+    """Returns True to continue launching, False to abort. Never raises."""
+    try:
+        from systema.startup import integrity
+        report = integrity.run_full_check()
+        if report.healthy:
+            return True
+        print(f"[startup] {report.summary()}", flush=True)
+        from systema.startup import recovery
+        # A QApplication has to exist for the dialog, and none does yet -- main()
+        # has not run. Making it here is safe: QApplication is a singleton and
+        # main() reuses this instance.
+        if QApplication.instance() is None:
+            QApplication(sys.argv)   # singleton; main() reuses this instance
+        launch, msg = recovery.offer(report)
+        print(f"[startup] recovery: {msg}", flush=True)
+        if not launch:
+            return False
+        # A revert rewrote the files this process already half-imported, so the
+        # only honest thing is a fresh start -- carrying on would run a mix of
+        # the old and new code.
+        if "reverted" in (msg or "").lower():
+            print("[startup] files were restored - restart the app to load them",
+                  flush=True)
+            return False
+        return True
+    except SystemExit:
+        raise
+    except Exception:
+        # A broken health check must never be the reason the app will not start.
+        traceback.print_exc()
+        return True
+
+
+if not _startup_integrity_gate():
+    sys.exit(1)
+
 from systema.app.controller import AssistantController
 # ─────────────────────────────────────────────────────────────────────────────
 

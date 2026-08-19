@@ -72,7 +72,18 @@ def test_resources_is_not_excluded_from_updates():
     """
     assert not any(pat.startswith("resources") for pat in _EXCLUDES), \
         f"resources/ is excluded from updates: {_EXCLUDES}"
-    assert "data/**" in _EXCLUDES, "data/** must stay fully excluded"
+    # This used to assert a blanket "data/**". That was narrowed DELIBERATELY on
+    # 2026-08-19: templates and instruction presets are shipped by the app AND
+    # edited by the user, so "never updatable" meant an upstream fix could not be
+    # delivered to them at all. They moved to the PROTECTED tier (visible,
+    # unticked, explicit opt-in) instead. What this test was really guarding is
+    # that the user's runtime state and secrets stay invisible to the updater, so
+    # it asserts that directly now. Full tier coverage: test_data_tiers.py.
+    from gitplucker.fsutil import glob_match
+    for rel in ("data/sessions/s.json", "data/memories/m.json",
+                "data/settings.json", "data/security/keys.json",
+                "data/logs/run.log", "data/updates/state.json"):
+        assert glob_match(rel, _EXCLUDES), f"{rel} must stay excluded"
 
 
 # ── settings adoption: absolute paths survive the move ──────────────────────

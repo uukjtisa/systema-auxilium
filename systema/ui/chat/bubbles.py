@@ -367,6 +367,17 @@ class BubblesMixin:
                     b.setMaximumWidth(maxw)
                 except RuntimeError:
                     pass
+            # Cards that clamp their OWN width follow the window here, found by
+            # capability rather than registration (same rule as
+            # theming._zoom_rich_children) so a card added later is covered for
+            # free. The Q&A card was built once at the old width and never
+            # re-clamped, so resizing the chat left it the wrong size.
+            w = md.get('widget')
+            if w is not None and hasattr(w, 'set_max_width'):
+                try:
+                    w.set_max_width(maxw)
+                except RuntimeError:
+                    pass
             # Exact-fit bubbles (user messages): re-clamp their fixed width
             # against the new cap so a shrunken window can't cut them off.
             cw = md.get('content_wrapper')

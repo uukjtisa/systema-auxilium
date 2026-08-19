@@ -261,6 +261,16 @@ class WindowControlsMixin:
 
     # ── Session tools menu (⋯) ──────────────────────────────────────────────
 
+    def _set_interview_first(self, on: bool):
+        """Arm/disarm the one-shot interview for the next turn."""
+        ai = getattr(self.controller, 'ai', None)
+        if ai is None:
+            return
+        ai.interview_first = bool(on)
+        if on:
+            self.add_system_message(
+                "The AI will ask before it acts on your next message.")
+
     def _show_session_menu(self):
         """Themed dropdown with session-scoped token/file tools."""
         from PyQt6.QtWidgets import QMenu
@@ -312,6 +322,25 @@ class WindowControlsMixin:
         outputs_menu.addAction(act_revert)
 
         menu.addSeparator()
+
+        # Arming the interview is a per-turn choice about the NEXT message, so
+        # it belongs with the session tools rather than in Settings. It is
+        # checkable so the menu shows whether it is currently armed instead of
+        # firing blind, and it hides entirely when the tool is switched off --
+        # an entry that cannot do anything is worse than no entry.
+        _ai = getattr(self.controller, 'ai', None)
+        if _ai is not None and getattr(_ai, 'include_ask_user', True):
+            act_interview = QAction("Interview me before acting (next turn)", self)
+            act_interview.setCheckable(True)
+            act_interview.setChecked(bool(getattr(_ai, 'interview_first', False)
+                                          or getattr(_ai, 'always_interview', False)))
+            act_interview.setEnabled(not getattr(_ai, 'always_interview', False))
+            if getattr(_ai, 'always_interview', False):
+                act_interview.setToolTip(
+                    "Always on - see Settings, System, Optional System Prompt Sections")
+            act_interview.toggled.connect(self._set_interview_first)
+            menu.addAction(act_interview)
+            menu.addSeparator()
 
         act_files = QAction("Files touched this session", self)
         act_files.triggered.connect(self._open_session_files_dialog)

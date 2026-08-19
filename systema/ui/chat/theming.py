@@ -5,6 +5,7 @@ Extracted verbatim from chat_window.py.
 """
 from systema.ui.theme import THEMES as _SHARED_THEMES
 from systema.common.logger import _make_logger, _NoOpLogger
+from systema.common.perf_monitor import spanned
 
 _verbose = True
 log = _make_logger("ChatWindow") if _verbose else _NoOpLogger()
@@ -37,6 +38,7 @@ class ThemingMixin:
             self._apply_zoom_all()
             self.save_config()
 
+    @spanned("chat.apply_zoom_all")
     def _apply_zoom_all(self):
         """Apply the current zoom level to all existing message text labels."""
         fsize = self._get_msg_font_size()
@@ -128,6 +130,7 @@ class ThemingMixin:
         key = getattr(self, '_current_theme_key', 'obsidian_blue')
         return self._THEMES.get(key, self._THEMES['obsidian_blue'])
 
+    @spanned("chat.apply_theme")
     def apply_theme(self, theme_key: str):
         """Apply a named colour theme to all major structural surfaces.
 

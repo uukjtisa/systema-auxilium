@@ -26,6 +26,7 @@ from PyQt6.QtGui import QRegion, QPainter, QColor, QFont, QPen
 from systema.ui.base_window import BaseWindow
 from systema.ui import theme as _theme
 from systema.common.logger import _make_logger
+from systema.common.perf_monitor import spanned
 
 log = _make_logger("SettingsWindow")
 
@@ -273,6 +274,7 @@ class _TokenGraphCanvas(QWidget):
 class SettingsWindow(BaseWindow):
     """Settings window for configuring the AI assistant"""
 
+    @spanned("settings_window.build")
     def __init__(self, controller):
         super().__init__()
         self.controller = controller
@@ -2145,7 +2147,27 @@ class SettingsWindow(BaseWindow):
         self.include_notify_tool_checkbox.setToolTip(
             "Adds notify tool instructions into the main AI engine's system prompt."
         )
+        self.include_ask_user_checkbox = QCheckBox(
+            "Inject the Q&A tool (ask_user) into system prompt")
+        self.include_ask_user_checkbox.setStyleSheet(_CHECK)
+        self.include_ask_user_checkbox.setToolTip(
+            "Lets the AI ask you a structured multiple-choice question and WAIT for\n"
+            "your answer instead of guessing when a request is ambiguous.\n"
+            "Chat only - a background task has nobody in front of it to answer."
+        )
+        self.always_interview_checkbox = QCheckBox(
+            "    ...and always interview me before acting")
+        self.always_interview_checkbox.setStyleSheet(_CHECK)
+        self.always_interview_checkbox.setToolTip(
+            "Makes the AI open with a question round on every ambiguous request,"
+            + chr(10) +
+            "instead of only when you arm it with /ask or the input-bar button.")
+        # Meaningless without the tool, so it follows it.
+        self.include_ask_user_checkbox.toggled.connect(
+            self.always_interview_checkbox.setEnabled)
         sp_extras_lay.addWidget(self.include_image_tools_checkbox)
+        sp_extras_lay.addWidget(self.include_ask_user_checkbox)
+        sp_extras_lay.addWidget(self.always_interview_checkbox)
         sp_extras_lay.addWidget(self.include_controller_ref_checkbox)
         sp_extras_lay.addWidget(self.include_notify_tool_checkbox)
         sys_lay.addWidget(sp_extras_group)
@@ -3530,7 +3552,13 @@ class SettingsWindow(BaseWindow):
         sys_prompt_hijacked = self.controller.settings.get('system_prompt_hijacked', False)
         self.system_prompt_hijack_checkbox.setChecked(sys_prompt_hijacked)
         self.include_image_tools_checkbox.setChecked(
-            self.controller.settings.get('include_image_tools', False))
+            self.controller.settings.get('include_image_tools', True))
+        self.include_ask_user_checkbox.setChecked(
+            self.controller.settings.get('include_ask_user', True))
+        self.always_interview_checkbox.setChecked(
+            self.controller.settings.get('always_interview', False))
+        self.always_interview_checkbox.setEnabled(
+            self.include_ask_user_checkbox.isChecked())
         self.include_controller_ref_checkbox.setChecked(
             self.controller.settings.get('include_controller_ref', False))
         self.include_notify_tool_checkbox.setChecked(
@@ -4283,14 +4311,19 @@ class SettingsWindow(BaseWindow):
                       lambda e=hij, t=hij_txt: c.set_system_prompt_hijack(e, t)))
         extras = (self.include_image_tools_checkbox.isChecked(),
                   self.include_controller_ref_checkbox.isChecked(),
-                  self.include_notify_tool_checkbox.isChecked())
-        if (bool(snap.get('include_image_tools', False)),
+                  self.include_notify_tool_checkbox.isChecked(),
+                  self.include_ask_user_checkbox.isChecked(),
+                  self.always_interview_checkbox.isChecked())
+        if (bool(snap.get('include_image_tools', True)),
                 bool(snap.get('include_controller_ref', False)),
-                bool(snap.get('include_notify_tool', False))) != extras:
+                bool(snap.get('include_notify_tool', False)),
+                bool(snap.get('include_ask_user', True)),
+                bool(snap.get('always_interview', False))) != extras:
             q.append(('system_prompt_extras',
                       lambda x=extras: c.set_system_prompt_extras(
                           include_image_tools=x[0], include_controller_ref=x[1],
-                          include_notify_tool=x[2])))
+                          include_notify_tool=x[2], include_ask_user=x[3],
+                          always_interview=x[4])))
 
         # Voice input device (input only; output uses the system default now)
         input_device = self.input_device_combo.currentData()

@@ -862,6 +862,7 @@ class AndroidBridge:
         'skill_action':   'skill_action',
         'image_attach':   'image_attach',
         'thinking':       'thinking',
+        'ask_user':       'ask_user',
         'skills_card':    None,   # RETIRED 2026-07-17 — desktop renders nothing
     }
 
@@ -928,6 +929,10 @@ class AndroidBridge:
                                         'annotation': msg.get("_annotation", "")})
         elif kind == 'thinking':
             self.add_reasoning_card(msg.get("_thinking", ""))
+        elif kind == 'ask_user':
+            self.add_qa_card(msg.get("_qa_questions") or [],
+                             msg.get("_qa_answers") or [],
+                             bool(msg.get("_qa_dismissed")))
 
     def refresh_session_list(self):
         self._send_sessions_page(0, "")
@@ -1058,6 +1063,39 @@ class AndroidBridge:
             "skill": str(info.get('skill') or ''),
             "ok": bool(info.get('ok')),
             "detail": str(info.get('detail') or ''),
+        })
+
+    def add_qa_card(self, questions, answers, dismissed: bool = False):
+        """Mirror the desktop ask_user card — a RESOLVED interview, read-only.
+
+        Sends the rendered Q:/A: block rather than the raw structure: the phone
+        only has to display what was asked and chosen, and the serializer that
+        builds it is the same one the agent and the input box use, so the three
+        surfaces can never word an answer differently.
+        """
+        from systema.execution import qa_spec
+        qset = qa_spec.from_payload(questions)
+        self._dispatch({
+            "cmd": "add_qa_card",
+            "summary": qa_spec.serialize(qset, answers),
+            "dismissed": bool(dismissed),
+            "count": len(qset),
+        })
+
+    def show_ask_user(self, qset):
+        """Push a LIVE question card to the phone while the turn waits on it.
+
+        Sent whether or not the phone can render it yet: the desktop is blocked
+        on the answer and cannot ask for it later, exactly like show_code_approval
+        sends its full review context up front. The phone-side Compose UI for
+        answering is not built yet, so today this is a notification that a
+        question is waiting — answering still happens on the desktop.
+        """
+        from systema.execution import qa_spec
+        self._dispatch({
+            "cmd": "show_ask_user",
+            "questions": qa_spec.to_payload(qset),
+            "count": len(qset),
         })
 
     def add_image_attach_card(self, info: dict):

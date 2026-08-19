@@ -67,6 +67,7 @@ def test_every_command_target_exists():
     Walks the attribute each command reaches for and asserts it is real.
     """
     from systema.app.controller import AssistantController
+    from systema.engine.ai_engine import AIEngine
     from systema.agents.skill_manager import SkillManager
     from systema.memory.session_manager import SessionManager
     from systema.ui.chat_window import ChatWindow
@@ -78,6 +79,7 @@ def test_every_command_target_exists():
         'chat': ChatWindow,
         'skills': SkillManager,
         'sessions': SessionManager,
+        'engine': AIEngine,
     }
     # (command, host, attribute) — the call each one actually makes.
     targets = [
@@ -103,6 +105,7 @@ def test_every_command_target_exists():
         ("memory", 'chat', '_open_memory_window'),
         ("logs", 'chat', '_open_logs_window'),
         ("update", 'controller', 'open_update_window'),
+        ("ask", 'engine', 'interview_first'),
     ]
 
     missing = [f"/{cmd} -> {host}.{attr}"

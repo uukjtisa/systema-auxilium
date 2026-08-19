@@ -598,8 +598,28 @@ class FloatingWindow(QWidget):
         if self.android_bridge and self.android_bridge.isVisible():
             self.android_bridge.show_ai_message(message)
 
-    def _startup_chat_init(self):
-        """Pre-initialize and briefly show the chat window at startup."""
+    # Bounded wait for the background chat_window import (see
+    # AssistantController._warm_chat_window). 40 x 150 ms = 6 s ceiling, then we
+    # proceed and eat the import on the GUI thread exactly as before — the wait
+    # can delay startup polish, never prevent it.
+    _CHATWIN_WAIT_TICKS = 40
+    _CHATWIN_WAIT_MS = 150
+
+    def _startup_chat_init(self, _tries: int = 0):
+        """Pre-initialize and briefly show the chat window at startup.
+
+        Waits for the warmer thread to finish importing systema.ui.chat_window
+        rather than importing it here: that import cost 5135-5612 ms on the GUI
+        thread and was hitch #2 of every run on 2026-08-19. The floating window
+        is already up and responsive while we wait, so the delay is invisible;
+        paying the import here was not.
+        """
+        import sys
+        if ("systema.ui.chat_window" not in sys.modules
+                and _tries < self._CHATWIN_WAIT_TICKS):
+            QTimer.singleShot(self._CHATWIN_WAIT_MS,
+                              lambda: self._startup_chat_init(_tries + 1))
+            return
         if self.chat_window is None:
             from systema.ui.chat_window import ChatWindow
             self.chat_window = ChatWindow(self.controller)

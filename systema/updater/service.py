@@ -47,7 +47,24 @@ _STATE_DIR = APP_ROOT / "data" / "updates"
 _EXCLUDES = [
     "**/.git/**", "**/__pycache__/**", "**/*.pyc", "**/.gitplucker/**",
     ".venv/**", "**/.venv/**", "venv/**", "**/node_modules/**",
-    "data/**",                       # logs, sessions, memory, tasks, updates, lock file
+    # data/ is enumerated, NOT blanket-excluded. Two paths under it are
+    # authored BOTH upstream and locally (templates the app ships and the user
+    # edits, and the shipped instruction presets), so a blanket "data/**" meant
+    # an update could never deliver a fix to them -- the email template had to
+    # be force-added by hand for exactly this reason. They are PROMOTED to the
+    # protected tier below instead: visible in the plan, unticked by default,
+    # explicit opt-in. Everything else under data/ is runtime state or secrets
+    # and stays invisible to the updater.
+    #
+    # An enumeration can be out-run by a NEW data/ subdirectory, so
+    # test_data_tiers.py fails if one appears without being classified here.
+    "data/cache/**", "data/data/**", "data/logs/**", "data/memories/**",
+    "data/received/**", "data/security/**", "data/sessions/**",
+    "data/task-sessions/**", "data/tasks/**", "data/temp/**", "data/updates/**",
+    "data/voice_fillers/**",
+    "data/api_requests.json", "data/api_responses.json",
+    "data/token_usage.json", "data/token_usage_output.json",
+    "data/autostart_launch.sh", "data/settings.json",
     "settings.json",                 # the user's own configuration (consolidated)
     # Legacy config names — pre-consolidation installs may still carry them and
     # an update must never propose touching a stale copy.
@@ -75,9 +92,29 @@ _SENSITIVE_GLOBS = [
     "resources/providers/**",
     "providers/**",              # pre-2026-07-28 layout
     "skills/**",
+    # PROMOTED from _EXCLUDES (2026-08-19). The app ships these and the user
+    # edits them, so "never updatable" was the wrong tier -- it meant an
+    # upstream fix to a template could not be delivered at all. Protected is
+    # the right one: shown, unticked, opt-in with a warning.
+    "data/templates/**",
+    "data/instruction_presets.json",
 ]
 
-_SENSITIVE_PREFIXES = ("resources/providers/", "providers/", "skills/")
+_SENSITIVE_PREFIXES = ("resources/providers/", "providers/", "skills/",
+                       "data/templates/", "data/instruction_presets.json")
+
+# Everything under data/ that must NEVER appear in an update plan. Kept as a
+# named list so the guard test can assert the two sets together cover data/.
+_DATA_RUNTIME_DIRS = (
+    "cache", "data", "logs", "memories", "received", "security", "sessions",
+    "task-sessions", "tasks", "temp", "updates", "voice_fillers",
+)
+_DATA_RUNTIME_FILES = (
+    "api_requests.json", "api_responses.json", "token_usage.json",
+    "token_usage_output.json", "autostart_launch.sh", "settings.json",
+    "systema_auxilium.lock",
+)
+_DATA_UPDATABLE = ("templates", "instruction_presets.json")
 
 
 def is_sensitive_path(relpath: str) -> bool:
@@ -130,6 +167,10 @@ DEV_MARKER = ".dev-copy"
 def in_dev_environment() -> bool:
     """True in the developer working dir (marker file present, never shipped)."""
     return (APP_ROOT / DEV_MARKER).exists()
+
+
+class _SkipSafetyNet(Exception):
+    """Internal control flow: this working copy does not get a safety net."""
 
 
 class _FnWorker(QThread):
@@ -520,13 +561,68 @@ class UpdaterService(QObject):
                                         "commit": plan.target_version, "partial": True}
         else:
             self._settle_after_apply = {"branch": branch, "partial": False}
+        # ── SAFETY NET, before a single file is written ──────────────────────
+        # Two things, in this order, and both BEFORE the worker starts:
+        #
+        # 1. A git snapshot of the working copy. This is the primary rollback
+        #    path now, not gitplucker's: it lives in APP_ROOT rather than under
+        #    data/, so wiping data/ (or the app pruning it) cannot take the
+        #    recovery path with it, and systema/startup/recovery.py can drive it
+        #    before the controller exists.
+        # 2. An in-progress marker. An apply killed partway -- power loss, or
+        #    the crash watchdog, which has force-killed this app repeatedly --
+        #    can leave every individual file syntactically VALID while the set
+        #    of them is a mix of two versions. No syntax check can see that; the
+        #    marker is the only honest signal, and startup reads it.
+        try:
+            from systema.startup import integrity
+            from systema.updater import local_git
+            # NOT in a developer working copy. Its files are meant to be
+            # mid-edit and it has its own version control; initialising a
+            # second repo over it and committing 184 MB of Minecraft server
+            # jars and nested .git directories is not a safety net, it is
+            # damage. (Found the hard way: a test that drives apply() against
+            # the real APP_ROOT did exactly that.)
+            if integrity.in_dev_environment():
+                log.info("[UpdaterService.apply] dev working copy -- skipping "
+                         "the git snapshot and the apply marker")
+                self._apply_snapshot_sha = None
+                raise _SkipSafetyNet
+            _sha = local_git.snapshot(
+                f"pre-update snapshot ({branch} -> {plan.target_version})")
+            if _sha:
+                log.info(f"[UpdaterService.apply] git snapshot {_sha}")
+            else:
+                log.warning("[UpdaterService.apply] NO git snapshot -- git is "
+                            "unavailable, so this apply has no local rollback")
+            integrity.mark_apply_started(
+                f"{branch} -> {plan.target_version}"
+                + (f" | snapshot {_sha}" if _sha else " | no snapshot"))
+            self._apply_snapshot_sha = _sha
+        except _SkipSafetyNet:
+            pass
+        except Exception as e:
+            # The safety net failing must not block the update the user asked
+            # for -- it just means this one runs without a net, loudly.
+            log.error(f"[UpdaterService.apply] safety net failed: "
+                      f"{type(e).__name__}: {e}")
+            self._apply_snapshot_sha = None
+
         w = _FnWorker(lambda: self._updater.apply(plan, only=only))
         w.ok.connect(self._on_apply_ok)
-        w.err.connect(self.apply_failed)
+        w.err.connect(self._on_apply_err)
         self._worker = w
         w.start()
 
     def _on_apply_ok(self, result):
+        # The apply is over -- the tree is no longer half-written, so the
+        # startup check must stop reporting it as interrupted.
+        try:
+            from systema.startup import integrity
+            integrity.mark_apply_finished()
+        except Exception as e:
+            log.warning(f"[UpdaterService._on_apply_ok] could not clear the "
+                        f"apply marker: {type(e).__name__}: {e}")
         self._plan = None
         pend = self._settle_after_apply
         self._settle_after_apply = None
@@ -542,6 +638,18 @@ class UpdaterService(QObject):
                 self.clear_settled_branch(branch)   # full apply advanced the version
         log.info(f"[UpdaterService._on_apply_ok] success={result.success} | {result.message}")
         self.apply_finished.emit(result)
+
+    def _on_apply_err(self, msg):
+        """A failed apply still finished -- the process survived it, so the
+        marker (which means "we never came back") must come down. What the files
+        actually look like is the integrity check's job, not the marker's."""
+        try:
+            from systema.startup import integrity
+            integrity.mark_apply_finished()
+        except Exception:
+            pass
+        log.error(f"[UpdaterService._on_apply_err] {msg}")
+        self.apply_failed.emit(msg)
 
     # ── startup auto-notification ──────────────────────────────────────────
     def check_startup_notify(self):
@@ -666,6 +774,34 @@ class UpdaterService(QObject):
             return []
 
     def rollback(self, branch: str | None = None):
+        """Undo the last apply. GIT FIRST, gitplucker as the fallback.
+
+        git wins because its snapshot is a commit of the whole working copy in
+        APP_ROOT, while gitplucker's lives under data/ alongside the very state
+        a "reset the app" wipe removes. Reverting also cleans files the bad
+        apply ADDED, which restoring a backup on top of a dirty tree does not.
+        """
+        try:
+            from systema.updater import local_git
+            if local_git.available() and local_git.recent_commits(1):
+                sha = local_git.recent_commits(1)[0][0]
+                log.info(f"[UpdaterService.rollback] git revert to {sha}")
+                if local_git.revert_to(sha):
+                    try:
+                        from systema.startup import integrity
+                        integrity.mark_apply_finished()
+                    except Exception:
+                        pass
+                    self.rollback_finished.emit(
+                        {"success": True,
+                         "message": f"Reverted the working copy to {sha}."})
+                    return
+                log.warning("[UpdaterService.rollback] git revert failed -- "
+                            "falling back to the gitplucker snapshot")
+        except Exception as e:
+            log.warning(f"[UpdaterService.rollback] git path unavailable "
+                        f"({type(e).__name__}: {e}) -- using gitplucker")
+
         if not self.available:
             self.rollback_failed.emit("updater unavailable")
             return

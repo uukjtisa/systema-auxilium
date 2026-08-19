@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
     QComboBox)
 from systema.security import code_guard as _guard
 from systema.common.logger import _make_logger, _NoOpLogger
+from systema.common.perf_monitor import spanned
 from PyQt6.QtCore import Qt, QTime, QDateTime, QThread, pyqtSignal, QTimer, QFileSystemWatcher
 from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor
 import re
@@ -1154,6 +1155,7 @@ class ManageTasksWindow(BaseWindow):
             stale.deleteLater()
         self._editor_page = page
 
+    @spanned("tasks.build_editor_page")
     def _build_editor_page(self) -> QWidget:
         page = QWidget()
         page.setStyleSheet(f"background: {_BG};")

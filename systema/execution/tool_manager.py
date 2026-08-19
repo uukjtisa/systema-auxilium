@@ -61,8 +61,18 @@ class WorkState:
 
 # Tools whose fence opener carries a ": [annotation]" label (parsed by the
 # tolerant annotated branch of _parse_fence, returning a 3-tuple).
+# Tools whose fence opener carries a ": [label]" annotation. Membership here is
+# NOT cosmetic: _parse_fence returns (content, remaining, annotation) for these
+# and (content, remaining) for everything else, and _code_fence only folds the
+# annotation back in for these when reconstructing a native call as a fence.
+# A tool whose parse_* unpacks three values MUST be listed, or it fails on the
+# annotated form and raises on the bare one -- which is exactly what
+# attach_image_to_chat did until 2026-08-19: its own registry fence_example
+# teaches the annotated opener, that form silently returned None (image never
+# shown, raw fence leaked into chat), and the bare form raised ValueError.
 _ANNOTATED_TOOL_NORMS = frozenset(
-    {'pythoninterpreter', 'readfile', 'editfile', 'writefile', 'grep', 'websearch'})
+    {'pythoninterpreter', 'readfile', 'editfile', 'writefile', 'grep', 'websearch',
+     'attachimagetochat', 'askuser'})
 
 
 # ──────────────── Malformed-opener tolerance helpers (weak models) ───────────
@@ -158,6 +168,11 @@ class ApprovalSignal(QObject):
     # reject REASON when not: the dialog only ever sends the pressed
     # button's field, so one slot carries whichever applies.
     close_approval_dialog = pyqtSignal(bool, str, str)
+    # ask_user: (QuestionSet, callback(answers, dismissed, unavailable)).
+    # Marshals the interview card onto the GUI thread the same way
+    # request_approval does -- the tool runs on a worker and must never
+    # touch widgets itself.
+    request_ask_user = pyqtSignal(object, object)
     timeout_signal   = pyqtSignal(int, object, object, object)  # elapsed, done_event, result_holder, user_event — timeout prompt
     work_code_active = pyqtSignal(bool)                          # True when code execution starts, False when it finishes
     work_narration   = pyqtSignal(str)               # a work step's narration → chat BEFORE its tool runs (ordering)
@@ -296,6 +311,8 @@ class ToolManager:
         log.debug("[ToolManager.__init__] Creating ApprovalSignal and connecting to main thread handler")
         self.approval_signal = ApprovalSignal()
         self.approval_signal.request_approval.connect(self._show_approval_dialog_on_main_thread)
+        self.approval_signal.request_ask_user.connect(self._show_ask_user_on_main_thread)
+        self._active_qa_card = None
         self.approval_signal.system_message.connect(self._deliver_system_message)
         self.approval_signal.file_op.connect(self._deliver_file_op)
         self.approval_signal.tool_card.connect(self._deliver_tool_card)
@@ -312,6 +329,11 @@ class ToolManager:
         # Set by whoever owns the chat surface (controller for the main session,
         # TaskAIEngine for a tasker). None = no chat to attach images to.
         self._attach_image_binding = None
+        # Delivery binding for the ask_user TOOL. Set by the chat surface only:
+        # this one BLOCKS the turn on a card the user must answer, so a context
+        # with no user in front of it (a background task) leaves it None and the
+        # tool reports that it is unavailable instead of hanging forever.
+        self._ask_user_binding = None
         log.debug("[ToolManager.__init__] ApprovalSignal connected")
 
         # ── Tool registry (single source of truth: tool_registry.py) ─────────
@@ -553,7 +575,8 @@ class ToolManager:
 
     def offered_tools(self, include_skills: bool = True,
                       include_images: bool = False,
-                      context: str = capabilities.CHAT) -> list:
+                      context: str = capabilities.CHAT,
+                      include_ask_user: bool = True) -> list:
         """The tool NAMES offered right now, straight from the capability
         manifest. Both advertised lists (native schemas here, the compat tool
         table in prompts/compat.py) resolve through this ONE query, so they
@@ -564,16 +587,19 @@ class ToolManager:
             allow_workmode=bool(self.allow_workmode),
             has_skills=bool(include_skills),
             include_image_tools=bool(include_images),
+            include_ask_user=bool(include_ask_user),
         )
         return capabilities.tools_for(context, gates)
 
     def get_canonical_tools(self, include_skills: bool = True,
                             include_images: bool = False,
-                            context: str = capabilities.CHAT) -> list:
+                            context: str = capabilities.CHAT,
+                            include_ask_user: bool = True) -> list:
         """Return the active tools as canonical schema dicts (name/description/
         parameters), gated by the same capability flags the prompt uses. Feed the
         result to systema.engine.native_adapters.to_<dialect>_tools() for native mode."""
-        active = self.offered_tools(include_skills, include_images, context)
+        active = self.offered_tools(include_skills, include_images, context,
+                                    include_ask_user=include_ask_user)
 
         out = []
         for name in active:
@@ -901,6 +927,7 @@ class ToolManager:
             'grep': self.parse_grep,
             'web_search': self.parse_web_search,
             'attach_image_to_chat': self.parse_attach_image_to_chat,
+            'ask_user': self.parse_ask_user,
             'load_skill': self.parse_load_skill,
             'unload_skill': self.parse_unload_skill,
         }
@@ -1449,6 +1476,136 @@ class ToolManager:
                          "attach_image_to_chat needs at least one image path."}
         return spec, remaining
 
+    def parse_ask_user(self, text):
+        """```ask_user: [label]  ->  (spec, remaining_text)
+
+        Body is the question spec in either supported form -- see
+        systema.execution.qa_spec, which owns the format and never raises."""
+        parsed = self._parse_fence(text, 'ask_user')
+        if not parsed:
+            return None
+        body, remaining, annotation = parsed
+        from systema.execution import qa_spec
+
+        qset = qa_spec.parse(body)
+        self.work.interpreter.last_annotation = annotation or None
+        if annotation:
+            self.approval_signal.system_message.emit(
+                f"**Working:** ***{annotation}***")
+        error = None
+        if not qset:
+            # Hand the parser's own warnings back verbatim -- they name the exact
+            # line that was wrong, so the model can fix it on the retry instead
+            # of guessing at a generic "malformed" complaint.
+            error = ("ask_user could not read your questions:\n- "
+                     + "\n- ".join(qset.warnings or ["unknown parse failure"]))
+        spec = {'qset': qset, 'annotation': annotation, 'error': error}
+        return spec, remaining
+
+    def run_ask_user(self, spec):
+        """Show the question card and BLOCK this turn until it is answered.
+
+        Same shape as the code-approval wait: the worker thread parks on a
+        threading.Event while the GUI thread spins a LOCAL QEventLoop, so the
+        app stays fully usable with the question on screen. No timeout, by
+        design -- the user may be away, and the turn must not silently invent
+        an answer.
+        """
+        if spec.get('error'):
+            return "ERROR:\n" + spec['error']
+        from systema.execution import qa_spec
+
+        qset = spec.get('qset')
+        if not qset:
+            return "ERROR:\nask_user had no usable questions to show."
+
+        done = threading.Event()
+        holder = {'answers': [], 'dismissed': True, 'unavailable': False}
+
+        def callback(answers, dismissed, unavailable=False):
+            holder['answers'] = answers or []
+            holder['dismissed'] = bool(dismissed)
+            holder['unavailable'] = bool(unavailable)
+            done.set()
+
+        self.approval_signal.request_ask_user.emit(qset, callback)
+        log.info("[ToolManager.run_ask_user] waiting for the user "
+                 f"({len(qset)} question(s), no timeout)")
+        done.wait()
+
+        if holder['unavailable']:
+            return ("ERROR:\nask_user is not available right now -- there is no "
+                    "chat window attached to show the question in. Decide with "
+                    "the information you have and state the assumption you made.")
+
+        answers = holder['answers']
+        body = qa_spec.serialize(qset, answers)
+        if holder['dismissed'] and not qa_spec.has_any_answer(answers):
+            return ("The user dismissed the question card without answering. Do "
+                    "NOT ask again -- proceed with your best judgement and say "
+                    "which assumption you made.")
+        if holder['dismissed']:
+            return (body + "\n\n(The user dismissed the card partway through, so "
+                    "anything marked (unanswered) is still open. Do not re-ask -- "
+                    "assume a sensible default and say which one you took.)")
+        return body
+
+    def _show_ask_user_on_main_thread(self, qset, callback):
+        """GUI-thread half of ask_user: build the card, wait, hand back answers.
+
+        A dismissed card with anything filled in pushes its partial Q:/A: block
+        into the input box before returning, so pressing Esc turns the interview
+        into the top of the user's own reply instead of throwing it away.
+        """
+        from PyQt6.QtCore import QEventLoop
+
+        chat = self._chat
+        if chat is None or not hasattr(chat, 'add_qa_card'):
+            log.warning("[ToolManager._show_ask_user_on_main_thread] no chat "
+                        "surface -- reporting ask_user unavailable")
+            callback([], True, True)
+            return
+        # Tell the phone a question is waiting, the same way the approval flow
+        # does — the desktop is about to block and cannot ask for anything later.
+        try:
+            ab = self._get_android_bridge() if callable(self._get_android_bridge) else None
+            if ab is not None and getattr(ab, '_conn', None) is not None:
+                ab.show_ask_user(qset)
+        except Exception as e:
+            log.warning(f"[ToolManager._show_ask_user_on_main_thread] android "
+                        f"dispatch failed (non-fatal): {type(e).__name__}: {e}")
+
+        try:
+            card = chat.add_qa_card(qset)
+        except Exception as e:
+            log.error("[ToolManager._show_ask_user_on_main_thread] could not "
+                      f"build the card: {type(e).__name__}: {e}")
+            callback([], True, True)
+            return
+
+        # NON-modal + local loop, exactly like the mini approval card: exec()
+        # would be application-modal and lock the user out of the window the
+        # question is sitting in.
+        loop = QEventLoop()
+        card.resolved.connect(loop.quit)
+        self._active_qa_card = card
+        try:
+            loop.exec()
+        finally:
+            self._active_qa_card = None
+
+        try:
+            from systema.execution import qa_spec
+            # Persist BEFORE the prepend so a crash between the two still leaves
+            # the transcript honest about what was asked and answered.
+            chat.save_qa_to_history(card)
+            if card.dismissed and qa_spec.has_any_answer(card.answers):
+                chat.prepend_qa_to_input(qset, card.answers)
+        except Exception as e:
+            log.error("[ToolManager._show_ask_user_on_main_thread] "
+                      f"prepend failed: {type(e).__name__}: {e}")
+        callback(card.answers, card.dismissed, False)
+
     def run_attach_image_to_chat(self, spec):
         """Show image(s) to the user. Read-only w.r.t. the files — they are never
         moved, rewritten or deleted. Returns the observation the model sees."""
@@ -1627,6 +1784,32 @@ class ToolManager:
             return {'paths': paths, 'annotation': annotation,
                     'error': None if paths else
                              "attach_image_to_chat needs at least one image path."}
+
+        if name == 'ask_user':
+            self.work.interpreter.last_annotation = annotation or None
+            if annotation:
+                self.approval_signal.system_message.emit(
+                    f"**Working:** ***{annotation}***")
+            from systema.execution import qa_spec
+            # A native model may send the questions as a JSON STRING or as an
+            # already-decoded list/dict, depending on the provider. qa_spec.parse
+            # takes text, so re-encode structured input rather than growing a
+            # second parser for it.
+            raw = args.get('questions')
+            if raw is None:
+                raw = args.get('question') or args.get('items') or ''
+            if not isinstance(raw, str):
+                import json as _json
+                try:
+                    raw = _json.dumps(raw)
+                except (TypeError, ValueError):
+                    raw = str(raw)
+            qset = qa_spec.parse(raw)
+            error = None
+            if not qset:
+                error = ("ask_user could not read your questions:\n- "
+                         + "\n- ".join(qset.warnings or ["unknown parse failure"]))
+            return {'qset': qset, 'annotation': annotation, 'error': error}
 
         if name == 'web_search':
             self.work.interpreter.last_annotation = annotation or None

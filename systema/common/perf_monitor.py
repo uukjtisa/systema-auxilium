@@ -26,6 +26,7 @@ Pure logging — no UI. Cross-OS, stdlib + QtCore only.
 from __future__ import annotations
 
 import sys
+import functools
 import threading
 import time
 import traceback
@@ -81,12 +82,20 @@ class HitchMonitor(QObject):
         self._worst_ms = 0.0
         self._hitches = 0
         self._running = False
+        # Uptime + per-hitch history. The "the UI gets worse the longer it runs"
+        # report was argued about for weeks because no report carried the one
+        # number that settles it: the hitch rate EARLY vs LATE in the same run.
+        # Each entry is (uptime_seconds, blocked_ms); the header renders both
+        # windows so a future reader answers the question from the file alone.
+        self._t0 = time.perf_counter()
+        self._events: "list[tuple[float, float]]" = []
         self._timer = QTimer(self)
         self._timer.setInterval(self.INTERVAL_MS)
         self._timer.timeout.connect(self._beat)
 
     def start(self):
         self._last_beat = time.perf_counter()
+        self._t0 = time.perf_counter()
         self._running = True
         self._timer.start()
         threading.Thread(target=self._watchdog, daemon=True,
@@ -173,9 +182,76 @@ class HitchMonitor(QObject):
                 continue
         return stack[-1] if stack else ("<native/Qt internals>", 0, "?")
 
+    # ── Degradation trend (the "does it get worse with uptime?" answer) ─────
+    _TREND_WINDOW_S = 600.0        # 10 minutes per comparison window
+    _WARMUP_S = 60.0               # startup import tax — not part of any decay curve
+
+    def _trend_lines(self, up_s: float) -> list:
+        """Header lines that make the degradation claim falsifiable from the file.
+
+        Compares the hitch rate AND the mean stall in an EARLY window against a
+        LATE one. Two deliberate choices, both learned from the 2026-08-19 data:
+
+        - The first _WARMUP_S of a run are excluded. Every run's worst hitches
+          are cold imports at startup; counting them as the "early" baseline
+          makes a healthy run look like it is improving and hides real decay.
+        - A verdict is only issued when BOTH axes agree. On 2026-08-19 the rate
+          rose 0.40 -> 0.90/min while the mean stall FELL 2248 -> 531 ms; that is
+          a user interacting more, not an app rotting, and an instrument that
+          calls it "degrading" is worse than no instrument.
+        """
+        ev = self._events
+        rate = (60.0 * len(ev) / up_s) if up_s > 0 else 0.0
+        head = (f"Uptime {self._fmt_uptime(up_s)} | {len(ev)} hitch(es) | "
+                f"{rate:.2f}/min overall")
+        if len(ev) >= 2:
+            head += f" | {ev[-1][0] - ev[-2][0]:.1f}s since previous"
+        out = [head]
+
+        w, warm = self._TREND_WINDOW_S, self._WARMUP_S
+        if up_s < warm + 2 * w:
+            need = self._fmt_uptime(warm + 2 * w)
+            out.append(f"Trend: needs {need} uptime to compare early vs late "
+                       f"(have {self._fmt_uptime(up_s)})")
+            return out
+
+        early = [d for (t, d) in ev if warm <= t <= warm + w]
+        late = [d for (t, d) in ev if t >= up_s - w]
+        e_rate, l_rate = 60.0 * len(early) / w, 60.0 * len(late) / w
+        e_mean = (sum(early) / len(early)) if early else 0.0
+        l_mean = (sum(late) / len(late)) if late else 0.0
+        out.append(f"Trend (excl. first {int(warm)}s warm-up): "
+                   f"early {e_rate:.2f}/min mean {e_mean:.0f} ms | "
+                   f"late {l_rate:.2f}/min mean {l_mean:.0f} ms")
+
+        if len(late) < 3 or len(early) < 3:
+            out.append("Verdict: too few hitches in a window to call it")
+            return out
+        rate_worse = l_rate > e_rate * 1.5
+        rate_better = l_rate * 1.5 < e_rate
+        dur_worse = l_mean > e_mean * 1.5
+        dur_better = l_mean * 1.5 < e_mean
+        if rate_worse and not dur_better:
+            out.append("Verdict: DEGRADING with uptime (hitches more frequent)")
+        elif dur_worse and not rate_better:
+            out.append("Verdict: DEGRADING with uptime (hitches longer)")
+        elif (rate_worse and dur_better) or (dur_worse and rate_better):
+            out.append("Verdict: MIXED — one axis worse, the other better; "
+                       "most likely a change in activity, not decay")
+        else:
+            out.append("Verdict: no degradation with uptime (late ~= early)")
+        return out
+
+    @staticmethod
+    def _fmt_uptime(sec: float) -> str:
+        sec = int(max(0.0, sec))
+        return f"{sec // 3600:02d}:{(sec % 3600) // 60:02d}:{sec % 60:02d}"
+
     def _report(self, blocked_ms: float, samples: list):
         self._hitches += 1
         self._worst_ms = max(self._worst_ms, blocked_ms)
+        up_s = time.perf_counter() - self._t0
+        self._events.append((up_s, float(blocked_ms)))
 
         # Aggregate identical stacks; order by sample count.
         counts: dict[tuple, int] = {}
@@ -206,6 +282,7 @@ class HitchMonitor(QObject):
                 f"GUI thread blocked ~{blocked_ms:.0f} ms "
                 f"(hitch #{self._hitches} this run, worst {self._worst_ms:.0f} ms)",
                 f"Stack samples: {len(samples)} at ~{int(self._WATCH_TICK*1000)} ms cadence",
+                *self._trend_lines(up_s),
                 "Culprit (deepest app frame of the most-sampled stack):",
                 f"    {culprit}",
                 "",
@@ -338,3 +415,21 @@ class span:
         elif ms >= SLOW_MS:
             log.info(f"[span] {self.label}: {ms:.0f} ms")
         return False
+
+
+def spanned(label: str):
+    """Decorator form of ``span`` — wraps a whole method in one line.
+
+    Exists because the operations that leave NO Python frame to blame (a
+    setStyleSheet sweep over a large tree, a font/metrics reflow, a window
+    build) are exactly the ones whose entire body needs covering. Doing that
+    with a bare ``with`` block means reindenting the method; doing it with
+    ``__enter__`` by hand leaks the span on an exception. This does neither.
+    """
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*a, **kw):
+            with span(label):
+                return fn(*a, **kw)
+        return wrapper
+    return deco

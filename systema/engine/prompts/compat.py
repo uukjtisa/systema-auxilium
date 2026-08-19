@@ -20,7 +20,8 @@ INVOKE_HINT = "run this in a python_interpreter fence — its code being:"
 
 def tool_format_section(include_workmode: bool = True,
                         include_skills: bool = False,
-                        include_images: bool = False) -> str:
+                        include_images: bool = False,
+                        include_ask_user: bool = True) -> str:
     """The ONE compat format section: fence rule, tool table + examples from
     the registry, the batch-fence policy. (The finish rule is NOT here — the
     work section owns it.)"""
@@ -31,7 +32,8 @@ def tool_format_section(include_workmode: bool = True,
         capabilities.CHAT,
         capabilities.gates_for_chat(allow_workmode=include_workmode,
                                     has_skills=include_skills,
-                                    include_image_tools=include_images))
+                                    include_image_tools=include_images,
+                                    include_ask_user=include_ask_user))
         if n in CANONICAL_TOOLS]
 
     if not active:

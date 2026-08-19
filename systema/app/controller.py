@@ -311,10 +311,17 @@ class AssistantController(QObject):
             self.settings.get('custom_system_prompt', '')
         )
         self.ai.set_system_prompt_extras(
-            include_image_tools=self.settings.get('include_image_tools', False),
+            include_image_tools=self.settings.get('include_image_tools', True),
+            include_ask_user=self.settings.get('include_ask_user', True),
             include_controller_ref=self.settings.get('include_controller_ref', False),
             include_notify_tool=self.settings.get('include_notify_tool', False),
         )
+        # Standing "always interview" preference. Set here as well as in
+        # set_system_prompt_extras so it survives a restart -- the setter only
+        # runs when the Settings dialog saves.
+        self.ai.always_interview = bool(
+            self.settings.get('always_interview', False)
+            and self.settings.get('include_ask_user', True))
 
         self.ai.set_tts_provider(self.settings.get('tts_provider', 'edge-tts'))
         self.ai.set_custom_script_path(self.settings.get('custom_script_path', ''))
@@ -383,6 +390,16 @@ class AssistantController(QObject):
         self.memory_manager = None  # will be set by _deferred_bg_init
         self.updater_service = None  # will be set by _deferred_bg_init
         self._update_window = None   # lazily created by open_update_window()
+        # CHAT WINDOW IMPORT — warmed on its own thread, immediately.
+        # Deliberately NOT in _warm_optional_imports: that runs at T+300 ms behind
+        # MemoryManager/TaskManager/Updater init and staggers 0.25 s between each
+        # module, while FloatingWindow._startup_chat_init fires at T+600 ms. Queued
+        # there, this import would still be cold when the GUI thread reached it.
+        # It is the single most expensive import in the app — 5135 ms and 5612 ms
+        # on 2026-08-19, hitch #2 of every run — and importing the MODULE only
+        # defines classes, so it is safe off the GUI thread. Constructing the
+        # widget stays on the GUI thread, in _startup_chat_init.
+        self._warm_chat_window()
         QTimer.singleShot(300, self._deferred_bg_init)
         # GUI-thread hitch detector — logs a WARNING with the blocked duration
         # whenever the event loop stalls (see common/perf_monitor.py). Always on.
@@ -456,6 +473,22 @@ class AssistantController(QObject):
             log.warning(f"[AssistantController._deferred_bg_init] UpdaterService failed (non-fatal): {e}")
             self.updater_service = None
 
+        # LOCAL GIT SAFETY NET — one-time init, and a migration for installs
+        # that predate it. Off the GUI thread: `git init` over a large working
+        # copy is slow, and this is deferred-init, not startup-critical. No-ops
+        # entirely without git, and in the developer copy, which has its own
+        # repo history and must not get a second one.
+        try:
+            import threading as _th
+            from systema.updater import local_git as _lg
+            from systema.startup.integrity import in_dev_environment as _dev
+            if not _dev() and _lg.available() and not _lg.is_repo():
+                _th.Thread(target=_lg.init_repo, daemon=True,
+                           name="local-git-init").start()
+        except Exception as e:
+            log.warning(f"[AssistantController._deferred_bg_init] local git "
+                        f"init skipped: {type(e).__name__}: {e}")
+
         # SESSION INDEX REVALIDATION — trust the index on screen, check disk here
         self._revalidate_sessions_async()
 
@@ -463,6 +496,35 @@ class AssistantController(QObject):
         self._warm_optional_imports()
 
         log.info("[AssistantController._deferred_bg_init] ✓ Deferred init complete")
+
+    @staticmethod
+    def _warm_chat_window():
+        """Import systema.ui.chat_window on a worker so the GUI never pays for it.
+
+        See the call site in __init__ for why this is separate from
+        _warm_optional_imports. _startup_chat_init waits on sys.modules for this,
+        so the only cost of losing the race is the status quo.
+        """
+        import importlib
+        import threading
+        import time as _time
+
+        def _warm():
+            t0 = _time.perf_counter()
+            try:
+                # importlib, not a plain import: the module is imported for its
+                # SIDE EFFECT (populating sys.modules so the GUI thread finds it
+                # warm), so a bound name here is genuinely unused and the
+                # dead-code gate is right to flag it.
+                importlib.import_module("systema.ui.chat_window")
+            except Exception as e:
+                log.error(f"[AssistantController._warm_chat_window] "
+                          f"{type(e).__name__}: {e}")
+                return
+            log.info(f"[AssistantController._warm_chat_window] warmed in "
+                     f"{(_time.perf_counter() - t0) * 1000:.0f} ms")
+
+        threading.Thread(target=_warm, daemon=True, name="chatwin-warmer").start()
 
     def _warm_optional_imports(self):
         """Import the heavy optional modules on a worker thread, staggered.
@@ -1665,16 +1727,25 @@ class AssistantController(QObject):
         self.settings['custom_system_prompt'] = custom_prompt
         self.ai.set_system_prompt_hijack(enabled, custom_prompt)
 
-    def set_system_prompt_extras(self, include_image_tools: bool = False,
+    def set_system_prompt_extras(self, include_image_tools: bool = True,
                                   include_controller_ref: bool = False,
-                                  include_notify_tool: bool = False):
+                                  include_notify_tool: bool = False,
+                                  include_ask_user: bool = True,
+                                  always_interview: bool = False):
         self.settings['include_image_tools'] = include_image_tools
         self.settings['include_controller_ref'] = include_controller_ref
         self.settings['include_notify_tool'] = include_notify_tool
+        self.settings['include_ask_user'] = include_ask_user
+        self.settings['always_interview'] = always_interview
+        # Standing preference, not a one-shot: the engine reads it on every
+        # prompt build and generate_response never clears it (only the
+        # per-turn interview_first flag is consumed).
+        self.ai.always_interview = bool(always_interview and include_ask_user)
         self.ai.set_system_prompt_extras(
             include_image_tools=include_image_tools,
             include_controller_ref=include_controller_ref,
             include_notify_tool=include_notify_tool,
+            include_ask_user=include_ask_user,
         )
         self.save_settings()
 
@@ -2988,7 +3059,8 @@ class AssistantController(QObject):
         tm.documented_gates = caps.gates_for_chat(
             allow_workmode=bool(getattr(tm, 'allow_workmode', True)),
             has_skills=bool(getattr(self, 'skill_manager', None)),
-            include_image_tools=bool(self.settings.get('include_image_tools', False)),
+            include_image_tools=bool(self.settings.get('include_image_tools', True)),
+            include_ask_user=bool(self.settings.get('include_ask_user', True)),
             include_notify_tool=bool(self.settings.get('include_notify_tool', False)),
             include_memory=bool(self.settings.get('memory_enabled', True)),
             include_controller_ref=bool(self.settings.get('include_controller_ref', False)),

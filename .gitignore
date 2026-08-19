@@ -24,3 +24,7 @@ venv/
 # that way — .gitignore does not untrack files. Anything genuinely new that
 # belongs in the repo under data/ needs an explicit `git add -f`.
 data/
+
+# Local development notes -- machine paths, never published
+CLAUDE.md
+AGENTS.md

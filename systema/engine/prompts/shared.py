@@ -742,3 +742,25 @@ YOU MUST NOW write a complete summary of your python interpreter session:
 Write this as a normal response to the user RIGHT NOW.
 Do NOT make any tool call. Do NOT re-enter work mode. Just talk.
 </SYSTEM_MESSAGE>"""
+
+
+# Appended for ONE turn when the user arms "interview me first" (the input-dock
+# button, /ask, the Session Tools entry, or the always-on setting). It does not
+# teach the tool -- the tool table already does that -- it changes the DEFAULT
+# from "assume and proceed" to "ask, then proceed".
+INTERVIEW_FIRST_SECTION = """## INTERVIEW FIRST (this turn)
+
+Before doing any substantial work on this request, call `ask_user` and wait for
+the answer. Do not guess at what the user meant and do not start building on an
+assumption you have not checked.
+
+- Ask about what is genuinely open and would change the work -- scope, target,
+  approach, the thing you would otherwise have to assume.
+- Within one question every option must be ADDITIVE: ticking all of them at once
+  must still describe a coherent outcome. If two options are real alternatives,
+  that is not a question -- decide it yourself, say which you took and why.
+- Do not ask what you can read from the files, the history, or the request.
+- One round is usually enough. If the answers settle it, get on with the work.
+
+If the user dismisses the card, proceed on your best judgement and say plainly
+which assumption you made."""

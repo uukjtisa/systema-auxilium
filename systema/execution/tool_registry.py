@@ -403,6 +403,57 @@ CANONICAL_TOOLS = {
                       "files are left untouched."),
         },
     },
+    'ask_user': {
+        'description': (
+            "ASK THE USER a structured multiple-choice question and WAIT for their answer. "
+            "Use this instead of guessing whenever the request is ambiguous, whenever two "
+            "readings would lead to materially different work, or before starting anything "
+            "large. Options are CHECKBOXES by default -- the user ticks as many as apply -- "
+            "so within one question every option must be ADDITIVE: it has to make sense for "
+            "them to tick all of them at once. If two options are genuine alternatives, that "
+            "is not a question; decide it yourself and say why. Every question also gets a "
+            "free-text 'Other' box automatically, so never add one as an option. Their "
+            "answers come back to you as a Q:/A: block."
+        ),
+        'param': ('questions',
+                  "The questions to ask. Either a JSON list of "
+                  "{question, header, multiSelect, options:[{label, description}]} objects, "
+                  "or the line format: a 'Q: <text>' line per question, optional 'header:' "
+                  "and 'multi: true|false' lines under it, then one '- Label | description' "
+                  "line per option. Blank line between questions. Max 4 questions, 2-8 "
+                  "options each, and give every option a real description -- the user reads "
+                  "those to choose."),
+        'extra_params': [
+            ('annotation',
+             "A short 3-6 word label (e.g. 'Clarifying the deploy target'). ALWAYS include "
+             "it -- shown to the user as this step's title.", False),
+            ('message_to_user',
+             "Optional fallback. Normally write any framing as normal text alongside this "
+             "call. Only put words here if you won't emit any text this turn.", False),
+        ],
+        'exec': False,
+        'compat': {
+            'table_row': "ask_user: Ask the user a multiple-choice question and wait",
+            'fence_example': (
+                "```ask_user: [Clarifying the deploy target]\n"
+                "Q: Which environments should the migration run against?\n"
+                "header: Deploy target\n"
+                "multi: true\n"
+                "- Staging | Safe to break; mirrors the prod schema.\n"
+                "- Production | Live data. Requires the backup step first.\n"
+                "- Local docker | Fast iteration, no network calls.\n"
+                "\n"
+                "Q: What should happen if a migration fails halfway?\n"
+                "- Roll back automatically | Safest; loses the partial progress.\n"
+                "- Stop and wait | Leaves the DB mid-migration for inspection.\n"
+                "```"
+            ),
+            'usage': ("One 'Q:' line per question, '- Label | description' per option, "
+                      "blank line between questions. 'header:' and 'multi:' are optional "
+                      "per question (multi defaults to true). An 'Other' free-text box is "
+                      "added for you. Max 4 questions. The turn WAITS for the answer."),
+        },
+    },
 }
 
 # Tools that form the file-editing subsystem (used for prompt grouping and the

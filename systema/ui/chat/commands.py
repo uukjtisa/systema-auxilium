@@ -120,6 +120,17 @@ def _cmd_restart(chat, arg):
     return None
 
 
+def _cmd_ask(chat, arg):
+    """Arm the interview: the AI asks before it acts, for the NEXT turn only."""
+    ai = chat.controller.ai
+    if not getattr(ai, 'include_ask_user', True):
+        return ("The Q&A tool is switched off. Turn on \"Inject the Q&A tool\" in "
+                "Settings - System - Optional System Prompt Sections first.")
+    ai.interview_first = True
+    return ("Armed. The AI will ask before it acts on your next message. "
+            "(One turn only - use the standing setting to make it permanent.)")
+
+
 def _cmd_compact(chat, arg):
     chat.controller.compact_all_toolcalls()
     return None                      # it reports its own progress
@@ -293,6 +304,8 @@ COMMANDS = [
     Command("files", "Files touched this session", "Tools", _cmd_files,
             mid_turn=ALWAYS, readonly=True),
     # ── Meta ─────────────────────────────────────────────────────────────────
+    Command("ask", "Make the AI interview you before it acts (next turn)",
+            "Context", _cmd_ask, mid_turn=IDLE),
     Command("help", "Show this list", "Meta", _cmd_help,
             mid_turn=ALWAYS, readonly=True),
     Command("settings", "Open Settings", "Meta", _cmd_settings,

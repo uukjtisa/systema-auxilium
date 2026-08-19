@@ -75,6 +75,13 @@ def summarize_memory_injection(memories: list, cap_tokens: int) -> dict:
 class AIEngine:
     """AI conversation engine"""
 
+    # Class-level so they exist on the CLASS, not just on instances: the
+    # slash-command target test resolves /ask against AIEngine itself, and a
+    # subclass built without running __init__ (TaskAIEngine, test doubles) still
+    # reads a sane default instead of raising.
+    interview_first = False      # one-shot, consumed by generate_response
+    always_interview = False     # standing setting, never auto-cleared
+
     def __init__(self, log_callback=None, system_info='',
                  voice_mode=False, elevenlabs_enabled=False, settings_callback=None, skill_manager=None,
                  controller=None):
@@ -184,10 +191,22 @@ class AIEngine:
         self.tool_execution_lockout = False
         self.system_prompt_hijacked = False
         self.custom_system_prompt = ""
-        # Optional system prompt section flags (main engine only)
-        self.include_image_tools = False
+        # Optional system prompt section flags (main engine only).
+        # Image tools and ask_user default ON so a fresh install gets them
+        # without visiting Settings; the controller overwrites all of these from
+        # settings.json a moment later. A TASK engine never inherits these
+        # values -- TaskManager assigns its own from the task's permissions
+        # (see task_manager._engine.include_image_tools), and ask_user is
+        # contexts=(CHAT,) so a tasker is never offered it at all.
+        self.include_image_tools = True
         self.include_controller_ref = False
         self.include_notify_tool = False
+        self.include_ask_user = True
+        # One-shot: armed by the user (input-dock button, /ask, Session
+        # Tools, or the always-on setting) and consumed by the next
+        # prompt build, so it steers exactly one turn.
+        self.interview_first = False
+        self.always_interview = False
 
         # Ephemeral image analysis: paths queued by attach_image_to_context() are
         # fed to the provider's chat(images=...) on the NEXT work-mode step, exactly
@@ -236,6 +255,9 @@ class AIEngine:
             elevenlabs_enabled=self.elevenlabs_enabled,
             skills=self.skill_manager.get_skills() if self.skill_manager else [],
             include_image_tools=self.include_image_tools,
+            include_ask_user=getattr(self, 'include_ask_user', True),
+            interview_first=(getattr(self, 'interview_first', False)
+                             or getattr(self, 'always_interview', False)),
             include_controller_ref=self.include_controller_ref,
             include_notify_tool=self.include_notify_tool,
         )
@@ -369,6 +391,9 @@ class AIEngine:
             elevenlabs_enabled=self.elevenlabs_enabled,
             skills=self.skill_manager.get_skills() if self.skill_manager else [],
             include_image_tools=self.include_image_tools,
+            include_ask_user=getattr(self, 'include_ask_user', True),
+            interview_first=(getattr(self, 'interview_first', False)
+                             or getattr(self, 'always_interview', False)),
             include_controller_ref=self.include_controller_ref,
             include_notify_tool=self.include_notify_tool,
             memory_inject_all=inject_all,
@@ -409,12 +434,14 @@ class AIEngine:
         self.system_prompt_hijacked = enabled
         self.custom_system_prompt = custom_prompt
 
-    def set_system_prompt_extras(self, include_image_tools: bool = False,
+    def set_system_prompt_extras(self, include_image_tools: bool = True,
                                   include_controller_ref: bool = False,
-                                  include_notify_tool: bool = False):
+                                  include_notify_tool: bool = False,
+                                  include_ask_user: bool = True):
         self.include_image_tools = include_image_tools
         self.include_controller_ref = include_controller_ref
         self.include_notify_tool = include_notify_tool
+        self.include_ask_user = include_ask_user
         self._rebuild_system_prompt()
 
     def set_custom_script_path(self, path):
@@ -1072,7 +1099,8 @@ class AIEngine:
         tools = self.tool_manager.get_canonical_tools(
             include_skills=bool(self.skill_manager),
             # Same gate the prompt uses — advertising and teaching must agree.
-            include_images=bool(getattr(self, 'include_image_tools', False)),
+            include_images=bool(getattr(self, 'include_image_tools', True)),
+            include_ask_user=bool(getattr(self, 'include_ask_user', True)),
         )
         try:
             result = self._run_provider_call(module, system_prompt, convo,
@@ -1410,14 +1438,22 @@ class AIEngine:
         log.debug(f"[AIEngine.generate_response] User message appended | "
                   f"total history entries={len(self.conversation_history)}")
 
-        ai_text = self._call_provider()
-        if not ai_text:
-            log.error("[AIEngine.generate_response] ✗ No AI text returned")
-            return self._make_error_result(self._provider_failure_message())
+        # The interview-first arming is a ONE-TURN instruction. It is consumed
+        # here rather than at prompt-build time because work mode rebuilds the
+        # prompt several times inside a single turn -- clearing on first build
+        # would drop it halfway through the turn it was meant to steer.
+        # always_interview is a standing setting and is deliberately untouched.
+        try:
+            ai_text = self._call_provider()
+            if not ai_text:
+                log.error("[AIEngine.generate_response] ✗ No AI text returned")
+                return self._make_error_result(self._provider_failure_message())
 
-        log.info(f"[AIEngine.generate_response] ✓ Got response | length={len(ai_text)} chars | "
-                 f"→ _process_ai_response()")
-        return self._process_ai_response(ai_text)
+            log.info(f"[AIEngine.generate_response] ✓ Got response | length={len(ai_text)} chars | "
+                     f"→ _process_ai_response()")
+            return self._process_ai_response(ai_text)
+        finally:
+            self.interview_first = False
 
     def generate_response_with_image(self, user_message, image_paths):
         """Generate a response for a message that arrives WITH its images.
@@ -1957,6 +1993,14 @@ class AIEngine:
                 elif name == 'attach_image_to_chat':
                     obs = tm.run_attach_image_to_chat(spec)
                     last_tool = 'attach_image_to_chat'
+                elif name == 'ask_user':
+                    # BLOCKS this batch until the user answers the card or
+                    # dismisses it. That is the point of the tool -- the turn
+                    # must not continue past a question it asked -- and the
+                    # binding parks on a local QEventLoop, so the rest of the
+                    # app stays live while it waits.
+                    obs = tm.run_ask_user(spec)
+                    last_tool = 'ask_user'
                 elif name == 'load_skill':
                     if self.skill_manager:
                         ok, msg = self.skill_manager.load_skill(spec)
@@ -2000,7 +2044,8 @@ class AIEngine:
                     # model was never given, which is how it kept re-trying them.
                     _offered = tm.offered_tools(
                         include_skills=bool(self.skill_manager),
-                        include_images=bool(getattr(self, 'include_image_tools', False)))
+                        include_images=bool(getattr(self, 'include_image_tools', True)),
+                        include_ask_user=bool(getattr(self, 'include_ask_user', True)))
                     obs = (f"Tool '{name}' does not exist and was NOT run. "
                            f"Available tools: {', '.join(_offered)}.")
             except Exception as e:

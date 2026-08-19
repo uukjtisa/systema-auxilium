@@ -57,7 +57,16 @@ ESSENTIAL = [
     "PyQt6", "Pillow", "pystray", "psutil", "send2trash", "pyautogui",
     "requests", "markdown2", "matplotlib", "pyparsing",
     "anthropic", "google-genai", "openai",
-    "updater-gitplucker>=0.7.0",   # self-update from GitHub (Settings ▸ Check for Updates)
+    # 0.7.1 is a HARD floor, not a nicety: 0.7.0 compares a raw byte hash
+    # against decoded text and never refreshes the baseline after a partial
+    # apply, so on Windows every file read as locally modified and updates
+    # came back as whole-file conflicts. With conflict_policy="mark" that
+    # wrote merge markers INTO the source and the app died at import
+    # (observed on Kali, 2026-08-19). Bumping the floor also makes the
+    # requirements diff non-empty, which is what triggers the in-app
+    # dependency installer at all -- a ">=" that is already satisfied is
+    # invisible to it and pip will not upgrade it.
+    "updater-gitplucker>=0.7.1",   # self-update from GitHub (Settings ▸ Check for Updates)
     "fastembed", "numpy", "onnxruntime==1.19.2",
     "sounddevice", "webrtcvad-wheels", "SpeechRecognition", "edge-tts", "pygame",
 ]

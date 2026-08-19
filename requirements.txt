@@ -23,7 +23,7 @@ pyparsing
 anthropic
 google-genai
 openai
-updater-gitplucker>=0.7.0
+updater-gitplucker>=0.7.1
 fastembed
 numpy
 onnxruntime==1.19.2

@@ -60,6 +60,7 @@ G_NOTIFY = 'notify'
 G_MEMORY = 'memory'
 G_CONTROLLER = 'controller_ref'
 G_MAIN_CHANNEL = 'main_channel'   # a tasker's link back to the user's chat
+G_ASK_USER = 'ask_user'           # the interview card (chat only)
 
 
 @dataclass(frozen=True)
@@ -123,6 +124,14 @@ CAPABILITIES = (
                             "task has no chat of its own).",
                note="TASK BINDING DIFFERS: a tasker has no chat turn of its own, so "
                     "its images are delivered into the user's MAIN chat."),
+
+    # -- tool surface: asking the user --------------------------------------
+    # CHAT ONLY, deliberately. ask_user blocks the turn on a card the user has
+    # to answer; a background task has no user in front of it and no chat turn
+    # of its own, so a tasker calling this would hang until its own timeout with
+    # nobody able to see the question. There is no task_summary for the same
+    # reason -- it must not be described to a background agent at all.
+    Capability('ask_user', (TOOL,), contexts=(CHAT,), gate=G_ASK_USER),
 
     # ── tool surface: skills ─────────────────────────────────────────────────
     Capability('load_skill', (TOOL,), gate=G_SKILLS),
@@ -248,10 +257,11 @@ def build_namespace(context: str, gates: dict, bindings: dict) -> dict:
 # ── gate mapping per context ─────────────────────────────────────────────────
 
 def gates_for_chat(*, allow_workmode: bool, has_skills: bool,
-                   include_image_tools: bool = False,
+                   include_image_tools: bool = True,
                    include_notify_tool: bool = False,
                    include_memory: bool = True,
-                   include_controller_ref: bool = False) -> dict:
+                   include_controller_ref: bool = False,
+                   include_ask_user: bool = True) -> dict:
     """Main-session flags -> canonical gates."""
     return {
         G_WORKMODE: bool(allow_workmode),
@@ -260,6 +270,7 @@ def gates_for_chat(*, allow_workmode: bool, has_skills: bool,
         G_NOTIFY: bool(include_notify_tool),
         G_MEMORY: bool(include_memory),
         G_CONTROLLER: bool(include_controller_ref),
+        G_ASK_USER: bool(include_ask_user),
         G_MAIN_CHANNEL: False,       # chat IS the main channel
     }
 
@@ -278,5 +289,6 @@ def gates_for_task(permissions: dict, *, has_skills: bool = False,
         G_NOTIFY: bool(p.get('inject_notify_tool', False)),
         G_MEMORY: bool(include_memory),
         G_CONTROLLER: bool(p.get('inject_controller_ref', False)),
+        G_ASK_USER: False,           # no user in front of a background task
         G_MAIN_CHANNEL: bool(has_main_channel),
     }
