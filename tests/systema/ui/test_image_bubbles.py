@@ -845,7 +845,16 @@ def test_the_greeting_wraps_rather_than_clipping(widget_host):
 
 def test_the_greeting_font_shrinks_to_fit_a_long_phrasing(widget_host):
     """Sizing off window width alone assumed an average-length greeting. The
-    pool spans roughly 4x, so the long ones overflowed and were cut off."""
+    pool spans roughly 4x, so the long ones overflowed and were cut off.
+
+    The string that triggers the shrink is MEASURED here rather than hardcoded.
+    A fixed phrase makes this test a font-metrics test: the same 92-character
+    greeting measures past the budget in Segoe UI on Windows and inside it in
+    the fallback font on a bare CI runner, so a hardcoded phrase passed locally
+    and failed in CI with "assert 23 < 23" -- the shrink loop was correct, the
+    string simply fit. Grow the probe until it genuinely overflows in THIS
+    environment and the contract is testable everywhere.
+    """
     from PyQt6.QtGui import QFont, QFontMetrics
     from systema.ui.chat.bubbles import BubblesMixin
 
@@ -864,20 +873,38 @@ def test_the_greeting_font_shrinks_to_fit_a_long_phrasing(widget_host):
         raise AssertionError("no font-size in the stylesheet")
 
     short = size_for("Evening.")
-    long = size_for("Nothing good happens at this hour, Thirdy. "
-                    "Let's prove that wrong, and then some, at length.")
+
+    # Build a phrasing that overflows the real two-line budget at the starting
+    # size, whatever font this machine actually has.
+    budget = int((row.width() - 48) * 1.9)
+    probe = QFont(label.font())
+    probe.setPixelSize(short)
+    phrase = ("Nothing good happens at this hour, Thirdy. "
+              "Let's prove that wrong, and then some, at length.")
+    long_text = phrase
+    while (QFontMetrics(probe).horizontalAdvance(long_text) <= budget
+           and len(long_text) < 4000):
+        long_text += " " + phrase
+    assert QFontMetrics(probe).horizontalAdvance(long_text) > budget, (
+        "could not construct an overflowing greeting -- no usable font metrics")
+
+    long = size_for(long_text)
     assert long < short, "a long greeting must be sized down, not clipped"
-    assert long >= 20, "but never below title size — it wraps instead"
+    assert long >= 20, "but never below title size -- it wraps instead"
+
+    # A longer string must never come back LARGER, at any length. This half is
+    # font-independent and is the invariant that actually protects the feature.
+    assert size_for(phrase) <= short
 
     # When the fit SUCCEEDS (it stopped above the floor) the text must actually
     # be inside the two-line budget. When it bottoms out at the floor it is
     # allowed to need a third line: wrapping at title size is the intended
     # failure, shrinking into body copy is not.
-    probe = QFont(label.font())
-    probe.setPixelSize(long)
-    if long > 20:
-        budget = int((row.width() - 48) * 1.9)
-        assert QFontMetrics(probe).horizontalAdvance(label.text()) <= budget
+    final = size_for(long_text)
+    if final > 20:
+        probe2 = QFont(label.font())
+        probe2.setPixelSize(final)
+        assert QFontMetrics(probe2).horizontalAdvance(label.text()) <= budget
 
 
 def test_the_greeting_banner_builds_and_scales(widget_host):
